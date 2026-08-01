@@ -37,7 +37,20 @@ providers:
       - cursor-grok-4.5-medium
       - cursor-grok-4.5-high
   gemini:
-    status: held                      # pending Antigravity CLI research; gemini-cli auth dead
+    status: piloting                  # agy 1.1.9 live-verified 2026-08-01: solo + 3-concurrent
+                                      # (+codex+cursor neighbors) all clean; adapter stays
+                                      # defensive (timeout, status check, model-echo verification)
+    auth: google-subscription         # Antigravity CLI (agy) personal OAuth, quota-billed
+    execution: headless               # agy -p --output-format stream-json
+    models:                           # snapshot 2026-08-01 — verify against `agy models`
+      - gemini-3.6-flash-low          # ✅ 3.0s e2e; --conversation resume verified (cache-warm)
+      - gemini-3.6-flash-medium
+      - gemini-3.6-flash-high
+      - gemini-3.5-flash-low
+      - gemini-3.5-flash-medium
+      - gemini-3.5-flash-high
+      - gemini-3.1-pro-low            # ✅ model-echo verified via stream-json
+      - gemini-3.1-pro-high
   ollama-cloud:
     status: excluded                  # PR reviewer fleet only
 

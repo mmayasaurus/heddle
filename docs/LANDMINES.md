@@ -63,14 +63,19 @@ flags churn monthly.
 - `google-gemini/gemini-cli` cannot authenticate personal Google accounts (free/AI Pro/Ultra) since
   ~2026-06-18 — **live-verified dead** on 2026-08-01. Never route Gemini via Cursor
   (subscription-boundary rule).
-- **Antigravity CLI (`agy`) — researched 2026-08-01, verdict: NOT fleet-ready.** It DOES auth
-  personal Pro/Ultra subscriptions (OAuth, no BYOK, quota-billed) and documents full headless
-  (`-p`, JSON, `--model`, resume, skip-permissions). But: the silent-empty-output/hang class was
-  only fixed v1.1.1 (2026-07-12), and **#573 is open and unaddressed — `agy -p` hangs 9/9 on macOS
-  when ≥3 other long-running CLI agent processes run concurrently** (a literal description of a
-  fleet box), plus fresh open bugs for silent Flash fallback (#710), ignored `--model` (#689), and
-  invalid JSON output (#702). Re-check in a few weeks (weekly release cadence). If added later:
-  max-1-concurrent guard + defensive wrapper (verify JSON `status`, never trust exit code alone).
+- **Antigravity CLI (`agy`) — PILOTING as of 2026-08-01** (agy 1.1.9, personal-subscription OAuth,
+  quota-billed, no BYOK). Live-verified on the fleet box: solo headless clean (valid JSON, status
+  SUCCESS); **the #573 concurrency hang did NOT reproduce** — 3 agy + codex + cursor
+  simultaneously from a non-TTY shell all completed in 11s; `--model` honored AND echoed in
+  stream-json events (adapter verifies echo, detecting the #710 silent-Flash-fallback class);
+  `--conversation` resume carries real continuity and is cache-warm. Caveats that keep this
+  "piloting" not "trusted": upstream #573 was filed against 1.1.0 with *long-running* neighbor
+  processes (our test used short-lived workers); #689/#702/#710 remain open upstream. The adapter
+  therefore always: hard-timeouts, requires `status==="SUCCESS"` + non-empty response + model
+  echo match, and never trusts exit code alone. ~18.2k input-token overhead per invocation
+  observed (likely the global `~/.agents/skills` pool auto-loading — slim-context knob TBD).
+  Envelope (`--output-format json`) has NO model field — use stream-json when model verification
+  matters.
 - **Never** use the reverse-engineered OpenCode↔Antigravity OAuth plugins: the flagship plugin is
   archived with an explicit ToS-violation + real-account-ban warning in its own README, corroborated
   by ban threads on Google's official forum. Not with a primary Google account, not ever here.

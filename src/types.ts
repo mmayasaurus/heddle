@@ -43,6 +43,6 @@ export interface WorkerResult {
 
 export interface WorkerAdapter {
   readonly name: string;
-  readonly provider: 'codex' | 'cursor' | 'claude';
+  readonly provider: 'codex' | 'cursor' | 'claude' | 'gemini';
   dispatch(prompt: string, opts: DispatchOptions): Promise<WorkerResult>;
 }
