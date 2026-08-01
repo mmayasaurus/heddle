@@ -1,0 +1,15 @@
+{
+  "name": "heddle",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Cross-provider agent orchestration for subscription coding CLIs — routing, skill packs, inter-agent comms, and a visibility dashboard.",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.5.0"
+  }
+}

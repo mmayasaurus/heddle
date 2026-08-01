@@ -1,0 +1,71 @@
+# Heddle routing table — v0 DRAFT (pilot scope; Maya-directed policy 2026-08-01)
+# task-class → provider/model/effort/skills, with fallbacks.
+# Orchestrators consult this at dispatch time; every decision is logged to the broker ledger.
+
+version: 0
+
+policy:
+  subscriptions_only: true            # hard rule: no per-token API billing anywhere
+  never_via_cursor: [claude, gpt, gemini]  # direct subscriptions cover these families
+  metered_pool_guard:
+    cursor_other_models:
+      route_away_at_pct: 90           # near-exhaustion → reroute; NEVER on-demand overage
+  reviewer_fleet_isolation:
+    ollama_cloud: excluded            # reserved for PR reviewer bots (account-scoped limits)
+
+providers:
+  claude:
+    auth: anthropic-subscription
+    execution: in-session-subagent    # spawned via the orchestrator's Agent tool, not a subprocess
+    models: [fable, opus, sonnet, haiku]
+    notes: shared prompt cache with orchestrator; per-agent skills/mcpServers/permissionMode native
+  codex:
+    auth: chatgpt-subscription
+    execution: headless               # codex exec --json, stdin CLOSED (see docs/LANDMINES.md)
+    models: [gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna]
+    effort: [minimal, low, medium, high, xhigh]   # -c model_reasoning_effort=…
+    slim_context_flags: ["--ignore-user-config"]  # for cheap task classes
+  cursor:
+    auth: cursor-subscription         # Max plan; supplemental models bill the Other-Models pool
+    execution: headless               # cursor-agent -p --output-format json --trust
+    models:                           # snapshot 2026-08-01 — verify against `cursor-agent models`
+      - kimi-k3-high
+      - composer-2.5
+      - composer-2.5-fast
+      - cursor-grok-4.5-low
+      - cursor-grok-4.5-medium
+      - cursor-grok-4.5-high
+  gemini:
+    status: held                      # pending Antigravity CLI research; gemini-cli auth dead
+  ollama-cloud:
+    status: excluded                  # PR reviewer fleet only
+
+# Task classes are intentionally coarse for the pilot. Refine from ledger data, not guesses.
+task_classes:
+  orchestration:            # decompose, integrate, judge, land — the orchestrator itself
+    provider: claude
+    model: fable
+  deep-implementation:      # gnarly features, cross-cutting refactors, subtle bugs
+    provider: claude
+    model: opus
+    fallback: {provider: codex, model: gpt-5.6-sol}
+  implementation:           # well-scoped feature work with clear spec
+    provider: claude
+    model: sonnet
+    fallback: {provider: codex, model: gpt-5.6-terra}
+  second-opinion:           # independent diagnosis/review of a diff or plan (diversity valuable)
+    provider: cursor
+    model: kimi-k3-high
+    fallback: {provider: codex, model: gpt-5.6-sol}
+  bulk-mechanical:          # renames, sweeps, codemods, boilerplate, test scaffolds
+    provider: codex
+    model: gpt-5.6-luna
+    codex_flags: ["--ignore-user-config"]
+    fallback: {provider: cursor, model: composer-2.5-fast}
+  research-summarize:       # doc reading, log triage, summarization
+    provider: claude
+    model: haiku
+    fallback: {provider: codex, model: gpt-5.6-luna}
+  quick-alt-take:           # cheap fast alternative draft to compare against primary
+    provider: cursor
+    model: cursor-grok-4.5-medium
