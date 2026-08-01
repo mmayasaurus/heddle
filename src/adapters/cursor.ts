@@ -1,5 +1,12 @@
 import { spawn } from 'node:child_process';
-import type { DispatchOptions, WorkerAdapter, WorkerResult } from '../types.js';
+import type { DispatchOptions, WorkerAdapter, WorkerResult, TokenUsage } from '../types.js';
+
+/**
+ * Model families Cursor carries that Maya holds a DIRECT subscription for. Routing these through
+ * Cursor would spend the wrong pool (policy: routing/routing.v0.yaml `never_via_cursor`).
+ * Enforced here so a bad routing-table entry can't silently misbill.
+ */
+const DIRECT_SUBSCRIPTION_PREFIXES = ['claude-', 'gpt-', 'gemini-', 'o1-', 'o3-'];
 
 /**
  * Cursor CLI adapter — `cursor-agent -p --output-format json`.
@@ -18,6 +25,14 @@ export class CursorAdapter implements WorkerAdapter {
   constructor(private readonly bin = 'cursor-agent') {}
 
   async dispatch(prompt: string, opts: DispatchOptions): Promise<WorkerResult> {
+    if (DIRECT_SUBSCRIPTION_PREFIXES.some((p) => opts.model.startsWith(p))) {
+      return {
+        ok: false, output: '', exitCode: null,
+        error: `policy: "${opts.model}" belongs to a family with a direct subscription — ` +
+          `route it to that provider's adapter, not through Cursor`,
+      };
+    }
+
     const args = ['-p', '--output-format', 'json', '--trust', '--model', opts.model];
     if (opts.resume) args.push('--resume', opts.resume);
     args.push(...(opts.extraFlags ?? []), prompt);
@@ -44,11 +59,23 @@ export class CursorAdapter implements WorkerAdapter {
       };
     }
 
+    // usage block confirmed live 2026-08-01 (undocumented at research time):
+    // {inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens}
+    const u = result.usage ?? {};
+    const usage: TokenUsage | undefined = Object.keys(u).length
+      ? {
+          inputTokens: u.inputTokens,
+          cachedInputTokens: u.cacheReadTokens,
+          outputTokens: u.outputTokens,
+        }
+      : undefined;
+
     const ok = exitCode === 0 && result.is_error !== true;
     return {
       ok,
       output: typeof result.result === 'string' ? result.result : JSON.stringify(result.result ?? ''),
       sessionId: result.session_id,
+      usage,
       durationMs: result.duration_ms ?? durationMs,
       exitCode,
       error: ok ? undefined : `cursor-agent is_error=${result.is_error} (exit ${exitCode})`,

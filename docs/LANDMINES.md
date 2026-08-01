@@ -35,8 +35,12 @@ flags churn monthly.
 - Effort is baked into model IDs (`kimi-k3-high`, `cursor-grok-4.5-{low,medium,high}`); `-fast`
   variants bill ~2×. `cursor-agent models` is the live catalog (server-refreshed ~10min) — never
   hardcode.
+- **The result JSON DOES carry usage** (undocumented at research time; live-verified 2026-08-01):
+  `usage: {inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens}`. The adapter parses it.
 - No usage/quota API — the "Other Models" dollar pool is only visible on cursor.com's dashboard.
   Track spend per-run client-side and enforce the route-away guard.
+- Latency varies enormously by model on identical trivial prompts (live-verified): composer-2.5
+  1.8s · cursor-grok-4.5-low 2.8s · kimi-k3-high 74s. Route latency-sensitive work accordingly.
 - `agent create-chat` pre-allocates a session id before first dispatch (useful for registries). (docs)
 - `--format json` (on `status`/`about`) vs `--output-format json` (on runs) — different flag names. (docs)
 

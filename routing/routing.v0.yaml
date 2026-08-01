@@ -29,10 +29,11 @@ providers:
     auth: cursor-subscription         # Max plan; supplemental models bill the Other-Models pool
     execution: headless               # cursor-agent -p --output-format json --trust
     models:                           # snapshot 2026-08-01 — verify against `cursor-agent models`
-      - kimi-k3-high
-      - composer-2.5
+      # ✅ = live round-trip verified 2026-08-01, with observed latency on a trivial prompt
+      - kimi-k3-high                  # ✅ 74s — slow; reserve for genuinely hard second-opinion work
+      - composer-2.5                  # ✅ 1.8s — fastest verified; Cursor-native, cache-warm
       - composer-2.5-fast
-      - cursor-grok-4.5-low
+      - cursor-grok-4.5-low           # ✅ 2.8s
       - cursor-grok-4.5-medium
       - cursor-grok-4.5-high
   gemini:
