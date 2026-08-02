@@ -113,6 +113,45 @@ flags churn monthly.
   archived with an explicit ToS-violation + real-account-ban warning in its own README, corroborated
   by ban threads on Google's official forum. Not with a primary Google account, not ever here.
 
+## Account rotation (multiple subscriptions per provider)
+
+- **The billing trap is the whole ballgame.** Every vendor treats an API-key env var as an
+  override that silently moves billing OFF the subscription, and headless mode gives no prompt —
+  Anthropic's docs: *"In non-interactive mode (-p), the key is always used when present"*;
+  OpenAI's: *"When you sign in with an API key, Codex uses standard API pricing instead of
+  included ChatGPT plan credits."* A stray export in a shell rc, a `.env`, or an inherited CI var
+  would bill per-token invisibly. `src/env.ts` strips all of them from every worker env and
+  refuses them as overrides — verified live.
+- **Codex — cleanest lever, and proven:** `CODEX_HOME` selects the account (its own `auth.json`,
+  config, and session history). Live-verified: the same dispatch pointed at two different
+  `CODEX_HOME` values reached two different accounts. `--profile` does NOT carry auth (one
+  CODEX_HOME = one identity; the `[profiles.*]` syntax was removed in 0.134.0+).
+  ⚠️ **Never run two concurrent workers under the same `CODEX_HOME`** — openai/codex#35619
+  documents catastrophic rollout-history loss (934 of 942 threads) from exactly that.
+- **Claude — `CLAUDE_CONFIG_DIR` per account** relocates config, sessions, and (on Linux/Windows)
+  credentials. **Open gap on macOS**: credentials live in the Keychain (`Claude Code-credentials`)
+  and no Anthropic doc states whether a second config dir gets its own Keychain item. Verify
+  before relying on it. For a future `claude -p` subprocess path, the docs-recommended
+  subscription-preserving credential is `claude setup-token` → `CLAUDE_CODE_OAUTH_TOKEN`
+  (one per account). **Never `--bare`** — it cannot use subscription auth at all (OAuth and
+  keychain are never read), so it silently forces API-key billing.
+- **Cursor — thinnest lever:** no config-dir mechanism exists; `CURSOR_API_KEY` (env var only —
+  passing `--api-key` on argv leaks it via `ps`) is the sole account selector. Per Cursor staff on
+  their forum it bills against that account's own plan rather than a separate SKU, but that's
+  forum-sourced, not docs — verify against a real invoice before high volume. The stream-json
+  `system/init` event carries `apiKeySource` (`env`/`flag`/`login`) to confirm what a run used.
+- **Rate-limit detection is string-matching everywhere** (no CLI has a machine-readable quota
+  signal). Claude: `"hit your session limit"` / `"...weekly limit"` / `"...Opus limit"`, each
+  followed by `· resets <time>` — three independently-clocked limits per account, so track three
+  timers. Codex: `"You've hit your usage limit"` and `"exceeded retry limit, last status: 429"`.
+  Cursor: match a stable substring like `"hit your usage limit"` case-insensitively — multiple
+  phrasings exist, and at least one third-party tool shipped a false positive by matching the bare
+  word "error".
+- **Proactive alternative for Codex only:** `~/.local/bin/claudex-usage` already queries an
+  undocumented ChatGPT usage endpoint with an account's own token and gets back real
+  used-percentage + reset times. Unofficial and could break, but it's the only proactive quota
+  signal available anywhere in this stack — reuse it for route-away-before-exhaustion.
+
 ## Everywhere
 
 - **No CLI exposes proactive quota-remaining.** Account usage from per-run structured output; catch

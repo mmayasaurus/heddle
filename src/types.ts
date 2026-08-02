@@ -17,6 +17,12 @@ export interface DispatchOptions {
   timeoutMs?: number;
   /** Resume a prior session/thread instead of starting fresh. */
   resume?: string;
+  /**
+   * Environment overrides for this dispatch — the account-rotation hook. Accepts subscription
+   * identity selectors only (CODEX_HOME, CLAUDE_CONFIG_DIR, CLAUDE_CODE_OAUTH_TOKEN,
+   * CURSOR_API_KEY); API-key vars are refused by buildWorkerEnv(). See src/env.ts.
+   */
+  env?: Record<string, string>;
 }
 
 export interface TokenUsage {

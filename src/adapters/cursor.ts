@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { buildWorkerEnv } from '../env.js';
 import type { DispatchOptions, WorkerAdapter, WorkerResult, TokenUsage } from '../types.js';
 
 /**
@@ -38,7 +39,8 @@ export class CursorAdapter implements WorkerAdapter {
     args.push(...(opts.extraFlags ?? []), prompt);
 
     const started = Date.now();
-    const { stdout, stderr, exitCode } = await run(this.bin, args, opts.cwd, opts.timeoutMs ?? 600_000);
+    const { stdout, stderr, exitCode } =
+      await run(this.bin, args, opts.cwd, opts.timeoutMs ?? 600_000, opts.env);
     const durationMs = Date.now() - started;
 
     // The result object is the last JSON line on stdout (progress noise may precede it).
@@ -84,10 +86,12 @@ export class CursorAdapter implements WorkerAdapter {
   }
 }
 
-function run(bin: string, args: string[], cwd: string, timeoutMs: number):
+function run(bin: string, args: string[], cwd: string, timeoutMs: number,
+             envOverrides?: Record<string, string>):
   Promise<{ stdout: string; stderr: string; exitCode: number | null }> {
   return new Promise((resolve) => {
-    const child = spawn(bin, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+    const { env } = buildWorkerEnv({ overrides: envOverrides });
+    const child = spawn(bin, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
     const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);

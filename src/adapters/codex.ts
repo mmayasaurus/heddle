@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { buildWorkerEnv } from '../env.js';
 import type { DispatchOptions, WorkerAdapter, WorkerResult, TokenUsage } from '../types.js';
 
 /**
@@ -27,7 +28,8 @@ export class CodexAdapter implements WorkerAdapter {
     args.push('-m', opts.model, ...(opts.extraFlags ?? []), prompt);
 
     const started = Date.now();
-    const { stdout, stderr, exitCode } = await run(this.bin, args, opts.cwd, opts.timeoutMs ?? 600_000);
+    const { stdout, stderr, exitCode } =
+      await run(this.bin, args, opts.cwd, opts.timeoutMs ?? 600_000, opts.env);
     const durationMs = Date.now() - started;
 
     if (stdout.trim().length === 0) {
@@ -79,11 +81,13 @@ export class CodexAdapter implements WorkerAdapter {
   }
 }
 
-function run(bin: string, args: string[], cwd: string, timeoutMs: number):
+function run(bin: string, args: string[], cwd: string, timeoutMs: number,
+             envOverrides?: Record<string, string>):
   Promise<{ stdout: string; stderr: string; exitCode: number | null }> {
   return new Promise((resolve) => {
     // stdin 'ignore' is load-bearing — see contract note above.
-    const child = spawn(bin, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+    const { env } = buildWorkerEnv({ overrides: envOverrides });
+    const child = spawn(bin, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
     const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);

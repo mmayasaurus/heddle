@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { buildWorkerEnv } from '../env.js';
 import type { DispatchOptions, WorkerAdapter, WorkerResult, TokenUsage } from '../types.js';
 
 /**
@@ -18,6 +19,7 @@ import type { DispatchOptions, WorkerAdapter, WorkerResult, TokenUsage } from '.
  *  - Policy: gemini-* slugs ONLY — agy's catalog also lists claude- and gpt-oss- third-party
  *    models; direct-subscription families never route through a middleman.
  */
+
 /** Retry probe ceiling for the #573 hang check — a hung agy emits nothing, so this is ample. */
 const RETRY_PROBE_MS = 120_000;
 
@@ -75,7 +77,7 @@ export class AgyAdapter implements WorkerAdapter {
 
     const budget = opts.timeoutMs ?? 600_000;
     const started = Date.now();
-    let { stdout, stderr, exitCode, timedOut } = await run(this.bin, args, opts.cwd, budget);
+    let { stdout, stderr, exitCode, timedOut } = await run(this.bin, args, opts.cwd, budget, opts.env);
 
     // Upstream #573: agy -p can hang indefinitely with zero output when several other
     // long-running CLI agent processes are active (contention in startup/handshake; staggered
@@ -85,7 +87,7 @@ export class AgyAdapter implements WorkerAdapter {
       // Cap the retry: a hung agy emits nothing, so a short probe is enough to confirm, and this
       // keeps a double-hang from burning two full budgets (2×10min at the default).
       const retryBudget = Math.min(budget, RETRY_PROBE_MS);
-      ({ stdout, stderr, exitCode, timedOut } = await run(this.bin, args, opts.cwd, retryBudget));
+      ({ stdout, stderr, exitCode, timedOut } = await run(this.bin, args, opts.cwd, retryBudget, opts.env));
       if (timedOut && stdout.trim().length === 0) {
         return {
           ok: false, output: '', exitCode, durationMs: Date.now() - started,
@@ -161,11 +163,13 @@ export class AgyAdapter implements WorkerAdapter {
   }
 }
 
-function run(bin: string, args: string[], cwd: string, timeoutMs: number):
+function run(bin: string, args: string[], cwd: string, timeoutMs: number,
+             envOverrides?: Record<string, string>):
   Promise<{ stdout: string; stderr: string; exitCode: number | null; timedOut: boolean }> {
   return new Promise((resolve) => {
     // stdin 'ignore' — same discipline as every subprocess adapter (see codex.ts).
-    const child = spawn(bin, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+    const { env } = buildWorkerEnv({ overrides: envOverrides });
+    const child = spawn(bin, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
     let timedOut = false;
