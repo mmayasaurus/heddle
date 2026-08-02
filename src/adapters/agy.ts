@@ -18,6 +18,9 @@ import type { DispatchOptions, WorkerAdapter, WorkerResult, TokenUsage } from '.
  *  - Policy: gemini-* slugs ONLY — agy's catalog also lists claude- and gpt-oss- third-party
  *    models; direct-subscription families never route through a middleman.
  */
+/** Retry probe ceiling for the #573 hang check — a hung agy emits nothing, so this is ample. */
+const RETRY_PROBE_MS = 120_000;
+
 export class AgyAdapter implements WorkerAdapter {
   readonly name = 'agy';
   readonly provider = 'gemini' as const;
@@ -42,14 +45,35 @@ export class AgyAdapter implements WorkerAdapter {
     if (opts.resume) args.push('--conversation', opts.resume);
     args.push(...(opts.extraFlags ?? []));
 
+    const budget = opts.timeoutMs ?? 600_000;
     const started = Date.now();
-    const { stdout, stderr, exitCode } = await run(this.bin, args, opts.cwd, opts.timeoutMs ?? 600_000);
+    let { stdout, stderr, exitCode, timedOut } = await run(this.bin, args, opts.cwd, budget);
+
+    // Upstream #573: agy -p can hang indefinitely with zero output when several other
+    // long-running CLI agent processes are active (contention in startup/handshake; staggered
+    // starts do NOT help; solo is 100% reliable). Filed against 1.1.0, still open. A timeout with
+    // no output matches that signature exactly — retry once, since contention is transient.
+    if (timedOut && stdout.trim().length === 0) {
+      // Cap the retry: a hung agy emits nothing, so a short probe is enough to confirm, and this
+      // keeps a double-hang from burning two full budgets (2×10min at the default).
+      const retryBudget = Math.min(budget, RETRY_PROBE_MS);
+      ({ stdout, stderr, exitCode, timedOut } = await run(this.bin, args, opts.cwd, retryBudget));
+      if (timedOut && stdout.trim().length === 0) {
+        return {
+          ok: false, output: '', exitCode, durationMs: Date.now() - started,
+          error: `agy produced no output in ${budget}ms, nor in a ${retryBudget}ms retry probe — ` +
+            `matches upstream #573 concurrency-hang signature; route to a fallback provider`,
+        };
+      }
+    }
+
     const durationMs = Date.now() - started;
 
     if (stdout.trim().length === 0) {
       return {
         ok: false, output: '', exitCode, durationMs,
-        error: `agy produced no stdout (exit ${exitCode}); stderr tail: ${stderr.slice(-400)}`,
+        error: `agy produced no stdout (exit ${exitCode}, timedOut=${timedOut}); ` +
+          `stderr tail: ${stderr.slice(-400)}`,
       };
     }
 
@@ -67,9 +91,15 @@ export class AgyAdapter implements WorkerAdapter {
     }
 
     if (!result) {
+      // Partial output + timeout = a legitimately slow task, NOT the #573 hang (which produces
+      // nothing at all). Deliberately not retried — raise the budget or route elsewhere instead
+      // of burning a second full timeout.
       return {
         ok: false, output: '', exitCode, durationMs,
-        error: `no result event from agy (exit ${exitCode}); stderr tail: ${stderr.slice(-400)}`,
+        error: timedOut
+          ? `agy timed out after ${budget}ms with partial output and no result event — ` +
+            `task likely needs a larger timeoutMs (not the #573 hang signature)`
+          : `no result event from agy (exit ${exitCode}); stderr tail: ${stderr.slice(-400)}`,
         raw: events,
       };
     }
@@ -104,19 +134,23 @@ export class AgyAdapter implements WorkerAdapter {
 }
 
 function run(bin: string, args: string[], cwd: string, timeoutMs: number):
-  Promise<{ stdout: string; stderr: string; exitCode: number | null }> {
+  Promise<{ stdout: string; stderr: string; exitCode: number | null; timedOut: boolean }> {
   return new Promise((resolve) => {
     // stdin 'ignore' — same discipline as every subprocess adapter (see codex.ts).
     const child = spawn(bin, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
-    const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
+    let timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, timeoutMs);
     child.stdout.on('data', (d) => { stdout += d; });
     child.stderr.on('data', (d) => { stderr += d; });
-    child.on('close', (code) => { clearTimeout(timer); resolve({ stdout, stderr, exitCode: code }); });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      resolve({ stdout, stderr, exitCode: code, timedOut });
+    });
     child.on('error', (err) => {
       clearTimeout(timer);
-      resolve({ stdout, stderr: `${stderr}\nspawn error: ${String(err)}`, exitCode: null });
+      resolve({ stdout, stderr: `${stderr}\nspawn error: ${String(err)}`, exitCode: null, timedOut });
     });
   });
 }

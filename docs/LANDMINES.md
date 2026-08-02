@@ -76,6 +76,20 @@ flags churn monthly.
   observed (likely the global `~/.agents/skills` pool auto-loading — slim-context knob TBD).
   Envelope (`--output-format json`) has NO model field — use stream-json when model verification
   matters.
+- **#573 characterized precisely** (fetched from the issue, 2026-08-01): filed against **agy 1.1.0**
+  on macOS Apple Silicon; trigger is **one `agy -p` alongside 3+ OTHER long-running CLI agent
+  processes** (codex-cli + opencode + grok in the repro) — the neighbors complete, agy hangs
+  forever with no output. Staggered 5s starts do NOT help; not tied to any one neighbor's flags;
+  reporter's read is **contention during startup/handshake**, not unconditional TTY detection.
+  Solo reliability reported "100%". Still OPEN, no maintainer response, no PTY workaround
+  mentioned; reporter's workaround is sequencing agy outside other CLI bursts.
+  **Relevance to us:** our clean 3-concurrent pass used *short-lived* neighbors on **1.1.9**
+  (9 releases newer) — encouraging but NOT a refutation, because Maya's real topology (several
+  long-running interactive orchestrator sessions) resembles the repro. Mitigation shipped in the
+  adapter: distinguish timeout-with-no-output from other failures, retry once (contention is
+  transient), then fail with an explicit #573-signature error so the routing layer fails over to
+  another provider rather than stalling a task. If hangs ever appear in practice, next levers are
+  a per-provider concurrency semaphore and a PTY wrapper experiment.
 - **Never** use the reverse-engineered OpenCode↔Antigravity OAuth plugins: the flagship plugin is
   archived with an explicit ToS-violation + real-account-ban warning in its own README, corroborated
   by ban threads on Google's official forum. Not with a primary Google account, not ever here.
