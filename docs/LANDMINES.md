@@ -83,13 +83,32 @@ flags churn monthly.
   reporter's read is **contention during startup/handshake**, not unconditional TTY detection.
   Solo reliability reported "100%". Still OPEN, no maintainer response, no PTY workaround
   mentioned; reporter's workaround is sequencing agy outside other CLI bursts.
-  **Relevance to us:** our clean 3-concurrent pass used *short-lived* neighbors on **1.1.9**
-  (9 releases newer) — encouraging but NOT a refutation, because Maya's real topology (several
-  long-running interactive orchestrator sessions) resembles the repro. Mitigation shipped in the
-  adapter: distinguish timeout-with-no-output from other failures, retry once (contention is
-  transient), then fail with an explicit #573-signature error so the routing layer fails over to
-  another provider rather than stalling a task. If hangs ever appear in practice, next levers are
-  a per-provider concurrency semaphore and a PTY wrapper experiment.
+  **The reporter's own eliminations refine the envelope sharply** (all from the issue body):
+  3 parallel *agy-only* runs finish in single-run time (8s) — so it is NOT agy-vs-agy; every
+  *pairwise* combination (agy + one other CLI) passes 100%; the failure needs **3+ OTHER heavy
+  CLI processes running longer prompts**. `--log-file` emits nothing during the hang — it dies
+  before its own logging initializes, i.e. in process bootstrap, not the request path.
+  **Correction to our earlier read:** our clean pass (3 agy + codex + cursor, short-lived) had only
+  **two** other CLI *types* — inside the empirically safe envelope, so it never actually exercised
+  the bug. Do not read it as a refutation.
+  **Operating rule for the routing/scheduler layer: keep ≤2 other heavy CLI agent processes running
+  alongside any agy dispatch**, or serialize agy against other-provider workers. Note that Maya's
+  real topology (several long-running interactive orchestrator tabs) can exceed this on its own.
+  Mitigation shipped in the adapter: distinguish timeout-with-no-output (#573 signature → one
+  capped 120s retry probe, then an explicit fail-over error) from timeout-with-partial-output (a
+  merely slow task → no retry, raise `timeoutMs`). Nine releases of notes (1.1.1→1.1.9) never
+  mention concurrency and the issue has zero maintainer comments — treat as unfixed.
+- **Same-conversation concurrency is a SEPARATE documented hang**: overlapping calls against one
+  `conversation_id` hit a session lock inside agy (reported by the tphakala/agy-mcp maintainer).
+  The adapter serializes per-conversation dispatches (different conversations still run in
+  parallel) — verified live: 3 concurrent resumes of one conversation returned "LOOM 1/2/3"
+  correctly in 6.5s instead of deadlocking.
+- Headless/one-shot runs still **block on MCP-server loading at startup by design** (1.1.9 notes;
+  interactive sessions got backgrounded loading, headless didn't) — every MCP server attached to
+  an agy worker is paid for in startup latency on every dispatch. Attach per-task, never globally.
+- PTY wrappers (e.g. agy-headless-bridge) target #76, which upstream fixed in 1.1.1 — and a Google
+  engineer's root-cause (swallowed server errors + inherited-stdin blocking) contradicts the
+  isatty-gate theory those wrappers assume. Low marginal value now; keep in reserve only.
 - **Never** use the reverse-engineered OpenCode↔Antigravity OAuth plugins: the flagship plugin is
   archived with an explicit ToS-violation + real-account-ban warning in its own README, corroborated
   by ban threads on Google's official forum. Not with a primary Google account, not ever here.

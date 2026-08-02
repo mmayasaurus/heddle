@@ -22,8 +22,14 @@ project-agnostic.
 
 1. **Subscriptions only.** Every execution path is a subscription-authenticated CLI: Claude models
    via interactive Claude Code sessions and their in-session subagents; GPT models via `codex exec`
-   (ChatGPT plan); supplemental models (Kimi K3, Composer, Grok, GLM, …) via `cursor-agent`
-   (Cursor plan's included pool). No API keys in any execution path, ever.
+   (ChatGPT plan); Gemini models via `agy` (Antigravity CLI, Google plan); supplemental models
+   (Kimi K3, Composer, Grok, GLM, …) via `cursor-agent` (Cursor plan's included pool). No API keys
+   in any execution path, ever.
+   **Corollary — we drive each vendor's own official binary, never a third-party client wearing
+   its credentials.** Google's Antigravity FAQ, for instance, prohibits using third-party software
+   with an Antigravity login (suspension/termination grounds) while its own docs demonstrate
+   scripting `agy -p --output-format json` in CI. Heddle is squarely the latter: official binaries,
+   official auth, no token extraction or credential proxying — for any provider.
 2. **Never route a model through a middleman when a direct subscription exists.** Cursor carries
    Claude/GPT/Gemini models in its catalog — Heddle must never select them there; it uses Cursor
    only for models with no direct subscription.

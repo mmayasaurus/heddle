@@ -12,6 +12,14 @@ policy:
       route_away_at_pct: 90           # near-exhaustion → reroute; NEVER on-demand overage
   reviewer_fleet_isolation:
     ollama_cloud: excluded            # reserved for PR reviewer bots (account-scoped limits)
+  official_binaries_only: true        # each vendor's own CLI + own auth; never a third-party
+                                      # client wearing another vendor's credentials (see README)
+  concurrency_guards:
+    agy:
+      max_other_heavy_clis: 2         # upstream #573: 3+ OTHER heavy CLI agents alongside an
+                                      # agy dispatch hangs it; pairwise is 100% safe. Scheduler
+                                      # must serialize agy against other-provider workers.
+      serialize_per_conversation: true  # separate documented session-lock hang (adapter enforces)
 
 providers:
   claude:

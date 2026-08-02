@@ -21,6 +21,30 @@ import type { DispatchOptions, WorkerAdapter, WorkerResult, TokenUsage } from '.
 /** Retry probe ceiling for the #573 hang check — a hung agy emits nothing, so this is ample. */
 const RETRY_PROBE_MS = 120_000;
 
+/**
+ * Serializes dispatches per conversation id. Overlapping calls against the SAME conversation
+ * trigger a known session-lock hang inside agy itself (documented by the tphakala/agy-mcp
+ * maintainer). Resume-heavy orchestration would hit this constantly, so the adapter queues
+ * same-conversation work instead of racing it. Different conversations still run in parallel.
+ */
+const conversationLocks = new Map<string, Promise<void>>();
+
+async function withConversationLock<T>(id: string | undefined, fn: () => Promise<T>): Promise<T> {
+  if (!id) return fn();
+  const prior = conversationLocks.get(id) ?? Promise.resolve();
+  const result = prior.then(fn, fn); // run once the prior call settles, success or failure
+  const chain = result.then(
+    () => undefined,
+    () => undefined, // swallow here so one failure can't poison the queue for later waiters
+  );
+  conversationLocks.set(id, chain);
+  try {
+    return await result;
+  } finally {
+    if (conversationLocks.get(id) === chain) conversationLocks.delete(id);
+  }
+}
+
 export class AgyAdapter implements WorkerAdapter {
   readonly name = 'agy';
   readonly provider = 'gemini' as const;
@@ -32,7 +56,11 @@ export class AgyAdapter implements WorkerAdapter {
     private readonly skipPermissions = true,
   ) {}
 
-  async dispatch(prompt: string, opts: DispatchOptions): Promise<WorkerResult> {
+  dispatch(prompt: string, opts: DispatchOptions): Promise<WorkerResult> {
+    return withConversationLock(opts.resume, () => this.execute(prompt, opts));
+  }
+
+  private async execute(prompt: string, opts: DispatchOptions): Promise<WorkerResult> {
     if (!opts.model.startsWith('gemini-')) {
       return {
         ok: false, output: '', exitCode: null,
