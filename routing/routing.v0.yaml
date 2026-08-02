@@ -16,9 +16,10 @@ policy:
                                       # client wearing another vendor's credentials (see README)
   concurrency_guards:
     agy:
-      max_other_heavy_clis: 2         # upstream #573: 3+ OTHER heavy CLI agents alongside an
-                                      # agy dispatch hangs it; pairwise is 100% safe. Scheduler
-                                      # must serialize agy against other-provider workers.
+      max_other_heavy_clis: null      # upstream #573 (filed vs 1.1.0) did NOT reproduce on 1.1.9:
+                                      # two direct attempts with 3 then 4 long-running neighbor
+                                      # CLIs all passed in ~1s (docs/LANDMINES.md). No cap needed;
+                                      # adapter keeps hang-detection as a cheap backstop.
       serialize_per_conversation: true  # separate documented session-lock hang (adapter enforces)
 
 providers:
@@ -34,7 +35,13 @@ providers:
     effort: [minimal, low, medium, high, xhigh]   # -c model_reasoning_effort=…
     slim_context_flags: ["--ignore-user-config"]  # for cheap task classes
   cursor:
-    auth: cursor-subscription         # Max plan; supplemental models bill the Other-Models pool
+    auth: cursor-subscription         # Max plan
+    # ⚠️ TWO POOLS, and they are NOT interchangeable:
+    #   "Cursor Models"  = Grok 4.5 + Composer 2.5 — generous plan allowance. PREFER THESE.
+    #   "Other Models"   = Kimi/GPT/Claude/Gemini — metered dollar pool, AND the same pool Maya's
+    #                      Cursor PR-review usage draws on. Spending it here starves PR review.
+    # Therefore: default Cursor work to Grok/Composer; Kimi is opt-in for genuinely hard tasks only.
+    prefer_pool: cursor-models
     execution: headless               # cursor-agent -p --output-format json --trust
     models:                           # snapshot 2026-08-01 — verify against `cursor-agent models`
       # ✅ = live round-trip verified 2026-08-01, with observed latency on a trivial prompt
@@ -77,8 +84,13 @@ task_classes:
     fallback: {provider: codex, model: gpt-5.6-terra}
   second-opinion:           # independent diagnosis/review of a diff or plan (diversity valuable)
     provider: cursor
+    model: cursor-grok-4.5-high   # Cursor-Models pool — does NOT touch the PR-review dollar pool
+    fallback: {provider: gemini, model: gemini-3.1-pro-high}
+  second-opinion-hard:      # opt-in only: costs the metered pool PR review needs
+    provider: cursor
     model: kimi-k3-high
-    fallback: {provider: codex, model: gpt-5.6-sol}
+    requires_explicit_opt_in: true
+    note: burns "Other Models" dollars shared with Cursor PR review — ask before using
   bulk-mechanical:          # renames, sweeps, codemods, boilerplate, test scaffolds
     provider: codex
     model: gpt-5.6-luna
@@ -91,3 +103,7 @@ task_classes:
   quick-alt-take:           # cheap fast alternative draft to compare against primary
     provider: cursor
     model: cursor-grok-4.5-medium
+  gemini-analysis:          # long-context reading, doc/log analysis, cross-checking
+    provider: gemini
+    model: gemini-3.1-pro-high
+    fallback: {provider: cursor, model: composer-2.5}

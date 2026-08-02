@@ -91,9 +91,15 @@ flags churn monthly.
   **Correction to our earlier read:** our clean pass (3 agy + codex + cursor, short-lived) had only
   **two** other CLI *types* — inside the empirically safe envelope, so it never actually exercised
   the bug. Do not read it as a refutation.
-  **Operating rule for the routing/scheduler layer: keep ≤2 other heavy CLI agent processes running
-  alongside any agy dispatch**, or serialize agy against other-provider workers. Note that Maya's
-  real topology (several long-running interactive orchestrator tabs) can exceed this on its own.
+  **DIRECT REPRODUCTION ATTEMPT ON 1.1.9 — PASSED, twice (2026-08-01).** Round 1: three genuinely
+  long-running neighbors (codex gpt-5.6-terra emitting 21KB, cursor grok-4.5-high 7.6KB,
+  composer-2.5 8KB, all concurrent for ~37s) with agy launched 2s into the burst → SUCCESS in
+  1.2s. Round 2 (harder): **four** long-running neighbors (2× codex + grok + kimi-k3, ~55s) with
+  agy fired at +1s, +8s and +20s → all three SUCCESS, 1.0-1.1s each. This is the reported repro
+  shape (agy + 3-4 other heavy CLI agents on long prompts) and it did not reproduce on 1.1.9 —
+  9 releases past the 1.1.0 the issue was filed against. **Working conclusion: fixed in practice
+  for this machine/version**, even though upstream never acknowledged it. Keep the adapter's
+  detection anyway (cheap, and the issue is still formally open).
   Mitigation shipped in the adapter: distinguish timeout-with-no-output (#573 signature → one
   capped 120s retry probe, then an explicit fail-over error) from timeout-with-partial-output (a
   merely slow task → no retry, raise `timeoutMs`). Nine releases of notes (1.1.1→1.1.9) never
