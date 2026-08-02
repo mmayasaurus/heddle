@@ -135,11 +135,20 @@ flags churn monthly.
   subscription-preserving credential is `claude setup-token` → `CLAUDE_CODE_OAUTH_TOKEN`
   (one per account). **Never `--bare`** — it cannot use subscription auth at all (OAuth and
   keychain are never read), so it silently forces API-key billing.
-- **Cursor — thinnest lever:** no config-dir mechanism exists; `CURSOR_API_KEY` (env var only —
-  passing `--api-key` on argv leaks it via `ps`) is the sole account selector. Per Cursor staff on
-  their forum it bills against that account's own plan rather than a separate SKU, but that's
-  forum-sourced, not docs — verify against a real invoice before high volume. The stream-json
-  `system/init` event carries `apiKeySource` (`env`/`flag`/`login`) to confirm what a run used.
+- **Cursor — thinnest lever, and billing semantics are UNDOCUMENTED.** No config-dir mechanism
+  exists; `CURSOR_API_KEY` (env var only — `--api-key` on argv leaks via `ps`) is the sole account
+  selector, minted at cursor.com/dashboard/api. **Directly checked 2026-08-01: the CLI auth page,
+  the pricing page, and account/api-keys (404) say NOTHING about how API-key-authenticated usage
+  is billed** — plan quota vs. separate metered API billing is simply not stated anywhere in the
+  docs. The only claim either way is a Cursor staff forum reply saying it draws on that account's
+  own plan. **Do not mint keys for rotation until that's empirically confirmed** (mint one, run a
+  small job, check whether it lands on the plan dashboard) — an unverified guess here risks
+  exactly the per-token billing this project forbids. Browser login (`cursor-agent login`) is the
+  known-safe path; account switching that way is manual + global (`logout`/`login`).
+  Mitigating factor: Grok 4.5 and Composer 2.5 are **Cursor Models** (generous plan allowance),
+  not the metered "Other Models" pool — so routing supplemental work to those two may make Cursor
+  rotation unnecessary. The stream-json `system/init` event carries `apiKeySource`
+  (`env`/`flag`/`login`) to confirm which credential a run actually used.
 - **Rate-limit detection is string-matching everywhere** (no CLI has a machine-readable quota
   signal). Claude: `"hit your session limit"` / `"...weekly limit"` / `"...Opus limit"`, each
   followed by `· resets <time>` — three independently-clocked limits per account, so track three
