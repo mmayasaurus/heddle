@@ -14,8 +14,10 @@ messaging, and a localhost dashboard for full visibility.
 Cursor are encoded in `src/adapters/`; the routing table schema is drafted; the comms broker
 (Phase 2) and dashboard (Phase 3) are designed but not yet built. See `docs/ARCHITECTURE.md`.
 
-Docs: `docs/ORCHESTRATION.md` (Phase 1 — what's being built now) · `docs/DASHBOARD.md`
-(the product vision) · `docs/ARCHITECTURE.md` (layers) · `docs/LANDMINES.md` (verified CLI gotchas).
+**Master spec: `docs/SPEC.md`** — the single source of truth (read this first). Detail:
+`docs/ORCHESTRATION.md` (Phase-1 mechanics) · `docs/DASHBOARD.md` (UI vision) ·
+`docs/ARCHITECTURE.md` (layers) · `docs/LANDMINES.md` (verified per-CLI contracts — read before
+touching an adapter).
 
 First consumer: the Spinventory rebuild fleet (architecture record:
 `Spinventory-Rebuild-App/_vault/architecture/agent-orchestration-plan.md`). Heddle itself is
