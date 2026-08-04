@@ -13,8 +13,10 @@ import { listPacks } from './skillpacks.js';
 
 const USAGE = `heddle — cross-provider orchestration for subscription coding CLIs
 
-  heddle dispatch --class <task-class> --task "<prompt>" [options]
-      --class <c>          task class from the routing table (see: heddle classes)
+  heddle dispatch (--class <c> | --provider <p> --model <m>) --task "<prompt>" [options]
+      --class <c>          task class from the routing table (see: heddle classes) — policy path
+      --provider <p>       name a provider directly (codex|cursor|gemini) — dynamic override
+      --model <m>          the model id for --provider (e.g. cursor-grok-4.5-high)
       --task <text>        the sub-task prompt (or pipe via stdin)
       --cwd <path>         working directory for the worker (default: cwd)
       --issue <SPI-n>      Linear issue this sub-task serves
@@ -59,9 +61,12 @@ try {
   switch (cmd) {
     case 'dispatch': {
       const taskClass = arg('--class');
+      const provider = arg('--provider');
+      const model = arg('--model');
       const prompt = arg('--task') ?? (await readStdin());
-      if (!taskClass || !prompt) {
-        console.error('dispatch requires --class and --task (or piped stdin)\n');
+      const hasDirect = Boolean(provider && model);
+      if ((!taskClass && !hasDirect) || !prompt) {
+        console.error('dispatch requires --task plus either --class or (--provider AND --model)\n');
         console.error(USAGE);
         process.exit(2);
       }
@@ -71,6 +76,8 @@ try {
 
       const res = await dispatch({
         taskClass,
+        provider,
+        model,
         prompt,
         cwd: arg('--cwd') ?? process.cwd(),
         issue: arg('--issue'),

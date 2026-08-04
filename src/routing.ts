@@ -84,3 +84,22 @@ export function resolveRoute(table: RoutingTable, taskClass: string): Route {
 export function listTaskClasses(table: RoutingTable): string[] {
   return Object.keys(table.taskClasses);
 }
+
+/**
+ * Direct route — the orchestrator names a provider+model itself instead of a task class.
+ * This is the "call whatever model is best for the job" escape hatch: full dynamic choice,
+ * but still fenced by the subscription policy (excluded/held providers refuse here, and the
+ * per-adapter misbilling guards — e.g. no claude/gpt/gemini ids through Cursor — still apply
+ * at dispatch time). No fallback and no opt-in gate: naming a model IS the opt-in.
+ */
+export function directRoute(
+  table: RoutingTable, provider: string, model: string, skills?: string[],
+): Route {
+  const cfg = table.providers[provider];
+  if (!cfg) {
+    throw new Error(`unknown provider "${provider}". Known: ${Object.keys(table.providers).join(', ')}`);
+  }
+  if (cfg.status === 'excluded') throw new Error(`provider "${provider}" is excluded from orchestration`);
+  if (cfg.status === 'held') throw new Error(`provider "${provider}" is on hold and not routable yet`);
+  return { taskClass: `direct:${provider}/${model}`, provider, model, skills };
+}

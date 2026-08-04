@@ -2,7 +2,7 @@ import { AgyAdapter } from './adapters/agy.js';
 import { CodexAdapter } from './adapters/codex.js';
 import { CursorAdapter } from './adapters/cursor.js';
 import { Ledger } from './ledger.js';
-import { loadRouting, resolveRoute, type Route, type RouteTarget } from './routing.js';
+import { loadRouting, resolveRoute, directRoute, type Route, type RouteTarget } from './routing.js';
 import { materializeAgentsMd } from './skillpacks.js';
 import type { WorkerAdapter, WorkerResult } from './types.js';
 
@@ -14,7 +14,11 @@ import type { WorkerAdapter, WorkerResult } from './types.js';
  */
 
 export interface DispatchRequest {
-  taskClass: string;
+  /** Policy path: a task class from the routing table. Use this OR provider+model. */
+  taskClass?: string;
+  /** Direct path: name the provider+model yourself (dynamic override). Use with `model`. */
+  provider?: string;
+  model?: string;
   prompt: string;
   cwd: string;
   /** Fleet identity of the dispatching orchestrator, e.g. "K". */
@@ -118,8 +122,18 @@ async function runTarget(
 }
 
 export async function dispatch(req: DispatchRequest, ledger = new Ledger()): Promise<DispatchOutcome> {
-  const route = resolveRoute(loadRouting(), req.taskClass);
+  const table = loadRouting();
 
+  // Direct path: orchestrator named the model. Full dynamic choice, still policy-fenced.
+  if (req.provider && req.model) {
+    const route = directRoute(table, req.provider, req.model, req.skills);
+    return runTarget(route, req, ledger, route, null);
+  }
+  if (!req.taskClass) {
+    throw new Error('dispatch requires either a task class or an explicit provider+model');
+  }
+
+  const route = resolveRoute(table, req.taskClass);
   if (route.requiresExplicitOptIn && !req.optIn) {
     throw new Error(
       `task class "${req.taskClass}" requires explicit opt-in` +
