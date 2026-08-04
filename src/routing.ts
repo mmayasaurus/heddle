@@ -13,6 +13,8 @@ export interface RouteTarget {
   model: string;
   extraFlags?: string[];
   skills?: string[];
+  /** Code-discovery MCP servers to attach for this route (e.g. ["memtrace"]). */
+  mcp?: string[];
   requiresExplicitOptIn?: boolean;
   note?: string;
 }
@@ -59,6 +61,7 @@ function toTarget(node: any): RouteTarget | undefined {
     // Provider-specific flag keys stay explicit rather than magic: codex_flags today.
     extraFlags: node.codex_flags ?? node.extra_flags,
     skills: node.skills,
+    mcp: node.mcp,
     requiresExplicitOptIn: node.requires_explicit_opt_in === true,
     note: node.note,
   };
@@ -93,7 +96,7 @@ export function listTaskClasses(table: RoutingTable): string[] {
  * at dispatch time). No fallback and no opt-in gate: naming a model IS the opt-in.
  */
 export function directRoute(
-  table: RoutingTable, provider: string, model: string, skills?: string[],
+  table: RoutingTable, provider: string, model: string, skills?: string[], mcp?: string[],
 ): Route {
   const cfg = table.providers[provider];
   if (!cfg) {
@@ -101,5 +104,5 @@ export function directRoute(
   }
   if (cfg.status === 'excluded') throw new Error(`provider "${provider}" is excluded from orchestration`);
   if (cfg.status === 'held') throw new Error(`provider "${provider}" is on hold and not routable yet`);
-  return { taskClass: `direct:${provider}/${model}`, provider, model, skills };
+  return { taskClass: `direct:${provider}/${model}`, provider, model, skills, mcp };
 }

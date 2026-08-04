@@ -77,10 +77,12 @@ task_classes:
   deep-implementation:      # gnarly features, cross-cutting refactors, subtle bugs
     provider: claude
     model: opus
+    mcp: [memtrace]         # code navigation matters most here — attach discovery by default
     fallback: {provider: codex, model: gpt-5.6-sol}
   implementation:           # well-scoped feature work with clear spec
     provider: claude
     model: sonnet
+    mcp: [memtrace]
     fallback: {provider: codex, model: gpt-5.6-terra}
   second-opinion:           # independent diagnosis/review of a diff or plan (diversity valuable)
     provider: cursor

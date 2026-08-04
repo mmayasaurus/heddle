@@ -4,6 +4,7 @@ import { CursorAdapter } from './adapters/cursor.js';
 import { Ledger } from './ledger.js';
 import { loadRouting, resolveRoute, directRoute, type Route, type RouteTarget } from './routing.js';
 import { materializeAgentsMd } from './skillpacks.js';
+import { materializeWorkerMcp, codexApprovalFlags } from './mcp.js';
 import type { WorkerAdapter, WorkerResult } from './types.js';
 
 /**
@@ -26,6 +27,8 @@ export interface DispatchRequest {
   issue?: string;
   /** Skill packs to materialize; defaults to the routing table's packs for this class. */
   skills?: string[];
+  /** Code-discovery MCP servers to attach; defaults to the routing table's mcp for this class. */
+  mcp?: string[];
   timeoutMs?: number;
   resume?: string;
   /** Per-dispatch account selection (CODEX_HOME, CURSOR_API_KEY, …). See src/env.ts. */
@@ -66,6 +69,7 @@ async function runTarget(
   fellBackFrom: string | null,
 ): Promise<DispatchOutcome> {
   const skills = req.skills ?? target.skills ?? [];
+  const mcp = req.mcp ?? target.mcp ?? [];
   const adapter = adapterFor(target.provider);
 
   const ledgerId = ledger.start({
@@ -82,13 +86,23 @@ async function runTarget(
     fellBackFrom,
   });
 
-  const restore = materializeAgentsMd(req.cwd, skills);
+  const restoreSkills = materializeAgentsMd(req.cwd, skills);
+  const restoreMcp = materializeWorkerMcp(req.cwd, target.provider, mcp);
+
+  // Codex needs its attached MCP servers' tools pre-approved per-invocation, or headless calls
+  // cancel. This makes heddle self-contained — it works even if the user's global codex config
+  // hasn't pre-approved the server.
+  const extraFlags = [
+    ...(target.extraFlags ?? []),
+    ...(target.provider === 'codex' && mcp.length ? codexApprovalFlags(mcp) : []),
+  ];
+
   let result: WorkerResult;
   try {
     result = await adapter.dispatch(req.prompt, {
       model: target.model,
       cwd: req.cwd,
-      extraFlags: target.extraFlags,
+      extraFlags,
       timeoutMs: req.timeoutMs,
       resume: req.resume,
       env: req.env,
@@ -96,7 +110,8 @@ async function runTarget(
   } catch (err) {
     result = { ok: false, output: '', exitCode: null, error: String((err as Error).message ?? err) };
   } finally {
-    restore();
+    restoreMcp();
+    restoreSkills();
   }
 
   ledger.finish(ledgerId, {
@@ -126,7 +141,7 @@ export async function dispatch(req: DispatchRequest, ledger = new Ledger()): Pro
 
   // Direct path: orchestrator named the model. Full dynamic choice, still policy-fenced.
   if (req.provider && req.model) {
-    const route = directRoute(table, req.provider, req.model, req.skills);
+    const route = directRoute(table, req.provider, req.model, req.skills, req.mcp);
     return runTarget(route, req, ledger, route, null);
   }
   if (!req.taskClass) {

@@ -23,7 +23,13 @@ export class CodexAdapter implements WorkerAdapter {
   ) {}
 
   async dispatch(prompt: string, opts: DispatchOptions): Promise<WorkerResult> {
-    const args = ['exec', '--json', '--skip-git-repo-check', '--sandbox', this.sandbox];
+    // `approval_policy="never"` is load-bearing for headless work: without it, tool calls that
+    // would otherwise prompt — notably MCP tool calls (memtrace/serena) — are auto-cancelled with
+    // "user cancelled MCP tool call" because there is no TTY to approve them. `never` auto-proceeds
+    // within the sandbox, which is the correct unattended-worker posture. `codex exec` takes this
+    // via `-c` config override (there is no `--ask-for-approval` flag on the exec subcommand).
+    const args = ['exec', '--json', '--skip-git-repo-check',
+      '--sandbox', this.sandbox, '-c', 'approval_policy="never"'];
     if (opts.resume) args.push('resume', opts.resume);
     args.push('-m', opts.model, ...(opts.extraFlags ?? []), prompt);
 
