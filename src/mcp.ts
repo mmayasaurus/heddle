@@ -11,19 +11,35 @@ import { join, dirname } from 'node:path';
  * the Commandment-#2 discovery tool. Serena is deferred: its per-host `--context` wiring is not
  * uniform across providers, so shipping it blind would violate the no-guessing rule.
  */
+/**
+ * Servers heddle can MATERIALIZE into a worker's own project config (cursor/agy). memtrace has a
+ * uniform stdio invocation; serena's context differs per host so it is not materialized here.
+ */
 export const WORKER_MCP_SERVERS: Record<string, { command: string; args: string[] }> = {
   memtrace: { command: 'memtrace', args: ['mcp'] },
 };
 
 /**
+ * Servers available to CODEX workers via the user's global ~/.codex/config.toml (both added +
+ * pre-approved there). Codex inherits these; heddle only re-asserts the approval per-invocation
+ * so it works even if the global pre-approval is ever removed.
+ */
+export const CODEX_GLOBAL_SERVERS = ['memtrace', 'serena'];
+
+/**
  * Codex needs each attached MCP server's tools PRE-APPROVED, or its headless runs cancel every
- * tool call with "user cancelled MCP tool call" (no TTY to approve). Verified live: memtrace
- * calls fail without this and succeed with it. Returns `-c` overrides to add to the codex args.
+ * tool call with "user cancelled MCP tool call" (no TTY to approve). Verified live: calls fail
+ * without this and succeed with it. Returns `-c` overrides to add to the codex args.
  */
 export function codexApprovalFlags(serverNames: string[]): string[] {
   const flags: string[] = [];
   for (const n of serverNames) {
-    resolveMcpServers([n]); // validate it's a known server before trusting its tools
+    if (!CODEX_GLOBAL_SERVERS.includes(n)) {
+      throw new Error(
+        `codex worker MCP "${n}" is not in your global ~/.codex config. ` +
+        `Known codex servers: ${CODEX_GLOBAL_SERVERS.join(', ')}`,
+      );
+    }
     flags.push('-c', `mcp_servers.${n}.default_tools_approval_mode="approve"`);
   }
   return flags;
@@ -55,12 +71,14 @@ export function resolveMcpServers(names: string[]): Record<string, { command: st
  */
 export function materializeWorkerMcp(cwd: string, provider: string, serverNames: string[]): () => void {
   if (serverNames.length === 0) return () => { /* nothing to attach */ };
-  const servers = resolveMcpServers(serverNames);
 
+  // Codex reads its servers (memtrace, serena) from the user's global config — nothing to write,
+  // and its known-set differs from the materializable set, so validate via codexApprovalFlags,
+  // not here.
+  if (provider === 'codex') return () => { /* no-op */ };
+
+  const servers = resolveMcpServers(serverNames);
   switch (provider) {
-    case 'codex':
-      // memtrace present globally; nothing to write. (Only memtrace is in the registry today.)
-      return () => { /* no-op */ };
     case 'cursor':
       return writeMergedMcpJson(join(cwd, '.cursor', 'mcp.json'), servers);
     case 'gemini':
