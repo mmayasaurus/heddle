@@ -130,16 +130,22 @@ Adapters implement one contract (`src/types.ts`: `WorkerAdapter.dispatch → Wor
 owns launch-command construction, structured-output parsing, resume handle, and MCP/approval
 plumbing. **All verified contracts live in `LANDMINES.md` — read it before touching an adapter.**
 
-**Worker isolation (OPEN DECISION, surfaced by Conductor/Superset):** heddle has no worktree story
-for workers yet. Options: (a) workers share the orchestrator's issue-worktree — MVP-simple, fine
-for sequential/non-overlapping sub-tasks; (b) one git worktree per PARALLEL worker — required for
-race-and-merge and any concurrent same-repo edits, with reference-counted cleanup. **Plan:** ship
-(a) for the headless-orchestration MVP; add (b) with a declarative per-repo lifecycle
-(`onWorktreeCreate/Destroy`, gitignored-file copy-in à la Conductor's `.worktreeinclude`,
-per-worker port range to avoid dev-server collisions) when race-mode / parallel workers land.
-Steal Conductor's "spotlight testing" (one-way sync of one worktree's changes back to root) for
-Docker/fixed-port stacks that can't be duplicated N ways. Spinventory already has
-`worktree-discipline.md` for the human fleet — productize the same rules for workers.
+**Worker isolation (DECIDED 2026-08-04).** The isolation question is about WORKERS (subagents),
+NOT orchestrators — the A–Q orchestrators ALREADY each run in their own git worktree. Constraint
+(Maya): too many worktrees make memtrace and RAM go crazy; worktrees are acceptable ONLY if cleaned
+up + discarded the moment they're no longer used. Therefore:
+- **DEFAULT: workers run INSIDE their orchestrator's existing worktree.** No new worktrees for
+  normal delegation — the orchestrator's worktree already isolates its issue, and its workers
+  inherit that isolation. Sequential workers, and parallel workers on non-overlapping files, need
+  nothing more. This is the headless-MVP behavior and keeps the worktree count flat.
+- **ONLY race-and-merge (N models, same task, same files) needs separate worktrees.** For that:
+  create TRANSIENT worktrees and tear them down IMMEDIATELY after the merge (reference-counted,
+  lifecycle-tied — honors "cleaned up + discarded"), and do NOT register memtrace overlays for
+  them (they exist purely for isolated editing; discovery queries hit the canonical index — this is
+  exactly what keeps memtrace + RAM sane). Prefer CoW/temp-dir copies over git worktrees where
+  possible, to skip the branch/overlay machinery entirely.
+- Steal Conductor's "spotlight testing" (one-way sync of one worktree's changes back to root) for
+  Docker/fixed-port stacks. Productize Spinventory's `worktree-discipline.md` for the race case.
 
 ---
 
@@ -179,6 +185,26 @@ stepping in only where context/judgment demand. This is the intended model, not 
   better-suited or parallelism helps; otherwise do it yourself. Trivial work stays in-session.
 
 Agents ARE allowed to do work themselves — delegation is a tool, not a mandate.
+
+**How orchestration knowledge reaches an orchestrator (DECIDED 2026-08-04 — hooks AND skills,
+split, integrated with the existing identity system).** Every A–Q agent is now a Fable orchestrator
+(resume-sessions-v2.sh), so the orchestrator OPERATING MODE must be reliably present, not dependent
+on the agent remembering to load a skill:
+- **SessionStart hook — extend the existing `agent-identity.py`.** It already injects fleet identity
+  + owned PRs + claimed Linear issues; append a CONCISE orchestration primer there so the role rides
+  ALONGSIDE the identity: "you are Agent K, a heddle orchestrator (owning SPI-712 / PR #2340);
+  delegate sub-tasks via the heddle MCP tools; full protocol → /orchestrate." Guaranteed present
+  every session; ties the orchestrator role directly to the Linear/PR ownership system Maya asked
+  about. MUST stay tiny — SessionStart bloat causes autocompaction (Maya's session-lean discipline).
+- **`/orchestrate` skill — load-on-demand.** The full protocol (decomposition patterns, task-class
+  reference, the dispatch loop, worker-isolation rules, delegation discipline) lives here, pulled in
+  when actually orchestrating, so it costs zero session-start context.
+- **Enforcement via hooks, not just prose** (§11): the delegation-discipline nudge + goal-auditor
+  stop are PreToolUse/Stop hooks. ⚠️ Keep them subagent-aware — tool-gating hooks can tangle
+  subagents (a known failure mode in this fleet).
+
+This mirrors the established design: identity + ownership are always-injected via hooks because they
+must always be present; detailed procedures are load-on-demand skills.
 
 ---
 
@@ -376,8 +402,10 @@ savings analytics.
 
 ## 17. Open decisions (need Maya)
 
-1. Worker isolation for the MVP: confirm (a) share orchestrator worktree now, (b) worktree-per-
-   parallel-worker with race-mode. (§5)
+1. ✅ RESOLVED (2026-08-04): worker isolation — workers share the orchestrator's worktree by
+   default; only race-mode uses transient, immediately-torn-down worktrees with no memtrace overlay.
+   Orchestration knowledge delivered via a concise SessionStart primer (in `agent-identity.py`) +
+   the `/orchestrate` skill. (§5, §7)
 2. Claude multi-account Keychain-isolation test (5 min, when no session is live). (§2)
 3. Cursor second account: only via `CURSOR_API_KEY` with undocumented billing — verify on an
    invoice before minting, or stay single-account (Grok/Composer are in the generous pool anyway).
