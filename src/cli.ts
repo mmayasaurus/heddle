@@ -5,6 +5,7 @@ import { dispatch } from './dispatch.js';
 import { Ledger } from './ledger.js';
 import { loadRouting, listTaskClasses, resolveRoute } from './routing.js';
 import { listPacks } from './skillpacks.js';
+import { classifyEffort, assessResult } from './classify.js';
 
 /**
  * heddle CLI — the surface orchestrators (and later the dashboard) drive.
@@ -24,6 +25,7 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
       --skills a,b         override the routing table's skill packs
       --mcp a,b            attach code-discovery MCP servers (e.g. memtrace)
       --effort <level>     reasoning effort: codex minimal|low|medium|high|xhigh; agy low|medium|high
+      --auto-effort        classify the task's difficulty (cheap model) and pin effort automatically
       --resume <id>        continue a prior worker session
       --timeout <ms>       wall-clock budget (default 600000)
       --codex-home <path>  account selection for codex workers
@@ -31,6 +33,9 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
       --no-fallback        do not try the table's fallback on failure
       --json               machine-readable result
 
+  heddle classify-effort --class <c> --task "<prompt>" [--json]   difficulty → effort (cheap model)
+  heddle assess --task "<prompt>" --output "<worker output>" [--ok] [--json]
+                                 judge a worker result: done | needs-rework | needs-human
   heddle classes [--json]        list task classes and where they route
   heddle packs                   list available skill packs
   heddle workers [--json]        dispatches still in flight
@@ -87,6 +92,7 @@ try {
         skills: arg('--skills')?.split(',').map((s) => s.trim()).filter(Boolean),
         mcp: arg('--mcp')?.split(',').map((s) => s.trim()).filter(Boolean),
         effort: arg('--effort'),
+        autoEffort: has('--auto-effort'),
         resume: arg('--resume'),
         timeoutMs: arg('--timeout') ? Number(arg('--timeout')) : undefined,
         env: Object.keys(env).length ? env : undefined,
@@ -103,6 +109,24 @@ try {
         return res.ok ? `${head}\n\n${res.output}` : `${head}\n  error: ${res.error}`;
       });
       process.exit(res.ok ? 0 : 1);
+      break;
+    }
+
+    case 'classify-effort': {
+      const taskClass = arg('--class') ?? 'general';
+      const task = arg('--task') ?? (await readStdin());
+      if (!task) { console.error('classify-effort requires --task (or piped stdin)'); process.exit(2); }
+      const effort = await classifyEffort(taskClass, task, arg('--cwd') ?? process.cwd());
+      out(json, { taskClass, effort }, () => effort);
+      break;
+    }
+
+    case 'assess': {
+      const task = arg('--task') ?? '';
+      const output = arg('--output') ?? (await readStdin());
+      if (!task || !output) { console.error('assess requires --task and --output (or piped stdin)'); process.exit(2); }
+      const a = await assessResult(task, output, has('--ok'), arg('--cwd') ?? process.cwd());
+      out(json, a, () => `${a.label}${a.matched ? '' : ' (unmatched — model reply was ambiguous)'}`);
       break;
     }
 

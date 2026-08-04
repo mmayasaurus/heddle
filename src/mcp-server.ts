@@ -6,6 +6,7 @@ import { dispatch } from './dispatch.js';
 import { Ledger } from './ledger.js';
 import { loadRouting, listTaskClasses, resolveRoute } from './routing.js';
 import { listPacks } from './skillpacks.js';
+import { classifyEffort, assessResult } from './classify.js';
 
 /**
  * heddle MCP server — the orchestration surface as MCP tools.
@@ -46,6 +47,7 @@ server.tool(
     skills: z.array(z.string()).optional().describe('Skill packs to load (see list_skill_packs).'),
     mcp: z.array(z.string()).optional().describe('Code-discovery MCP servers to attach, e.g. ["memtrace"].'),
     effort: z.string().optional().describe('Reasoning effort: codex minimal|low|medium|high|xhigh; agy low|medium|high.'),
+    auto_effort: z.boolean().optional().describe('Classify the sub-task difficulty (cheap model) and pin effort automatically, if effort not set.'),
     resume: z.string().optional().describe('Resume a prior worker session by its sessionId.'),
     codex_home: z.string().optional().describe('Account selection for codex workers (CODEX_HOME path).'),
     opt_in: z.boolean().optional().describe('Required for task classes gated behind explicit opt-in.'),
@@ -67,6 +69,7 @@ server.tool(
         skills: a.skills,
         mcp: a.mcp,
         effort: a.effort,
+        autoEffort: a.auto_effort,
         resume: a.resume,
         env: Object.keys(env).length ? env : undefined,
         optIn: a.opt_in,
@@ -78,6 +81,38 @@ server.tool(
     } catch (err) {
       return errorText(`dispatch failed: ${(err as Error).message ?? String(err)}`);
     }
+  },
+);
+
+server.tool(
+  'classify_effort',
+  'Classify a sub-task\'s difficulty with a cheap model and return the reasoning-effort level ' +
+    '(minimal|low|medium|high|xhigh). Use when unsure what effort a delegated task needs.',
+  {
+    task: z.string().describe('The sub-task to classify.'),
+    task_class: z.string().optional().describe('The routing task class, for context.'),
+    cwd: z.string().optional(),
+  },
+  async (a) => {
+    try { return text({ effort: await classifyEffort(a.task_class ?? 'general', a.task, a.cwd) }); }
+    catch (err) { return errorText(`classify_effort failed: ${(err as Error).message ?? String(err)}`); }
+  },
+);
+
+server.tool(
+  'assess_result',
+  'Judge a worker\'s result with a cheap model: done | needs-rework | needs-human. `needs-human` ' +
+    'means it is blocked on a decision/permission/ambiguity only the operator can resolve. Use to ' +
+    'decide whether to accept, re-dispatch, or escalate a delegated result.',
+  {
+    task: z.string().describe('The sub-task the worker was given.'),
+    output: z.string().describe("The worker's result/output."),
+    worker_ok: z.boolean().optional().describe('Whether the worker itself reported success.'),
+    cwd: z.string().optional(),
+  },
+  async (a) => {
+    try { return text(await assessResult(a.task, a.output, a.worker_ok ?? true, a.cwd)); }
+    catch (err) { return errorText(`assess_result failed: ${(err as Error).message ?? String(err)}`); }
   },
 );
 

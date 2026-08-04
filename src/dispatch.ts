@@ -5,6 +5,7 @@ import { Ledger } from './ledger.js';
 import { loadRouting, resolveRoute, directRoute, type Route, type RouteTarget } from './routing.js';
 import { materializeAgentsMd } from './skillpacks.js';
 import { materializeWorkerMcp, codexApprovalFlags } from './mcp.js';
+import { classifyEffort } from './classify.js';
 import type { WorkerAdapter, WorkerResult } from './types.js';
 
 /**
@@ -31,6 +32,9 @@ export interface DispatchRequest {
   mcp?: string[];
   /** Reasoning effort override (codex/agy); defaults to the routing table's effort for this class. */
   effort?: string;
+  /** Opt-in: classify the sub-task's difficulty with a cheap model and pin the effort (if `effort`
+   *  isn't already set). Adds one cheap classification dispatch up front. */
+  autoEffort?: boolean;
   timeoutMs?: number;
   resume?: string;
   /** Per-dispatch account selection (CODEX_HOME, CURSOR_API_KEY, …). See src/env.ts. */
@@ -144,6 +148,15 @@ async function runTarget(
 
 export async function dispatch(req: DispatchRequest, ledger = new Ledger()): Promise<DispatchOutcome> {
   const table = loadRouting();
+
+  // Auto-effort (opt-in): classify the sub-task's difficulty and pin the effort, unless the caller
+  // already set one. Best-effort — a classifier failure falls through to the route/default effort.
+  if (req.autoEffort && !req.effort) {
+    const ctx = req.taskClass ?? (req.provider && req.model ? `${req.provider}/${req.model}` : 'general');
+    try {
+      req = { ...req, effort: await classifyEffort(ctx, req.prompt, req.cwd) };
+    } catch { /* fall through */ }
+  }
 
   // Direct path: orchestrator named the model. Full dynamic choice, still policy-fenced.
   if (req.provider && req.model) {
