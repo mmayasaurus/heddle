@@ -376,6 +376,65 @@ not as a universal layer.
 
 ---
 
+## 15b. Capabilities catalog — hooks / skills / MCP / plugins
+
+Legend: **[have]** exists, reuse · **[planned]** already in this spec · **[NEW]** surfaced here ·
+**[reuse]** deliberately DON'T build, use the existing thing. Priority: P1 = needed for the
+headless MVP · P2 = Phase 2 · P3 = later. Guiding rule: skills are TASK-shaped, not provider-shaped
+(a `code-review` skill works on any model); provider differences live in adapters/routing/LANDMINES,
+not skills.
+
+### MCP servers (consolidate — don't proliferate)
+- **heddle MCP** [have, GROW] — dispatch surface. Add tools: `provider_usage` (per-provider window
+  %, from the ChatGPT `wham` endpoint + ledger → route away before caps) P2; `fleet_status` (who
+  owns which issue/PR — wraps `lin.sh mine` + `pr-own`) P2.
+- **comms broker MCP** [planned] — `send_message`/`await_reply`/chatroom/`needs_human`. P2.
+- **DAP debugging MCP** [planned, check-first] — run/step/inspect live. P3.
+- **memtrace fleet layer** [reuse] — `fleet_publish_intent`/`acquire_lease`/`record_episode`/
+  `audit`/`ydoc` ALREADY do cross-orchestrator edit-conflict coordination + a shared blackboard.
+  Use it; the broker is for real-time CHAT only, not coordination.
+- [reuse] Linear MCP + `lin.sh` (issue ops) · argent (UI QA) · supabase-dev (DB) · sentry (errors) ·
+  posthog (analytics → could feed the stats screen).
+
+### Hooks (enforcement + injection; keep subagent-aware)
+- **orchestration-primer** [planned] — SessionStart, extend `agent-identity.py`, tiny. P1.
+- **delegation-discipline nudge** [planned] — PreToolUse, on orchestrators. P1.
+- **goal-auditor stop** [planned] — Stop/SubagentStop, tiny-model, keep-going/done/stuck×3. P2.
+- **worker-scoped safeguard bundle** [NEW] — materialized per-dispatch for codex/cursor/agy (which
+  lack Claude's hooks): no-delete-without-permission, no-secrets, stay-in-lane, memtrace-first.
+  Ports the protections Claude workers already get to cross-provider workers. P1/P2.
+- **ledger + activity telemetry** [NEW] — PostToolUse → ledger + terminal-activity tracker + stats. P2.
+- **cost/quota pre-dispatch guard** [NEW] — check the provider window; block/reroute near cap
+  (needs `provider_usage`). P2.
+- **needs-human trigger** [NEW] — permission-request/idle → broker queue (fail-open). P2.
+- [have, extend to workers] secret-guard, file-guard, block-destructive, deletion guards,
+  pr-sweep, vault-search.
+
+### Skills (by workflow stage — mostly REUSE + a few NEW orchestration ones)
+- **Spec / decompose:** `/orchestrate` [planned, P1] + `decompose-and-spec` [NEW, P1] (break an
+  issue into worker specs, pick task classes, write clear worker instructions; steal OpenChamber
+  "magic prompts" templating + agency-swarm structured-handoff fields).
+- **Build / code:** [have] spinventory-core, code-discovery, quality-gate, supabase-dev; [have,
+  invoke] sleek-style-guide, social-style-guide; [NEW, extract-from-source, P2] condensed style
+  skill materialized into non-Claude workers' AGENTS.md (they can't invoke the Claude commands).
+- **Review:** `code-review` worker skill [NEW, P2] encoding the DR reviewer lenses (correctness /
+  runtime / security / parity / conventions); [have, reuse] /code-review, security-review, find-bugs.
+- **Test / verify:** [have] quality-gate; [reuse] vitest, verification-before-completion,
+  systematic-debugging, test-driven-development.
+- **Land / PR:** [have] pr-sweep.sh + clean-pr/clean-all-prs; optional `drive-pr-to-green` skill P3.
+- **Meta:** `handoff` (orchestrator↔orchestrator continuation) [NEW, P2]; `race-and-merge`/fusion
+  [NEW, P2]; [reuse] brainstorming, writing-plans, executing-plans, dispatching-parallel-agents,
+  subagent-driven-development.
+- [reuse] the large existing library (Apple-framework, memtrace-*, posthog-*, argent-*) maps
+  straight onto stages — invoke, don't rebuild.
+
+### Plugins (packaging = distribution)
+- **Package heddle as a Claude Code plugin** [NEW, P2] bundling the orchestration skills +
+  primer/delegation hooks + the heddle MCP server → one install distributes the whole layer across
+  the fleet and to new machines, instead of manual per-machine wiring. Fits the existing plugin
+  setup (claude-hud, openai-codex, posthog, memtrace-skills, frontend-design).
+- [reuse] openai-codex (codex-rescue), posthog (stats feed), memtrace-skills, frontend-design.
+
 ## 16. Build phases
 
 **Phase 1 — orchestration core (headless-runnable) — IN PROGRESS.** Goal: lettered Claude agents
