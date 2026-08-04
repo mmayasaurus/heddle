@@ -23,6 +23,7 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
       --agent <X>          dispatching orchestrator's fleet identity
       --skills a,b         override the routing table's skill packs
       --mcp a,b            attach code-discovery MCP servers (e.g. memtrace)
+      --effort <level>     reasoning effort: codex minimal|low|medium|high|xhigh; agy low|medium|high
       --resume <id>        continue a prior worker session
       --timeout <ms>       wall-clock budget (default 600000)
       --codex-home <path>  account selection for codex workers
@@ -85,6 +86,7 @@ try {
         orchestrator: arg('--agent'),
         skills: arg('--skills')?.split(',').map((s) => s.trim()).filter(Boolean),
         mcp: arg('--mcp')?.split(',').map((s) => s.trim()).filter(Boolean),
+        effort: arg('--effort'),
         resume: arg('--resume'),
         timeoutMs: arg('--timeout') ? Number(arg('--timeout')) : undefined,
         env: Object.keys(env).length ? env : undefined,

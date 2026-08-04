@@ -29,6 +29,8 @@ export interface DispatchRequest {
   skills?: string[];
   /** Code-discovery MCP servers to attach; defaults to the routing table's mcp for this class. */
   mcp?: string[];
+  /** Reasoning effort override (codex/agy); defaults to the routing table's effort for this class. */
+  effort?: string;
   timeoutMs?: number;
   resume?: string;
   /** Per-dispatch account selection (CODEX_HOME, CURSOR_API_KEY, …). See src/env.ts. */
@@ -95,6 +97,9 @@ async function runTarget(
   const extraFlags = [
     ...(target.extraFlags ?? []),
     ...(target.provider === 'codex' && mcp.length ? codexApprovalFlags(mcp) : []),
+    // Cursor, like codex, blocks headless MCP calls without approval: --approve-mcps clears the
+    // server, --force (Run Everything) clears the per-call gate that otherwise rejects tool calls.
+    ...(target.provider === 'cursor' && mcp.length ? ['--approve-mcps', '--force'] : []),
   ];
 
   let result: WorkerResult;
@@ -102,6 +107,7 @@ async function runTarget(
     result = await adapter.dispatch(req.prompt, {
       model: target.model,
       cwd: req.cwd,
+      effort: req.effort ?? target.effort,
       extraFlags,
       timeoutMs: req.timeoutMs,
       resume: req.resume,

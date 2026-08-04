@@ -30,6 +30,7 @@ export class CodexAdapter implements WorkerAdapter {
     // via `-c` config override (there is no `--ask-for-approval` flag on the exec subcommand).
     const args = ['exec', '--json', '--skip-git-repo-check',
       '--sandbox', this.sandbox, '-c', 'approval_policy="never"'];
+    if (opts.effort) args.push('-c', `model_reasoning_effort="${opts.effort}"`);
     if (opts.resume) args.push('resume', opts.resume);
     args.push('-m', opts.model, ...(opts.extraFlags ?? []), prompt);
 

@@ -96,11 +96,20 @@ task_classes:
   bulk-mechanical:          # renames, sweeps, codemods, boilerplate, test scaffolds
     provider: codex
     model: gpt-5.6-luna
+    effort: low             # cheap + fast for low-reasoning mechanical work
     codex_flags: ["--ignore-user-config"]
     fallback: {provider: cursor, model: composer-2.5-fast}
+  scaffold:                 # fast structural code drafts — Cursor's coding-tuned model
+    provider: cursor
+    model: composer-2.5
+    fallback: {provider: codex, model: gpt-5.6-luna}
   research-summarize:       # doc reading, log triage, summarization
     provider: claude
     model: haiku
+    fallback: {provider: codex, model: gpt-5.6-luna}
+  documentation:            # READMEs, comments, changelogs, docstrings — minimal reasoning need
+    provider: gemini         # gemini-flash: cheap, fast, fine for prose-over-known-facts
+    model: gemini-3.6-flash-low
     fallback: {provider: codex, model: gpt-5.6-luna}
   quick-alt-take:           # cheap fast alternative draft to compare against primary
     provider: cursor

@@ -11,6 +11,12 @@ export interface DispatchOptions {
   model: string;
   /** Working directory the worker runs in (usually a git worktree). */
   cwd: string;
+  /**
+   * Reasoning effort. Interpreted per provider: codex → `-c model_reasoning_effort`
+   * (minimal|low|medium|high|xhigh); agy → `--effort` (low|medium|high). Cursor encodes effort in
+   * the model id (…-low/-medium/-high) so it ignores this. Omit to use the model's default.
+   */
+  effort?: string;
   /** Extra CLI flags the routing table attaches to a task class (e.g. slim-context flags). */
   extraFlags?: string[];
   /** Hard wall-clock limit; adapters kill the child past this. */

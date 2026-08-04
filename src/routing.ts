@@ -11,6 +11,7 @@ import { parse as parseYaml } from 'yaml';
 export interface RouteTarget {
   provider: string;
   model: string;
+  effort?: string;
   extraFlags?: string[];
   skills?: string[];
   /** Code-discovery MCP servers to attach for this route (e.g. ["memtrace"]). */
@@ -58,6 +59,7 @@ function toTarget(node: any): RouteTarget | undefined {
   return {
     provider: node.provider,
     model: node.model,
+    effort: node.effort,
     // Provider-specific flag keys stay explicit rather than magic: codex_flags today.
     extraFlags: node.codex_flags ?? node.extra_flags,
     skills: node.skills,

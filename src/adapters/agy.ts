@@ -71,6 +71,7 @@ export class AgyAdapter implements WorkerAdapter {
     }
 
     const args = ['-p', prompt, '--output-format', 'stream-json', '--model', opts.model];
+    if (opts.effort) args.push('--effort', opts.effort);
     if (this.skipPermissions) args.push('--dangerously-skip-permissions');
     if (opts.resume) args.push('--conversation', opts.resume);
     args.push(...(opts.extraFlags ?? []));
