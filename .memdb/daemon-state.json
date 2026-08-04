@@ -1,5 +1,5 @@
 {
-  "pid": 98034,
+  "pid": 45676,
   "loopbackEndpoint": "http://127.0.0.1:50051",
   "uiPort": 3030,
   "memdbDataDir": "/Users/mayatobi/Developer/heddle/.memdb",
@@ -8,6 +8,6 @@
   "vectorDim": 768,
   "status": "healthy",
   "memdbMode": "local",
-  "startedAtEpochMs": 1785629523430,
-  "updatedAtEpochMs": 1785629525439
+  "startedAtEpochMs": 1785801711893,
+  "updatedAtEpochMs": 1785801715904
 }

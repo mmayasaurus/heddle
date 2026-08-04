@@ -52,26 +52,42 @@ Three panes + bottom bar. Maya works primarily *in terminals* — the dashboard 
   exact per-run usage for cross-provider workers (adapters already parse it) and best-effort
   live estimates for Claude subagents from hook events. Exact-after, estimated-during.
 
-## Chatroom (center tab)
+## Chatroom (center tab) — PULL model (decided 2026-08-03)
 
 A terminal-style chatroom — one shared room for the whole fleet.
 
-- Participants: all orchestrators + Maya (first-class); subagents can be granted posting rights
-  (❓ default-on or opt-in per dispatch?).
-- **@mentions**: tagging Agent B notifies B (broker push → Monitor event in B's session); B is
-  expected to come respond in the room. Agents also chime in unprompted where they can contribute,
-  and use the room for broadcasts.
-- **Messages do NOT appear in individual terminal tabs** — the room is its own surface; agents
-  read/write it via broker tools, not via their terminal I/O.
-- **Ambient context**: chatroom traffic flows into every orchestrator's context — tagged AND
-  untagged — so agents passively know what the fleet is doing; each agent prunes what's
-  irrelevant to it. ⚙️ Token-cost control: mentions + replies deliver immediately; untagged
-  ambient traffic delivers as periodic digests (batched, summarizable, prunable) rather than
-  per-message injection — same information, bounded cost. (❓ digest cadence, and whether Maya
-  wants a raw-firehose override per agent.)
+- **Agents check the room when they want** to know what the fleet is doing. Nothing is injected
+  into context by default — near-zero token cost when quiet, and no digest machinery needed.
+- **`@all` = guaranteed delivery.** Broadcasting with `@all` (or `@AgentB` for one target) fires
+  a notification the recipient will actually see, via its Monitor subscription — so
+  fleet-critical messages don't wait for someone to poll.
+- **Culture: conservative by design.** Use it for: needing another opinion, answering someone's
+  question, announcements affecting multiple agents, and open questions where the right responder
+  is unknown. Not chatter, not narration. Agents respond to mentions, and chime in unprompted
+  only when they can genuinely contribute.
+- **Subagents may post, sparingly** — e.g. a worker stuck mid-task asking for an assist.
+- **Messages do NOT appear in individual terminal tabs** — the room is its own surface.
+- **DMs are first-class**: subagent↔subagent, subagent↔host orchestrator, and Maya↔anyone.
 - Implementation: the room is a broker thread; the "terminal chatroom" is a small TUI client
-  attached to it — which means **the chatroom works from plain iTerm2 tabs before the GUI app
-  exists at all** (it's just another terminal program).
+  attached to it — so **the chatroom works from plain iTerm2 tabs before the GUI exists**.
+
+## Per-subagent view (center)
+
+Selecting a subagent from the statusline's subagent list (or the left roster) switches the center
+view to **that subagent's own surface**: its live conversation with its host orchestrator, its DMs
+with Maya, and — where the provider exposes it — its **thinking**.
+
+**Thinking availability is provider-dependent (verified live 2026-08-03):**
+
+| Worker | Thinking content | What the UI can show |
+|---|---|---|
+| Cursor | **YES** — streamed `type:"thinking"` deltas | full live thinking |
+| Claude | **YES** — thinking blocks in stream-json/transcript | full thinking |
+| Codex | **NO** — content withheld; only `reasoning_output_tokens` | step/progress + reasoning-token count |
+| agy / Gemini | **NO** — `step_update` steps + response deltas; `thinking_tokens` only | step/progress + thinking-token count |
+
+Thinking display is a per-tab toggle, on by default where available; where it isn't, the UI says
+so explicitly rather than implying the pane is empty because the model isn't reasoning.
 
 ## Right pane — Linear + GitHub, the real things
 
@@ -102,6 +118,25 @@ Per-provider, per-account meters with percentages, covering every limit type the
 ⚙️ Honest asymmetry: Claude/Codex meters are real percentages; Gemini/Cursor are heddle's own
 bookkeeping until those vendors ship usage APIs (none exists today — verified).
 
+## Stats screen (its own app section)
+
+A dedicated screen of everything the orchestration produces — not squeezed into the meters bar:
+
+- **Token usage**: per orchestrator, per subagent, per task class, per provider, per model, over
+  time. Cache-hit ratios (already parsed from every adapter's usage block).
+- **Provider usage**: consumption trends against each plan's limits; which accounts are hot;
+  cooldown/reset timers; Cursor pool split (Cursor-Models vs the metered Other-Models pool that
+  PR review shares).
+- **Routing / savings**: % of work routed off the Claude pool, dispatches per task class, model
+  win-rates (how often a routed worker's output was accepted vs redone), cost-per-issue trend.
+  This is the "is orchestration actually working" screen.
+- **Subagent stats**: dispatch counts, success/failure/timeouts, mean duration by model+class,
+  which skill packs were loaded, retries and fallbacks fired (e.g. agy hang-signature events).
+- **Tooling usage**: memtrace and Serena call counts/latency per agent (both expose MCP telemetry
+  — Memtrace already ships a posttool telemetry hook), plus MCP server usage generally.
+- **Code quality**: gate pass/fail rate, lint/typecheck/test outcomes per dispatch, PR review
+  round-trips per issue, regression tests added, reviewer findings by class.
+
 ## Data spine (what feeds all of this)
 
 Everything above reads from the Phase-2 broker + ledger, which is why comms gets built first:
@@ -111,22 +146,30 @@ Everything above reads from the Phase-2 broker + ledger, which is why comms gets
 - **tmux**: session registry = the roster's ground truth for what's alive.
 - **Linear/GitHub APIs**: right-pane lists; popups are the real apps and need no sync at all.
 
-## Build order (revised 2026-08-03)
+## Build order (set by Maya 2026-08-03 — orchestration first, GUI last)
 
-1. **Phase 2 — broker + chatroom TUI** (functional comms BEFORE any GUI: mentions, notifications,
-   ambient digests, needs-Maya queue — usable from plain iTerm tabs immediately).
-2. **Phase 2.5 — tmux substrate + launcher** (orchestrators start inside tmux; iTerm2 `-CC`
-   attach preserves Maya's exact current experience; `heddle start/resume` wraps the existing
-   resume scripts).
-3. **Phase 3 — Electron shell MVP**: left roster + center tabs with embedded live terminals +
-   chatroom tab + bottom meters (Claude/Codex real, Gemini/Cursor estimated).
+**The point: get lettered agents A–Q orchestrating real Spinventory work ASAP, then build the
+dashboard around a system that's already running.**
+
+1. **Phase 1 — orchestration mechanisms** → `docs/ORCHESTRATION.md`. Dispatcher CLI, ledger,
+   skill packs, heddle MCP server, `/orchestrate` command, rules/docs. Pilot on a real SPI issue,
+   tune routing from ledger data, roll out to the fleet. *No GUI involved.*
+2. **Phase 2 — chatroom + terminal experience.** Broker + TUI chat client (works in plain iTerm);
+   statusline extension listing subagents with per-subagent context/usage and clickable selection;
+   tmux substrate so sessions are attachable from both iTerm2 (`-CC`) and, later, the app.
+3. **Phase 3 — Electron shell**: left roster, center terminal tabs (+ inner subagent tabs), chat
+   tab, bottom provider meters.
 4. **Phase 4 — right pane**: Linear/PR lists + real-app popups + cross-links.
-5. **Phase 5 — statusline deep integration** (per-subagent segments), savings analytics, polish.
+5. **Phase 5 — stats screen** + savings analytics + polish.
 
-## Open decisions (❓ for Maya)
+## Decisions (locked 2026-08-03)
 
-1. Electron shell (required for real-Linear/GH popups + embedded terminals) — confirm.
-2. tmux as session substrate with iTerm2 `-CC` attach — confirm (this is what makes "same session
-   visible in iTerm AND the dashboard" physically possible).
-3. Chat ambient-context delivery: digest cadence / raw-firehose option.
-4. Subagent chatroom posting: default-on or per-dispatch opt-in.
+1. ✅ **Electron shell** — required for real Linear/GitHub popups and embedded terminals.
+2. ✅ **tmux substrate** with iTerm2 `-CC` attach — makes one live session visible in both iTerm
+   and the app.
+3. ✅ **Chat is pull-based**, with `@all`/`@agent` as the guaranteed-delivery exception; culture is
+   deliberately conservative. (Replaces the earlier ambient-digest design — simpler and cheaper.)
+4. ✅ **Subagents may post** to the room sparingly, and have first-class DMs with each other, their
+   host orchestrator, and Maya.
+5. ✅ **Thinking shown where the provider exposes it** (Cursor, Claude), with an explicit
+   "not exposed by this provider" state for Codex and Gemini.
