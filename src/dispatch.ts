@@ -4,7 +4,7 @@ import { CursorAdapter } from './adapters/cursor.js';
 import { Ledger } from './ledger.js';
 import { loadRouting, resolveRoute, directRoute, type Route, type RouteTarget } from './routing.js';
 import { materializeAgentsMd } from './skillpacks.js';
-import { materializeWorkerMcp, codexApprovalFlags } from './mcp.js';
+import { materializeWorkerMcp, codexMcpFlags } from './mcp.js';
 import { classifyEffort } from './classify.js';
 import type { WorkerAdapter, WorkerResult } from './types.js';
 
@@ -100,7 +100,7 @@ async function runTarget(
   // hasn't pre-approved the server.
   const extraFlags = [
     ...(target.extraFlags ?? []),
-    ...(target.provider === 'codex' && mcp.length ? codexApprovalFlags(mcp) : []),
+    ...(target.provider === 'codex' && mcp.length ? codexMcpFlags(mcp) : []),
     // Cursor, like codex, blocks headless MCP calls without approval: --approve-mcps clears the
     // server, --force (Run Everything) clears the per-call gate that otherwise rejects tool calls.
     ...(target.provider === 'cursor' && mcp.length ? ['--approve-mcps', '--force'] : []),

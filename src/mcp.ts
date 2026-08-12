@@ -20,26 +20,30 @@ export const WORKER_MCP_SERVERS: Record<string, { command: string; args: string[
 };
 
 /**
- * Servers available to CODEX workers via the user's global ~/.codex/config.toml (both added +
- * pre-approved there). Codex inherits these; heddle only re-asserts the approval per-invocation
- * so it works even if the global pre-approval is ever removed.
+ * Full self-contained CODEX MCP server definitions. Codex workers run with `--ignore-user-config`
+ * (efficiency + governance: sheds the ~13k global fleet instructions, argent's ~90 tools, serena,
+ * node_repl, etc. — verified ~124k vs multi-hundred-k input), so the servers a worker needs must be
+ * defined inline via `-c`, not inherited from ~/.codex. Verified: memtrace reachable this way.
  */
-export const CODEX_GLOBAL_SERVERS = ['memtrace', 'serena'];
+const CODEX_MCP_DEFS: Record<string, { command: string; args: string[] }> = {
+  memtrace: { command: 'memtrace', args: ['mcp'] },
+  serena: { command: 'codex-serena', args: ['start-mcp-server', '--context', 'codex', '--project-from-cwd'] },
+};
 
 /**
- * Codex needs each attached MCP server's tools PRE-APPROVED, or its headless runs cancel every
- * tool call with "user cancelled MCP tool call" (no TTY to approve). Verified live: calls fail
- * without this and succeed with it. Returns `-c` overrides to add to the codex args.
+ * `-c` overrides that (a) fully define each requested MCP server (so it exists under
+ * --ignore-user-config) and (b) pre-approve its tools — without approval, codex headless cancels
+ * every tool call with "user cancelled MCP tool call" (no TTY). Verified live.
  */
-export function codexApprovalFlags(serverNames: string[]): string[] {
+export function codexMcpFlags(serverNames: string[]): string[] {
   const flags: string[] = [];
   for (const n of serverNames) {
-    if (!CODEX_GLOBAL_SERVERS.includes(n)) {
-      throw new Error(
-        `codex worker MCP "${n}" is not in your global ~/.codex config. ` +
-        `Known codex servers: ${CODEX_GLOBAL_SERVERS.join(', ')}`,
-      );
+    const def = CODEX_MCP_DEFS[n];
+    if (!def) {
+      throw new Error(`unknown codex MCP server "${n}". Known: ${Object.keys(CODEX_MCP_DEFS).join(', ')}`);
     }
+    flags.push('-c', `mcp_servers.${n}.command=${JSON.stringify(def.command)}`);
+    flags.push('-c', `mcp_servers.${n}.args=${JSON.stringify(def.args)}`);
     flags.push('-c', `mcp_servers.${n}.default_tools_approval_mode="approve"`);
   }
   return flags;

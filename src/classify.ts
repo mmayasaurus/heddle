@@ -29,7 +29,7 @@ export interface ClassifierConfig {
 export const DEFAULT_CLASSIFIER: ClassifierConfig = {
   provider: 'codex',
   model: 'gpt-5.6-luna',
-  extraFlags: ['--ignore-user-config'],
+  // (CodexAdapter runs lean by default now — no need to pass --ignore-user-config here.)
 };
 
 /** A step up for the harder judgment call (done vs rework vs human) — luna was too conservative,
@@ -37,7 +37,6 @@ export const DEFAULT_CLASSIFIER: ClassifierConfig = {
 export const ASSESS_CLASSIFIER: ClassifierConfig = {
   provider: 'codex',
   model: 'gpt-5.6-terra',
-  extraFlags: ['--ignore-user-config'],
 };
 
 function adapterFor(cfg: ClassifierConfig): WorkerAdapter {

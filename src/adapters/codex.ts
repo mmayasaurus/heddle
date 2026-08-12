@@ -20,6 +20,11 @@ export class CodexAdapter implements WorkerAdapter {
     private readonly bin = 'codex',
     /** Sandbox for worker runs. Workers that edit files need workspace-write. */
     private readonly sandbox: 'read-only' | 'workspace-write' | 'danger-full-access' = 'workspace-write',
+    /** Run lean: skip the user's global ~/.codex config (fleet instructions, argent's ~90 tools,
+     *  serena, node_repl…). Default true — a delegated worker should get ONLY the skill packs +
+     *  the MCP servers it was given (supplied inline via codexMcpFlags). Also sheds the fleet
+     *  claim-before-code policy that made an early worker refuse. Verified ~124k vs multi-100k input. */
+    private readonly ignoreUserConfig = true,
   ) {}
 
   async dispatch(prompt: string, opts: DispatchOptions): Promise<WorkerResult> {
@@ -30,6 +35,7 @@ export class CodexAdapter implements WorkerAdapter {
     // via `-c` config override (there is no `--ask-for-approval` flag on the exec subcommand).
     const args = ['exec', '--json', '--skip-git-repo-check',
       '--sandbox', this.sandbox, '-c', 'approval_policy="never"'];
+    if (this.ignoreUserConfig) args.push('--ignore-user-config');
     if (opts.effort) args.push('-c', `model_reasoning_effort="${opts.effort}"`);
     if (opts.resume) args.push('resume', opts.resume);
     args.push('-m', opts.model, ...(opts.extraFlags ?? []), prompt);
