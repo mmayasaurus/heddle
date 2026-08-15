@@ -3,7 +3,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import {
-  DELIVERY_OUTCOMES, MESSAGE_KINDS, PRIVILEGED_TIERS, TIERS,
+  DELIVERY_OUTCOMES, MESSAGE_KINDS, PARTICIPANT_KINDS, PRIVILEGED_TIERS, TIERS,
   type DeliveryEvent, type DeliveryOutcome, type MessageKind, type MessageRecord, type NewDeliveryEvent,
   type NewMessage, type Participant, type ParticipantKind, type Tier, type TierDecision,
   type TranscriptQuery, type TranscriptScope,
@@ -36,6 +36,9 @@ export const DEFAULT_COMMS_PATH = join(homedir(), '.heddle', 'comms.db');
 /** Bump when the schema changes shape; recorded as PRAGMA user_version. */
 export const COMMS_SCHEMA_VERSION = 1;
 
+const sqlList = (xs: readonly string[]) => xs.map((x) => `'${x}'`).join(', ');
+
+// The SQL enums are generated from the TypeScript lists so the two cannot drift.
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS messages (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -51,7 +54,7 @@ CREATE TABLE IF NOT EXISTS messages (
   thread      TEXT,
   dispatch_id INTEGER,
   meta        TEXT,
-  CHECK (tier IN ('operator', 'orchestrator-directive', 'agent-message')),
+  CHECK (tier IN (${sqlList(TIERS)})),
   CHECK (verified IN (0, 1)),
   -- verified <=> privileged tier: an unverified operator/directive row cannot exist even via a
   -- raw INSERT, and an agent-message never claims verification.
@@ -86,7 +89,7 @@ CREATE TABLE IF NOT EXISTS deliveries (
   reason     TEXT,
   transport  TEXT,
   attempt    INTEGER NOT NULL DEFAULT 1,
-  CHECK (outcome IN ('sent', 'held', 'released', 'refused', 'failed', 'logged'))
+  CHECK (outcome IN (${sqlList(DELIVERY_OUTCOMES)}))
 );
 CREATE INDEX IF NOT EXISTS idx_deliveries_message ON deliveries(message_id, id);
 CREATE INDEX IF NOT EXISTS idx_deliveries_target  ON deliveries(target, id);
@@ -104,7 +107,7 @@ CREATE TABLE IF NOT EXISTS participants (
   label       TEXT,
   first_seen  TEXT NOT NULL,
   last_seen   TEXT NOT NULL,
-  CHECK (kind IN ('agent', 'child', 'operator')),
+  CHECK (kind IN (${sqlList(PARTICIPANT_KINDS)})),
   -- A child's address IS its lineage (parent.seq); agents/operator carry no lineage columns.
   CHECK ((kind = 'child' AND parent IS NOT NULL AND seq IS NOT NULL AND address = parent || '.' || seq)
       OR (kind <> 'child' AND parent IS NULL AND seq IS NULL AND dispatch_id IS NULL)),
@@ -367,6 +370,9 @@ export class CommsLog {
     if (ev.messageId != null && (!Number.isInteger(ev.messageId) || ev.messageId < 1)) throw new Error('messageId must be a positive id');
     const attempt = ev.attempt ?? 1;
     if (!Number.isInteger(attempt) || attempt < 1) throw new Error('attempt must be a positive integer');
+    if (ev.messageId != null && !this.db.prepare('SELECT 1 FROM messages WHERE id = ?').get(ev.messageId)) {
+      throw new Error(`delivery for message ${ev.messageId}, which does not exist`);
+    }
     const info = this.db.prepare(`
       INSERT INTO deliveries (ts, message_id, sender, target, outcome, code, reason, transport, attempt)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)

@@ -1,6 +1,6 @@
 import type { CommsLog } from './log.js';
 import { postEnveloped, type LineageSource } from './envelope.js';
-import { BROADCAST, canSend, parseAddress } from './address.js';
+import { canSend, parseAddress, type AddressKind } from './address.js';
 import type { DeliveryOutcome, MessageKind, MessageRecord, Tier } from './types.js';
 
 /**
@@ -174,26 +174,28 @@ export class Broker {
    * Registered participants take precedence over the bare grammar because almost every fleet id
    * is ALSO a valid address form — "codex" must mean codex-B when that is the only codex-*.
    */
-  resolveTarget(from: string, to: string): { address: string } | Extract<PostResult, { outcome: 'refused' }> {
+  resolveTarget(from: string, to: string): { address: string; kind: AddressKind } | Extract<PostResult, { outcome: 'refused' }> {
     if (to === ORCHESTRATOR_ALIAS) {
       const me = this.log.participant(from);
       if (!me || me.kind !== 'child' || !me.parent) {
         return { outcome: 'refused', code: 'no-orchestrator', to, reason: `${from} is not a child; @orchestrator has no meaning for it` };
       }
-      return { address: me.parent };
+      return { address: me.parent, kind: 'agent' };
     }
     if (typeof to !== 'string' || to.length === 0) {
       return { outcome: 'refused', code: 'unknown-target', to: String(to ?? ''), reason: 'empty target' };
     }
     const parsed = parseAddress(to);
-    if (parsed && (parsed.kind === 'room' || parsed.kind === 'broadcast' || parsed.kind === 'operator')) return { address: to };
-    if (this.log.participant(to)) return { address: to };
-    const candidates = this.log.participants().map((p) => p.address).filter((a) => a.startsWith(to));
-    if (candidates.length === 1) return { address: candidates[0] };
+    if (parsed && (parsed.kind === 'room' || parsed.kind === 'broadcast' || parsed.kind === 'operator')) return { address: to, kind: parsed.kind };
+    const registered = this.log.participant(to);
+    if (registered) return { address: to, kind: registered.kind };
+    const candidates = this.log.participants().filter((p) => p.address.startsWith(to));
+    if (candidates.length === 1) return { address: candidates[0].address, kind: candidates[0].kind };
     if (candidates.length > 1) {
-      return { outcome: 'refused', code: 'ambiguous-target', to, candidates, reason: `${JSON.stringify(to)} matches ${candidates.length} participants: ${candidates.join(', ')}` };
+      const names = candidates.map((c) => c.address);
+      return { outcome: 'refused', code: 'ambiguous-target', to, candidates: names, reason: `${JSON.stringify(to)} matches ${names.length} participants: ${names.join(', ')}` };
     }
-    if (parsed) return { address: to };
+    if (parsed) return { address: to, kind: parsed.kind };
     return { outcome: 'refused', code: 'unknown-target', to, reason: `${JSON.stringify(to)} is neither a valid address nor a prefix of a registered participant` };
   }
 
@@ -203,7 +205,7 @@ export class Broker {
   private overLimit(pairKey: string): number | null {
     const now = this.now();
     const list = (this.stamps.get(pairKey) ?? []).filter((t) => now - t < this.rate.windowMs);
-    this.stamps.set(pairKey, list);
+    if (list.length === 0) this.stamps.delete(pairKey); else this.stamps.set(pairKey, list); // dormant pairs don't accumulate
     if (list.length >= this.rate.max) return list[0] + this.rate.windowMs - now;
     const burst = list.filter((t) => now - t < this.rate.burstWindowMs);
     if (burst.length >= this.rate.burst) return burst[0] + this.rate.burstWindowMs - now;
@@ -228,6 +230,7 @@ export class Broker {
     const resolved = this.resolveTarget(req.from, req.to);
     if ('outcome' in resolved) return this.refuse(req.from, req.to, resolved.code, resolved.reason, resolved.candidates, resolved.retryAfterMs);
     const to = resolved.address;
+    const kind = resolved.kind;
 
     const bytes = Buffer.byteLength(req.body ?? '', 'utf8');
     if (bytes > this.maxBodyBytes) {
@@ -242,12 +245,15 @@ export class Broker {
         undefined, retryAfterMs);
     }
 
+    // `resolvedFrom` is broker-authored provenance: whatever the caller put there is dropped.
+    const { resolvedFrom: _callerResolvedFrom, ...callerMeta } = req.meta ?? {};
+    void _callerResolvedFrom;
     let enveloped;
     try {
       enveloped = postEnveloped(this.log, this.ledger, {
         from: req.from, to, body: req.body, kind: req.kind, requestedTier: req.requestedTier,
         replyTo: req.replyTo, issue: req.issue, thread: req.thread,
-        meta: { ...(req.meta ?? {}), ...(to !== req.to ? { resolvedFrom: req.to } : {}) },
+        meta: { ...callerMeta, ...(to !== req.to ? { resolvedFrom: req.to } : {}) },
       });
     } catch (err) {
       return this.refuse(req.from, to, 'invalid-message', (err as Error).message ?? String(err));
@@ -256,7 +262,6 @@ export class Broker {
     const { record, envelope } = enveloped;
     const base = { messageId: record.id, to, tier: record.tier, envelope };
 
-    const kind = parseAddress(to)!.kind;
     if (kind === 'room') {
       // Pull model: rooms are read when an agent wants to know; nothing is injected.
       this.log.recordDelivery({ messageId: record.id, from: req.from, to, outcome: 'logged', code: 'room-pull', transport: this.transport.name });
@@ -268,28 +273,38 @@ export class Broker {
         this.log.recordDelivery({ messageId: record.id, from: req.from, to, outcome: 'logged', code: 'no-recipients', transport: this.transport.name });
         return { ...base, outcome: 'logged', code: 'no-recipients' };
       }
+      // Fan-out runs concurrently ACROSS recipients; per-recipient serialization still holds because
+      // each dispatchTo goes through that recipient's delivery chain.
       const outcomes = await Promise.all(recipients.map((r) => this.dispatchTo(record, envelope, r, req.from)));
-      const failed = outcomes.filter((o) => o === 'failed').length;
-      const heldN = outcomes.filter((o) => o === 'held').length;
-      if (failed) return { ...base, outcome: 'failed', code: 'partial', reason: `${failed}/${recipients.length} recipients failed` };
-      if (heldN) return { ...base, outcome: 'held', code: 'partial-hold', reason: `${heldN}/${recipients.length} recipients held at a permission gate` };
+      const failed = outcomes.filter((o) => o.outcome === 'failed').length;
+      const heldN = outcomes.filter((o) => o.outcome === 'held').length;
+      const n = recipients.length;
+      if (failed && heldN) return { ...base, outcome: 'failed', code: 'partial-mixed', reason: `${failed}/${n} recipients failed, ${heldN}/${n} held at a permission gate` };
+      if (failed) return { ...base, outcome: 'failed', code: 'partial', reason: `${failed}/${n} recipients failed` };
+      if (heldN) return { ...base, outcome: 'held', code: 'partial-hold', reason: `${heldN}/${n} recipients held at a permission gate` };
       return { ...base, outcome: 'sent', code: 'broadcast' };
     }
-    const outcome = await this.dispatchTo(record, envelope, to, req.from);
-    return { ...base, outcome, code: outcome === 'held' ? 'permission-gate' : outcome === 'sent' ? 'injected' : 'transport' };
+    const d = await this.dispatchTo(record, envelope, to, req.from);
+    return { ...base, outcome: d.outcome, code: d.code, ...(d.reason ? { reason: d.reason } : {}) };
   }
 
   /** Hold if the target is at a permission gate, else inject (serialized per target). */
-  private async dispatchTo(record: MessageRecord, envelope: string, target: string, from: string): Promise<'sent' | 'held' | 'failed'> {
-    const state = await this.targetState.state(target);
+  private async dispatchTo(
+    record: MessageRecord, envelope: string, target: string, from: string,
+  ): Promise<{ outcome: 'sent' | 'held' | 'failed'; code: string; reason?: string }> {
+    // Order is preserved per target: while older messages for this target are still held, a new
+    // one queues behind them (released in order by pump()) instead of overtaking them.
+    const queuedBehind = this.held.some((h) => h.target === target);
+    const state = queuedBehind ? 'permission-gate' : await this.targetState.state(target);
     if (state === 'permission-gate') {
       this.held.push({ record, envelope, target, heldAt: this.now(), attempts: 0 });
-      this.log.recordDelivery({ messageId: record.id, from, to: target, outcome: 'held', code: 'permission-gate', transport: this.transport.name });
-      return 'held';
+      const code = queuedBehind ? 'queued-behind-held' : 'permission-gate';
+      this.log.recordDelivery({ messageId: record.id, from, to: target, outcome: 'held', code, transport: this.transport.name });
+      return { outcome: 'held', code };
     }
     const res = await this.deliverSerialized(target, { record, envelope, target, attempt: 1 });
     this.log.recordDelivery({ messageId: record.id, from, to: target, outcome: res.ok ? 'sent' : 'failed', code: res.code, reason: res.reason ?? null, transport: this.transport.name, attempt: 1 });
-    return res.ok ? 'sent' : 'failed';
+    return { outcome: res.ok ? 'sent' : 'failed', code: res.code, reason: res.reason };
   }
 
   /** One in-flight injection per target: chain deliveries behind whatever is running for it. */
@@ -304,7 +319,9 @@ export class Broker {
   private async safeDeliver(d: Delivery): Promise<TransportOutcome> {
     try {
       const out = await this.transport.deliver(d);
-      return { ok: out.ok === true, code: /^[a-z0-9-]{1,64}$/.test(out.code ?? '') ? out.code : (out.ok ? 'injected' : 'transport-error'), reason: out.reason };
+      const ok = out.ok === true;
+      const code = /^[a-z0-9-]{1,64}$/.test(out.code ?? '') ? out.code : (ok ? 'injected' : 'transport-error');
+      return { ok, code, reason: out.reason };
     } catch (err) {
       return { ok: false, code: 'transport-error', reason: (err as Error).message ?? String(err) };
     }
@@ -324,23 +341,35 @@ export class Broker {
   async pump(): Promise<{ released: number; failed: number; stillHeld: number }> {
     let released = 0, failed = 0;
     const remaining: Held[] = [];
+    const blocked = new Set<string>(); // a target whose older entry stays held keeps its later ones held too (order)
     for (const h of this.held) {
       h.attempts += 1;
-      const state = await this.targetState.state(h.target);
+      const expired = this.now() - h.heldAt > this.holdMaxMs;
+      const state = blocked.has(h.target) ? 'permission-gate' : await this.targetState.state(h.target);
       if (state === 'permission-gate') {
-        if (this.now() - h.heldAt > this.holdMaxMs) {
+        if (expired) {
           this.log.recordDelivery({ messageId: h.record.id, from: h.record.from, to: h.target, outcome: 'failed', code: 'hold-timeout',
             reason: `held ${this.now() - h.heldAt}ms at a permission gate; recipient can still pull it`, transport: this.transport.name, attempt: h.attempts });
           failed += 1;
         } else {
           remaining.push(h);
+          blocked.add(h.target);
         }
         continue;
       }
       const res = await this.deliverSerialized(h.target, { record: h.record, envelope: h.envelope, target: h.target, attempt: h.attempts });
-      this.log.recordDelivery({ messageId: h.record.id, from: h.record.from, to: h.target, outcome: res.ok ? 'released' : 'failed', code: res.ok ? 'gate-cleared' : res.code,
-        reason: res.reason ?? null, transport: this.transport.name, attempt: h.attempts });
-      if (res.ok) released += 1; else failed += 1;
+      if (res.ok) {
+        this.log.recordDelivery({ messageId: h.record.id, from: h.record.from, to: h.target, outcome: 'released', code: 'gate-cleared',
+          reason: res.reason ?? null, transport: this.transport.name, attempt: h.attempts });
+        released += 1;
+        continue;
+      }
+      // Transient transport failure after the gate cleared: keep retrying on later pumps until
+      // holdMaxMs — every attempt is a typed row, so a flapping transport is visible, not silent.
+      this.log.recordDelivery({ messageId: h.record.id, from: h.record.from, to: h.target, outcome: 'failed', code: expired ? 'hold-timeout' : res.code,
+        reason: expired ? `gave up after ${this.now() - h.heldAt}ms; last transport error: ${res.reason ?? res.code}` : (res.reason ?? null),
+        transport: this.transport.name, attempt: h.attempts });
+      if (expired) { failed += 1; } else { remaining.push(h); blocked.add(h.target); }
     }
     this.held.splice(0, this.held.length, ...remaining);
     return { released, failed, stillHeld: remaining.length };

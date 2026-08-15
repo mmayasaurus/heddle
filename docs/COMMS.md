@@ -324,14 +324,16 @@ Anthropic SendMessage bridge (HED-7), the MCP long-poll, or a test double provid
 | Rate limit | per `(from → to)` pair: ≤ 5 in any 10 s window AND ≤ 3 in any 1 s burst (`DEFAULT_RATE_LIMIT`); refused posts do not consume budget; the refusal carries `retryAfterMs` | `rate-limited` |
 | Envelope | `postEnveloped` decides the tier and appends; a message the log rejects (e.g. dangling `replyTo`) is a refusal | `invalid-message` |
 | Rooms | pull model — logged, never injected | outcome `logged` / `room-pull` |
-| `@all` | fan-out to every registered participant except the sender; `sent`, or `failed` (`partial`) / `held` (`partial-hold`) | — |
-| Hold at gate | if `TargetStateProvider.state(to) === 'permission-gate'` the message is logged but not injected (`held`); `pump()` releases it when the gate clears (`released`, `gate-cleared`) or fails it after `holdMaxMs` (`failed`, `hold-timeout`) — the recipient can still pull it from the log | — |
-| Serialization | one in-flight injection per target; later deliveries to the same target queue behind it; different targets proceed concurrently | — |
-| Transport | `{ ok, code, reason }` → `sent` / `failed`; a throwing transport is `failed` / `transport-error`; garbage codes are normalised | — |
+| `@all` | fan-out to every registered participant except the sender (concurrent across recipients, still serialized per recipient); `sent` (`broadcast`), or `failed` (`partial` / `partial-mixed`) / `held` (`partial-hold`) | — |
+| Hold at gate | if `TargetStateProvider.state(to) === 'permission-gate'` the message is logged but not injected (`held` / `permission-gate`); a newer message for a target that still has held ones queues behind them (`held` / `queued-behind-held`) so per-target order survives; `pump()` releases in order when the gate clears (`released` / `gate-cleared`), keeps retrying a transiently failing transport (each attempt a typed `failed` row) and gives up after `holdMaxMs` (`failed` / `hold-timeout`) — the recipient can still pull it from the log | — |
+| Serialization | one in-flight injection per target (per-target promise chain); different targets proceed concurrently | — |
+| Transport | `{ ok, code, reason }` → `sent` / `failed` (the transport's code and reason are carried into the `PostResult`); a throwing transport is `failed` / `transport-error`; garbage codes are normalised | — |
 
 Refusals never create a message row; they are `deliveries` rows with `message_id NULL`, the
 sender/target, the code and the reason — so a rate-limited or oversized post is auditable without
-storing its body.
+storing its body. `meta.resolvedFrom` is broker-authored: a caller-supplied value is dropped. The
+SQL enums (`tier`, `outcome`, participant `kind`) are generated from the TypeScript lists, so the
+two cannot drift.
 
 **Target state.** `TargetStateProvider` is pluggable. The default `LedgerTargetState` answers
 `busy` (dispatch in flight) / `exited` (finished) / `unknown` from the dispatch ledger and never

@@ -118,6 +118,7 @@ export interface TierDecision {
 
 /** Who can send/receive. Fleet agents and the operator register themselves; children are minted. */
 export type ParticipantKind = 'agent' | 'child' | 'operator';
+export const PARTICIPANT_KINDS: readonly ParticipantKind[] = ['agent', 'child', 'operator'];
 
 export interface Participant {
   address: string;
