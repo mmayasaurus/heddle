@@ -36,7 +36,7 @@ export const DEFAULT_COMMS_PATH = join(homedir(), '.heddle', 'comms.db');
 /** Bump when the schema changes shape; recorded as PRAGMA user_version. */
 export const COMMS_SCHEMA_VERSION = 1;
 
-const sqlList = (xs: readonly string[]) => xs.map((x) => `'${x}'`).join(', ');
+const sqlList = (xs: readonly string[]) => xs.map((x) => `'${x.replace(/'/g, "''")}'`).join(', ');
 
 // The SQL enums are generated from the TypeScript lists so the two cannot drift.
 const SCHEMA = `
@@ -357,8 +357,9 @@ export class CommsLog {
   /** Participants whose address starts with `prefix`, sorted — the resolver's lookup (no full scan). */
   participantsWithPrefix(prefix: string): Participant[] {
     if (typeof prefix !== 'string' || prefix.length === 0) return [];
-    const rows = this.db.prepare('SELECT * FROM participants WHERE substr(address, 1, ?) = ? ORDER BY address')
-      .all(prefix.length, prefix);
+    // Range seek on the primary key (prefix ≤ address < prefix + max char) — indexed, no scan.
+    const rows = this.db.prepare('SELECT * FROM participants WHERE address >= ? AND address < ? ORDER BY address')
+      .all(prefix, prefix + '\uffff');
     return (rows as unknown as PRow[]).map(toParticipant);
   }
 
@@ -391,6 +392,24 @@ export class CommsLog {
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(this.now(), ev.messageId ?? null, ev.from, ev.to, ev.outcome, ev.code, ev.reason ?? null, ev.transport ?? null, attempt);
     return this.delivery(Number(info.lastInsertRowid))!;
+  }
+
+  /**
+   * Holds still owed a release or a timeout: `held` events with no later resolving event for the
+   * same (message, target) — resolving = `released`, `sent`, or `failed`/`hold-timeout`. (A later
+   * `failed` with another code is a transient transport failure: the entry is still held.)
+   */
+  openHolds(): DeliveryEvent[] {
+    const rows = this.db.prepare(`
+      SELECT d.* FROM deliveries d
+      WHERE d.outcome = 'held' AND NOT EXISTS (
+        SELECT 1 FROM deliveries e
+        WHERE e.message_id = d.message_id AND e.target = d.target AND e.id > d.id
+          AND (e.outcome IN ('released', 'sent') OR (e.outcome = 'failed' AND e.code = 'hold-timeout'))
+      )
+      ORDER BY d.id ASC
+    `).all();
+    return (rows as unknown as DRow[]).map(toDelivery);
   }
 
   delivery(id: number): DeliveryEvent | null {

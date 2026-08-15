@@ -75,6 +75,8 @@ export interface BrokerOptions {
   holdMaxMs?: number;
   /** Epoch-ms clock, injectable for tests. */
   now?: () => number;
+  /** Where non-fatal broker warnings go (e.g. a failing state provider). Default: process.emitWarning. */
+  onWarning?: (message: string) => void;
 }
 
 export interface PostRequest {
@@ -142,6 +144,7 @@ export class Broker {
   private readonly maxBodyBytes: number;
   private readonly holdMaxMs: number;
   private readonly now: () => number;
+  private readonly onWarning: (message: string) => void;
   /** Accept timestamps per "from→to" pair (only accepted posts consume budget). */
   private readonly stamps = new Map<string, number[]>();
   /** Per-target delivery chains — the "one in-flight injection per target" rule. */
@@ -159,6 +162,7 @@ export class Broker {
     this.maxBodyBytes = opts.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
     this.holdMaxMs = opts.holdMaxMs ?? DEFAULT_HOLD_MAX_MS;
     this.now = opts.now ?? Date.now;
+    this.onWarning = opts.onWarning ?? ((m) => process.emitWarning(m, 'HeddleBrokerWarning'));
   }
 
   // ------------------------------------------------------------------ addressing
@@ -325,9 +329,14 @@ export class Broker {
     return { outcome: res.ok ? 'sent' : 'failed', code: res.code, reason: res.reason };
   }
 
-  /** A failing state provider is not a reason to lose a message: treat it as unknown (deliver). */
+  /** A failing state provider is not a reason to lose a message: treat it as unknown (deliver), but say so. */
   private async stateOf(target: string): Promise<TargetState> {
-    try { return await this.targetState.state(target); } catch { return 'unknown'; }
+    try {
+      return await this.targetState.state(target);
+    } catch (err) {
+      this.onWarning(`target-state provider failed for ${target}: ${(err as Error).message ?? String(err)} — treating as unknown`);
+      return 'unknown';
+    }
   }
 
   /** One in-flight injection per target: chain deliveries behind whatever is running for it. */
@@ -412,21 +421,11 @@ export class Broker {
    * startup (channel server does); returns how many were restored.
    */
   restoreHeld(): number {
-    const seen = new Map<string, boolean>(); // "msg→target" → still held?
-    for (const ev of this.log.deliveries({ limit: 10_000 })) {
-      if (ev.messageId == null) continue;
-      const key = `${ev.messageId}→${ev.to}`;
-      if (ev.outcome === 'held') seen.set(key, true);
-      else if (seen.has(key)) seen.set(key, false);
-    }
     let restored = 0;
-    for (const [key, open] of seen) {
-      if (!open) continue;
-      const [idStr, target] = key.split('→');
-      const record = this.log.get(Number(idStr));
-      if (!record || this.held.some((h) => h.record.id === record.id && h.target === target)) continue;
-      const heldEv = this.log.deliveries({ messageId: record.id, target }).find((e) => e.outcome === 'held');
-      this.held.push({ record, envelope: renderEnvelope(record), target, heldAt: heldEv ? Date.parse(heldEv.ts) : this.now(), attempts: 1 });
+    for (const ev of this.log.openHolds()) { // SQL: held rows with no later resolving event — whole log, oldest first
+      const record = ev.messageId == null ? null : this.log.get(ev.messageId);
+      if (!record || this.held.some((h) => h.record.id === record.id && h.target === ev.to)) continue;
+      this.held.push({ record, envelope: renderEnvelope(record), target: ev.to, heldAt: Date.parse(ev.ts), attempts: 1 });
       restored += 1;
     }
     return restored;
