@@ -162,9 +162,11 @@ describe('comms bridge (temp db)', () => {
     let blipOnce = true;
     await new InboundPump(log, 'K', () => { if (blipOnce) { blipOnce = false; throw new Error('blip'); } }, { sinceId: failedRow.id - 1 }).tick();
     expect(log.channelResumeCursor('K')).toBe(failedRow.id - 1);
+    // A restart replays ONLY the unresolved failure — the success next to it is not injected twice.
     const retried: number[] = [];
     await new InboundPump(log, 'K', (_e, r) => { retried.push(r.id); }).tick();
-    expect(retried).toEqual([failedRow.id, okRow.id]);
+    expect(retried).toEqual([failedRow.id]);
+    expect(log.deliveries({ messageId: okRow.id }).filter((d) => d.outcome === 'sent')).toHaveLength(1);
     // Re-entrancy: a tick that fires while another is awaiting an emit does nothing.
     let release!: () => void;
     const slow = new InboundPump(log, 'R', () => new Promise<void>((res) => { release = res; }));
@@ -202,6 +204,15 @@ describe('comms bridge (temp db)', () => {
       { messageId: bad.id, outcome: 'failed', code: 'channel-error', reason: 'socket unavailable' },
       { messageId: good.id, outcome: 'sent', code: 'channel-written', reason: null },
     ]);
+    // The SAME pump retries the unresolved failure on its next tick — and never re-emits `good`.
+    expect(await pump.tick()).toEqual({ emitted: 0, failed: 1 });
+    expect(seen).toEqual([good.id]);
+    // Once the transport recovers, the failure resolves and later ticks go quiet.
+    const healed = new InboundPump(log, 'K', (_event, record) => { seen.push(record.id); });
+    expect(await healed.tick()).toEqual({ emitted: 1, failed: 0 });
+    expect(seen).toEqual([good.id, bad.id]);
+    expect(await healed.tick()).toEqual({ emitted: 0, failed: 0 });
+    expect(log.deliveries({ messageId: good.id }).filter((d) => d.outcome === 'sent')).toHaveLength(1); // exactly once
   });
 
   it('builds tactical SendMessage hints with the correct recipient, frame, labels, and id', () => {
