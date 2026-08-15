@@ -175,7 +175,7 @@ jobs:
           # One-line receipt in the job summary. python3 is guaranteed in the
           # image (the semgrep CLI is a Python package); jq is not (qodo, r3).
           N=$(python3 -c 'import json; print(len(json.load(open("semgrep.sarif"))["runs"][0]["results"]))')
-          echo "semgrep: **$N** finding(s) (${BASELINE:+new vs base}${BASELINE:-full scan})" >> "$GITHUB_STEP_SUMMARY"
+          echo "semgrep: **$N** finding(s) (${BASELINE:+new vs base }${BASELINE:-full scan})" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload SARIF to code scanning
         # Needs a write token — same-repo PRs and main pushes only; fork PRs
