@@ -15,3 +15,4 @@ export * from './address.js';
 export * from './log.js';
 export * from './envelope.js';
 export * from './broker.js';
+export * from './bridge.js';
