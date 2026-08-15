@@ -162,19 +162,44 @@ function readClaudeTapFile(path: string, nowS: number): { fiveHour: CapWindow; s
   return { fiveHour: conv(raw.rate_limits.five_hour), sevenDay: conv(raw.rate_limits.seven_day), capturedAt };
 }
 
-/** Raw Claude tap fallback: claude.json (last-seen session) + claude-<acctId>.json per account. */
+/**
+ * The window-keeper's anchor `claude-<acctId>.keeper.json` = {account, startedAt, resets_at, used:null,
+ * source:"keeper-ping"} — written when the keeper STARTS a 5h window with a headless ping (which never
+ * renders the statusline, so the tap cannot see it). Treated as a fresh capture with used ≈ 0 for that
+ * window while `resets_at` is in the future; without it, accounts that only ever get keeper pings
+ * (acct3/acct4) would stay "unknown" forever and never be picked (Agent R, 2026-08-15).
+ */
+function readKeeperAnchor(path: string, nowS: number): { fiveHour: CapWindow; capturedAt: number } | null {
+  const raw = readJson(path) as { startedAt?: unknown; resets_at?: unknown; source?: unknown } | null;
+  if (!raw) return null;
+  const startedAt = num(raw.startedAt);
+  const resetsAt = num(raw.resets_at);
+  if (startedAt === null || resetsAt === null) return null;
+  if (resetsAt <= nowS) return null; // the window the keeper started has already rolled over
+  return { fiveHour: { usedPercentage: 0, resetsAt }, capturedAt: startedAt };
+}
+
+/** Raw Claude tap fallback: claude.json (last-seen session) + claude-<acctId>.json per account (+ keeper anchors). */
 export function readClaudeTap(usageDir: string, nowS: number): ProviderCaps | null {
   const main = readClaudeTapFile(join(usageDir, 'claude.json'), nowS);
   const accounts: AccountCaps[] = [];
   let files: string[] = [];
   try { files = existsSync(usageDir) ? readdirSync(usageDir) : []; } catch { files = []; }
+  const ids = new Set<string>();
   for (const f of files) {
-    const m = /^claude-([A-Za-z0-9_.-]+)\.json$/.exec(f);
-    if (!m) continue;
-    const acct = readClaudeTapFile(join(usageDir, f), nowS);
+    const m = /^claude-([A-Za-z0-9_.-]+?)(\.keeper)?\.json$/.exec(f);
+    if (m) ids.add(m[1]);
+  }
+  for (const id of [...ids].sort()) {
+    const tap = readClaudeTapFile(join(usageDir, `claude-${id}.json`), nowS);
+    const keeper = readKeeperAnchor(join(usageDir, `claude-${id}.keeper.json`), nowS);
+    // freshest wins (the same rule the keeper itself uses)
+    const useKeeper = keeper !== null && (tap === null || keeper.capturedAt > tap.capturedAt);
+    const src = useKeeper ? keeper : tap;
     accounts.push({
-      id: m[1], fiveHour: acct?.fiveHour ?? UNKNOWN, sevenDay: acct?.sevenDay ?? UNKNOWN,
-      windows: {}, noteCodes: acct ? [] : ['claude.noCapture'], limitReached: false, stale: acct === null,
+      id, fiveHour: src?.fiveHour ?? UNKNOWN, sevenDay: (useKeeper ? UNKNOWN : tap?.sevenDay) ?? UNKNOWN,
+      windows: {}, noteCodes: src ? (useKeeper ? ['claude.keeperAnchor'] : []) : ['claude.noCapture'],
+      limitReached: false, stale: src === null,
     });
   }
   if (!main && accounts.length === 0) return null;
