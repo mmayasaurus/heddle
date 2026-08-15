@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { Ledger } from '../src/ledger.js';
+import { Ledger, applyLedgerMigrations } from '../src/ledger.js';
 
 describe('Ledger.refuse + refusal-column migration', () => {
   const dirs: string[] = [];
@@ -113,6 +113,21 @@ describe('Ledger — usage excludes refusals; migration tolerates a concurrent A
     const [codex, claude] = ledger.usageByProvider();
     expect(codex).toMatchObject({ provider: 'codex', dispatches: 1, succeeded: 1, refusals: 1, input_tokens: 100 });
     expect(claude).toMatchObject({ provider: 'claude', dispatches: 0, succeeded: 0, refusals: 2, input_tokens: 0 });
+  });
+
+  it('tolerates the check-then-ALTER race: a stale column set + a column another process already added is success', () => {
+    const path = tempPath();
+    const first = new Ledger(path); // migrates: refusal exists now
+    first.close();
+    const db = new DatabaseSync(path);
+    // Simulate a process whose PRAGMA check ran BEFORE another opener added the column: it believes
+    // `refusal` is missing and issues the ALTER — SQLite answers "duplicate column name".
+    const result = applyLedgerMigrations(db, new Set());
+    expect(result.alreadyPresent).toContain('refusal');
+    expect(result.applied).toEqual([]);
+    // and a real error still propagates (a bogus table)
+    expect(() => db.exec('ALTER TABLE no_such_table ADD COLUMN x TEXT')).toThrow();
+    db.close();
   });
 
   it('opens an already-migrated old schema and documents SQLite duplicate-column behavior', () => {

@@ -146,9 +146,11 @@ choosing a worker instead:
   class packs/MCP to give your subagent, and the declared fallback you can name
   as `provider`+`model` to run it as a subprocess instead. No auto-fallback.
   `orchestration` is `dispatchable: false` — it is the orchestrator's OWN work;
-  its refusal says "continue in-session" and suggests no worker pack. Refusal
-  rows are excluded from `heddle usage` dispatch/success counts (reported as a
-  separate `refusals` column).
+  a dispatch of it is refused on EVERY path (class, class + explicit route,
+  whatever the named provider) with code `not-dispatchable`, "continue
+  yourself", no worker pack; `list_task_classes` exposes `dispatchable` and
+  lists no mandatory pack for it. Refusal rows are excluded from `heddle usage`
+  dispatch/success counts (reported as a separate `refusals` column).
 - **Dispatch-guidance hook** (`dist/hook-dispatch-guidance.js`, a Claude Code
   PreToolUse hook on `mcp__heddle__dispatch_worker`): warns — never blocks —
   when (1) a code-editing class (`edits_code: true`) is dispatched with no

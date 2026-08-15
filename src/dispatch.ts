@@ -218,6 +218,9 @@ export async function dispatch(
       (route.note ? ` — ${route.note}` : '') + '. Pass optIn/--opt-in to proceed.',
     );
   }
+  // A non-dispatchable class (`orchestration`) is refused on EVERY path — a named subprocess route
+  // does not turn the orchestrator's own work into a worker task.
+  if (!route.dispatchable) return refuseNotDispatchable(route, req, ledger);
 
   // Class + explicit provider/model: the class supplies policy (default skills/mcp, opt-in gate,
   // ledger task_class), the named route replaces the table's — no fallback, naming it is the choice.
@@ -262,6 +265,24 @@ export async function dispatch(
 
 /** How the in-session route was chosen — the refusal reason must not misstate the YAML policy. */
 type InSessionOrigin = 'direct' | 'class' | 'explicit' | 'fallback';
+
+function refuseNotDispatchable(route: Route, req: DispatchRequest, ledger: Ledger): DispatchOutcome {
+  const skills = req.skills ?? route.skills ?? [];
+  const reason = `task class "${route.taskClass}" is not dispatchable (dispatchable: false) — it is the ` +
+    `orchestrator's own in-session work` + (req.provider && req.model ? `; naming a route (${req.provider}/${req.model}) does not change that` : '') + '.';
+  const instruction = `Continue yourself; there is nothing to delegate.`;
+  const ledgerId = ledger.refuse({
+    orchestrator: req.orchestrator ?? null, taskClass: route.taskClass, provider: route.provider,
+    model: route.model, skills: skills.length ? skills.join(',') : null, issue: req.issue ?? null, pr: null,
+    cwd: req.cwd, promptPreview: req.prompt, sessionId: null, fellBackFrom: null,
+  }, 'not-dispatchable', reason);
+  return {
+    ok: false, output: '', exitCode: null, error: `${reason} ${instruction}`,
+    taskClass: route.taskClass, provider: route.provider, model: route.model, skills, ledgerId,
+    usedFallback: false, execution: providerExecution(loadRouting(), route.provider),
+    refusal: { code: 'not-dispatchable', reason, instruction },
+  };
+}
 
 function refuseInSession(
   route: Route, req: DispatchRequest, ledger: Ledger, execution: string, origin: InSessionOrigin,
