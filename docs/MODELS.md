@@ -109,6 +109,65 @@ get a temporary `AGENTS.md` block (restored after dispatch).
 
 Authoritative contracts: `docs/LANDMINES.md`. Authoritative map: the YAML.
 
+## Cap-aware routing (BUILT — HED-67, 2026-08-15)
+
+Ground truth that forced it: six Fable orchestrators burned a full Claude 5h
+window in ~50 min while codex sat at 8%/2% weekly and gemini at 6%. The router
+now consults live caps at every dispatch (`src/usage.ts` → `src/capaware.ts`)
+and records why it chose what it chose (`route_reason` in the ledger).
+
+- **Sources** (never a vendor call from heddle-core): `~/.heddle/usage/limits.json`
+  — the dashboard's mirror of its `heddle_provider_limits` result
+  (`{writtenAt, limits: ProviderLimit[]}`, contract in heddle-dashboard
+  `docs/USAGE_TAP.md`, pinned by its `limits.golden.json`; written every poll
+  while the app runs) — then the raw Claude statusline tap
+  `~/.heddle/usage/claude.json` + per-account `claude-<acctId>.json` (written on
+  every statusline render, app or no app) as the Claude fallback. **Stale is
+  unknown** (limits.json > 15 min old, tap > 10 min old, or a snapshot flagged
+  `stale` upstream): unknown never routes away and never refuses. A window whose
+  `resetsAt` has passed counts as 0 until the next capture.
+- **route-away** (`policy.cap_aware_routing.route_away_at_pct`, default 90):
+  if the primary provider's binding window (5h; 7d when there is no 5h; for
+  cursor, the pool its model draws from) is at/over the threshold and the class
+  declares a fallback whose own window is under it → the fallback runs, ledgered
+  with `fell_back_from` + `route_reason: cap:route-away …`. Both over → the
+  primary runs (soft cap, `cap:both-over`). No fallback → primary (`cap:over`).
+  Applies to Claude-primary classes too: `implementation` at Claude 5h ≥ 90 %
+  runs its declared `codex/gpt-5.6-terra` fallback as a subprocess instead of
+  returning the in-session refusal (below the threshold you still get the
+  refusal + account advice).
+- **Cursor pools** (Maya-corrected model, W's fields): `included-total` gates
+  Cursor's own models (`cursor-grok-*`, `composer-*`, `auto`) — soft
+  route-away; `included-api` gates NAMED third-party models (kimi-k3, …) — at
+  ≥ 100 % (or noteCode `cursor.includedApiExhausted`) they would bill
+  on-demand, so heddle **refuses** them (`metered-pool-exhausted`, ledgered);
+  `cursor.onDemandLimitReached` → everything on that Cursor account is refused.
+  The account heddle's dispatches bill is the `cursor-agent-keychain` row when
+  the dashboard reports it (the IDE row is informational).
+- **Explicit routes** (`provider`+`model` named by the caller) are never routed
+  away — naming it is the choice — but the metered-pool refusals still apply.
+- **Dry run:** `heddle route --class <c> [--provider p --model m] [--opt-in]` and
+  the `plan_dispatch` MCP tool print the decision, the checks, the remaining
+  fallback and the account advice — no ledger row, no worker.
+
+## Claude accounts (HED-68 — advisory today)
+
+`~/.heddle/accounts.json` (`claude[]: {id, configDir|null, email, note}`;
+`configDir: null` = the default login — do NOT set `CLAUDE_CONFIG_DIR` for it,
+`claude auth status` reports logged-out that way) is the registry of Maya's
+Claude Max20 accounts. The statusline tap writes per-account caps to
+`~/.heddle/usage/claude-<acctId>.json`. Because heddle's Claude workers are the
+orchestrator's own in-session subagents (same account as the parent), heddle
+cannot rotate them by itself yet — so today it **advises**: every
+`claude-in-session` refusal, `heddle route implementation` and `plan_dispatch`
+end with `Claude accounts: acct3 has the most 5h headroom (12 % used); this
+session is on acct1 (43 %) — CLAUDE_CONFIG_DIR=…`, and the ledger `account`
+column records the advised account. Operating guidance until rotation is real:
+pin ~2 orchestrators per account. Codex workers record `account` =
+`basename(CODEX_HOME)` when the caller selects one. A true out-of-process
+Claude worker (headless `claude -p` under `CLAUDE_CONFIG_DIR`) is a design
+decision for Maya — drafted, not built (see the HED-67/68 PR).
+
 ## Structural caps (BUILT — HED-2, 2026-08-15; Scape-derived, clean-room)
 
 Enforced in `src/dispatch.ts`, not in prompts. Every refusal is a **finished
