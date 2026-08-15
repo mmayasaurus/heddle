@@ -15,7 +15,9 @@
 #
 # Hardening (zizmor-clean): every action hash-pinned (Dependabot bumps the pins,
 # see .github/dependabot.yml), workflow-level `permissions: {}`, checkout without
-# persisted credentials (nothing here pushes, so build steps never see a token).
+# persisted credentials (nothing here pushes, so build steps never see a token),
+# runner pinned to an Ubuntu series (not `-latest`) so the environment only
+# moves when we move it.
 name: Gate
 
 on:
@@ -39,7 +41,7 @@ jobs:
   gate:
     # Required-check context string — do not rename (see header).
     name: gate
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
       contents: read
@@ -66,21 +68,22 @@ jobs:
       - name: Build
         run: npm run build
 
-      # Behavioral smoke: the built CLI must start, parse routing/routing.yaml,
-      # and enumerate skills/. `--json` output is asserted non-empty so a silent
-      # empty table can't pass as green.
+      # Behavioral smoke: the built CLI must start, parse routing/routing.v0.yaml
+      # (the repo-relative default), and enumerate skills/. `--json` output is
+      # asserted non-empty so a silent empty table can't pass as green.
       - name: Smoke the built CLI (offline commands)
         run: |
           set -euo pipefail
           node dist/cli.js >/dev/null            # usage text, exit 0
-          # Each command's --json output must be a NON-EMPTY array.
+          # Each command's --json output must be a NON-EMPTY array. Under
+          # `node -e`, process.argv[1] is the first extra argument (verified
+          # on Node 22 locally and in the first CI run of this workflow).
           check_nonempty_array() {
             node -e '
-              let s = ""; process.stdin.on("data", d => s += d).on("end", () => {
-                const v = JSON.parse(s);
-                if (!Array.isArray(v) || v.length === 0) { console.error(process.argv[1] + ": empty result"); process.exit(1); }
-                console.log(process.argv[1] + ": " + v.length + " entries");
-              });' "$1"
+              const v = JSON.parse(require("fs").readFileSync(0, "utf8"));
+              const name = process.argv[1];
+              if (!Array.isArray(v) || v.length === 0) { console.error(name + ": empty result"); process.exit(1); }
+              console.log(name + ": " + v.length + " entries");' "$1"
           }
           node dist/cli.js classes --json | check_nonempty_array classes
           node dist/cli.js packs   --json | check_nonempty_array packs

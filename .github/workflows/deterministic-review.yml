@@ -7,30 +7,40 @@
 #               (--baseline-commit = the PR's base SHA: only findings this PR
 #               introduces), FULL on pushes to main (so the Security tab holds
 #               the whole picture, not just deltas).
-#   gitleaks  — secrets in the PR's commits (official gitleaks-action: scans
-#               base^..head, values are REDACTED, inline PR comments on hits,
-#               job goes red on a real hit — a secret in a public repo is a P1,
-#               and rotating it is the fix, not re-running CI).
+#   gitleaks  — secrets in exactly the PR's commit range (base.sha..head.sha),
+#               values REDACTED. Runs the official gitleaks CLI image directly
+#               rather than gitleaks-action: the action lists PR commits with
+#               the API default per_page=30 and never paginates, so a PR with
+#               >30 commits is silently PARTIALLY scanned — and it needs a
+#               write token, which fork PRs never get. Push-to-main coverage is
+#               GitHub's native secret scanning + push protection (enabled on
+#               this repo 2026-08-15) — a second engine on the same pushes.
 # Workflow hygiene (actionlint + zizmor) lives in actions-hygiene.yml, path-
 # filtered to .github/ changes.
 #
 # Where findings show up — DIFFERENT PLUMBING from Spinventory, SAME DISCIPLINE:
-# instead of a hand-rolled, sanitized PR-comment poster, semgrep results are
-# uploaded as SARIF to GitHub code scanning (free on public repos): they render
-# as the "Code scanning results / semgrep" check + inline annotations on the PR
-# and in the repo's Security tab. gitleaks posts its own inline review comments.
-# The PR sweep (see the review discipline doc, HED-16) must read code-scanning
-# alerts + the checks tab, not only comments/reviews/threads.
+# instead of a hand-rolled, sanitized PR-comment poster, results are uploaded
+# as SARIF to GitHub code scanning (free on public repos): they render as the
+# "Code scanning results / <tool>" check + inline annotations on the PR and in
+# the repo's Security tab; each job also writes a one-line job summary. The PR
+# sweep (review discipline doc, HED-16) must read code-scanning alerts + the
+# checks tab, not only comments/reviews/threads.
+#
+# Fork PRs: the SCANS run for everyone (read-only token is enough — nothing
+# here checks out untrusted code with secrets, and no PR-controlled string is
+# expanded into a run: block); only the SARIF-upload steps, which need a write
+# token, are skipped for forks — the log + job summary still carry the result.
 #
 # Posture: semgrep is REPORT-ONLY (the job never reds on findings; code
 # scanning's own "check failure" threshold decides whether its check reds —
-# repo default: errors only). gitleaks is BLOCKING-red but NOT a required
-# check. Neither can post for FORK PRs (read-only token) — those jobs are
-# skipped via the same-repo guard until an outside-contributor path is designed.
+# repo default: errors only). gitleaks is BLOCKING-red on a hit (rotating the
+# secret is the fix, not re-running CI) but NOT a required check.
 #
-# Hardening (zizmor-clean): every action hash-pinned + Dependabot-bumped,
-# workflow-level `permissions: {}`, checkout without persisted credentials,
-# no PR-controlled strings expanded into run: blocks.
+# Hardening (zizmor-clean): every action hash-pinned + Dependabot-bumped;
+# container images tag+digest-pinned (Dependabot does NOT track `container:`
+# images or `docker://` uses — bump those by hand, see the notes at each one);
+# workflow-level `permissions: {}`; checkout without persisted credentials;
+# runners pinned to an Ubuntu series (ubuntu-24.04), not `-latest`.
 name: Deterministic Review
 
 on:
@@ -50,21 +60,24 @@ concurrency:
 jobs:
   semgrep:
     name: semgrep (diff-aware on PRs · full on main)
-    # Dependabot PRs get a read-only token that cannot upload SARIF (semgrep's
-    # own sample config skips them). Drafts + fork PRs skipped (see header).
+    # Every push to main is scanned. PRs: skip drafts and Dependabot's own PRs
+    # (Dependabot gets a read-only token that cannot upload SARIF — semgrep's
+    # sample config skips them too); the guard is PR-only so a main push whose
+    # actor happens to be dependabot is still scanned.
     if: >-
-      github.actor != 'dependabot[bot]' &&
-      (github.event_name == 'push' ||
-       (github.event.pull_request.draft == false &&
-        github.event.pull_request.head.repo.full_name == github.repository))
-    runs-on: ubuntu-latest
+      github.event_name == 'push' ||
+      (github.event.pull_request.draft == false &&
+       github.actor != 'dependabot[bot]')
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
       contents: read
-      security-events: write  # SARIF upload to code scanning
+      security-events: write  # SARIF upload to code scanning (same-repo only)
     container:
       # Semgrep's documented CI image (docs.semgrep.dev sample-ci-configs),
-      # version-pinned. Bump deliberately: newer rules = new findings.
+      # tag+digest-pinned. MANUAL BUMP (Dependabot ignores container images):
+      # bump the tag, refresh the digest from Docker Hub, and expect newer
+      # rules = new findings.
       image: semgrep/semgrep:1.173.0@sha256:67319956da3dcb58baf5b322899c15458e3963e7018a86aeeb5cd224e69cb77a
     steps:
       - name: Checkout (full history — the baseline commit must be present)
@@ -78,49 +91,98 @@ jobs:
           # PR: base SHA of the PR (the merge commit's first parent) — semgrep
           # reports only findings absent from it. Push: empty → full scan.
           BASELINE: ${{ github.event.pull_request.base.sha }}
+        # POSIX sh on purpose: inside a `container:` the runner defaults to
+        # `sh -e`, not bash (first run of this workflow proved it — a bash
+        # array here failed with "syntax error: unexpected (").
         run: |
           set -u
-          ARGS=(scan --config p/typescript --config p/nodejs
-                --metrics=off --sarif-output=semgrep.sarif
-                --exclude node_modules --exclude dist)
+          set -- scan --config p/typescript --config p/nodejs \
+                 --metrics=off --sarif-output=semgrep.sarif \
+                 --exclude node_modules --exclude dist
           if [ -n "$BASELINE" ]; then
             echo "diff-aware scan: baseline $BASELINE"
-            ARGS+=(--baseline-commit="$BASELINE")
+            set -- "$@" --baseline-commit="$BASELINE"
           else
             echo "full scan (push to main)"
           fi
           # No --error: report-only tier. A tool crash / unparseable output is
           # still an honest red (the upload step needs the file).
-          semgrep "${ARGS[@]}"
+          semgrep "$@"
+          # One-line receipt in the job summary (jq ships in the image).
+          N=$(jq '.runs[0].results | length' semgrep.sarif)
+          echo "semgrep: **$N** finding(s) (${BASELINE:+new vs base}${BASELINE:-full scan})" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload SARIF to code scanning
+        # Needs a write token — same-repo PRs and main pushes only; fork PRs
+        # keep the scan result in the log + summary above.
+        if: >-
+          github.event_name == 'push' ||
+          github.event.pull_request.head.repo.full_name == github.repository
         uses: github/codeql-action/upload-sarif@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
         with:
           sarif_file: semgrep.sarif
           category: semgrep
 
   gitleaks:
-    name: gitleaks (secrets)
-    # Drafts ARE scanned (a leaked secret does not wait for ready_for_review);
-    # fork PRs skipped — the action needs pull-requests: write to comment.
-    if: >-
-      github.event_name == 'push' ||
-      github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest
+    name: gitleaks (secrets in the PR's commits)
+    # PRs only — drafts INCLUDED (a leaked secret does not wait for
+    # ready_for_review). Push-to-main coverage is GitHub secret scanning.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
-      pull-requests: write  # inline review comments on findings
+      security-events: write  # SARIF upload to code scanning (same-repo only)
+    container:
+      # Official gitleaks image (alpine + git + gitleaks), tag+digest-pinned.
+      # MANUAL BUMP (Dependabot ignores container images): bump the tag and
+      # refresh the digest from Docker Hub.
+      image: zricethezav/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
     steps:
-      - name: Checkout (full history — the action scans base^..head)
+      - name: Checkout (full history — the PR range must be present)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
 
-      # Free for personal-account repos (mmayasaurus is a User, verified
-      # 2026-08-15); GITLEAKS_LICENSE is only required for organizations.
-      - name: gitleaks
-        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+      - name: Scan the PR's commit range
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        # POSIX sh (container job — see the semgrep step). Exit code 2 = leaks
+        # found (job goes red); anything else non-zero = tool/infra error.
+        # --redact keeps values out of logs AND out of the report; the report
+        # is uploaded to code scanning below (rule/file/line only). Suppression
+        # files (.gitleaks.toml / .gitleaksignore) are PR-controlled: a PR that
+        # touches them is flagged in the summary so a "clean" result on such a
+        # PR is reviewed by hand (Spinventory det-tier finding, #2077).
+        run: |
+          set -u
+          echo "scanning $BASE..$HEAD"
+          # `|| rc=$?` — the runner's `sh -e` would otherwise abort on the
+          # exit-2 hit before the summary line below is written.
+          rc=0
+          gitleaks git --log-opts="$BASE..$HEAD" --redact --no-banner \
+            --exit-code 2 --report-format sarif --report-path gitleaks.sarif . || rc=$?
+          if git diff --name-only "$BASE" "$HEAD" -- .gitleaks.toml .gitleaksignore | grep -q .; then
+            echo "⚠️ this PR modifies a gitleaks suppression file (.gitleaks.toml / .gitleaksignore) — review the change by hand before trusting a clean result." >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning::this PR modifies a gitleaks suppression file — review by hand before trusting a clean result."
+          fi
+          case "$rc" in
+            0) echo "gitleaks: no secrets found in $BASE..$HEAD" >> "$GITHUB_STEP_SUMMARY" ;;
+            2) echo "gitleaks: 🔑 **possible secret(s) found** in this PR's commits — see the job log (values redacted); rotate anything real." >> "$GITHUB_STEP_SUMMARY" ;;
+            *) echo "gitleaks: tool error (exit $rc) — NOT a clean pass" >> "$GITHUB_STEP_SUMMARY" ;;
+          esac
+          exit "$rc"
+
+      - name: Upload SARIF to code scanning
+        # always(): the report matters MOST when the scan step just failed on
+        # a hit. Same-repo only (write token); fork PRs keep the log verdict.
+        if: >-
+          always() &&
+          github.event.pull_request.head.repo.full_name == github.repository &&
+          hashFiles('gitleaks.sarif') != ''
+        uses: github/codeql-action/upload-sarif@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
+        with:
+          sarif_file: gitleaks.sarif
+          category: gitleaks

@@ -11,8 +11,9 @@
 #                and surface as the "Code scanning results / zizmor" check.
 #
 # Runs on the PR's own copy of the workflows, so a PR that edits CI audits
-# itself. Fork PRs are skipped for zizmor (SARIF upload needs a write token);
-# actionlint needs no token and runs for everyone.
+# itself. Both tools run for fork PRs too; zizmor's SARIF upload needs a write
+# token, so for forks it prints findings to the log instead (same audit, same
+# verdict — different surface).
 name: Workflow Hygiene
 
 on:
@@ -33,7 +34,7 @@ concurrency:
 jobs:
   actionlint:
     name: actionlint
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: read
@@ -46,6 +47,8 @@ jobs:
       # rhysd/actionlint's documented Docker usage, version- AND digest-pinned
       # (the docs' `:latest` is a moving target). Digest = the multi-arch
       # manifest list for 1.7.12 on Docker Hub, resolved 2026-08-15.
+      # MANUAL BUMP: Dependabot does not track `docker://` uses
+      # (dependabot-core#8362) — bump tag + digest by hand.
       - name: actionlint
         uses: docker://rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
         with:
@@ -53,14 +56,11 @@ jobs:
 
   zizmor:
     name: zizmor
-    if: >-
-      github.event_name == 'push' ||
-      github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
-      security-events: write  # SARIF upload to code scanning
+      security-events: write  # SARIF upload to code scanning (same-repo only)
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -68,6 +68,10 @@ jobs:
           persist-credentials: false
 
       # zizmor's official action; defaults = persona regular, online audits on
-      # (uses the job token for read-only GitHub API lookups), SARIF upload on.
+      # (uses the job token for read-only GitHub API lookups). SARIF upload
+      # only where the token can write (main pushes + same-repo PRs); fork PRs
+      # get the findings printed to the console instead.
       - name: zizmor
         uses: zizmorcore/zizmor-action@3dc1ecc9bcb9e94e9b2c709687979e1298497054 # v0.6.2
+        with:
+          advanced-security: ${{ github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository }}
