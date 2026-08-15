@@ -147,7 +147,7 @@ export class Broker {
   private readonly holdMaxMs: number;
   private readonly now: () => number;
   private readonly onWarning: (message: string) => void;
-  /** Accept timestamps per "from→to" pair (only accepted posts consume budget). */
+  /** Accept timestamps per "from->to" pair (only accepted posts consume budget). */
   private readonly stamps = new Map<string, number[]>();
   /** Per-target delivery chains — the "one in-flight injection per target" rule. */
   private readonly chains = new Map<string, Promise<unknown>>();
@@ -241,7 +241,7 @@ export class Broker {
   private checkConstraints(from: string, to: string, body: string): { code: RefusalCode; reason: string; retryAfterMs?: number } | null {
     const bytes = Buffer.byteLength(body, 'utf8');
     if (bytes > this.maxBodyBytes) return { code: 'body-too-large', reason: `body is ${bytes} bytes; cap is ${this.maxBodyBytes}` };
-    const pairKey = `${from}→${to}`;
+    const pairKey = `${from}->${to}`;
     const retryAfterMs = this.overLimit(pairKey);
     if (retryAfterMs !== null) {
       return { code: 'rate-limited', retryAfterMs,
@@ -267,7 +267,7 @@ export class Broker {
 
     const constraint = this.checkConstraints(req.from, to, req.body ?? '');
     if (constraint) return this.refuse(req.from, to, constraint.code, constraint.reason + via, undefined, constraint.retryAfterMs);
-    const pairKey = `${req.from}→${to}`;
+    const pairKey = `${req.from}->${to}`;
 
     // `resolvedFrom` is broker-authored provenance: whatever the caller put there is dropped.
     const { resolvedFrom: _callerResolvedFrom, ...callerMeta } = req.meta ?? {};
