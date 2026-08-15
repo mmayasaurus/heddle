@@ -157,11 +157,11 @@ export class Ledger {
   constructor(path: string = DEFAULT_LEDGER_PATH) {
     mkdirSync(dirname(path), { recursive: true });
     this.db = new DatabaseSync(path);
-    this.db.exec('PRAGMA journal_mode = WAL;');
     // Several heddle processes (one MCP server per orchestrator session, CLIs, the dashboard) share
-    // this file; wait briefly for a writer instead of failing with SQLITE_BUSY, including during the
-    // migration window below (check, then ALTER).
+    // this file; wait briefly for a writer instead of failing with SQLITE_BUSY. Set FIRST so it also
+    // covers the WAL switch and the migration window below (check, then ALTER).
     this.db.exec('PRAGMA busy_timeout = 5000;');
+    this.db.exec('PRAGMA journal_mode = WAL;');
     this.db.exec(SCHEMA);
     const have = new Set(
       (this.db.prepare('PRAGMA table_info(dispatches)').all() as { name: string }[]).map((c) => c.name),
@@ -329,6 +329,12 @@ export class Ledger {
       GROUP BY provider ORDER BY dispatches DESC
     `);
     return (sinceIso ? stmt.all(sinceIso) : stmt.all()) as Record<string, unknown>[];
+  }
+
+  /** One dispatch row by id, or null. Read-only lookup — the comms broker verifies lineage with it. */
+  get(id: number): Record<string, unknown> | null {
+    const row = this.db.prepare('SELECT * FROM dispatches WHERE id = ?').get(id);
+    return (row as Record<string, unknown> | undefined) ?? null;
   }
 
   close(): void {
