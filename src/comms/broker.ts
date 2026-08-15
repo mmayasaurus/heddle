@@ -16,7 +16,10 @@ import type { DeliveryOutcome, MessageKind, MessageRecord, Tier } from './types.
  *   hold at gate          if the target sits at a permission gate, the message is logged but not
  *                         injected; `pump()` releases it when the gate clears (or fails it after
  *                         holdMaxMs — the recipient can still pull it from the log).
- *   serialization         one in-flight injection per target; later ones queue behind it.
+ *   serialization         one in-flight injection per target within this broker; later ones queue
+ *                         behind it. Across processes the guarantee comes from the transport: with
+ *                         the channel transport the RECIPIENT's single pump performs every injection
+ *                         into its session, so ordering holds fleet-wide.
  *   typed outcomes        every decision is a `deliveries` row: sent / held / released / refused /
  *                         failed / logged — never a boolean.
  *
@@ -64,6 +67,8 @@ export const DEFAULT_RATE_LIMIT: RateLimit = { windowMs: 10_000, max: 5, burstWi
 export const DEFAULT_MAX_BODY_BYTES = 8 * 1024;
 export const DEFAULT_HOLD_MAX_MS = 10 * 60_000;
 export const ORCHESTRATOR_ALIAS = '@orchestrator';
+/** Registered for bookkeeping only (e.g. the neutral `peer` sender of mirrored inbound SendMessages) — never a recipient. */
+export const RESERVED_ADDRESSES: ReadonlySet<string> = new Set(['peer']);
 
 export interface BrokerOptions {
   log: CommsLog;
@@ -211,7 +216,7 @@ export class Broker {
     if (parsed && (parsed.kind === 'room' || parsed.kind === 'broadcast' || parsed.kind === 'operator')) return { address: to, kind: parsed.kind };
     const registered = this.log.participant(to);
     if (registered) return { address: to, kind: registered.kind };
-    const candidates = this.log.participantsWithPrefix(to);
+    const candidates = this.log.participantsWithPrefix(to).filter((p) => !RESERVED_ADDRESSES.has(p.address));
     if (candidates.length === 1) return { address: candidates[0].address, kind: candidates[0].kind };
     if (candidates.length > 1) {
       const names = candidates.map((c) => c.address);
@@ -424,13 +429,16 @@ export class Broker {
    * dispatchTo goes through that recipient's delivery chain); the result summarises the fan-out.
    */
   private async deliverBroadcast(record: MessageRecord, envelope: string, base: AcceptedBase): Promise<PostResult> {
-    const recipients = this.log.participants().map((p) => p.address).filter((a) => a !== record.from);
+    const recipients = this.log.participants().map((p) => p.address).filter((a) => a !== record.from && !RESERVED_ADDRESSES.has(a));
     if (recipients.length === 0) {
       this.log.recordDelivery({ messageId: record.id, from: record.from, to: record.to, outcome: 'logged', code: 'no-recipients', transport: this.transport.name });
       return { ...base, outcome: 'logged', code: 'no-recipients' };
     }
     // Guaranteed delivery: push where the recipient has a live channel, inbox (pull) otherwise —
-    // "no live session" is not a failure for a broadcast, it is the pull path.
+    // "no live session" is not a failure for a broadcast, it is the pull path. A broadcast also
+    // charges each (from → recipient) budget, so @all is not a way around the per-recipient rate
+    // limit (the broadcast itself was admitted on the from → @all budget).
+    for (const r of recipients) this.consume(`${record.from}->${r}`);
     const outcomes = await Promise.all(recipients.map((r) => this.dispatchTo(record, envelope, r, record.from, { broadcast: true })));
     const failed = outcomes.filter((o) => o.outcome === 'failed').length;
     const heldN = outcomes.filter((o) => o.outcome === 'held').length;

@@ -4,7 +4,7 @@ import type { Transport as McpTransport } from '@modelcontextprotocol/sdk/shared
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
-import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { CommsLog, DEFAULT_COMMS_PATH } from './log.js';
 import { Ledger, DEFAULT_LEDGER_PATH } from '../ledger.js';
 import { Broker } from './broker.js';
@@ -166,6 +166,7 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
   const isWorker = env.HEDDLE_WORKER === '1';
   const pushEnabled = env.HEDDLE_COMMS_PUSH === '1';
   const sessionName = env.HEDDLE_SESSION_NAME || me;
+  const instanceId = env.CLAUDE_CODE_SESSION_ID || randomUUID(); // owns this process's presence row
 
   const mcp = new Server(
     { name: 'heddle-comms', version: '0.0.1' },
@@ -194,7 +195,7 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
     if (revoked) return;
     revoked = true;
     warn('operator credential revoked (token rotated) — presence unregistered, push stopped; restart with the current token');
-    try { if (me && pushEnabled) log.unregisterSession(me); } catch (err) { warn(`unregister failed: ${errorMessage(err)}`); }
+    try { if (me && pushEnabled) log.unregisterSession(me, instanceId); } catch (err) { warn(`unregister failed: ${errorMessage(err)}`); }
   }
 
   mcp.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
@@ -218,6 +219,7 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
           const who = requireMe();
           const id = num(a.message_id);
           if (id === undefined || !Number.isInteger(id) || id < 1) return errorText('confirm_sent: message_id must be a positive integer');
+          if (a.ok !== undefined && typeof a.ok !== 'boolean') return errorText('confirm_sent: ok must be a boolean');
           confirmSent(log, id, { from: who, ok: a.ok !== false, reason: str(a.reason) });
           return text({ ok: true });
         }
@@ -311,7 +313,7 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
     if (!me) return;
     if (pushEnabled) {
       log.registerSession({
-        address: me, sessionId: env.CLAUDE_CODE_SESSION_ID ?? null, sessionName,
+        address: me, sessionId: instanceId, sessionName,
         pid: env.CLAUDE_PID ? Number(env.CLAUDE_PID) : process.ppid, socket: env.CLAUDE_CODE_MESSAGING_SOCKET ?? null, // the hosting Claude session, not this child
       });
       inbound = new InboundPump(log, me, (event) => {
@@ -320,7 +322,7 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
       });
       heartbeat = setInterval(() => {
         if (!operatorStillValid()) { void revokeOperator(); return; }
-        try { log.heartbeatSession(me); } catch (err) { warn(`heartbeat failed: ${errorMessage(err)}`); }
+        try { log.heartbeatSession(me, instanceId); } catch (err) { warn(`heartbeat failed: ${errorMessage(err)}`); }
       }, 30_000);
       heartbeat.unref();
     } else {
@@ -343,7 +345,7 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
     stopping = true;
     if (timer) clearTimeout(timer);
     if (heartbeat) clearInterval(heartbeat);
-    try { if (me && pushEnabled) log.unregisterSession(me); } catch (err) { warn(`unregister failed: ${errorMessage(err)}`); }
+    try { if (me && pushEnabled) log.unregisterSession(me, instanceId); } catch (err) { warn(`unregister failed: ${errorMessage(err)}`); }
     try { await mcp.close(); } catch { /* transport already gone */ }
     try { log.close(); } catch (err) { warn(`log close failed: ${errorMessage(err)}`); }
     if (ownsLedger) { try { (ledger as Ledger | null)?.close?.(); } catch (err) { warn(`ledger close failed: ${errorMessage(err)}`); } }
