@@ -94,14 +94,24 @@ describe('comms bridge (temp db)', () => {
   });
 
   it('documents channel provenance and SendMessage limits', () => {
-    expect(CHANNEL_INSTRUCTIONS).toContain(UNTRUSTED_LABEL);
-    expect(CHANNEL_INSTRUCTIONS).toContain(DIRECTIVE_LABEL);
-    expect(CHANNEL_INSTRUCTIONS).toContain(OPERATOR_LABEL);
-    for (const phrase of ['post_message', '@orchestrator', 'read_transcript', 'log_sent']) expect(CHANNEL_INSTRUCTIONS).toContain(phrase);
+    for (const label of [UNTRUSTED_LABEL, DIRECTIVE_LABEL, OPERATOR_LABEL]) expect(CHANNEL_INSTRUCTIONS).toContain(label);
+    for (const word of ['post_message', '@orchestrator', 'read_transcript', 'log_sent']) expect(CHANNEL_INSTRUCTIONS).toContain(word);
     expect(SENDMESSAGE_LIMITS.length).toBeGreaterThanOrEqual(5);
-    for (const limit of SENDMESSAGE_LIMITS) expect(limit.trim()).not.toBe('');
-    expect(SENDMESSAGE_LIMITS.some((limit) => limit.includes('100'))).toBe(true);
-    expect(SENDMESSAGE_LIMITS.some((limit) => limit.includes('50'))).toBe(true);
+    for (const l of SENDMESSAGE_LIMITS) expect(typeof l === 'string' && l.length > 0).toBe(true);
+    // Pinned quotas from code.claude.com/docs/en/cross-session-messaging.md — exact phrases, so a regression cannot hide.
+    expect(SENDMESSAGE_LIMITS.some((l) => l.includes('at most 100 messages'))).toBe(true);
+    expect(SENDMESSAGE_LIMITS.some((l) => l.includes('cap at 50 per session'))).toBe(true);
+    expect(SENDMESSAGE_LIMITS.some((l) => l.startsWith('Plain text only'))).toBe(true);
+    expect(SENDMESSAGE_LIMITS.some((l) => l.includes('no persistence or observe/read-back API'))).toBe(true);
+  });
+
+  it('rejects an invalid stale window instead of silently marking everything stale', () => {
+    log.registerSession({ address: 'R' });
+    for (const bad of [Number.NaN, -1, Number.POSITIVE_INFINITY]) {
+      expect(() => log.liveSession('R', bad)).toThrow(/staleMs/);
+      expect(() => log.liveSessions(bad)).toThrow(/staleMs/);
+    }
+    expect(log.liveSession('R', 0)).not.toBeNull(); // zero is a valid (instant) window at the same tick
   });
 
   it('reports a queued channel delivery only for a live recipient session', async () => {
@@ -153,6 +163,13 @@ describe('comms bridge (temp db)', () => {
     const replay = new InboundPump(log, 'K', (_event, record) => { replayed.push(record.id); }, { sinceId: 0 });
     await replay.tick();
     expect(replayed).toContain(before.id);
+  });
+
+  it('records a channel error even when the emit throws a non-Error value', async () => {
+    log.append({ from: 'R', to: 'K', body: 'x' });
+    const pump = new InboundPump(log, 'K', () => { throw null; }, { sinceId: 0 });
+    expect(await pump.tick()).toEqual({ emitted: 0, failed: 1 });
+    expect(log.deliveries().at(-1)).toMatchObject({ outcome: 'failed', code: 'channel-error', reason: 'unknown error (nothing thrown)' });
   });
 
   it('records channel errors, advances beyond them, and continues pumping', async () => {
@@ -221,8 +238,8 @@ describe('comms bridge (temp db)', () => {
     // Even an unminted child name cannot break the mirror.
     expect(mirrorReceived(log, { fromName: 'K.9', to: 'K', body: 'x' }).from).toBe('peer');
     expect(log.deliveries().slice(0, 2).map((d) => ({ messageId: d.messageId, outcome: d.outcome, code: d.code, transport: d.transport }))).toEqual([
-      { messageId: fleet.id, outcome: 'sent', code: 'sendmessage-received', transport: 'sendmessage' },
-      { messageId: unknown.id, outcome: 'sent', code: 'sendmessage-received', transport: 'sendmessage' },
+      { messageId: fleet.id, outcome: 'logged', code: 'sendmessage-received', transport: 'sendmessage' },
+      { messageId: unknown.id, outcome: 'logged', code: 'sendmessage-received', transport: 'sendmessage' },
     ]);
   });
 });

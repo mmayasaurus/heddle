@@ -454,8 +454,8 @@ a `SocketTransport` slots in beside `ChannelTransport` without touching the brok
 - **HED-7:** Claude bridge — `heddle-comms` channel MCP server (structured push via
   `notifications/claude/channel`, pull tools) + the tactical SendMessage layer mirrored into this
   log (built — see Claude bridge).
-- Later: MCP tools (`post_message` / `read_transcript`), WebSocket push, room governance
-  (SPEC §9), needs-human queue (SPEC §10).
+- Later: WebSocket push for the dashboard, room governance / membership (SPEC §9), the
+  needs-human queue (SPEC §10), transports for non-Claude workers beyond pull.
 
 ## Testing
 

@@ -7,7 +7,7 @@ import { dirname, join } from 'node:path';
 import { CommsLog, DEFAULT_COMMS_PATH } from './log.js';
 import { Ledger, DEFAULT_LEDGER_PATH } from '../ledger.js';
 import { Broker } from './broker.js';
-import { ChannelTransport, InboundPump, CHANNEL_INSTRUCTIONS, SENDMESSAGE_LIMITS, sendMessageHint, confirmSent, mirrorSent, mirrorReceived } from './bridge.js';
+import { ChannelTransport, InboundPump, CHANNEL_INSTRUCTIONS, SENDMESSAGE_LIMITS, sendMessageHint, confirmSent, mirrorSent, mirrorReceived, errorMessage } from './bridge.js';
 import { parseAddress } from './address.js';
 import { TIERS, MESSAGE_KINDS, type Tier, type MessageKind } from './types.js';
 
@@ -141,11 +141,13 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       }
       case 'confirm_sent': {
         const who = requireMe();
-        confirmSent(log, num(a.message_id)!, { from: who, ok: a.ok !== false, reason: str(a.reason) });
+        const id = num(a.message_id);
+        if (id === undefined || !Number.isInteger(id) || id < 1) return errorText('confirm_sent: message_id must be a positive integer');
+        confirmSent(log, id, { from: who, ok: a.ok !== false, reason: str(a.reason) });
         return text({ ok: true });
       }
-      case 'log_sent': return text(compact(mirrorSent(log, { from: requireMe(), to: String(a.to), body: String(a.body), summary: str(a.summary) })));
-      case 'log_received': return text(compact(mirrorReceived(log, { fromName: String(a.from_name), fromUds: str(a.from_uds), fromMode: str(a.from_mode), to: requireMe(), body: String(a.body) })));
+      case 'log_sent': return text(compact(mirrorSent(log, { from: requireMe(), to: requireStr(a.to, 'to'), body: requireStr(a.body, 'body'), summary: str(a.summary) })));
+      case 'log_received': return text(compact(mirrorReceived(log, { fromName: requireStr(a.from_name, 'from_name'), fromUds: str(a.from_uds), fromMode: str(a.from_mode), to: requireMe(), body: requireStr(a.body, 'body') })));
       case 'comms_whoami': return text({
         identity: me, sessionName, worker: isWorker, session: me ? log.session(me) : null,
         liveSessions: log.liveSessions(), sendMessageLimits: SENDMESSAGE_LIMITS,
@@ -153,14 +155,14 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       default: return errorText(`unknown tool: ${req.params.name}`);
     }
   } catch (err) {
-    return errorText(`${req.params.name} failed: ${(err as Error).message ?? String(err)}`);
+    return errorText(`${req.params.name} failed: ${errorMessage(err)}`);
   }
 });
 
 async function postMessage(a: Record<string, unknown>) {
   const who = requireMe();
   const res = await broker.post({
-    from: who, to: String(a.to), body: String(a.body), kind: str(a.kind) as MessageKind | undefined,
+    from: who, to: requireStr(a.to, 'to'), body: requireStr(a.body, 'body'), kind: str(a.kind) as MessageKind | undefined,
     requestedTier: (str(a.requested_tier) as Tier | undefined) ?? null, replyTo: num(a.reply_to) ?? null,
     issue: str(a.issue) ?? null, thread: str(a.thread) ?? null, meta: { transport: 'heddle-comms' },
   });
@@ -193,31 +195,35 @@ let stopping = false;
 const bye = () => {
   if (stopping) return;
   stopping = true;
-  try { if (me && pushEnabled) log.unregisterSession(me); } catch (err) { warn(`unregister failed: ${(err as Error).message}`); }
-  try { log.close(); } catch (err) { warn(`log close failed: ${(err as Error).message}`); }
-  try { ledger?.close(); } catch (err) { warn(`ledger close failed: ${(err as Error).message}`); }
+  try { if (me && pushEnabled) log.unregisterSession(me); } catch (err) { warn(`unregister failed: ${errorMessage(err)}`); }
+  try { log.close(); } catch (err) { warn(`log close failed: ${errorMessage(err)}`); }
+  try { ledger?.close(); } catch (err) { warn(`ledger close failed: ${errorMessage(err)}`); }
   process.exit(0);
 };
 process.on('SIGTERM', bye); process.on('SIGINT', bye); process.stdin.on('close', bye);
 
-if (me && pushEnabled) {
-  log.registerSession({
-    address: me, sessionId: process.env.CLAUDE_CODE_SESSION_ID ?? null, sessionName,
-    pid: process.env.CLAUDE_PID ? Number(process.env.CLAUDE_PID) : process.ppid, socket: process.env.CLAUDE_CODE_MESSAGING_SOCKET ?? null,
-  });
-  const inbound = new InboundPump(log, me, (event) => mcp.notification({ method: 'notifications/claude/channel', params: { content: event.content, meta: event.meta } }));
-  const heartbeat = setInterval(() => { try { log.heartbeatSession(me); } catch (err) { warn(`heartbeat failed: ${(err as Error).message}`); } }, 30_000);
-  heartbeat.unref();
-  // One loop, never overlapping: the next cycle is scheduled only after this one finished.
+if (me) {
+  // Holds this identity posted are released by THIS process (also in pull-only mode) — one loop,
+  // never overlapping: the next cycle is scheduled only after this one finished.
+  let inbound: InboundPump | null = null;
+  if (pushEnabled) {
+    log.registerSession({
+      address: me, sessionId: process.env.CLAUDE_CODE_SESSION_ID ?? null, sessionName,
+      pid: process.env.CLAUDE_PID ? Number(process.env.CLAUDE_PID) : process.ppid, socket: process.env.CLAUDE_CODE_MESSAGING_SOCKET ?? null,
+    });
+    inbound = new InboundPump(log, me, (event) => mcp.notification({ method: 'notifications/claude/channel', params: { content: event.content, meta: event.meta } }));
+    const heartbeat = setInterval(() => { try { log.heartbeatSession(me); } catch (err) { warn(`heartbeat failed: ${errorMessage(err)}`); } }, 30_000);
+    heartbeat.unref();
+  } else {
+    warn(`push disabled (HEDDLE_COMMS_PUSH is not 1): ${me} is pull-only — no presence row, no channel events`);
+  }
   const cycle = async () => {
     if (stopping) return;
-    try { await inbound.tick(); } catch (err) { warn(`inbound tick failed: ${(err as Error).message}`); }
-    try { await broker.pump(); } catch (err) { warn(`pump failed: ${(err as Error).message}`); }
+    if (inbound) { try { await inbound.tick(); } catch (err) { warn(`inbound tick failed: ${errorMessage(err)}`); } }
+    try { await broker.pump(); } catch (err) { warn(`pump failed: ${errorMessage(err)}`); }
     setTimeout(cycle, 1_000).unref();
   };
   setTimeout(cycle, 1_000).unref();
-} else if (me) {
-  warn(`push disabled (HEDDLE_COMMS_PUSH is not 1): ${me} is pull-only — no presence row, no channel events`);
 }
 
 await mcp.connect(new StdioServerTransport());
@@ -267,6 +273,10 @@ function compact(r: ReturnType<CommsLog['get']>) {
 }
 
 function str(v: unknown): string | undefined { return typeof v === 'string' && v.length ? v : undefined; }
+function requireStr(v: unknown, name: string): string {
+  if (typeof v !== 'string' || v.length === 0) throw new Error(`${name} must be a non-empty string`);
+  return v;
+}
 function num(v: unknown): number | undefined { return typeof v === 'number' && Number.isFinite(v) ? v : undefined; }
 function text(obj: unknown) { return { content: [{ type: 'text' as const, text: typeof obj === 'string' ? obj : JSON.stringify(obj, null, 2) }] }; }
 function errorText(msg: string) { return { content: [{ type: 'text' as const, text: msg }], isError: true }; }

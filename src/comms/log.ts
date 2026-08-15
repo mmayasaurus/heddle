@@ -439,12 +439,14 @@ export class CommsLog {
 
   /** The session for `address` if its heartbeat is fresher than `staleMs`, else null. */
   liveSession(address: string, staleMs = DEFAULT_SESSION_STALE_MS): SessionRecord | null {
+    requireStaleMs(staleMs);
     const s = this.session(address);
     if (!s) return null;
     return Date.parse(this.now()) - Date.parse(s.heartbeatAt) <= staleMs ? s : null;
   }
 
   liveSessions(staleMs = DEFAULT_SESSION_STALE_MS): SessionRecord[] {
+    requireStaleMs(staleMs);
     const cutoff = new Date(Date.parse(this.now()) - staleMs).toISOString();
     return (this.db.prepare('SELECT * FROM sessions WHERE heartbeat_at >= ? ORDER BY address').all(cutoff) as unknown as SRow[]).map(toSession);
   }
@@ -540,6 +542,10 @@ export class CommsLog {
   private touch(address: string, ts: string): void {
     this.db.prepare('UPDATE participants SET last_seen = ? WHERE address = ?').run(ts, address);
   }
+}
+
+function requireStaleMs(v: number): void {
+  if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) throw new Error('staleMs must be a finite, non-negative number of milliseconds');
 }
 
 // ------------------------------------------------------------------ transcript helpers

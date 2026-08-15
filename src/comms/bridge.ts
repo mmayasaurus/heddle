@@ -30,6 +30,13 @@ import type { MessageRecord } from './types.js';
  *     schema is not — so heddle does not write to it (Maya's read-the-docs rule).
  */
 
+/** Safe error → string, whatever was thrown (Error, string, null, …). */
+export function errorMessage(err: unknown): string {
+  if (err instanceof Error) return err.message || err.name;
+  if (err === null || err === undefined) return 'unknown error (nothing thrown)';
+  return typeof err === 'string' ? err : JSON.stringify(err);
+}
+
 /** Documented limits of the tactical layer — surfaced to operators and in COMMS.md. */
 export const SENDMESSAGE_LIMITS = [
   'Plain text only — no structured fields; tier framing is the text frame the broker renders.',
@@ -134,7 +141,7 @@ export class InboundPump {
           this.log.recordDelivery({ messageId: r.id, from: r.from, to: this.me, outcome: 'sent', code: 'channel-written', transport: 'channel' });
           emitted += 1;
         } catch (err) {
-          this.log.recordDelivery({ messageId: r.id, from: r.from, to: this.me, outcome: 'failed', code: 'channel-error', reason: (err as Error).message ?? String(err), transport: 'channel' });
+          this.log.recordDelivery({ messageId: r.id, from: r.from, to: this.me, outcome: 'failed', code: 'channel-error', reason: errorMessage(err), transport: 'channel' });
           failed += 1;
         }
       }
@@ -216,6 +223,7 @@ export function mirrorReceived(
       ...(input.fromUds ? { fromUds: input.fromUds } : {}), ...(input.fromMode ? { fromMode: input.fromMode } : {}),
     },
   });
-  log.recordDelivery({ messageId: rec.id, from: rec.from, to: rec.to, outcome: 'sent', code: 'sendmessage-received', transport: 'sendmessage' });
+  // An inbound mirror is a record of receipt, not an injection: `logged` (no delivery attempted).
+  log.recordDelivery({ messageId: rec.id, from: rec.from, to: rec.to, outcome: 'logged', code: 'sendmessage-received', transport: 'sendmessage' });
   return rec;
 }
