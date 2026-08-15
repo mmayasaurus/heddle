@@ -497,7 +497,8 @@ savings analytics.
 - **Layer detail:** `docs/ARCHITECTURE.md`. **Phase-1 mechanics:** `docs/ORCHESTRATION.md`.
   **Dashboard UI vision:** `docs/DASHBOARD.md` (tmux parts superseded by §13 here).
 - **Routing policy:** `routing/routing.v0.yaml`. **Skill packs:** `skills/`.
-- **Code:** `src/adapters/*.ts` (codex, cursor, agy, claude protocol) and
+- **Comms broker (built so far):** `docs/COMMS.md` — log schema, address grammar, `CommsLog` API.
+- **Code:** `src/adapters/*.ts` (codex, cursor, agy, claude protocol), `src/comms/*.ts` (broker) and
   `src/{dispatch,routing,ledger,skillpacks,mcp,env,cli,types,guidance,hook-dispatch-guidance,mcp-server}.ts`;
   tests `test/*.test.ts` (`npm test`).
 - **Research detail & decision log (session-durable):** memory `project-agent-orchestration-lane`.

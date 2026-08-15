@@ -10,9 +10,11 @@ sub-tasks, and dispatch each sub-task to the best-fit model — running on **you
 subscriptions, never per-token API billing** — with task-specific skill packs, real inter-agent
 messaging, and a localhost dashboard for full visibility.
 
-**Status: Phase 1 (orchestration) — adapters verified, dispatcher next.** Verified invocation contracts for Codex and
-Cursor are encoded in `src/adapters/`; the routing table schema is drafted; the comms broker
-(Phase 2) and dashboard (Phase 3) are designed but not yet built. See `docs/ARCHITECTURE.md`.
+**Status: Phase 1 (orchestration) built — adapters, routing, dispatcher, ledger, MCP server verified;
+Phase 2 (comms broker) in progress.** Verified invocation contracts for Codex and Cursor are encoded in
+`src/adapters/`; the comms broker's durable log + participant registry exist (`docs/COMMS.md`), with
+envelopes / delivery / bridges landing ticket by ticket (HED-5/6/7); the dashboard (Phase 3) is
+designed but not yet built. See `docs/ARCHITECTURE.md`.
 
 **Master spec: `docs/SPEC.md`** — the single source of truth (read this first). Detail:
 `docs/ORCHESTRATION.md` (Phase-1 mechanics) · `docs/DASHBOARD.md` (UI vision) ·
@@ -51,6 +53,7 @@ project-agnostic.
 
 ```
 docs/ARCHITECTURE.md   five-layer design: workers · routing · broker · ownership · dashboard
+docs/COMMS.md          comms broker: append-only message log, addresses, participant registry (HED-4)
 docs/LANDMINES.md      live-verified per-CLI gotchas (read before touching adapters)
 routing/routing.v0.yaml routing table: task-class → provider/model/effort/skills(+why, edits_code)
 src/types.ts           WorkerAdapter contract (ports-and-adapters)
@@ -70,6 +73,8 @@ nudges on no-task-fit-packs / missing opt-in (never blocks). Semantics + registr
 
 Node **≥ 22.12** (`node:sqlite` needs 22.5+; vitest 4's vite/rolldown declare `>=22.12.0` —
 `package.json` `engines` pins it so older 22.x fail fast at install instead of mid-test).
+
+CI, scanners and the review-sweep rules: [`docs/CI.md`](docs/CI.md).
 
 ```bash
 npm install
