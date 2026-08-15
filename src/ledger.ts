@@ -83,11 +83,6 @@ CREATE INDEX IF NOT EXISTS idx_dispatches_started ON dispatches(started_at);
 `;
 
 /**
- * Columns added after the first schema shipped. `CREATE TABLE IF NOT EXISTS` never alters an
- * existing table, so each is added with ALTER TABLE when missing — a real ledger (~/.heddle) predates
- * them. Additive only; the dashboard reads columns by name, so extra columns are safe.
- */
-/**
  * Add every missing column. `existing` is the column set observed BEFORE the ALTERs — several heddle
  * processes may open a pre-migration ledger at once (MCP servers, CLIs, the dashboard); if another
  * one added a column between our check and our ALTER, SQLite says "duplicate column name" — that is
@@ -109,6 +104,11 @@ export function applyLedgerMigrations(db: DatabaseSync, existing: Set<string>): 
   return { applied, alreadyPresent };
 }
 
+/**
+ * Columns added after the first schema shipped. `CREATE TABLE IF NOT EXISTS` never alters an
+ * existing table, so each is added with ALTER TABLE when missing — a real ledger (~/.heddle) predates
+ * them. Additive only; the dashboard reads columns by name, so extra columns are safe.
+ */
 const MIGRATIONS: { column: string; ddl: string }[] = [
   { column: 'refusal', ddl: 'ALTER TABLE dispatches ADD COLUMN refusal TEXT' },
 ];

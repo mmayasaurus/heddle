@@ -105,6 +105,9 @@ describe('dispatch — review fixes', () => {
     );
     expect(explicit.refusal?.code).toBe('not-dispatchable');
     expect(explicit.refusal?.reason).toContain('codex/gpt-5.6-luna');
+    // structured fields + ledger row name the route the caller actually asked for
+    expect(explicit).toMatchObject({ taskClass: 'orchestration', provider: 'codex', model: 'gpt-5.6-luna' });
+    expect(ledger.recent(1)[0]).toMatchObject({ task_class: 'orchestration', provider: 'codex', model: 'gpt-5.6-luna', refusal: 'not-dispatchable' });
     expect(fake.calls).toHaveLength(0);
   });
 
