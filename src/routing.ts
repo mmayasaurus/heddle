@@ -116,8 +116,17 @@ export function resolveRoute(table: RoutingTable, taskClass: string): Route {
   // vocabulary is per provider (codex minimal…xhigh vs agy low|medium|high; cursor bakes it into
   // the model id), so a primary's effort would be wrong or rejected on another provider.
   const fb = toTarget(node.fallback, `task_classes.${taskClass}.fallback`);
-  if (fb && (!fb.provider || !fb.model)) {
-    throw new Error(`task class "${taskClass}": fallback is missing provider or model`);
+  if (fb) {
+    if (!fb.provider || !fb.model) {
+      throw new Error(`task class "${taskClass}": fallback is missing provider or model`);
+    }
+    // Same policy checks as the primary: a fallback into an unknown/excluded provider is a broken
+    // table, surfaced at resolve time — not after the primary already failed.
+    const fbCfg = table.providers[fb.provider];
+    if (!fbCfg) throw new Error(`task class "${taskClass}": fallback names unknown provider "${fb.provider}"`);
+    if (fbCfg.status === 'excluded') {
+      throw new Error(`task class "${taskClass}": fallback routes to excluded provider "${fb.provider}"`);
+    }
   }
   const fallback = fb ? { ...fb, skills: fb.skills ?? primary.skills, mcp: fb.mcp ?? primary.mcp } : undefined;
   return {

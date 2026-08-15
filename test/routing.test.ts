@@ -183,3 +183,25 @@ task_classes:
     expect(providerExecution(table, 'no-such-provider')).toBeUndefined();
   });
 });
+
+describe('resolveRoute — fallback provider policy checks', () => {
+  const dirs: string[] = [];
+  afterEach(() => { for (const d of dirs) rmSync(d, { recursive: true, force: true }); dirs.length = 0; });
+  function table(yaml: string) {
+    const dir = mkdtempSync(join(tmpdir(), 'heddle-routing-fbpolicy-'));
+    dirs.push(dir);
+    const path = join(dir, 'routing.yaml');
+    writeFileSync(path, yaml);
+    return loadRouting(path);
+  }
+
+  it('rejects a fallback that names a provider the table does not declare', () => {
+    const t = table('providers: { codex: {} }\ntask_classes:\n  synth: { provider: codex, model: m1, fallback: { provider: nope, model: x } }\n');
+    expect(() => resolveRoute(t, 'synth')).toThrow(/fallback names unknown provider "nope"/);
+  });
+
+  it('rejects a fallback into an excluded provider at resolve time, not after the primary fails', () => {
+    const t = table('providers: { codex: {}, ollama-cloud: { status: excluded } }\ntask_classes:\n  synth: { provider: codex, model: m1, fallback: { provider: ollama-cloud, model: x } }\n');
+    expect(() => resolveRoute(t, 'synth')).toThrow(/fallback routes to excluded provider "ollama-cloud"/);
+  });
+});
