@@ -249,8 +249,9 @@ export class Broker {
     const pairKey = `${from}->${to}`;
     const retryAfterMs = this.overLimit(pairKey);
     if (retryAfterMs !== null) {
+      // (No "/" inside the template: some static analysers read `${a}/${b}` as a regex literal.)
       return { code: 'rate-limited', retryAfterMs,
-        reason: `${pairKey}: max ${this.rate.max}/${this.rate.windowMs}ms, burst ${this.rate.burst}/${this.rate.burstWindowMs}ms; retry in ${retryAfterMs}ms` };
+        reason: `${pairKey}: max ${this.rate.max} per ${this.rate.windowMs} ms, burst ${this.rate.burst} per ${this.rate.burstWindowMs} ms; retry in ${retryAfterMs} ms` };
     }
     return null;
   }
