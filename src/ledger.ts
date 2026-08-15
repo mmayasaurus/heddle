@@ -33,6 +33,8 @@ export interface DispatchRecord {
   /** Provider-native resume handle, so a worker can be continued. */
   sessionId: string | null;
   ok: number;
+  /** Failure reason on ok=0; on ok=1 a `cleanup-warning:`-prefixed note means the work succeeded
+   *  but post-run restore had a problem (non-fatal by convention). */
   error: string | null;
   inputTokens: number | null;
   cachedInputTokens: number | null;
@@ -160,11 +162,14 @@ const MIGRATIONS: { column: string; ddl: string }[] = [
  */
 const LINEAGE_TRIGGER = `
 CREATE TRIGGER IF NOT EXISTS dispatches_lineage_immutable
-BEFORE UPDATE OF id, orchestrator ON dispatches
+BEFORE UPDATE OF id, orchestrator, identity_source ON dispatches
 BEGIN
-  SELECT RAISE(ABORT, 'dispatches.id/orchestrator are immutable (lineage)');
+  SELECT RAISE(ABORT, 'dispatches.id/orchestrator/identity_source are immutable (lineage)');
 END;
 `;
+
+/** Trigger bodies are frozen at CREATE; drop the v1 (id, orchestrator only) body so the widened one applies. */
+const LINEAGE_TRIGGER_DROP_V1 = "DROP TRIGGER IF EXISTS dispatches_lineage_immutable;";
 
 export class Ledger {
   private db: DatabaseSync;
@@ -178,12 +183,25 @@ export class Ledger {
     this.db.exec('PRAGMA busy_timeout = 5000;');
     this.db.exec('PRAGMA journal_mode = WAL;');
     this.db.exec('PRAGMA foreign_keys = ON;'); // reviews.dispatch_id must be a real dispatch
-    this.db.exec(SCHEMA);
-    const have = new Set(
-      (this.db.prepare('PRAGMA table_info(dispatches)').all() as { name: string }[]).map((c) => c.name),
-    );
-    applyLedgerMigrations(this.db, have);
-    this.db.exec(LINEAGE_TRIGGER);
+    // One IMMEDIATE transaction around schema + migrations + trigger: concurrent openers of a
+    // pre-migration db serialize here instead of interleaving ALTERs (busy_timeout covers the wait;
+    // duplicate-column tolerance in applyLedgerMigrations covers a winner that got there first).
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      this.db.exec(SCHEMA);
+      const have = new Set(
+        (this.db.prepare('PRAGMA table_info(dispatches)').all() as { name: string }[]).map((c) => c.name),
+      );
+      applyLedgerMigrations(this.db, have);
+      this.db.exec(LINEAGE_TRIGGER_DROP_V1);
+      this.db.exec(LINEAGE_TRIGGER);
+      this.db.exec('COMMIT');
+    } catch (err) {
+      // ROLLBACK itself can only fail when no transaction is active (the original error already
+      // aborted it) — the original error is the signal and propagates either way.
+      try { this.db.exec('ROLLBACK'); } catch { /* not in a transaction */ }
+      throw err;
+    }
   }
 
   /** Record a dispatch at start; returns the row id to finish() later. */
@@ -240,9 +258,11 @@ export class Ledger {
   startUnderCap(
     r: DispatchStartRecord, cap: { max: number; staleAfterMs: number },
   ): { id: number; refused: false } | { id: number; refused: true; inFlight: number; reason: string } {
-    const now = new Date().toISOString();
     this.db.exec('BEGIN IMMEDIATE');
     try {
+      // Stamped AFTER the lock is held: a wait on a writer must not make this row look older (and
+      // possibly "stale") than it is.
+      const now = new Date().toISOString();
       const inFlight = this.inFlightCount(r.orchestrator, cap.staleAfterMs);
       if (inFlight >= cap.max) {
         const who = r.orchestrator ?? '(unbound/anonymous)';

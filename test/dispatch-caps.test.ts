@@ -90,9 +90,21 @@ describe('dispatch — structural caps', () => {
     } finally {
       if (prev === undefined) delete process.env.HEDDLE_ROUTING; else process.env.HEDDLE_ROUTING = prev;
     }
+    // capability-FIT fallback: scaffold's primary (cursor) cannot enforce `net`, its declared codex
+    // fallback can — the dispatch routes there instead of dying on the refusal.
     const cursor = fakeAdapter();
-    const cursorRefusal = await dispatch({ taskClass: 'scaffold', prompt: 'x', cwd, capabilities: ['net'], identity: unbound }, ledger, () => cursor.adapter);
-    expect(cursorRefusal.refusal?.code).toBe('capability-denied'); expect(cursor.calls).toHaveLength(0);
+    const fit = await dispatch({ taskClass: 'scaffold', prompt: 'x', cwd, capabilities: ['net'], identity: unbound }, ledger, () => cursor.adapter);
+    expect(fit.ok).toBe(true);
+    expect(fit.refusal).toBeUndefined();
+    expect(cursor.calls).toHaveLength(1);
+    expect(cursor.calls[0].opts.model).toBe('gpt-5.6-luna');
+    expect(cursor.calls[0].opts.capabilities).toEqual(['net']);
+    expect(fit.usedFallback).toBe(true);
+    expect(ledger.recent(1)[0]).toMatchObject({ model: 'gpt-5.6-luna', capabilities: 'net', fell_back_from: 'cursor/composer-2.5 (capability-unenforceable)' });
+    // …but a TERMINAL kind (unknown token) never falls back, even with a fallback declared
+    const bogus = fakeAdapter();
+    const terminal = await dispatch({ taskClass: 'scaffold', prompt: 'x', cwd, capabilities: ['fly'], identity: unbound }, ledger, () => bogus.adapter);
+    expect(terminal.refusal?.code).toBe('capability-denied'); expect(bogus.calls).toHaveLength(0);
   });
 
   it('enforces named concurrency caps independently and ignores stale rows', async () => {

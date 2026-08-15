@@ -49,12 +49,19 @@ describe('dispatch — headless Claude workers', () => {
     expect(fake.calls[0].opts.systemPromptAppend).toContain('### code-discovery'); expect(fake.calls[0].opts.systemPromptAppend).toContain('### quality-gate'); expect(outcome.ok).toBe(true);
   });
 
-  it('passes enforceable Claude browse capabilities through and refuses unenforceable net capability requests', async () => {
+  it('passes enforceable Claude browse capabilities through, and net routes to the enforcing codex fallback (capability-fit)', async () => {
     const fake = fakeAdapter(undefined, { readAgents: false }); const ledger = tempLedger();
     const granted = await dispatch({ taskClass: 'research-summarize', prompt: 'x', cwd: tempDir(), identity: unbound, capabilities: ['browse'], accounts, caps: { claude: claudeCaps([{ id: 'acct1', used: 1 }]) } }, ledger, () => fake.adapter);
     expect(fake.calls[0].opts.capabilities).toEqual(['browse']); expect(ledger.recent(1)[0].capabilities).toBe('browse');
-    const denied = await dispatch({ taskClass: 'research-summarize', prompt: 'x', cwd: tempDir(), identity: unbound, capabilities: ['net'], accounts, caps: { claude: claudeCaps([{ id: 'acct1', used: 1 }]) } }, ledger, () => fake.adapter);
-    expect(denied.refusal?.code).toBe('capability-denied'); expect(fake.calls).toHaveLength(1);
+    // claude cannot enforce `net` (no sandbox), but research-summarize's declared codex fallback can —
+    // capability-fit routing runs it there instead of a terminal refusal.
+    const fit = await dispatch({ taskClass: 'research-summarize', prompt: 'x', cwd: tempDir(), identity: unbound, capabilities: ['net'], accounts, caps: { claude: claudeCaps([{ id: 'acct1', used: 1 }]) } }, ledger, () => fake.adapter);
+    expect(fit.ok).toBe(true);
+    expect(fit.refusal).toBeUndefined();
+    expect(fake.calls).toHaveLength(2);
+    expect(fake.calls[1].opts.model).toBe('gpt-5.6-luna');
+    expect(fake.calls[1].opts.capabilities).toEqual(['net']);
+    expect(ledger.recent(1)[0]).toMatchObject({ model: 'gpt-5.6-luna', capabilities: 'net', fell_back_from: 'claude/haiku (capability-unenforceable)' });
   });
 
   it('stamps Claude worker environments with the worker marker and ledger dispatch id', async () => {

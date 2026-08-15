@@ -48,7 +48,10 @@ export class CodexAdapter implements WorkerAdapter {
     const args = ['exec', '--json', '--skip-git-repo-check',
       '--sandbox', sandbox, '-c', 'approval_policy="never"'];
     if (caps.has('net')) args.push('-c', 'sandbox_workspace_write.network_access=true');
-    if (caps.has('browse')) args.push('-c', 'web_search="live"');
+    // web_search is ALWAYS pinned: "live" only under a browse grant, else "cached" — because
+    // danger-full-access (exec-privileged) would otherwise flip codex's default to live and hand a
+    // privileged worker browsing it was never granted (LANDMINES).
+    args.push('-c', caps.has('browse') ? 'web_search="live"' : 'web_search="cached"');
     if (this.ignoreUserConfig) args.push('--ignore-user-config');
     if (opts.effort) args.push('-c', `model_reasoning_effort="${opts.effort}"`);
     if (opts.resume) args.push('resume', opts.resume);
