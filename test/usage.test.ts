@@ -81,3 +81,35 @@ describe('usage cap readers', () => {
     expect(bindingWindow({ ...mirror.claude, source: 'none' })).toBeNull(); expect(bindingWindow({ ...mirror.claude, stale: true })).toBeNull();
   });
 });
+
+describe('readClaudeTap — window-keeper anchors', () => {
+  it('treats a live keeper anchor as a fresh ~0% capture for an account the tap has never seen, and lets a fresher tap win', async () => {
+    const { mkdtempSync, writeFileSync, rmSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const { readClaudeTap } = await import('../src/usage.js');
+    const dir = mkdtempSync(join(tmpdir(), 'heddle-keeper-'));
+    try {
+      const nowS = 1_800_000_000;
+      // acct3: only a keeper anchor (window started 10 min ago, resets in 4h50m)
+      writeFileSync(join(dir, 'claude-acct3.keeper.json'), JSON.stringify({ account: 'acct3', startedAt: nowS - 600, resets_at: nowS + 17_400, used: null, source: 'keeper-ping' }));
+      // acct2: an OLD tap file (2h) and a NEWER keeper anchor (5 min) → keeper wins
+      writeFileSync(join(dir, 'claude-acct2.json'), JSON.stringify({ model: 'claude-fable-5', rate_limits: { five_hour: { used_percentage: 40, resets_at: nowS + 3600 }, seven_day: { used_percentage: 10, resets_at: nowS + 86400 } }, capturedAt: nowS - 7200 }));
+      writeFileSync(join(dir, 'claude-acct2.keeper.json'), JSON.stringify({ account: 'acct2', startedAt: nowS - 300, resets_at: nowS + 17_700, used: null, source: 'keeper-ping' }));
+      // acct1: fresh tap (1 min) and an older keeper anchor → tap wins
+      writeFileSync(join(dir, 'claude-acct1.json'), JSON.stringify({ model: 'claude-fable-5', rate_limits: { five_hour: { used_percentage: 64, resets_at: nowS + 3000 }, seven_day: { used_percentage: 21, resets_at: nowS + 80000 } }, capturedAt: nowS - 60 }));
+      writeFileSync(join(dir, 'claude-acct1.keeper.json'), JSON.stringify({ account: 'acct1', startedAt: nowS - 900, resets_at: nowS + 17_100, used: null, source: 'keeper-ping' }));
+      // acct4: a keeper anchor whose window already rolled over → unknown
+      writeFileSync(join(dir, 'claude-acct4.keeper.json'), JSON.stringify({ account: 'acct4', startedAt: nowS - 20_000, resets_at: nowS - 2000, used: null, source: 'keeper-ping' }));
+      const caps = readClaudeTap(dir, nowS)!;
+      const by = Object.fromEntries(caps.accounts.map((a) => [a.id, a]));
+      expect(Object.keys(by).sort()).toEqual(['acct1', 'acct2', 'acct3', 'acct4']);
+      expect(by.acct3).toMatchObject({ stale: false, fiveHour: { usedPercentage: 0, resetsAt: nowS + 17_400 }, noteCodes: ['claude.keeperAnchor'] });
+      expect(by.acct2).toMatchObject({ stale: false, fiveHour: { usedPercentage: 0, resetsAt: nowS + 17_700 }, noteCodes: ['claude.keeperAnchor'] });
+      expect(by.acct1).toMatchObject({ stale: false, fiveHour: { usedPercentage: 64 }, noteCodes: [] });
+      expect(by.acct4).toMatchObject({ stale: true, fiveHour: { usedPercentage: null }, noteCodes: ['claude.noCapture'] });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

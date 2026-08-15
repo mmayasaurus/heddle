@@ -162,7 +162,13 @@ src/capaware.ts), which ends the manual log-out/log-in juggling:
   `CLAUDE_CONFIG_DIR` for it: setting it explicitly to `~/.claude` changes
   resolution and `claude auth status` reports logged-out, verified by R).
   Per-account caps come from the tap's `~/.heddle/usage/claude-<acctId>.json`
-  (or the dashboard's `limits.json` account rows).
+  (or the dashboard's `limits.json` account rows), plus the window-keeper's
+  anchor `claude-<acctId>.keeper.json` (`{account, startedAt, resets_at, used:
+  null, source:"keeper-ping"}` — written when the keeper starts a 5h window with
+  a headless ping the tap cannot see): while its `resets_at` is in the future it
+  counts as a fresh capture at ~0 % (`noteCode claude.keeperAnchor`); the
+  freshest of tap vs keeper wins. Without it, accounts that only ever get keeper
+  pings would stay unknown and never be picked.
 - **Selection**: the account with the lowest 5h used% among those with a
   FRESH capture; `account_pin` / `--account <id>` overrides; nothing fresh → the
   default login. The ledger `account` column records the account actually
