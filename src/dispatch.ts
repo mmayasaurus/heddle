@@ -100,6 +100,8 @@ export interface DispatchOutcome extends WorkerResult {
   execution?: string;
   /** Present iff heddle refused to run the dispatch (ok is then false). */
   refusal?: DispatchRefusal;
+  /** Set on capability-denied refusals: which check failed (`unenforceable` means a fallback may fit). */
+  capabilityRefusalKind?: 'unknown-token' | 'operator-gate' | 'opt-in' | 'unenforceable';
 }
 
 /** Resolves a provider name to its adapter. Injectable into dispatch() so tests can run the full
@@ -130,6 +132,8 @@ interface DispatchContext {
   identity: BoundIdentity;
   attribution: ReturnType<typeof attributeDispatch>;
   caps: StructuralCaps;
+  /** Why this route ran (recorded as route_reason on later HED-67 branches; here: capability-fit notes). */
+  routeReason?: string;
 }
 
 function baseRecord(
@@ -188,8 +192,10 @@ async function runTarget(
   if (caps.refusal) {
     return refusalOutcome(ctx, req, route.taskClass, target, skills, {
       code: caps.refusal.code, reason: caps.refusal.reason,
-      instruction: 'Drop the capability, or dispatch to a provider that can enforce it (see docs/MODELS.md "Capabilities").',
-    }, { usedFallback: fellBackFrom !== null }, undefined, fellBackFrom);
+      instruction: caps.refusal.kind === 'unenforceable'
+        ? 'Dispatch to a provider that can enforce it (class + explicit provider/model), or drop the capability (see docs/MODELS.md "Capabilities").'
+        : 'Drop the capability, or fix the call (see docs/MODELS.md "Capabilities").',
+    }, { usedFallback: fellBackFrom !== null, capabilityRefusalKind: caps.refusal.kind } as Partial<DispatchOutcome>, undefined, fellBackFrom);
   }
 
   // HED-19: fail fast, BEFORE a ledger row exists, on anything materialization would reject —
@@ -396,6 +402,20 @@ export async function dispatch(
 
   // ---- Run (capabilities + max-children are decided per target inside runTarget) --------------
   const primary = await runTarget(target, req, ctx, route, null);
+  // Capability-fit fallback: when the PRIMARY provider merely lacks the knob (`unenforceable`) and
+  // the class declares a fallback whose provider CAN enforce every requested capability, route there
+  // — that's fit-routing, same spirit as the model fallback. Caller/operator errors stay terminal.
+  if (primary.refusal?.code === 'capability-denied' && primary.capabilityRefusalKind === 'unenforceable'
+      && !req.noFallback && fallback) {
+    const fbCaps = decideCapabilities(fallback.provider, req.capabilities, req.optIn === true, capabilityPolicy(table));
+    if (!fbCaps.refusal) {
+      ctx.routeReason = `${ctx.routeReason ?? ''}; capability-fit fallback: ${target.provider} cannot enforce [${(req.capabilities ?? []).join(', ')}] → ${fallback.provider}/${fallback.model}`.replace(/^; /, '');
+      const fbExec = providerExecution(table, fallback.provider);
+      if (fbExec !== 'in-session-subagent') {
+        return runTarget(fallback, req, ctx, route, `${route.provider}/${route.model} (capability-unenforceable)`);
+      }
+    }
+  }
   if (primary.ok || primary.refusal || req.noFallback || !fallback) return primary;
 
   // Primary failed and the table names a fallback — try it, recording the origin so the ledger

@@ -38,7 +38,13 @@ export interface CapabilityDecision {
   /** De-duplicated grants in allowlist order — what the adapter will enforce and the ledger records. */
   granted: Capability[];
   /** Present iff the request must be refused (unknown token, missing opt-in, or unenforceable). */
-  refusal?: { code: 'capability-denied'; reason: string };
+  refusal?: {
+    code: 'capability-denied';
+    reason: string;
+    /** `unenforceable` = THIS provider lacks the knob (another provider may enforce it — the class
+     *  fallback is tried); `unknown-token` / `operator-gate` / `opt-in` = caller/operator errors (terminal). */
+    kind: 'unknown-token' | 'operator-gate' | 'opt-in' | 'unenforceable';
+  };
 }
 
 /** Operator-owned switches from the routing YAML (`policy.capabilities`). */
@@ -65,7 +71,7 @@ export function decideCapabilities(
     return {
       granted: [],
       refusal: {
-        code: 'capability-denied',
+        code: 'capability-denied', kind: 'unknown-token',
         reason: `unknown capability ${unknown.map((u) => `"${u}"`).join(', ')} — the allowlist is ` +
           `${CAPABILITIES.join(', ')}; a dispatch cannot mint capabilities heddle does not know.`,
       },
@@ -80,7 +86,7 @@ export function decideCapabilities(
       return {
         granted: [],
         refusal: {
-          code: 'capability-denied',
+          code: 'capability-denied', kind: 'operator-gate',
           reason: 'capability "exec-privileged" (no sandbox: codex danger-full-access) is disabled by the ' +
             'operator — routing.v0.yaml policy.capabilities.allow_exec_privileged is not true. A tool ' +
             'argument cannot enable it.',
@@ -91,7 +97,7 @@ export function decideCapabilities(
       return {
         granted: [],
         refusal: {
-          code: 'capability-denied',
+          code: 'capability-denied', kind: 'opt-in',
           reason: 'capability "exec-privileged" runs the worker OUTSIDE its sandbox (codex ' +
             'danger-full-access: can push to remotes, run deploy scripts, touch $HOME) and additionally ' +
             'requires `opt_in: true` on the call.',
@@ -106,7 +112,7 @@ export function decideCapabilities(
     return {
       granted: [],
       refusal: {
-        code: 'capability-denied',
+        code: 'capability-denied', kind: 'unenforceable',
         reason: `provider "${provider}" cannot enforce capability ${unenforceable.map((c) => `"${c}"`).join(', ')} ` +
           `(no CLI flag heddle can pass — see docs/LANDMINES.md); refusing rather than pretending the ` +
           `worker is fenced. Enforceable on ${provider}: ${enforceable.length ? enforceable.join(', ') : 'none'}` +
