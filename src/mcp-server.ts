@@ -2,7 +2,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
-import { dispatch, planDispatch } from './dispatch.js';
+import { dispatch, planDispatch, summarizePlan } from './dispatch.js';
 import { Ledger } from './ledger.js';
 import { loadRouting, describeTaskClasses } from './routing.js';
 import { listPacks, withMandatoryPacks } from './skillpacks.js';
@@ -131,19 +131,7 @@ server.tool(
         taskClass: a.task_class, provider: a.provider, model: a.model, prompt: '(dry run)',
         cwd: process.cwd(), optIn: a.opt_in, env: Object.keys(env).length ? env : undefined, identity: IDENTITY,
       });
-      return text({
-        task_class: plan.route.taskClass,
-        would_run: plan.decision.refusal ? null : `${plan.target.provider}/${plan.target.model}`,
-        execution: plan.execution ?? null,
-        routed_away_for_cap: plan.decision.routedAwayForCap,
-        remaining_fallback: plan.fallback ? `${plan.fallback.provider}/${plan.fallback.model}` : null,
-        route_reason: plan.decision.routeReason,
-        refusal: plan.decision.refusal ?? null,
-        checks: plan.decision.checks,
-        account: plan.account,
-        account_advice: plan.accountAdvice?.line ?? null,
-        skills: plan.skillsForRefusal,
-      });
+      return text(summarizePlan(plan));
     } catch (err) {
       return errorText(`plan_dispatch failed: ${err instanceof Error ? err.message : String(err)}`);
     }
