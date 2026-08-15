@@ -274,8 +274,14 @@ export class Broker {
       const retryAfterMs = Math.max(0, Date.parse(floor.expiresAt) - this.now());
       return { code: 'floor-held', reason: `${floor.holder} holds the floor of ${room} (lease ends ${floor.expiresAt}); no interleaved replies`, retryAfterMs };
     }
-    if (holdFloor) this.log.acquireFloor(room, from);
-    else if (floor && floor.holder === from) this.log.acquireFloor(room, from); // a holder's post renews its lease
+    if (holdFloor || (floor && floor.holder === from)) {
+      // Take (or renew) the floor atomically; losing the race to another holder is a floor-held refusal.
+      const got = this.log.acquireFloor(room, from);
+      if (!got) {
+        const now = this.log.floor(room);
+        return { code: 'floor-held', reason: `${now?.holder ?? 'someone'} took the floor of ${room} first`, retryAfterMs: now ? Math.max(0, Date.parse(now.expiresAt) - this.now()) : 0 };
+      }
+    }
     return null;
   }
 

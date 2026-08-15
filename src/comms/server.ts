@@ -46,7 +46,7 @@ export interface CommsServerOptions {
   log?: CommsLog;
   ledger?: LineageSource | null;
   warn?: (message: string) => void;
-  /** Called with a channel event; the bin sends notifications/claude/channel. */
+  /** Epoch-ms clock passed to the Broker (rate limits, holds, floor leases); injectable for tests. */
   now?: () => number;
 }
 
@@ -114,8 +114,12 @@ export function resolveCommsIdentity(env: NodeJS.ProcessEnv, cwd: string, warn: 
   for (;;) {
     const f = join(dir, '.fleet-agent');
     if (existsSync(f)) {
-      const v = bindable(readFileSync(f, 'utf8'));
-      if (v) return { identity: v, isOperator: false };
+      try {
+        const v = bindable(readFileSync(f, 'utf8'));
+        if (v) return { identity: v, isOperator: false };
+      } catch (err) {
+        warn(`could not read ${f}: ${errorMessage(err)} — continuing unbound`);
+      }
     }
     const up = dirname(dir);
     if (up === dir) return { identity: null, isOperator: false };
