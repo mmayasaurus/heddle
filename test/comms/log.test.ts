@@ -46,10 +46,15 @@ describe('CommsLog (temp db)', () => {
     expect(log.count()).toBe(1);
   });
 
-  it('records reply_to / issue / dispatch_id / kind when given', () => {
-    const q = log.append({ from: 'K', to: 'R', body: 'question?', issue: 'HED-4' });
-    const a = log.append({ from: 'R', to: 'K', body: 'answer.', kind: 'status', replyTo: q.id, dispatchId: 42, issue: 'HED-4' });
-    expect(a).toMatchObject({ kind: 'status', replyTo: q.id, dispatchId: 42, issue: 'HED-4' });
+  it('records reply_to / issue / thread / dispatch_id / kind when given, and threads are queryable', () => {
+    const q = log.append({ from: 'K', to: 'R', body: 'question?', issue: 'HED-4', thread: 'HED-4/review-1' });
+    const a = log.append({ from: 'R', to: 'K', body: 'answer.', kind: 'status', replyTo: q.id, dispatchId: 42, issue: 'HED-4', thread: 'HED-4/review-1' });
+    log.append({ from: 'R', to: 'K', body: 'unrelated', thread: 'HED-4/review-2' });
+    log.append({ from: 'R', to: 'K', body: 'no thread' });
+    expect(a).toMatchObject({ kind: 'status', replyTo: q.id, dispatchId: 42, issue: 'HED-4', thread: 'HED-4/review-1' });
+    expect(log.transcript({ pair: ['K', 'R'] }, { thread: 'HED-4/review-1' }).map((m) => m.body)).toEqual(['question?', 'answer.']);
+    expect(log.transcript({ all: true }, { thread: 'HED-4/review-2' }).map((m) => m.body)).toEqual(['unrelated']);
+    expect(log.get(4)?.thread).toBeNull();
   });
 
   it('refuses garbage before it reaches the database', () => {
@@ -60,6 +65,13 @@ describe('CommsLog (temp db)', () => {
     expect(() => log.append({ from: 'K', to: 'R', body: '' })).toThrow(/non-empty/);
     expect(() => log.append({ from: 'K', to: 'R', body: 'x', kind: 'gossip' as never })).toThrow(/unknown message kind/);
     expect(() => log.append({ from: 'K', to: 'R', body: 'x', replyTo: 1.5 })).toThrow(/replyTo/);
+    expect(() => log.append({ from: 'K', to: 'R', body: 'x', replyTo: 0 })).toThrow(/positive message id/);
+    expect(() => log.append({ from: 'K', to: 'R', body: 'x', replyTo: 999 })).toThrow(/replyTo 999 does not exist/);
+    expect(() => log.append({ from: 'K', to: 'R', body: 'x', dispatchId: 0 })).toThrow(/dispatchId must be a positive integer/);
+    expect(() => log.append({ from: 'K', to: 'R', body: 'x', dispatchId: 1.5 })).toThrow(/dispatchId must be a positive integer/);
+    expect(() => log.append({ from: 'K', to: 'R', body: 'x', issue: '' })).toThrow(/issue must be/);
+    expect(() => log.append({ from: 'K', to: 'R', body: 'x', issue: 'x'.repeat(65) })).toThrow(/issue must be/);
+    expect(() => log.append({ from: 'K', to: 'R', body: 'x', thread: '' })).toThrow(/thread must be/);
     expect(log.count()).toBe(0);
     // A refused append leaves no participant side-effects behind either.
     expect(log.participants()).toEqual([]);
@@ -89,6 +101,14 @@ describe('CommsLog (temp db)', () => {
     expect(() => log.append({ from: 'K', to: 'K.1', body: 'x' }, seal(decision('K', 'K.1', 'operator')))).toThrow(/operator tier requires the operator sender address/);
     expect(() => log.append({ from: 'K', to: 'K.1', body: 'x' }, seal(decision('K', 'K.1', 'orchestrator-directive', { verified: false })))).toThrow(/inconsistent/);
     expect(() => log.append({ from: 'K', to: 'K.1', body: 'x' }, seal(decision('K', 'K.1', 'agent-message', { verified: true })))).toThrow(/inconsistent/);
+    // Sealing freezes: a seal-then-mutate escalation is impossible (ESM is strict → TypeError).
+    const frozen = seal(decision('K', 'K.1', 'agent-message')) as { tier: string };
+    expect(() => { frozen.tier = 'operator'; }).toThrow(TypeError);
+    // The verifier's dispatch anchor is authoritative over the caller's.
+    const anchored = () => seal(decision('K', 'K.1', 'orchestrator-directive', { evidence: 'ledger', dispatchId: 17 }));
+    expect(log.append({ from: 'K', to: 'K.1', body: 'x' }, anchored()).dispatchId).toBe(17);
+    expect(log.append({ from: 'K', to: 'K.1', body: 'x', dispatchId: 17 }, anchored()).dispatchId).toBe(17);
+    expect(() => log.append({ from: 'K', to: 'K.1', body: 'x', dispatchId: 18 }, anchored())).toThrow(/contradicts the verified lineage/);
 
     // Bypass the class entirely: raw INSERTs that break verified <=> privileged are refused by the DB.
     const raw = new DatabaseSync(path);
@@ -99,7 +119,7 @@ describe('CommsLog (temp db)', () => {
         ).run('t', 'K', 'K.1', 'spoof', tier, verified), `${tier}/${verified}`).toThrow(/CHECK constraint failed/);
       }
     } finally { raw.close(); }
-    expect(log.count()).toBe(3);
+    expect(log.count()).toBe(5);
   });
 
   it('participant lineage is frozen once written; only last_seen/label may change', () => {
@@ -115,6 +135,7 @@ describe('CommsLog (temp db)', () => {
         "UPDATE participants SET kind = 'agent' WHERE address = 'K.1'",
         "UPDATE participants SET address = 'R.1' WHERE address = 'K.1'",
         "UPDATE participants SET kind = 'child' WHERE address = 'R'",
+        "UPDATE participants SET first_seen = 'rewritten' WHERE address = 'K.1'",
       ]) {
         expect(() => raw.prepare(sql).run(), sql).toThrow(/lineage is immutable/);
       }
@@ -139,6 +160,13 @@ describe('CommsLog (temp db)', () => {
       expect(ins('S', 'agent', null, null, 42), 'agents carry no dispatch').toThrow(/CHECK constraint failed/);
       expect(ins('K.2', 'child', 'K', 2, 17), 'dispatch already bound').toThrow(/UNIQUE constraint failed/);
       expect(ins('Z.1', 'child', 'Z', 1, null), 'parent must exist').toThrow(/FOREIGN KEY constraint failed/);
+      expect(ins('K.7', 'agent', null, null, null), 'a dotted address cannot be an agent').toThrow(/CHECK constraint failed/);
+      expect(ins('X', 'operator', null, null, null), 'only "operator" is the operator').toThrow(/CHECK constraint failed/);
+      // And a raw message INSERT cannot speak as anyone unregistered — incl. an unminted child.
+      for (const sender of ['K.9', 'ghost']) {
+        expect(() => raw.prepare("INSERT INTO messages (ts, sender, target, body) VALUES ('t', ?, 'K', 'boo')").run(sender), sender)
+          .toThrow(/sender is not a registered participant/);
+      }
     } finally { raw.close(); }
     expect(log.participants().map((p) => p.address)).toEqual(['K', 'K.1']);
   });
@@ -207,13 +235,24 @@ describe('CommsLog (temp db)', () => {
     expect(later.map((m) => m.id)).toEqual([7, 8, 9]);
     // Both cursors apply together (AND).
     expect(log.transcript({ all: true }, { sinceTs: everything[5].ts, sinceId: 8 }).map((m) => m.id)).toEqual([9]);
+    // Cursors compare INSTANTS, not spellings: an offset form of the same instant behaves identically.
+    const offsetForm = '2026-08-15T14:00:06+02:00'; // == 12:00:06Z == everything[5].ts (mintChild took tick 0)
+    expect(new Date(offsetForm).toISOString()).toBe(everything[5].ts);
+    expect(log.transcript({ all: true }, { sinceTs: offsetForm }).map((m) => m.id)).toEqual([7, 8, 9]);
+    expect(log.transcript({ all: true }, { sinceTs: '2026-08-15T14:00:05.500+02:00' }).map((m) => m.id)).toEqual([6, 7, 8, 9]);
   });
 
   it('transcript rejects malformed scopes and cursors', () => {
     expect(() => log.transcript({ room: 'K' })).toThrow(/must be a #room/);
     expect(() => log.transcript({ inbox: '#fleet' })).toThrow(/agent\/child\/operator/);
     expect(() => log.transcript({ pair: ['K', 'nope nope'] })).toThrow(/invalid to address/);
+    // A pair is a DM thread: rooms and @all are not peers (would leak room traffic as a "DM").
+    expect(() => log.transcript({ pair: ['K', '#fleet'] })).toThrow(/rooms and @all are not peers/);
+    expect(() => log.transcript({ pair: ['@all', 'K'] })).toThrow(/rooms and @all are not peers/);
     expect(() => log.transcript({} as never)).toThrow(/scope must be one of/);
+    expect(() => log.transcript({ all: false } as never)).toThrow(/scope must be one of/);
+    expect(() => log.transcript({ all: 1 } as never)).toThrow(/scope must be one of/);
+    expect(() => log.transcript({ all: true }, { thread: '' })).toThrow(/thread/);
     expect(() => log.transcript({ all: true }, { sinceId: -1 })).toThrow(/sinceId/);
     expect(() => log.transcript({ all: true }, { sinceTs: 'yesterday' })).toThrow(/ISO-8601/);
     expect(() => log.transcript({ all: true }, { limit: 0 })).toThrow(/limit/);
@@ -274,6 +313,22 @@ describe('CommsLog (temp db)', () => {
   });
 
   // ------------------------------------------------------------ durability
+
+  it('refuses to open a database whose schema version it does not understand — and never relabels it', () => {
+    log.append({ from: 'K', to: 'R', body: 'v1 row' });
+    log.close();
+    const raw = new DatabaseSync(path);
+    raw.exec('PRAGMA user_version = 99');
+    raw.close();
+    expect(() => new CommsLog(path)).toThrow(/schema v99; this heddle understands v1 — upgrade heddle/);
+    const again = new DatabaseSync(path);
+    try {
+      expect((again.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(99);
+      again.exec('PRAGMA user_version = 1'); // restore so afterEach can close cleanly via a fresh handle
+    } finally { again.close(); }
+    log = new CommsLog(path);
+    expect(log.count()).toBe(1);
+  });
 
   it('persists across close/reopen and stamps the schema version', () => {
     log.mintChild('K');

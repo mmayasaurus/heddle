@@ -63,7 +63,15 @@ export function canSend(parsed: ParsedAddress): boolean {
   return parsed.kind === 'agent' || parsed.kind === 'child' || parsed.kind === 'operator';
 }
 
-/** Build a child address; the log's mintChild() is the only intended caller. */
+/** Build a child address; the log's mintChild() is the only intended caller. Refuses to build garbage. */
 export function childAddress(parent: string, seq: number): string {
-  return `${parent}.${seq}`;
+  if (parseAddress(parent)?.kind !== 'agent') {
+    throw new Error(`childAddress(): parent must be a fleet agent address, got ${JSON.stringify(parent)}`);
+  }
+  if (!Number.isInteger(seq) || seq < 1 || seq > 999_999_999) {
+    throw new Error(`childAddress(): seq must be a positive integer, got ${String(seq)}`);
+  }
+  const addr = `${parent}.${seq}`;
+  if (parseAddress(addr)?.kind !== 'child') throw new Error(`childAddress(): built an invalid address ${addr}`);
+  return addr;
 }

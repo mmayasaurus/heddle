@@ -10,8 +10,13 @@
  */
 const sealed = new WeakSet<object>();
 
-/** Mark a decision as broker-issued. Only decideTier() should call this. */
-export function seal<T extends object>(decision: T): T {
+/**
+ * Mark a decision as broker-issued and FREEZE it, so the seal vouches for the contents, not just
+ * the object identity (a caller cannot seal-then-mutate `tier`/`verified`). Only the verifier
+ * (decideTier, envelope layer) should call this; it is an in-process trust-boundary check.
+ */
+export function seal<T extends object>(decision: T): Readonly<T> {
+  Object.freeze(decision);
   sealed.add(decision);
   return decision;
 }
