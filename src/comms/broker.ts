@@ -1,5 +1,5 @@
 import type { CommsLog } from './log.js';
-import { postEnveloped, type LineageSource } from './envelope.js';
+import { postEnveloped, renderEnvelope, type LineageSource } from './envelope.js';
 import { canSend, parseAddress, type AddressKind } from './address.js';
 import type { DeliveryOutcome, MessageKind, MessageRecord, Tier } from './types.js';
 
@@ -146,7 +146,9 @@ export class Broker {
   private readonly stamps = new Map<string, number[]>();
   /** Per-target delivery chains — the "one in-flight injection per target" rule. */
   private readonly chains = new Map<string, Promise<unknown>>();
-  private readonly held: Held[] = [];
+  private held: Held[] = [];
+  private pumping: Promise<{ released: number; failed: number; stillHeld: number }> | null = null;
+  private sweepCounter = 0;
 
   constructor(opts: BrokerOptions) {
     this.log = opts.log;
@@ -189,7 +191,7 @@ export class Broker {
     if (parsed && (parsed.kind === 'room' || parsed.kind === 'broadcast' || parsed.kind === 'operator')) return { address: to, kind: parsed.kind };
     const registered = this.log.participant(to);
     if (registered) return { address: to, kind: registered.kind };
-    const candidates = this.log.participants().filter((p) => p.address.startsWith(to));
+    const candidates = this.log.participantsWithPrefix(to);
     if (candidates.length === 1) return { address: candidates[0].address, kind: candidates[0].kind };
     if (candidates.length > 1) {
       const names = candidates.map((c) => c.address);
@@ -201,21 +203,45 @@ export class Broker {
 
   // ------------------------------------------------------------------ rate limit
 
-  /** Check (without consuming) the pair's budget; returns retryAfterMs when over. */
+  /** Check (without consuming) the pair's budget; returns the retryAfterMs that clears BOTH limits. */
   private overLimit(pairKey: string): number | null {
     const now = this.now();
+    if (++this.sweepCounter % 256 === 0) this.sweepStamps(now);
     const list = (this.stamps.get(pairKey) ?? []).filter((t) => now - t < this.rate.windowMs);
-    if (list.length === 0) this.stamps.delete(pairKey); else this.stamps.set(pairKey, list); // dormant pairs don't accumulate
-    if (list.length >= this.rate.max) return list[0] + this.rate.windowMs - now;
+    if (list.length === 0) this.stamps.delete(pairKey); else this.stamps.set(pairKey, list);
+    let wait = 0;
+    if (list.length >= this.rate.max) wait = Math.max(wait, list[0] + this.rate.windowMs - now);
     const burst = list.filter((t) => now - t < this.rate.burstWindowMs);
-    if (burst.length >= this.rate.burst) return burst[0] + this.rate.burstWindowMs - now;
-    return null;
+    if (burst.length >= this.rate.burst) wait = Math.max(wait, burst[0] + this.rate.burstWindowMs - now);
+    return wait > 0 ? wait : null;
+  }
+
+  /** Drop pairs whose whole window has expired, so a long-lived broker's memory stays bounded. */
+  private sweepStamps(now: number): void {
+    for (const [key, list] of this.stamps) {
+      if (list.every((t) => now - t >= this.rate.windowMs)) this.stamps.delete(key);
+    }
   }
 
   private consume(pairKey: string): void {
     const list = this.stamps.get(pairKey) ?? [];
     list.push(this.now());
     this.stamps.set(pairKey, list);
+  }
+
+  // ------------------------------------------------------------------ pre-flight
+
+  /** Size cap + rate limit. Returns null when the post may proceed. */
+  private checkConstraints(from: string, to: string, body: string): { code: RefusalCode; reason: string; retryAfterMs?: number } | null {
+    const bytes = Buffer.byteLength(body, 'utf8');
+    if (bytes > this.maxBodyBytes) return { code: 'body-too-large', reason: `body is ${bytes} bytes; cap is ${this.maxBodyBytes}` };
+    const pairKey = `${from}→${to}`;
+    const retryAfterMs = this.overLimit(pairKey);
+    if (retryAfterMs !== null) {
+      return { code: 'rate-limited', retryAfterMs,
+        reason: `${pairKey}: max ${this.rate.max}/${this.rate.windowMs}ms, burst ${this.rate.burst}/${this.rate.burstWindowMs}ms; retry in ${retryAfterMs}ms` };
+    }
+    return null;
   }
 
   // ------------------------------------------------------------------ post
@@ -231,19 +257,11 @@ export class Broker {
     if ('outcome' in resolved) return this.refuse(req.from, req.to, resolved.code, resolved.reason, resolved.candidates, resolved.retryAfterMs);
     const to = resolved.address;
     const kind = resolved.kind;
+    const via = to !== req.to ? ` (requested as ${JSON.stringify(req.to)})` : '';
 
-    const bytes = Buffer.byteLength(req.body ?? '', 'utf8');
-    if (bytes > this.maxBodyBytes) {
-      return this.refuse(req.from, to, 'body-too-large', `body is ${bytes} bytes; cap is ${this.maxBodyBytes}`);
-    }
-
+    const constraint = this.checkConstraints(req.from, to, req.body ?? '');
+    if (constraint) return this.refuse(req.from, to, constraint.code, constraint.reason + via, undefined, constraint.retryAfterMs);
     const pairKey = `${req.from}→${to}`;
-    const retryAfterMs = this.overLimit(pairKey);
-    if (retryAfterMs !== null) {
-      return this.refuse(req.from, to, 'rate-limited',
-        `${pairKey}: max ${this.rate.max}/${this.rate.windowMs}ms, burst ${this.rate.burst}/${this.rate.burstWindowMs}ms; retry in ${retryAfterMs}ms`,
-        undefined, retryAfterMs);
-    }
 
     // `resolvedFrom` is broker-authored provenance: whatever the caller put there is dropped.
     const { resolvedFrom: _callerResolvedFrom, ...callerMeta } = req.meta ?? {};
@@ -295,9 +313,9 @@ export class Broker {
     // Order is preserved per target: while older messages for this target are still held, a new
     // one queues behind them (released in order by pump()) instead of overtaking them.
     const queuedBehind = this.held.some((h) => h.target === target);
-    const state = queuedBehind ? 'permission-gate' : await this.targetState.state(target);
+    const state = queuedBehind ? 'permission-gate' : await this.stateOf(target);
     if (state === 'permission-gate') {
-      this.held.push({ record, envelope, target, heldAt: this.now(), attempts: 0 });
+      this.held.push({ record, envelope, target, heldAt: this.now(), attempts: 1 }); // the hold itself is attempt 1
       const code = queuedBehind ? 'queued-behind-held' : 'permission-gate';
       this.log.recordDelivery({ messageId: record.id, from, to: target, outcome: 'held', code, transport: this.transport.name });
       return { outcome: 'held', code };
@@ -305,6 +323,11 @@ export class Broker {
     const res = await this.deliverSerialized(target, { record, envelope, target, attempt: 1 });
     this.log.recordDelivery({ messageId: record.id, from, to: target, outcome: res.ok ? 'sent' : 'failed', code: res.code, reason: res.reason ?? null, transport: this.transport.name, attempt: 1 });
     return { outcome: res.ok ? 'sent' : 'failed', code: res.code, reason: res.reason };
+  }
+
+  /** A failing state provider is not a reason to lose a message: treat it as unknown (deliver). */
+  private async stateOf(target: string): Promise<TargetState> {
+    try { return await this.targetState.state(target); } catch { return 'unknown'; }
   }
 
   /** One in-flight injection per target: chain deliveries behind whatever is running for it. */
@@ -335,44 +358,78 @@ export class Broker {
   }
 
   /**
-   * Retry held messages: release the ones whose gate cleared, fail the ones held longer than
-   * holdMaxMs. Call from a timer (or after a state change). Returns what happened.
+   * Retry held messages: release the ones whose gate cleared (in order per target), fail the ones
+   * held longer than holdMaxMs. Overlapping calls share one run (a slow transport cannot make a
+   * timer-driven pump inject the same message twice); independent targets are pumped
+   * concurrently, same-target entries strictly in order. Entries that arrive while a pump is
+   * running are untouched by it and picked up by the next one.
    */
-  async pump(): Promise<{ released: number; failed: number; stillHeld: number }> {
+  pump(): Promise<{ released: number; failed: number; stillHeld: number }> {
+    if (this.pumping) return this.pumping;
+    this.pumping = this.pumpOnce().finally(() => { this.pumping = null; });
+    return this.pumping;
+  }
+
+  private async pumpOnce(): Promise<{ released: number; failed: number; stillHeld: number }> {
+    const batch = [...this.held];               // snapshot; post() may push more meanwhile
+    const done = new Set<Held>();
+    const byTarget = new Map<string, Held[]>();
+    for (const h of batch) (byTarget.get(h.target) ?? byTarget.set(h.target, []).get(h.target)!).push(h);
     let released = 0, failed = 0;
-    const remaining: Held[] = [];
-    const blocked = new Set<string>(); // a target whose older entry stays held keeps its later ones held too (order)
-    for (const h of this.held) {
-      h.attempts += 1;
-      const expired = this.now() - h.heldAt > this.holdMaxMs;
-      const state = blocked.has(h.target) ? 'permission-gate' : await this.targetState.state(h.target);
-      if (state === 'permission-gate') {
-        if (expired) {
+    await Promise.all([...byTarget.values()].map(async (entries) => {
+      for (const h of entries) {                // in order; a still-held entry blocks the rest of its target
+        const expired = this.now() - h.heldAt > this.holdMaxMs;
+        if (expired) {                          // the contract is a MAX hold time — stale instructions are not injected late
+          h.attempts += 1;
           this.log.recordDelivery({ messageId: h.record.id, from: h.record.from, to: h.target, outcome: 'failed', code: 'hold-timeout',
-            reason: `held ${this.now() - h.heldAt}ms at a permission gate; recipient can still pull it`, transport: this.transport.name, attempt: h.attempts });
-          failed += 1;
-        } else {
-          remaining.push(h);
-          blocked.add(h.target);
+            reason: `held ${this.now() - h.heldAt}ms (max ${this.holdMaxMs}ms); recipient can still pull it`, transport: this.transport.name, attempt: h.attempts });
+          failed += 1; done.add(h);
+          continue;
         }
-        continue;
-      }
-      const res = await this.deliverSerialized(h.target, { record: h.record, envelope: h.envelope, target: h.target, attempt: h.attempts });
-      if (res.ok) {
-        this.log.recordDelivery({ messageId: h.record.id, from: h.record.from, to: h.target, outcome: 'released', code: 'gate-cleared',
+        if (await this.stateOf(h.target) === 'permission-gate') return; // still gated: this target keeps its order (not an attempt)
+        h.attempts += 1;                        // a real delivery attempt (the hold itself was attempt 1)
+        const res = await this.deliverSerialized(h.target, { record: h.record, envelope: h.envelope, target: h.target, attempt: h.attempts });
+        if (res.ok) {
+          this.log.recordDelivery({ messageId: h.record.id, from: h.record.from, to: h.target, outcome: 'released', code: 'gate-cleared',
+            reason: res.reason ?? null, transport: this.transport.name, attempt: h.attempts });
+          released += 1; done.add(h);
+          continue;
+        }
+        // Transient transport failure after the gate cleared: keep the entry for the next pump (until
+        // holdMaxMs) — every attempt is a typed row, so a flapping transport is visible, not silent.
+        this.log.recordDelivery({ messageId: h.record.id, from: h.record.from, to: h.target, outcome: 'failed', code: res.code,
           reason: res.reason ?? null, transport: this.transport.name, attempt: h.attempts });
-        released += 1;
-        continue;
+        return;                                 // keep order behind the failed entry
       }
-      // Transient transport failure after the gate cleared: keep retrying on later pumps until
-      // holdMaxMs — every attempt is a typed row, so a flapping transport is visible, not silent.
-      this.log.recordDelivery({ messageId: h.record.id, from: h.record.from, to: h.target, outcome: 'failed', code: expired ? 'hold-timeout' : res.code,
-        reason: expired ? `gave up after ${this.now() - h.heldAt}ms; last transport error: ${res.reason ?? res.code}` : (res.reason ?? null),
-        transport: this.transport.name, attempt: h.attempts });
-      if (expired) { failed += 1; } else { remaining.push(h); blocked.add(h.target); }
+    }));
+    this.held = this.held.filter((h) => !done.has(h)); // entries pushed during the run survive
+    return { released, failed, stillHeld: this.held.length };
+  }
+
+  /**
+   * Rebuild the in-memory hold queue from the durable log after a restart: every message whose
+   * LAST delivery event for a target is `held` is still owed a release/timeout. Call once at
+   * startup (channel server does); returns how many were restored.
+   */
+  restoreHeld(): number {
+    const seen = new Map<string, boolean>(); // "msg→target" → still held?
+    for (const ev of this.log.deliveries({ limit: 10_000 })) {
+      if (ev.messageId == null) continue;
+      const key = `${ev.messageId}→${ev.to}`;
+      if (ev.outcome === 'held') seen.set(key, true);
+      else if (seen.has(key)) seen.set(key, false);
     }
-    this.held.splice(0, this.held.length, ...remaining);
-    return { released, failed, stillHeld: remaining.length };
+    let restored = 0;
+    for (const [key, open] of seen) {
+      if (!open) continue;
+      const [idStr, target] = key.split('→');
+      const record = this.log.get(Number(idStr));
+      if (!record || this.held.some((h) => h.record.id === record.id && h.target === target)) continue;
+      const heldEv = this.log.deliveries({ messageId: record.id, target }).find((e) => e.outcome === 'held');
+      this.held.push({ record, envelope: renderEnvelope(record), target, heldAt: heldEv ? Date.parse(heldEv.ts) : this.now(), attempts: 1 });
+      restored += 1;
+    }
+    return restored;
   }
 
   // ------------------------------------------------------------------ internals

@@ -93,6 +93,7 @@ CREATE TABLE IF NOT EXISTS deliveries (
 );
 CREATE INDEX IF NOT EXISTS idx_deliveries_message ON deliveries(message_id, id);
 CREATE INDEX IF NOT EXISTS idx_deliveries_target  ON deliveries(target, id);
+CREATE INDEX IF NOT EXISTS idx_deliveries_sender  ON deliveries(sender, id);
 CREATE TRIGGER IF NOT EXISTS deliveries_append_only_update BEFORE UPDATE ON deliveries
 BEGIN SELECT RAISE(ABORT, 'delivery log is append-only: UPDATE refused'); END;
 CREATE TRIGGER IF NOT EXISTS deliveries_append_only_delete BEFORE DELETE ON deliveries
@@ -389,6 +390,14 @@ export class CommsLog {
     return row ? toParticipant(row) : null;
   }
 
+  /** Participants whose address starts with `prefix`, sorted — the resolver's lookup (no full scan). */
+  participantsWithPrefix(prefix: string): Participant[] {
+    if (typeof prefix !== 'string' || prefix.length === 0) return [];
+    const rows = this.db.prepare('SELECT * FROM participants WHERE substr(address, 1, ?) = ? ORDER BY address')
+      .all(prefix.length, prefix);
+    return (rows as unknown as PRow[]).map(toParticipant);
+  }
+
   /** All participants, optionally only the children of one parent. */
   participants(filter: { parent?: string } = {}): Participant[] {
     const rows = filter.parent != null
@@ -448,6 +457,10 @@ export class CommsLog {
     if (ev.messageId != null && (!Number.isInteger(ev.messageId) || ev.messageId < 1)) throw new Error('messageId must be a positive id');
     const attempt = ev.attempt ?? 1;
     if (!Number.isInteger(attempt) || attempt < 1) throw new Error('attempt must be a positive integer');
+    // Invariants: a refusal never has a message row (nothing was accepted); every other outcome is
+    // ABOUT an existing message.
+    if (ev.outcome === 'refused' && ev.messageId != null) throw new Error('a refused delivery cannot reference a message (nothing was accepted)');
+    if (ev.outcome !== 'refused' && ev.messageId == null) throw new Error(`a ${ev.outcome} delivery must reference the message it is about`);
     if (ev.messageId != null && !this.db.prepare('SELECT 1 FROM messages WHERE id = ?').get(ev.messageId)) {
       throw new Error(`delivery for message ${ev.messageId}, which does not exist`);
     }
