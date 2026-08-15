@@ -60,7 +60,8 @@ item fixed or answered with rationale (dispute bots with evidence, never rubber-
 reviewers need a manual trigger (CodeRabbit on repos with <10 stars: comment `@coderabbitai
 review`). The commands for every channel are in [REVIEW-SWEEP.md](REVIEW-SWEEP.md); the maintainers'
 fleet automates the same sweep with a script kept outside this repo. Two clean sweeps ≥15 minutes
-apart at HEAD are the bar (late-landing bots), and merges are merge commits — never squash, never force.
+apart against the SAME commit are the bar (late-landing bots), and merges are merge commits — never squash,
+never force.
 
 ### Standing rules (Maya, 2026-08-15 — apply to everyone, orchestrator included)
 

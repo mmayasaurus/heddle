@@ -1,6 +1,8 @@
 # PR review sweep — before anything is called clean or merged
 
-A PR review sweep is the systematic audit of every feedback channel on a pull request against its latest commit. Reviews land across multiple distinct GitHub surfaces, and automated bots often post findings several minutes after a push. A pull request is declared "clean" only after every surface has been fully inspected at HEAD and all findings are either resolved or explicitly dispositioned. The primary failure mode in PR review is a partial or stale sweep where late-landing bot findings are missed. To guard against late-arriving automated reviews, the mandatory standard for merge readiness is two consecutive clean sweeps conducted at least 15 minutes apart at HEAD.
+A PR review sweep is the systematic audit of every feedback channel on a pull request against its latest commit. Reviews land across multiple distinct GitHub surfaces, and automated bots often post findings several minutes after a push. A pull request is declared "clean" only after every surface has been fully inspected at HEAD and all findings are either resolved or explicitly dispositioned. The primary failure mode in PR review is a partial or stale sweep where late-landing bot findings are missed. To guard against late-arriving automated reviews, the mandatory standard for merge readiness is two consecutive clean sweeps conducted at least 15 minutes apart at HEAD — the bots on these repos typically post between 1 and 20 minutes after a push, in no fixed order.
+
+This document is shared by both heddle repos; the few repo-specific facts (the dashboard's by-design red `lint` job, the exact scanner set) are called out where they appear, everything else applies to both.
 
 ## The five channels
 
@@ -13,13 +15,13 @@ OWNER=mmayasaurus REPO=$(gh repo view --json name -q .name) N=<pr-number>
 | Channel | Scope | Inspection command | Finding criteria |
 |---|---|---|---|
 | (a) Issue comments | Top-level PR conversation | `gh pr view $N --json comments` | Unaddressed feedback or requested changes in comment bodies. |
-| (b) Review bodies | Formally submitted review header text | `gh pr view $N --json reviews` | An empty body is clean; a non-empty body is a finding (several bots post findings in review bodies rather than comments). |
+| (b) Review bodies | Formally submitted review header text | `gh pr view $N --json reviews` | An empty body is clean; a non-empty body must be READ regardless of review state — an `APPROVED` review can still carry a suggestion (several bots post findings in review bodies rather than comments). |
 | (c) Inline review threads | Line-level code review discussions | GraphQL query below | Any thread where `isResolved` is `false`. |
 | (d) Code-scanning alerts | SARIF security and lint findings | `gh api --paginate "repos/$OWNER/$REPO/code-scanning/alerts?pr=$N&state=open"` | Any open alert associated with the PR. (`pr` is a documented query parameter of this endpoint — GitHub's OpenAPI description, component `pr-alias`.) |
-| (e) Checks at HEAD | CI workflow jobs and status rollups | `gh pr checks $N` and `gh pr view $N --json statusCheckRollup` | Any failing required check. |
+| (e) Checks at HEAD | CI workflow jobs and status rollups | `gh pr checks $N` (`--required` filters to the ruleset's required ones) and `gh pr view $N --json statusCheckRollup` | Every required check has SUCCEEDED (pending, skipped and cancelled do not count). A red NON-required check is still a finding unless its red is documented as by-design (e.g. the dashboard `lint` job until HED-14) — a red gitleaks or actionlint job is never "just non-required". |
 
 > [!NOTE]
-> A "Code scanning results / <tool>" check in channel (e) is a summary of open alerts in channel (d); see [CI.md](CI.md). On heddle-dashboard, the `lint` job is red by design until HED-14 and is not required.
+> A "Code scanning results / <tool>" check in channel (e) is a summary of open alerts in channel (d); see [CI.md](CI.md). For a PR from a **fork**, the scanners still run but cannot upload SARIF (read-only token), so channel (d) stays empty — read the semgrep and gitleaks **job summaries / logs** in channel (e) instead; a fork PR is not clean until those say so. On heddle-dashboard, the `lint` job is red by design until HED-14 and is not required.
 
 To inspect channel (c) inline review threads, run the following GraphQL query (100 threads per page; if `hasNextPage` is true, repeat with `after:"<endCursor>"` until it is false — a sweep that stops at page one is incomplete):
 
@@ -33,7 +35,7 @@ Most review applications trigger automatically on push. However, specific tools 
 
 - **CodeRabbit**: On repositories with fewer than 10 stars, CodeRabbit only reviews when triggered by commenting `@coderabbitai review` (or `@coderabbitai full review` for an initial full pass). Post this comment after opening the PR and after each substantive push.
 - **Copilot code review**: Request-based review; re-request manually from the Reviewers panel in the GitHub UI.
-- **Automatic reviewers**:
+- **Automatic reviewers** (roster as of 2026-08-15 — it changes; the checks tab and comment authors of any recent PR are the live list):
   - Qodo
   - Codacy
   - cubic
@@ -63,7 +65,7 @@ Read these notices to confirm their status, then move on without treating them a
 
 ## Address every item
 
-For every finding identified across all channels, either fix it or reply with clear technical rationale and resolve the thread. When disputing automated bot findings, always provide concrete evidence such as a green run link, a documentation quote, or a measured runtime value. Never rubber-stamp and never resolve a thread silently.
+For every finding identified across all channels, either fix it or reply with clear technical rationale — and for inline threads (channel c) resolve the thread; issue comments (a) get a fix or a reply; review bodies (b) get a fix or a reply plus a disposition receipt. When disputing automated bot findings, always provide concrete evidence such as a green run link, a documentation quote, or a measured runtime value. Never rubber-stamp and never resolve a thread silently.
 
 Bots are frequently wrong. Three real examples from the first CI PRs on the two heddle repos (heddle#2, heddle-dashboard#5) demonstrate valid refutations:
 
@@ -83,7 +85,11 @@ After reading and addressing a non-empty review body (channel b), post ONE comme
 <!-- dispositioned: <login> <submitted_at ISO timestamp> -->
 ```
 
-Use the login as GitHub prints it (e.g. `codacy-production[bot]`) and the timestamp exactly as returned by the API. The receipt is keyed on author and timestamp, so a new review by the same author still flags.
+Use the login as GitHub prints it (e.g. `codacy-production[bot]`) and the timestamp exactly as returned by the API. The receipt is keyed on author and submission timestamp, so a new review by the same author still flags. Known limit: a bot that EDITS an already-submitted review keeps its `submitted_at`, so the receipt still matches — Gitar maintains a living review this way; re-read living reviews each round rather than trusting the receipt. To list the pairs you need to receipt:
+
+```shell
+gh api --paginate "repos/$OWNER/$REPO/pulls/$N/reviews" --jq '.[] | select(.body != "") | "<!-- dispositioned: \(.user.login) \(.submitted_at) -->"'
+```
 
 Example comment:
 
@@ -94,7 +100,7 @@ Reviewed and dispositioned automated feedback:
 
 ## Push once per round, then re-sweep
 
-Batch fixes for a round into one push (each push spawns a full reviewer round). After pushing:
+Batch fixes for a round into one push (each push spawns reviewer runs — some incremental, some full, some none). After pushing:
 
 1. Re-trigger the manual reviewers (e.g. comment `@coderabbitai review`).
 2. Wait for the round to land.
@@ -107,7 +113,7 @@ Batch fixes for a round into one push (each push spawns a full reviewer round). 
 - 0 open code-scanning alerts introduced by the PR (or each one dispositioned).
 - Every required status check green at HEAD (`gate`).
 - No unread or late-landing items.
-- Sweep #2 completed ≥15 minutes after sweep #1 at HEAD with nothing new.
+- Sweep #2 completed ≥15 minutes after sweep #1, both against the SAME commit (`headRefOid`) — record the SHA with each sweep; any push resets the window.
 
 ## Gotchas that already bit us
 
@@ -122,9 +128,9 @@ The authoritative wording lives in [CI.md](CI.md#standing-rules-maya-2026-08-15-
 
 ## Merging
 
-- Merge commits only (`gh pr merge $N --merge`).
+- Merge commits only, pinned to the commit you swept: `gh pr merge $N --merge --match-head-commit <swept-sha>` (a push landing between sweep #2 and the merge must not slip through unswept).
 - Never squash, never force-push.
-- Ensure branch is up to date with `main` (merge `origin/main` into it if behind).
+- Ensure the branch is up to date with the base repository's `main` (merge it into the branch if behind — from a fork that means the base repo's remote, not the fork's `origin/main`).
 - PR description body carries `Fixes <ticket>`.
 - Keep the branch after merging (branches are history).
 - Who may merge is a maintainer policy outside this document.
