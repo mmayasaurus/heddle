@@ -8,56 +8,59 @@ import { loadRouting, listTaskClasses, resolveRoute, directRoute } from '../src/
  * hand. These catch the mistakes a YAML edit can introduce silently: a class pointing at a model
  * its provider doesn't list, a fallback into an excluded provider, or a Cursor route that would
  * spend a direct-subscription family through the middleman (policy `never_via_cursor`).
+ *
+ * Per-class invariants use `it.each` so a failure names the offending class instead of stopping
+ * the whole loop at the first one.
  */
 const here = dirname(fileURLToPath(import.meta.url));
 const TABLE_PATH = join(here, '..', 'routing', 'routing.v0.yaml');
 
-/** Families the policy says must never route via Cursor, as the model-id prefixes Cursor uses. */
-const DIRECT_SUB_PREFIXES = ['claude-', 'gpt-', 'gemini-'];
-
 describe('routing.v0.yaml — shipped table invariants', () => {
   const table = loadRouting(TABLE_PATH);
   const classes = listTaskClasses(table);
+  const targetsOf = (c: string) => {
+    const r = resolveRoute(table, c);
+    return [r, r.fallback].filter(Boolean) as { provider: string; model: string }[];
+  };
 
-  it('has task classes and every one resolves to a provider+model', () => {
+  it('has at least one task class', () => {
     expect(classes.length).toBeGreaterThan(0);
-    for (const c of classes) {
-      const r = resolveRoute(table, c);
-      expect(r.provider, `${c}.provider`).toBeTruthy();
-      expect(r.model, `${c}.model`).toBeTruthy();
+  });
+
+  it.each(classes)('%s resolves to a provider and a model', (c) => {
+    const r = resolveRoute(table, c);
+    expect(r.provider).toBeTruthy();
+    expect(r.model).toBeTruthy();
+  });
+
+  it.each(classes)('%s: primary and fallback providers exist in the providers block and are not excluded', (c) => {
+    for (const t of targetsOf(c)) {
+      const cfg = table.providers[t.provider];
+      expect(cfg, `unknown provider "${t.provider}"`).toBeDefined();
+      expect(cfg.status, `provider "${t.provider}" is excluded`).not.toBe('excluded');
     }
   });
 
-  it('every primary and fallback provider exists in the providers block and is not excluded', () => {
-    for (const c of classes) {
-      const r = resolveRoute(table, c);
-      for (const t of [r, r.fallback].filter(Boolean) as { provider: string }[]) {
-        const cfg = table.providers[t.provider];
-        expect(cfg, `${c}: unknown provider "${t.provider}"`).toBeDefined();
-        expect(cfg.status, `${c}: provider "${t.provider}" is excluded`).not.toBe('excluded');
-      }
+  it.each(classes)('%s: every routed model is in its provider\'s declared model list (catalog snapshot)', (c) => {
+    for (const t of targetsOf(c)) {
+      const models = table.providers[t.provider]?.models as string[] | undefined;
+      expect(models, `provider "${t.provider}" declares no models`).toBeDefined();
+      expect(models, `"${t.model}" not in ${t.provider}.models`).toContain(t.model);
     }
   });
 
-  it('every routed model is in its provider\'s declared model list (catalog snapshot)', () => {
-    for (const c of classes) {
-      const r = resolveRoute(table, c);
-      for (const t of [r, r.fallback].filter(Boolean) as { provider: string; model: string }[]) {
-        const models = table.providers[t.provider]?.models as string[] | undefined;
-        expect(models, `${c}: provider "${t.provider}" declares no models`).toBeDefined();
-        expect(models, `${c}: "${t.model}" not in ${t.provider}.models`).toContain(t.model);
-      }
-    }
+  it('declares the never_via_cursor policy for the direct-subscription families', () => {
+    expect(table.policy.never_via_cursor).toEqual(['claude', 'gpt', 'gemini']);
   });
 
-  it('never routes a direct-subscription family (claude/gpt/gemini) through cursor', () => {
-    for (const c of classes) {
-      const r = resolveRoute(table, c);
-      for (const t of [r, r.fallback].filter(Boolean) as { provider: string; model: string }[]) {
-        if (t.provider !== 'cursor') continue;
-        for (const p of DIRECT_SUB_PREFIXES) {
-          expect(t.model.startsWith(p), `${c}: cursor route "${t.model}" violates never_via_cursor`).toBe(false);
-        }
+  it.each(classes)('%s: never routes a never_via_cursor family through cursor', (c) => {
+    // Derived from the table's own policy so this guard can't drift from the YAML it validates.
+    // Cursor's catalog ids carry the family as a prefix (claude-…, gpt-…, gemini-…).
+    const banned = (table.policy.never_via_cursor as string[]).map((family) => `${family}-`);
+    for (const t of targetsOf(c)) {
+      if (t.provider !== 'cursor') continue;
+      for (const p of banned) {
+        expect(t.model.startsWith(p), `cursor route "${t.model}" violates never_via_cursor`).toBe(false);
       }
     }
   });
@@ -72,8 +75,11 @@ describe('routing.v0.yaml — shipped table invariants', () => {
 describe('resolveRoute / directRoute — policy fences', () => {
   const table = loadRouting(TABLE_PATH);
 
-  it('names the known classes when asked for an unknown one', () => {
-    expect(() => resolveRoute(table, 'no-such-class')).toThrow(/unknown task class "no-such-class"[\s\S]*implementation/);
+  it('rejects an unknown class and lists every known class in the message', () => {
+    let message = '';
+    try { resolveRoute(table, 'no-such-class'); } catch (e) { message = (e as Error).message; }
+    expect(message).toMatch(/unknown task class "no-such-class"/);
+    for (const known of listTaskClasses(table)) expect(message).toContain(known);
   });
 
   it('refuses a direct route to the excluded provider (ollama-cloud is the PR-reviewer pool)', () => {
