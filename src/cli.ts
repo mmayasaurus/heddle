@@ -232,12 +232,11 @@ try {
           process.exit(2);
         }
         const ledger = new Ledger();
-        // Only in-flight rows can be closed; anything else either doesn't exist or already finished.
-        if (!ledger.inFlight().some((r) => r.id === id)) {
+        // Atomic: only an in-flight row can be closed; a row the worker already finished stays as is.
+        if (!ledger.closeIfInFlight(id, `closed manually: ${error}`)) {
           console.error(`heddle: row #${id} is not in flight (no such row, or already finished) — nothing to close`);
           process.exit(1);
         }
-        ledger.finish(id, { ok: false, error: `closed manually: ${error}` });
         out(json, { id, closed: true }, () => `closed #${id} (ok=0): ${error}`);
         break;
       }

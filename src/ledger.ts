@@ -107,6 +107,28 @@ CREATE INDEX IF NOT EXISTS idx_dispatches_started ON dispatches(started_at);
  * existing table, so each is added with ALTER TABLE when missing — a real ledger (~/.heddle) predates
  * them. Additive only; the dashboard reads columns by name, so extra columns are safe.
  */
+/**
+ * Add every missing column. `existing` is the column set observed BEFORE the ALTERs — several heddle
+ * processes may open a pre-migration ledger at once (MCP servers, CLIs, the dashboard); if another
+ * one added a column between our check and our ALTER, SQLite says "duplicate column name" — that is
+ * success, not failure. Exported so the race path itself is testable (pass a stale `existing`).
+ */
+export function applyLedgerMigrations(db: DatabaseSync, existing: Set<string>): { applied: string[]; alreadyPresent: string[] } {
+  const applied: string[] = [];
+  const alreadyPresent: string[] = [];
+  for (const m of MIGRATIONS) {
+    if (existing.has(m.column)) continue;
+    try {
+      db.exec(m.ddl);
+      applied.push(m.column);
+    } catch (err) {
+      if (!/duplicate column name/i.test(err instanceof Error ? err.message : String(err))) throw err;
+      alreadyPresent.push(m.column); // a concurrent opener won the race — fine
+    }
+  }
+  return { applied, alreadyPresent };
+}
+
 const MIGRATIONS: { column: string; ddl: string }[] = [
   { column: 'refusal', ddl: 'ALTER TABLE dispatches ADD COLUMN refusal TEXT' },
   // HED-2 / HED-67 / HED-68 (one migration batch, 2026-08-15):
@@ -144,15 +166,7 @@ export class Ledger {
     const have = new Set(
       (this.db.prepare('PRAGMA table_info(dispatches)').all() as { name: string }[]).map((c) => c.name),
     );
-    for (const m of MIGRATIONS) {
-      if (have.has(m.column)) continue;
-      // Several heddle processes may open a pre-migration ledger at once (MCP servers, CLIs, the
-      // dashboard); if another one added the column between our check and our ALTER, SQLite says
-      // "duplicate column name" — that is success, not failure.
-      try { this.db.exec(m.ddl); } catch (err) {
-        if (!/duplicate column name/i.test(err instanceof Error ? err.message : String(err))) throw err;
-      }
-    }
+    applyLedgerMigrations(this.db, have);
     this.db.exec(LINEAGE_TRIGGER);
   }
 
@@ -255,6 +269,20 @@ export class Ledger {
       outcome.outputTokens ?? null, outcome.reasoningTokens ?? null,
       new Date().toISOString(), id,
     );
+  }
+
+  /**
+   * Manual close of an ORPHANED row (heddle ledger finish): only succeeds while the row is still in
+   * flight, atomically — a worker's own finish() (real outcome) is never overwritten by it, and a
+   * manual close never races a completing worker into two writers. Returns false when nothing was
+   * closed (no such row, or already finished).
+   */
+  closeIfInFlight(id: number, error: string): boolean {
+    const info = this.db.prepare(`
+      UPDATE dispatches SET ok = 0, error = ?, finished_at = ?
+      WHERE id = ? AND finished_at IS NULL
+    `).run(error, new Date().toISOString(), id);
+    return Number(info.changes) > 0;
   }
 
   recent(limit = 20, issue?: string): Record<string, unknown>[] {

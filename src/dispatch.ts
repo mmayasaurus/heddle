@@ -9,7 +9,7 @@ import {
 import { materializeAgentsMd, readPack, withMandatoryPacks } from './skillpacks.js';
 import { materializeWorkerMcp, validateWorkerMcp, codexMcpFlags } from './mcp.js';
 import { classifyEffort } from './classify.js';
-import { decideCapabilities } from './capabilities.js';
+import { decideCapabilities, capabilityPolicy } from './capabilities.js';
 import { resolveIdentity, attributeDispatch, WORKER_ENV, type BoundIdentity } from './identity.js';
 import { readProviderCaps, type CapsByProvider } from './usage.js';
 import {
@@ -85,7 +85,7 @@ export interface DispatchRequest {
  * `refusal` column.
  */
 export interface DispatchRefusal {
-  code: 'claude-in-session' | 'depth-1' | 'max-children' | 'capability-denied' | 'metered-pool-exhausted';
+  code: 'claude-in-session' | 'not-dispatchable' | 'depth-1' | 'max-children' | 'capability-denied' | 'metered-pool-exhausted';
   reason: string;
   /** What to do instead, when there is a clear alternative. */
   instruction?: string;
@@ -174,10 +174,12 @@ function baseRecord(
 function refusalOutcome(
   ctx: DispatchContext, req: DispatchRequest, taskClass: string, target: RouteTarget,
   skills: string[], refusal: DispatchRefusal, extra: Partial<DispatchOutcome> = {},
-  ledgerId?: number,
+  ledgerId?: number, fellBackFrom: string | null = null,
 ): DispatchOutcome {
+  // A refusal row records what was ASKED (e.g. the denied capabilities), so the audit trail shows it.
   const id = ledgerId ?? ctx.ledger.refuse(
-    baseRecord(ctx, req, taskClass, target, skills, null), refusal.code, refusal.reason,
+    baseRecord(ctx, req, taskClass, target, skills, fellBackFrom, req.capabilities ?? []),
+    refusal.code, refusal.reason,
   );
   return {
     ok: false, output: '', exitCode: null,
@@ -201,12 +203,12 @@ async function runTarget(
   const mcp = req.mcp ?? target.mcp ?? [];
 
   // Capabilities are decided per TARGET provider (a fallback may enforce a different set).
-  const caps = decideCapabilities(target.provider, req.capabilities, req.optIn === true);
+  const caps = decideCapabilities(target.provider, req.capabilities, req.optIn === true, capabilityPolicy(ctx.table));
   if (caps.refusal) {
     return refusalOutcome(ctx, req, route.taskClass, target, skills, {
       code: caps.refusal.code, reason: caps.refusal.reason,
       instruction: 'Drop the capability, or dispatch to a provider that can enforce it (see docs/MODELS.md "Capabilities").',
-    }, { usedFallback: fellBackFrom !== null });
+    }, { usedFallback: fellBackFrom !== null }, undefined, fellBackFrom);
   }
 
   // HED-19: fail fast, BEFORE a ledger row exists, on anything materialization would reject —
@@ -270,7 +272,15 @@ async function runTarget(
   } catch (err) {
     result = { ok: false, output: '', exitCode: null, error: err instanceof Error ? err.message : String(err) };
   } finally {
-    try { restoreMcp(); } finally { restoreSkills(); }
+    // Restore is best-effort and must never keep the row from being finished (a restore failure is
+    // reported in the outcome error instead).
+    for (const restore of [restoreMcp, restoreSkills]) {
+      try { restore(); } catch (err) {
+        const note = `restore failed: ${err instanceof Error ? err.message : String(err)}`;
+        result = result! ?? { ok: false, output: '', exitCode: null, error: note };
+        result.error = result.error ? `${result.error}; ${note}` : note;
+      }
+    }
   }
 
   ctx.ledger.finish(ledgerId, {
@@ -306,18 +316,22 @@ export async function dispatch(
   req: DispatchRequest, ledger = new Ledger(), adapterFor: AdapterFactory = defaultAdapterFor,
 ): Promise<DispatchOutcome> {
   const table = loadRouting();
-  const identity = req.identity ?? resolveIdentity(req.cwd);
+  // Identity is WHO IS RUNNING this process (its own cwd), never the worker's target directory —
+  // a `.fleet-agent` planted under `--cwd` must not rename the caller.
+  const identity = req.identity ?? resolveIdentity(process.cwd());
   let attribution = attributeDispatch(identity, req.orchestrator);
-  // A worker that tries to dispatch has no identity of its own; attribute the (refused) attempt to
-  // the orchestrator that spawned it, so the parent's ledger shows it. Marked as such.
-  if (!attribution.orchestrator && identity.worker?.parent) {
-    attribution = { orchestrator: identity.worker.parent, identitySource: 'worker-parent' };
+  // A nested attempt from inside a worker is attributed to the orchestrator that spawned it (the
+  // worker has no identity of its own — parent identity vars are stripped from worker envs), and
+  // marked as such, whatever else the environment claims.
+  if (identity.worker) {
+    attribution = { orchestrator: identity.worker.parent ?? attribution.orchestrator ?? null, identitySource: 'worker-parent' };
   }
   const ctx: DispatchContext = { table, ledger, adapterFor, identity, attribution, caps: structuralCaps(table) };
 
   // Auto-effort (opt-in): classify the sub-task's difficulty and pin the effort, unless the caller
   // already set one. Best-effort — a classifier failure falls through to the route/default effort.
-  if (req.autoEffort && !req.effort) {
+  // Skipped entirely inside a worker: depth-1 below refuses anyway, and the classifier is a spawn.
+  if (req.autoEffort && !req.effort && !identity.worker) {
     const ctxLabel = req.taskClass ?? (req.provider && req.model ? `${req.provider}/${req.model}` : 'general');
     try {
       req = { ...req, effort: await classifyEffort(ctxLabel, req.prompt, req.cwd) };
@@ -341,6 +355,10 @@ export async function dispatch(
       instruction: 'Finish your own task and report; ask your orchestrator to dispatch further work.',
     });
   }
+
+  // ---- Non-dispatchable class (`orchestration`) — refused on EVERY path ------------------------
+  // A named subprocess route does not turn the orchestrator's own work into a worker task.
+  if (!route.dispatchable) return refuseNotDispatchable(route, req, ctx);
 
   // ---- Cap-aware refusal (metered pool exhausted / on-demand hard stop) ------------------------
   if (plan.decision.refusal) {
@@ -465,6 +483,15 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
 
 /** How the in-session route was chosen — the refusal reason must not misstate the YAML policy. */
 type InSessionOrigin = 'direct' | 'class' | 'explicit' | 'fallback';
+
+function refuseNotDispatchable(route: Route, req: DispatchRequest, ctx: DispatchContext): DispatchOutcome {
+  const skills = req.skills ?? route.skills ?? []; // never a worker → no mandatory pack
+  const reason = `task class "${route.taskClass}" is not dispatchable (dispatchable: false) — it is the ` +
+    `orchestrator's own in-session work` + (req.provider && req.model ? `; naming a route (${req.provider}/${req.model}) does not change that` : '') + '.';
+  const instruction = `Continue yourself; there is nothing to delegate.`;
+  return refusalOutcome(ctx, req, route.taskClass, route, skills,
+    { code: 'not-dispatchable', reason, instruction }, { execution: providerExecution(ctx.table, route.provider) });
+}
 
 function refuseInSession(
   route: RouteTarget & { taskClass: string; dispatchable: boolean; fallback?: RouteTarget },

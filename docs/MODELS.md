@@ -118,10 +118,10 @@ silent no-op, never left in flight.
 
 | Cap | Rule | Refusal code |
 |---|---|---|
-| **depth-1** | A heddle **worker** cannot dispatch workers. Every worker subprocess is stamped `HEDDLE_WORKER=1`, `HEDDLE_DISPATCH_ID=<ledger id>`, `HEDDLE_PARENT=<orchestrator>`; a heddle MCP server or CLI started inside that env refuses every dispatch. In-session Claude subagents can't be told apart server-side (same MCP process as the orchestrator) — the dispatch-guidance hook nudges (`subagent-dispatch`) when the payload carries `agent_id`. | `depth-1` |
-| **max-children** | One orchestrator may have at most `policy.structural_caps.max_children_per_orchestrator` (default **8**) workers in flight; the count and the new row are written in ONE `BEGIN IMMEDIATE` transaction, so concurrent dispatches — even from different heddle processes — can't both slip under the cap. Rows older than `in_flight_stale_after_ms` (default 3 h) are orphans and don't hold a slot; close them with `heddle workers --stale <h>` + `heddle ledger finish <id> --error "…"`. | `max-children` |
-| **capabilities** | Default-deny. `dispatch_worker.capabilities` / `--capabilities` grants from the allowlist `net`, `browse`, `exec-privileged`; grants are ledgered (`capabilities` column) and passed **only** to a CLI that can enforce them. Unknown token, `exec-privileged` without `opt_in: true`, or a grant the provider can't enforce → refused, never pretended. | `capability-denied` |
-| **identity** | Who a dispatch is attributed to is bound ONCE per process (`HEDDLE_AGENT` → `FLEET_AGENT` → `.fleet-agent` file → unbound), never chosen by the model; the tool's `agent` arg is used only when unbound and the ledger records `identity_source` (`bound` / `caller`). `dispatches.id`/`orchestrator` are immutable (DB trigger). `heddle whoami` shows the binding. | — |
+| **depth-1** | A heddle **worker** cannot dispatch workers. Structurally: workers are never given the dispatch surface (the heddle MCP is not attachable to workers; only memtrace/serena are). Defense in depth: every worker subprocess is stamped `HEDDLE_WORKER=1`, `HEDDLE_DISPATCH_ID=<ledger id>`, `HEDDLE_PARENT=<orchestrator>` and the orchestrator's own `HEDDLE_AGENT`/`FLEET_AGENT` are stripped from its env; a heddle MCP server or CLI started inside that env refuses every dispatch (ledgered as `depth-1`, attributed to the parent with `identity_source=worker-parent`). Honest limit: env stamps stop accidental nesting and make attempts auditable; a worker that deliberately scrubs its env and locates the CLI is not stopped by them (the codex sandbox does not restrict process execution) — the machine is the trust boundary. In-session Claude subagents share the orchestrator's MCP process, shell and identity, so they cannot be told apart at all: the dispatch-guidance hook nudges (`subagent-dispatch`) when the MCP payload carries `agent_id`; the CLI path is open by SPEC design (Claude subagents ARE the orchestrator's own workers). | `depth-1` |
+| **max-children** | One orchestrator may have at most `policy.structural_caps.max_children_per_orchestrator` (default **8**) workers in flight; the count and the new row are written in ONE `BEGIN IMMEDIATE` transaction, so concurrent dispatches — even from different heddle processes — can't both slip under the cap. The bucket key is the ledger `orchestrator` — the process-bound identity when bound, otherwise the caller-supplied `agent` string (an unbound orchestrator could name several strings and get several buckets; bind identity — `HEDDLE_AGENT` in the launcher — for a real cap). Rows older than `in_flight_stale_after_ms` (default 3 h) are orphans and don't hold a slot (a worker genuinely running past 3 h also stops counting — the default worker timeout is 10 min); close orphans with `heddle workers --stale <h>` + `heddle ledger finish <id> --error "…"` (atomic; only in-flight rows can be closed, a worker's own real outcome is never overwritten). | `max-children` |
+| **capabilities** | Default-deny. `dispatch_worker.capabilities` / `--capabilities` grants from the allowlist `net`, `browse`, `exec-privileged`; grants are ledgered (`capabilities` column — a refusal row records what was asked) and passed **only** to a CLI that can enforce them. Unknown token, or a grant the provider can't enforce → refused, never pretended. `exec-privileged` needs **two keys**: the operator flips `policy.capabilities.allow_exec_privileged: true` in the routing YAML AND the call passes `opt_in: true` — a model-controlled tool argument alone can never widen the sandbox. | `capability-denied` |
+| **identity** | Who a dispatch is attributed to is bound ONCE per process from ITS OWN cwd/env (`HEDDLE_AGENT` → `FLEET_AGENT` → `.fleet-agent` file → unbound) — never from the worker's target `--cwd`, never chosen by the model; the tool's `agent` arg is used only when unbound and the ledger records `identity_source` (`bound` / `caller` / `worker-parent`). Prefer the env binding: a `.fleet-agent` file is a convenience for pinned worktrees, and env beats file. `dispatches.id`/`orchestrator` are immutable (DB trigger). `heddle whoami` shows the binding. | — |
 
 Capability enforcement matrix (verified against each CLI's own docs/help,
 2026-08-15 — `docs/LANDMINES.md`):
@@ -136,9 +136,19 @@ Capability enforcement matrix (verified against each CLI's own docs/help,
 Cursor/agy have no per-capability flags heddle can pass, so a grant there is
 refused; note that their headless workers are also **not** network-fenced by
 heddle today (documented gap — their `--sandbox` flags exist but their
-network/fs semantics are unverified). Class + explicit route
-(`task_class` + `provider`/`model`) is the way to move a capability-needing task
-onto codex under the class's policy.
+network/fs semantics are unverified), and that attaching MCP to a cursor
+worker adds `--approve-mcps --force` (auto-approve tool calls — approval
+bypass, not a filesystem/network widening; same category as codex's
+`approval_policy="never"`). Class + explicit route (`task_class` +
+`provider`/`model`) is the way to move a capability-needing task onto codex
+under the class's policy.
+
+What is and isn't a ledgered refusal: the **structural/policy refusals** above
+(`depth-1`, `max-children`, `capability-denied`, `claude-in-session`) are always
+finished rows. **Caller/config errors** — unknown class, missing opt-in for a
+gated class, provider without model, unknown skill pack or MCP server, unknown
+provider — throw before any row exists (HED-19: fail fast, no orphan, no
+mutated worktree).
 
 ## Dispatch-time surfacing (BUILT — HED-1, 2026-08-15)
 
@@ -177,9 +187,11 @@ choosing a worker instead:
   class packs/MCP to give your subagent, and the declared fallback you can name
   as `provider`+`model` to run it as a subprocess instead. No auto-fallback.
   `orchestration` is `dispatchable: false` — it is the orchestrator's OWN work;
-  its refusal says "continue in-session" and suggests no worker pack. Refusal
-  rows are excluded from `heddle usage` dispatch/success counts (reported as a
-  separate `refusals` column).
+  a dispatch of it is refused on EVERY path (class, class + explicit route,
+  whatever the named provider) with code `not-dispatchable`, "continue
+  yourself", no worker pack; `list_task_classes` exposes `dispatchable` and
+  lists no mandatory pack for it. Refusal rows are excluded from `heddle usage`
+  dispatch/success counts (reported as a separate `refusals` column).
 - **Dispatch-guidance hook** (`dist/hook-dispatch-guidance.js`, a Claude Code
   PreToolUse hook on `mcp__heddle__dispatch_worker`): warns — never blocks —
   when (1) a code-editing class (`edits_code: true`) is dispatched with no

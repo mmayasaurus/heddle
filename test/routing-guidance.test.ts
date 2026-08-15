@@ -65,10 +65,15 @@ describe('routing.v0.yaml — shipped dispatch guidance', () => {
     expect(bulk.edits_code).toBe(true);
   });
 
-  it('leaves raw skills unchanged without a union function but adds worker-role when given one', () => {
-    const raw = describeTaskClasses(table).find((row) => row.task_class === 'orchestration')!;
-    const unioned = describeTaskClasses(table, withMandatoryPacks).find((row) => row.task_class === 'orchestration')!;
-    expect(raw.skills).toEqual([]);
+  it('leaves raw skills unchanged without a union function and adds worker-role only to DISPATCHABLE classes', () => {
+    const raw = describeTaskClasses(table).find((row) => row.task_class === 'documentation')!;
+    const unioned = describeTaskClasses(table, withMandatoryPacks).find((row) => row.task_class === 'documentation')!;
+    expect(raw.skills).toEqual(['worker-role']);
     expect(unioned.skills).toEqual(['worker-role']);
+    // orchestration is dispatchable:false — never a worker, so no mandatory pack even with the union
+    const orch = describeTaskClasses(table, withMandatoryPacks).find((row) => row.task_class === 'orchestration')!;
+    expect(orch.dispatchable).toBe(false);
+    expect(orch.skills).toEqual([]);
+    expect(describeTaskClasses(table, withMandatoryPacks).filter((r) => r.task_class !== 'orchestration').every((r) => r.dispatchable && r.skills[0] === 'worker-role')).toBe(true);
   });
 });

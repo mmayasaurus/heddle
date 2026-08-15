@@ -101,8 +101,8 @@ export function dispatchGuidance(table: RoutingTable, input: DispatchGuidanceInp
         `heddle: task class "${cls}" requires explicit opt-in and this call has no \`opt_in: true\` — ` +
         `the dispatcher WILL REFUSE it. Why the class is gated: ${route.note ?? 'see routing.v0.yaml'}. ` +
         (explicit
-          ? `This call names the explicit route ${explicit} under the class's policy (the class's own route ` +
-            `${route.provider}/${route.model} will not run). `
+          ? `This call names the explicit route ${explicit} under the class's policy` +
+            (explicit !== `${route.provider}/${route.model}` ? ` (the class's own route ${route.provider}/${route.model} will not run)` : '') + `. `
           : `Routes to ${route.provider}/${route.model}. `) +
         `Pass \`opt_in: true\` only if the cost is justified (ask the operator first); otherwise pick a ` +
         `class that is not gated (see list_task_classes).`,
