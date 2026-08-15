@@ -477,7 +477,9 @@ export async function dispatch(
 
   // ---- Run (capabilities + max-children are decided per target inside runTarget) --------------
   const primary = await runTarget(target, req, ctx, route, plan.decision.routedAwayForCap ? `${route.provider}/${route.model}` : null);
-  if (primary.ok || primary.refusal || req.noFallback || !fallback) return primary;
+  // A read-only MANDATE VIOLATION is a policy failure of the reviewer, not a provider failure — never
+  // "retry" it on the fallback (that would re-run in an already-mutated tree and mask the violation).
+  if (primary.ok || primary.refusal || primary.review?.mandateOk === false || req.noFallback || !fallback) return primary;
 
   // Primary failed and the table names a fallback — try it, recording the origin so the ledger
   // shows which routes actually hold up in practice. A fallback that is itself in-session (custom
