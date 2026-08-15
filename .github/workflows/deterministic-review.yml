@@ -108,6 +108,8 @@ jobs:
           # a scan against it attributes main's newer findings to the PR
           # (heddle-dashboard#13 → HED-80). Push: empty → full scan.
           IS_PR: ${{ github.event_name == 'pull_request' && 'yes' || '' }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
           BASE_SHA_FALLBACK: ${{ github.event.pull_request.base.sha }}
         # POSIX sh on purpose: inside a `container:` the runner defaults to
         # `sh -e`, not bash (first run of this workflow proved it — a bash
@@ -129,17 +131,25 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           BASELINE=""
           if [ -n "$IS_PR" ]; then
-            # actions/checkout checks out refs/pull/N/merge — a synthetic merge
-            # commit whose first parent is the base branch tip actually merged.
-            if git rev-parse -q --verify HEAD^2 >/dev/null 2>&1; then
+            # actions/checkout checks out refs/pull/N/merge — GitHub's synthetic
+            # merge commit: first parent = the base branch tip actually merged,
+            # second parent = the PR head. Both facts are CHECKED (qodo, HED-80
+            # r1): HEAD^2 must be the PR head, otherwise this is some other
+            # merge commit (ref: override) and HEAD^1 would be an unrelated
+            # baseline. Fallback = merge-base of the CURRENT base tip and HEAD
+            # (fetch-depth 0 has origin/<base>), never the stale base.sha
+            # unless even that is unavailable.
+            if [ "$(git rev-parse -q --verify HEAD^2 2>/dev/null)" = "$PR_HEAD_SHA" ]; then
               BASELINE=$(git rev-parse HEAD^1)
+            elif BASELINE=$(git merge-base "origin/$PR_BASE_REF" HEAD 2>/dev/null) && [ -n "$BASELINE" ]; then
+              echo "::warning::HEAD is not GitHub's synthetic merge of this PR — baseline = merge-base(origin/$PR_BASE_REF, HEAD)"
             else
-              BASELINE="$BASE_SHA_FALLBACK"   # non-merge checkout (ref: overridden)
-              echo "::warning::HEAD is not a merge commit — falling back to pull_request.base.sha as the baseline (may lag main)"
+              BASELINE="$BASE_SHA_FALLBACK"
+              echo "::warning::could not resolve the current base tip — falling back to pull_request.base.sha as the baseline (may lag main)"
             fi
           fi
           if [ -n "$BASELINE" ]; then
-            git ls-files -- '.semgrepignore' '*/.semgrepignore' | while IFS= read -r f; do
+            git ls-files | grep -E '(^|/)\.semgrepignore$' | while IFS= read -r f; do
               git rm -q -- "$f"
             done
             git ls-tree -r --name-only "$BASELINE" | grep -E '(^|/)\.semgrepignore$' | while IFS= read -r f; do
