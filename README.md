@@ -60,9 +60,17 @@ src/smoke.ts           `npm run build && node dist/smoke.js <adapter> "<prompt>"
 
 ## Dev
 
+Node **≥ 22.12** (`node:sqlite` needs 22.5+; vitest 4's vite/rolldown declare `>=22.12.0` —
+`package.json` `engines` pins it so older 22.x fail fast at install instead of mid-test).
+
 ```bash
 npm install
-npm run build          # tsc
+npm run build          # tsc → dist/
+npm run typecheck      # tsc --noEmit over src/ AND test/ (tsconfig.test.json)
+npm test               # vitest run — unit tests under test/**/*.test.ts (no build needed)
 node dist/smoke.js cursor "Reply with exactly: OK"   # requires cursor-agent login
 node dist/smoke.js codex  "Reply with exactly: OK"   # requires codex login
 ```
+
+Tests are behavioral (assert what a change DOES, not that a toggle toggles) and never touch the
+operator's real ledger — construct `new Ledger(<temp path>)`, see `test/ledger.test.ts`.
