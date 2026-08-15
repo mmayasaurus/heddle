@@ -3,9 +3,10 @@ import { mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import {
-  MESSAGE_KINDS, PRIVILEGED_TIERS, TIERS,
-  type MessageKind, type MessageRecord, type NewMessage, type Participant, type ParticipantKind,
-  type Tier, type TierDecision, type TranscriptQuery, type TranscriptScope,
+  DELIVERY_OUTCOMES, MESSAGE_KINDS, PRIVILEGED_TIERS, TIERS,
+  type DeliveryEvent, type DeliveryOutcome, type MessageKind, type MessageRecord, type NewDeliveryEvent,
+  type NewMessage, type Participant, type ParticipantKind, type Tier, type TierDecision,
+  type TranscriptQuery, type TranscriptScope,
 } from './types.js';
 import { BROADCAST, canSend, childAddress, parseAddress, requireAddress } from './address.js';
 import { isSealed } from './seal.js';
@@ -71,6 +72,28 @@ BEGIN SELECT RAISE(ABORT, 'comms log is append-only: DELETE refused'); END;
 CREATE TRIGGER IF NOT EXISTS messages_sender_registered BEFORE INSERT ON messages
 WHEN NOT EXISTS (SELECT 1 FROM participants WHERE address = NEW.sender)
 BEGIN SELECT RAISE(ABORT, 'sender is not a registered participant'); END;
+
+-- Typed delivery outcomes (SPEC §10: never a boolean). One row per attempt/decision; refusals
+-- that never became a message have message_id NULL. Append-only like messages.
+CREATE TABLE IF NOT EXISTS deliveries (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts         TEXT    NOT NULL,
+  message_id INTEGER,
+  sender     TEXT    NOT NULL,
+  target     TEXT    NOT NULL,
+  outcome    TEXT    NOT NULL,
+  code       TEXT    NOT NULL,
+  reason     TEXT,
+  transport  TEXT,
+  attempt    INTEGER NOT NULL DEFAULT 1,
+  CHECK (outcome IN ('sent', 'held', 'released', 'refused', 'failed', 'logged'))
+);
+CREATE INDEX IF NOT EXISTS idx_deliveries_message ON deliveries(message_id, id);
+CREATE INDEX IF NOT EXISTS idx_deliveries_target  ON deliveries(target, id);
+CREATE TRIGGER IF NOT EXISTS deliveries_append_only_update BEFORE UPDATE ON deliveries
+BEGIN SELECT RAISE(ABORT, 'delivery log is append-only: UPDATE refused'); END;
+CREATE TRIGGER IF NOT EXISTS deliveries_append_only_delete BEFORE DELETE ON deliveries
+BEGIN SELECT RAISE(ABORT, 'delivery log is append-only: DELETE refused'); END;
 
 CREATE TABLE IF NOT EXISTS participants (
   address     TEXT PRIMARY KEY,
@@ -431,6 +454,42 @@ export class CommsLog {
     return (rows as unknown as PRow[]).map(toParticipant);
   }
 
+  // ---------------------------------------------------------------- deliveries
+
+  /** Record one typed delivery outcome (sent / held / released / refused / failed / logged). */
+  recordDelivery(ev: NewDeliveryEvent): DeliveryEvent {
+    if (!DELIVERY_OUTCOMES.includes(ev.outcome)) throw new Error(`unknown delivery outcome ${JSON.stringify(ev.outcome)}`);
+    if (typeof ev.code !== 'string' || !/^[a-z0-9-]{1,64}$/.test(ev.code)) throw new Error('delivery code must be a short kebab-case token');
+    if (ev.messageId != null && (!Number.isInteger(ev.messageId) || ev.messageId < 1)) throw new Error('messageId must be a positive id');
+    const attempt = ev.attempt ?? 1;
+    if (!Number.isInteger(attempt) || attempt < 1) throw new Error('attempt must be a positive integer');
+    const info = this.db.prepare(`
+      INSERT INTO deliveries (ts, message_id, sender, target, outcome, code, reason, transport, attempt)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(this.now(), ev.messageId ?? null, ev.from, ev.to, ev.outcome, ev.code, ev.reason ?? null, ev.transport ?? null, attempt);
+    return this.delivery(Number(info.lastInsertRowid))!;
+  }
+
+  delivery(id: number): DeliveryEvent | null {
+    const row = this.db.prepare('SELECT * FROM deliveries WHERE id = ?').get(id) as unknown as DRow | undefined;
+    return row ? toDelivery(row) : null;
+  }
+
+  /** Delivery events, oldest first; filter by message, target or sender; `sinceId` exclusive. */
+  deliveries(filter: { messageId?: number; target?: string; sender?: string; sinceId?: number; limit?: number } = {}): DeliveryEvent[] {
+    const where: string[] = [];
+    const params: (string | number)[] = [];
+    if (filter.messageId != null) { where.push('message_id = ?'); params.push(filter.messageId); }
+    if (filter.target != null) { where.push('target = ?'); params.push(filter.target); }
+    if (filter.sender != null) { where.push('sender = ?'); params.push(filter.sender); }
+    if (filter.sinceId != null) { where.push('id > ?'); params.push(filter.sinceId); }
+    const limit = filter.limit ?? 200;
+    if (!Number.isInteger(limit) || limit <= 0) throw new Error('limit must be a positive integer');
+    params.push(limit);
+    const sql = `SELECT * FROM deliveries ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY id ASC LIMIT ?`;
+    return (this.db.prepare(sql).all(...params) as unknown as DRow[]).map(toDelivery);
+  }
+
   /** Idempotent: closing twice is a no-op, so teardown paths can call it defensively. */
   close(): void {
     if (this.closed) return;
@@ -461,6 +520,19 @@ interface Row {
   id: number; ts: string; sender: string; target: string; kind: string; tier: string;
   verified: number; body: string; reply_to: number | null; issue: string | null; thread: string | null;
   dispatch_id: number | null; meta: string | null;
+}
+
+interface DRow {
+  id: number; ts: string; message_id: number | null; sender: string; target: string; outcome: string;
+  code: string; reason: string | null; transport: string | null; attempt: number;
+}
+
+function toDelivery(r: DRow): DeliveryEvent {
+  return {
+    id: Number(r.id), ts: r.ts, messageId: r.message_id == null ? null : Number(r.message_id),
+    from: r.sender, to: r.target, outcome: r.outcome as DeliveryOutcome, code: r.code, reason: r.reason,
+    transport: r.transport, attempt: Number(r.attempt),
+  };
 }
 
 interface PRow {
