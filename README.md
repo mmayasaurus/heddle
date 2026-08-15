@@ -63,6 +63,9 @@ src/smoke.ts           `npm run build && node dist/smoke.js <adapter> "<prompt>"
 
 ## Dev
 
+Node **≥ 22.12** (`node:sqlite` needs 22.5+; vitest 4's vite/rolldown declare `>=22.12.0` —
+`package.json` `engines` pins it so older 22.x fail fast at install instead of mid-test).
+
 ```bash
 npm install
 npm run build          # tsc → dist/

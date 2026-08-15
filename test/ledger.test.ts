@@ -26,8 +26,9 @@ describe('Ledger (temp db)', () => {
     ledger = new Ledger(join(dir, 'ledger.db'));
   });
   afterEach(() => {
-    ledger.close();
-    rmSync(dir, { recursive: true, force: true });
+    // Guarded so a beforeEach failure surfaces as itself, not as a teardown TypeError.
+    ledger?.close();
+    if (dir) rmSync(dir, { recursive: true, force: true });
   });
 
   it('a started dispatch is in flight until finished, then carries the outcome', () => {
