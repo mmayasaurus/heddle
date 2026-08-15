@@ -54,7 +54,7 @@ exists because an unconfigured DeepSource opened ~118 non-defect threads on one 
 
 ## The review sweep (before anything is called clean)
 
-A PR is clean only after **every channel** — issue comments, review bodies, inline threads,
+Full procedure with the exact commands: [REVIEW-SWEEP.md](REVIEW-SWEEP.md). In short: a PR is clean only after **every channel** — issue comments, review bodies, inline threads,
 code-scanning alerts, and the checks tab — has been read against the **latest** commit and every
 item fixed or answered with rationale (dispute bots with evidence, never rubber-stamp). Some
 reviewers need a manual trigger (CodeRabbit on repos with <10 stars: comment `@coderabbitai
