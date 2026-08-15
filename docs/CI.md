@@ -58,9 +58,9 @@ Full procedure with the exact commands: [REVIEW-SWEEP.md](REVIEW-SWEEP.md). In s
 code-scanning alerts, and the checks tab — has been read against the **latest** commit and every
 item fixed or answered with rationale (dispute bots with evidence, never rubber-stamp). Some
 reviewers need a manual trigger (CodeRabbit on repos with <10 stars: comment `@coderabbitai
-review`). Spinventory's `pr-sweep.sh <n>` is repo-agnostic and runs from inside this repo; the
-heddle-specific sweep doc is HED-16. Two clean sweeps ≥15 minutes apart at HEAD are the bar
-(late-landing bots), and merges are merge commits — never squash, never force.
+review`). The commands for every channel are in [REVIEW-SWEEP.md](REVIEW-SWEEP.md); the maintainers'
+fleet automates the same sweep with a script kept outside this repo. Two clean sweeps ≥15 minutes
+apart at HEAD are the bar (late-landing bots), and merges are merge commits — never squash, never force.
 
 ### Standing rules (Maya, 2026-08-15 — apply to everyone, orchestrator included)
 

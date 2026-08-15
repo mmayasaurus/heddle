@@ -4,23 +4,27 @@ A PR review sweep is the systematic audit of every feedback channel on a pull re
 
 ## The five channels
 
-Review feedback arrives through five distinct channels on GitHub. Every channel must be queried using `gh` (GitHub CLI) and `jq` for the target PR number `<n>`.
+Review feedback arrives through five distinct channels on GitHub. Query every channel with `gh` (GitHub CLI); `jq` helps when you want to filter the JSON. Set the placeholders once and paste the commands as-is:
+
+```shell
+OWNER=mmayasaurus REPO=$(gh repo view --json name -q .name) N=<pr-number>
+```
 
 | Channel | Scope | Inspection command | Finding criteria |
 |---|---|---|---|
-| (a) Issue comments | Top-level PR conversation | `gh pr view <n> --json comments` | Unaddressed feedback or requested changes in comment bodies. |
-| (b) Review bodies | Formally submitted review header text | `gh pr view <n> --json reviews` | An empty body is clean; a non-empty body is a finding (several bots post findings in review bodies rather than comments). |
+| (a) Issue comments | Top-level PR conversation | `gh pr view $N --json comments` | Unaddressed feedback or requested changes in comment bodies. |
+| (b) Review bodies | Formally submitted review header text | `gh pr view $N --json reviews` | An empty body is clean; a non-empty body is a finding (several bots post findings in review bodies rather than comments). |
 | (c) Inline review threads | Line-level code review discussions | GraphQL query below | Any thread where `isResolved` is `false`. |
-| (d) Code-scanning alerts | SARIF security and lint findings | `gh api "repos/<owner>/<repo>/code-scanning/alerts?pr=<n>&state=open"` | Any open alert associated with the PR. |
-| (e) Checks at HEAD | CI workflow jobs and status rollups | `gh pr checks <n>` and `gh pr view <n> --json statusCheckRollup` | Any failing required check. |
+| (d) Code-scanning alerts | SARIF security and lint findings | `gh api --paginate "repos/$OWNER/$REPO/code-scanning/alerts?pr=$N&state=open"` | Any open alert associated with the PR. (`pr` is a documented query parameter of this endpoint — GitHub's OpenAPI description, component `pr-alias`.) |
+| (e) Checks at HEAD | CI workflow jobs and status rollups | `gh pr checks $N` and `gh pr view $N --json statusCheckRollup` | Any failing required check. |
 
 > [!NOTE]
 > A "Code scanning results / <tool>" check in channel (e) is a summary of open alerts in channel (d); see [CI.md](CI.md). On heddle-dashboard, the `lint` job is red by design until HED-14 and is not required.
 
-To inspect channel (c) inline review threads, run the following GraphQL query:
+To inspect channel (c) inline review threads, run the following GraphQL query (100 threads per page; if `hasNextPage` is true, repeat with `after:"<endCursor>"` until it is false — a sweep that stops at page one is incomplete):
 
 ```shell
-gh api graphql -f query='query($o:String!,$r:String!,$n:Int!){ repository(owner:$o,name:$r){ pullRequest(number:$n){ reviewThreads(first:100){ nodes{ id isResolved path line comments(first:1){ nodes{ author{login} body } } } } } } }' -F o=<owner> -F r=<repo> -F n=<n>
+gh api graphql -f query='query($o:String!,$r:String!,$n:Int!){ repository(owner:$o,name:$r){ pullRequest(number:$n){ reviewThreads(first:100){ pageInfo{ hasNextPage endCursor } nodes{ id isResolved path line comments(first:1){ nodes{ author{login} body } } } } } } }' -F o="$OWNER" -F r="$REPO" -F n="$N"
 ```
 
 ## Trigger the reviewers that need it
@@ -107,23 +111,18 @@ Batch fixes for a round into one push (each push spawns a full reviewer round). 
 
 ## Gotchas that already bit us
 
-- **No workflow runs at HEAD after a push?** Check `gh pr view <n> --json mergeable,mergeStateStatus` first: GitHub silently skips `pull_request` workflows on a conflicting PR; fix by merging `origin/main` into the branch (never force-push).
+- **No workflow runs at HEAD after a push?** Check `gh pr view $N --json mergeable,mergeStateStatus` first: GitHub silently skips `pull_request` workflows on a conflicting PR; fix by merging `origin/main` into the branch (never force-push).
 - **A green scanner check is not proof a scan happened.** Read the job log for the scanned volume (our gitleaks step now fails closed on an empty scan; see [CI.md](CI.md)).
 - **A skipped "noop" Deterministic Review run per push** is the `edited`-event guard operating normally, not a failure.
 - **Bots auto-resolve their own threads when the code changes.** The sweep still lists them; check `isResolved`, not memory.
 
-## Standing rules from the maintainer (2026-08-15)
+## Standing rules from the maintainer
 
-- **No direct commits to `main`** — every change goes branch → PR → full sweep → merge, no exceptions.
-- **As many revision rounds as it takes** — every comment / review body / inline thread is addressed
-  (fix, or reply+resolve with evidence) before merge. "Green" is not "clean".
-- **Behavioral tests, not toggle tests** — a test must prove the switch DOES the thing (observable
-  effect: state, persisted result, downstream behavior), not that a flag flipped; superficial tests are a
-  review finding to fix.
+The authoritative wording lives in [CI.md](CI.md#standing-rules-maya-2026-08-15--apply-to-everyone-orchestrator-included) (no direct commits to `main`; as many revision rounds as it takes; behavioral tests, not toggle tests) — one source, not two.
 
 ## Merging
 
-- Merge commits only (`gh pr merge <n> --merge`).
+- Merge commits only (`gh pr merge $N --merge`).
 - Never squash, never force-push.
 - Ensure branch is up to date with `main` (merge `origin/main` into it if behind).
 - PR description body carries `Fixes <ticket>`.
