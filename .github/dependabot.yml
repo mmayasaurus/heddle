@@ -1,0 +1,31 @@
+# Dependabot version updates — GitHub Actions only (HED-11).
+#
+# Every `uses: owner/repo@<sha>` action in .github/workflows is hash-pinned
+# (zizmor `unpinned-uses` policy); Dependabot is what keeps THOSE pins moving —
+# it bumps the SHA and the `# vX.Y.Z` comment together. Grouped into one weekly
+# PR so the reviewer fleet runs once, not once per action.
+# NOT covered by Dependabot (dependabot-core#8362): `uses: docker://…` and
+# `container: image:` references — those tag+digest pins are bumped by hand
+# (each one carries a MANUAL BUMP note in its workflow).
+#
+# npm/cargo VERSION updates are deliberately not enabled here (PR noise for a
+# small team); Dependabot SECURITY updates are a repo setting (enabled
+# 2026-08-15) and cover the vulnerable-dependency case regardless.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    # 7-day cooldown (zizmor dependabot-cooldown; GitHub's implicit default is
+    # 3): a fresh action release gets a week of other people's CI before it is
+    # proposed here — regressions and opportunistic supply-chain compromises are
+    # usually caught or yanked inside that window.
+    cooldown:
+      default-days: 7
+    groups:
+      github-actions:
+        patterns: ["*"]
+    open-pull-requests-limit: 2
+    commit-message:
+      prefix: "ci(deps)"
