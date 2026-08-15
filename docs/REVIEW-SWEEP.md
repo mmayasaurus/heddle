@@ -112,6 +112,15 @@ Batch fixes for a round into one push (each push spawns a full reviewer round). 
 - **A skipped "noop" Deterministic Review run per push** is the `edited`-event guard operating normally, not a failure.
 - **Bots auto-resolve their own threads when the code changes.** The sweep still lists them; check `isResolved`, not memory.
 
+## Standing rules from the maintainer (2026-08-15)
+
+- **No direct commits to `main`** — every change goes branch → PR → full sweep → merge, no exceptions.
+- **As many revision rounds as it takes** — every comment / review body / inline thread is addressed
+  (fix, or reply+resolve with evidence) before merge. "Green" is not "clean".
+- **Behavioral tests, not toggle tests** — a test must prove the switch DOES the thing (observable
+  effect: state, persisted result, downstream behavior), not that a flag flipped; superficial tests are a
+  review finding to fix.
+
 ## Merging
 
 - Merge commits only (`gh pr merge <n> --merge`).
