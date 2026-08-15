@@ -1,7 +1,7 @@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import type { Transport as McpTransport } from '@modelcontextprotocol/sdk/shared/transport.js';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
@@ -24,9 +24,12 @@ import { TIERS, MESSAGE_KINDS, type Tier, type MessageKind } from './types.js';
  *   operator   — only via the configuration-level credential: HEDDLE_COMMS_ROLE=operator AND
  *                HEDDLE_COMMS_OPERATOR_TOKEN equal to ~/.heddle/operator.token (created once with
  *                `heddle-comms --init-operator-token`, 0600; `--rotate` invalidates the old one).
- *                A model cannot edit its own MCP config and agent sessions never see that env, so
- *                "origin-verified" = "this session was configured as the operator's". The token is
- *                re-checked on every privileged call, so a rotation takes effect immediately.
+ *                The path is a FIXED trust root (no env override). A model cannot edit its own MCP
+ *                config and agent sessions never see that env, so "origin-verified" = "this session
+ *                was configured as the operator's". Workers (HEDDLE_WORKER=1 / HEDDLE_COMMS_ADDRESS)
+ *                can never bind operator even if they inherited the env. The token is re-checked on
+ *                every privileged call AND in the push/heartbeat loop, so a rotation revokes a running
+ *                session immediately (tools refused, presence unregistered, push stopped).
  *   agent/child — HEDDLE_AGENT → FLEET_AGENT → HEDDLE_COMMS_ADDRESS (a heddle-dispatched worker)
  *                → a `.fleet-agent` file walking up from cwd → unbound (tools that need a sender
  *                refuse). `operator` is REFUSED from these sources. HEDDLE_WORKER=1 forbids
@@ -48,6 +51,11 @@ export interface CommsServerOptions {
   warn?: (message: string) => void;
   /** Epoch-ms clock passed to the Broker (rate limits, holds, floor leases); injectable for tests. */
   now?: () => number;
+  /**
+   * TEST-ONLY override of the operator token file. Deliberately NOT an env var: the trust root
+   * must be a path only the operator controls, never one a process can point at its own file.
+   */
+  operatorTokenPath?: string;
 }
 
 export interface CommsServer {
@@ -65,27 +73,30 @@ export interface CommsServer {
 
 const IDENTIFIER = /^[a-z0-9_]+$/;
 
-export function operatorTokenPath(env: NodeJS.ProcessEnv): string {
-  return env.HEDDLE_OPERATOR_TOKEN_PATH || join(homedir(), '.heddle', 'operator.token');
-}
+/** The operator trust root. Fixed on purpose — no env var may move it (see CommsServerOptions.operatorTokenPath). */
+export const OPERATOR_TOKEN_PATH = join(homedir(), '.heddle', 'operator.token');
 
 /**
- * Create (or, with rotate, replace) ~/.heddle/operator.token (0600). Returns what happened; the
- * token value itself is only ever in the file — never printed, never logged.
+ * Create (or, with rotate, replace) the operator token file (0600 — enforced with chmod even on an
+ * existing or rewritten file). Returns what happened; the token value itself is only ever in the
+ * file — never printed, never logged.
  */
-export function initOperatorToken(env: NodeJS.ProcessEnv, opts: { rotate?: boolean } = {}): { path: string; action: 'created' | 'rotated' | 'kept' } {
-  const path = operatorTokenPath(env);
-  if (existsSync(path) && !opts.rotate) return { path, action: 'kept' };
-  const action = existsSync(path) ? 'rotated' : 'created';
+export function initOperatorToken(opts: { rotate?: boolean; path?: string } = {}): { path: string; action: 'created' | 'rotated' | 'kept' } {
+  const path = opts.path ?? OPERATOR_TOKEN_PATH;
+  const existed = existsSync(path);
+  if (existed && !opts.rotate) {
+    chmodSync(path, 0o600); // a pre-existing file with loose bits is tightened, not trusted as-is
+    return { path, action: 'kept' };
+  }
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, randomBytes(24).toString('hex') + '\n', { mode: 0o600 });
-  return { path, action };
+  chmodSync(path, 0o600); // { mode } applies on create only; a rotated file keeps its old bits otherwise
+  return { path, action: existed ? 'rotated' : 'created' };
 }
 
 /** Does the presented credential match the operator token file right now? Constant-time; never logs the values. */
-export function operatorTokenMatches(env: NodeJS.ProcessEnv): boolean {
+export function operatorTokenMatches(env: NodeJS.ProcessEnv, path: string = OPERATOR_TOKEN_PATH): boolean {
   const presented = (env.HEDDLE_COMMS_OPERATOR_TOKEN ?? '').trim();
-  const path = operatorTokenPath(env);
   if (!presented || !existsSync(path)) return false;
   const expected = readFileSync(path, 'utf8').trim();
   const a = Buffer.from(presented), b = Buffer.from(expected);
@@ -93,11 +104,20 @@ export function operatorTokenMatches(env: NodeJS.ProcessEnv): boolean {
 }
 
 /** Bind the comms identity from the environment (see the module doc). */
-export function resolveCommsIdentity(env: NodeJS.ProcessEnv, cwd: string, warn: (m: string) => void): { identity: string | null; isOperator: boolean } {
+export function resolveCommsIdentity(
+  env: NodeJS.ProcessEnv, cwd: string, warn: (m: string) => void, tokenPath: string = OPERATOR_TOKEN_PATH,
+): { identity: string | null; isOperator: boolean } {
   if (env.HEDDLE_COMMS_ROLE === 'operator') {
-    if (operatorTokenMatches(env)) return { identity: 'operator', isOperator: true };
-    warn('HEDDLE_COMMS_ROLE=operator but the operator token is missing or does not match — refusing to bind operator (unbound)');
-    return { identity: null, isOperator: false };
+    // A worker, or anything a heddle dispatch stamped, is never the operator — even if it inherited
+    // the operator session's environment (buildWorkerEnv strips billing vars, not comms vars).
+    if (env.HEDDLE_WORKER === '1' || env.HEDDLE_COMMS_ADDRESS) {
+      warn('HEDDLE_COMMS_ROLE=operator inside a worker process — refusing (workers are never the operator); binding as the worker instead');
+    } else if (operatorTokenMatches(env, tokenPath)) {
+      return { identity: 'operator', isOperator: true };
+    } else {
+      warn('HEDDLE_COMMS_ROLE=operator but the operator token is missing or does not match — refusing to bind operator (unbound)');
+      return { identity: null, isOperator: false };
+    }
   }
   // TODO(HED-65/HED-2): switch to Agent U's src/identity.ts once it lands (same order, one module).
   const bindable = (v: string | undefined): string | null => {
@@ -139,8 +159,10 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
   const warn = opts.warn ?? ((m: string) => process.stderr.write(`heddle-comms: ${m}\n`));
   const cwd = opts.cwd ?? process.cwd();
   const log = opts.log ?? new CommsLog(env.HEDDLE_COMMS_DB || DEFAULT_COMMS_PATH);
-  const ledger = opts.ledger === undefined ? openLedgerIfPresent(env, warn) : opts.ledger;
-  const { identity: me, isOperator } = resolveCommsIdentity(env, cwd, warn);
+  const ownsLedger = opts.ledger === undefined;
+  const ledger = ownsLedger ? openLedgerIfPresent(env, warn) : opts.ledger;
+  const tokenPath = opts.operatorTokenPath ?? OPERATOR_TOKEN_PATH;
+  const { identity: me, isOperator } = resolveCommsIdentity(env, cwd, warn, tokenPath);
   const isWorker = env.HEDDLE_WORKER === '1';
   const pushEnabled = env.HEDDLE_COMMS_PUSH === '1';
   const sessionName = env.HEDDLE_SESSION_NAME || me;
@@ -160,11 +182,20 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
   }
 
   /** The bound identity, re-verified for the operator on every call so a token rotation bites immediately. */
+  let revoked = false;
+  const operatorStillValid = (): boolean => !isOperator || operatorTokenMatches(env, tokenPath);
   const requireMe = (): string => {
     if (!me) throw new Error('no bound comms identity: set HEDDLE_AGENT (or FLEET_AGENT / .fleet-agent) — or, for the operator, HEDDLE_COMMS_ROLE=operator + the token — before starting the session');
-    if (isOperator && !operatorTokenMatches(env)) throw new Error('operator token no longer matches (rotated?): restart the session with the current token');
+    if (!operatorStillValid()) { void revokeOperator(); throw new Error('operator token no longer matches (rotated?): restart the session with the current token'); }
     return me;
   };
+  /** A rotation revokes the running session everywhere: presence gone, pumps stopped, tools refused. */
+  async function revokeOperator(): Promise<void> {
+    if (revoked) return;
+    revoked = true;
+    warn('operator credential revoked (token rotated) — presence unregistered, push stopped; restart with the current token');
+    try { if (me && pushEnabled) log.unregisterSession(me); } catch (err) { warn(`unregister failed: ${errorMessage(err)}`); }
+  }
 
   mcp.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
   mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
@@ -190,7 +221,15 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
           confirmSent(log, id, { from: who, ok: a.ok !== false, reason: str(a.reason) });
           return text({ ok: true });
         }
-        case 'log_sent': return text(compact(mirrorSent(log, { from: requireMe(), to: requireStr(a.to, 'to'), body: requireStr(a.body, 'body'), summary: str(a.summary) })));
+        case 'log_sent': {
+          const who = requireMe();
+          const to = requireStr(a.to, 'to');
+          const kind = parseAddress(to)?.kind;
+          if (kind !== 'agent' && kind !== 'child' && kind !== 'operator') {
+            return errorText('log_sent mirrors a DIRECT SendMessage only (an agent, child or operator address); rooms and @all go through post_message');
+          }
+          return text(compact(mirrorSent(log, { from: who, to, body: requireStr(a.body, 'body'), summary: str(a.summary) })));
+        }
         case 'log_received': return text(compact(mirrorReceived(log, { fromName: requireStr(a.from_name, 'from_name'), fromUds: str(a.from_uds), fromMode: str(a.from_mode), to: requireMe(), body: requireStr(a.body, 'body') })));
         case 'create_room': return text(broker.createRoom(requireMe(), requireStr(a.name, 'name'), { topic: str(a.topic), open: a.open === true }));
         case 'join_room': { const who = requireMe(); return text(broker.addMember(who, requireStr(a.room, 'room'), str(a.address) ?? who)); }
@@ -202,7 +241,7 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
         case 'acquire_floor': return text(broker.acquireFloor(requireMe(), requireStr(a.room, 'room'), num(a.lease_ms)));
         case 'release_floor': return text(broker.releaseFloor(requireMe(), requireStr(a.room, 'room')));
         case 'comms_whoami': return text({
-          identity: me, sessionName, worker: isWorker, operator: isOperator, pushEnabled, session: me ? log.session(me) : null,
+          identity: operatorStillValid() ? me : null, revoked: !operatorStillValid(), sessionName, worker: isWorker, operator: isOperator && operatorStillValid(), pushEnabled, session: me ? log.session(me) : null,
           rooms: me ? log.roomsFor(me).map((r) => r.name) : [], liveSessions: log.liveSessions(), sendMessageLimits: SENDMESSAGE_LIMITS,
         });
         default: return errorText(`unknown tool: ${req.params.name}`);
@@ -255,13 +294,16 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
     if (pushEnabled) {
       log.registerSession({
         address: me, sessionId: env.CLAUDE_CODE_SESSION_ID ?? null, sessionName,
-        pid: env.CLAUDE_PID ? Number(env.CLAUDE_PID) : process.pid, socket: env.CLAUDE_CODE_MESSAGING_SOCKET ?? null,
+        pid: env.CLAUDE_PID ? Number(env.CLAUDE_PID) : process.ppid, socket: env.CLAUDE_CODE_MESSAGING_SOCKET ?? null, // the hosting Claude session, not this child
       });
       inbound = new InboundPump(log, me, (event) => {
         for (const k of Object.keys(event.meta)) if (!IDENTIFIER.test(k)) delete event.meta[k]; // Claude Code drops these silently — never send them
         return mcp.notification({ method: 'notifications/claude/channel', params: { content: event.content, meta: event.meta } });
       });
-      heartbeat = setInterval(() => { try { log.heartbeatSession(me); } catch (err) { warn(`heartbeat failed: ${errorMessage(err)}`); } }, 30_000);
+      heartbeat = setInterval(() => {
+        if (!operatorStillValid()) { void revokeOperator(); return; }
+        try { log.heartbeatSession(me); } catch (err) { warn(`heartbeat failed: ${errorMessage(err)}`); }
+      }, 30_000);
       heartbeat.unref();
     } else {
       warn(`push disabled (HEDDLE_COMMS_PUSH is not 1): ${me} is pull-only — no presence row, no channel events`);
@@ -269,6 +311,7 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
     // One loop, never overlapping: the next cycle is scheduled only after this one finished.
     const cycle = async () => {
       if (stopping) return;
+      if (!operatorStillValid()) { await revokeOperator(); return; } // stop pumping for a revoked operator
       if (inbound) { try { await inbound.tick(); } catch (err) { warn(`inbound tick failed: ${errorMessage(err)}`); } }
       try { await broker.pump(); } catch (err) { warn(`pump failed: ${errorMessage(err)}`); }
       if (!stopping) { timer = setTimeout(cycle, 1_000); timer.unref(); }
@@ -285,7 +328,7 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
     try { if (me && pushEnabled) log.unregisterSession(me); } catch (err) { warn(`unregister failed: ${errorMessage(err)}`); }
     try { await mcp.close(); } catch { /* transport already gone */ }
     try { log.close(); } catch (err) { warn(`log close failed: ${errorMessage(err)}`); }
-    try { (ledger as Ledger | null)?.close?.(); } catch (err) { warn(`ledger close failed: ${errorMessage(err)}`); }
+    if (ownsLedger) { try { (ledger as Ledger | null)?.close?.(); } catch (err) { warn(`ledger close failed: ${errorMessage(err)}`); } }
   }
 
   return { mcp, broker, log, identity: me, isOperator, pushEnabled, start, stop };

@@ -449,7 +449,7 @@ a room when they want to; `@all` / `@agent` are the guaranteed-delivery exceptio
   (`#hed-73`) are created on demand by an orchestrator or the operator (closed by default).
 - **Governance**: creating rooms and changing membership is for the **operator and fleet agents
   (orchestrators) only** — workers cannot self-join; an orchestrator may add itself, peers and its
-  **own** children; the operator anyone; anyone may leave. Every refusal is returned AND ledgered
+  **own** children; the operator anyone; removal mirrors it (yourself, your own children, or the operator). Every refusal is returned AND ledgered
   (`deliveries` row `refused` / `room-governance`, `message_id NULL`, from = actor, to = room).
 - **Posting**: the room must exist (`no-such-room`); the operator may post anywhere; an open room
   accepts any registered participant; a closed room is members-only (`not-a-member`). Room posts
@@ -465,14 +465,19 @@ a room when they want to; `@all` / `@agent` are the guaranteed-delivery exceptio
 - **Operator send**: the `operator` identity binds ONLY through a configuration-level credential
   — `heddle-comms --init-operator-token` writes `~/.heddle/operator.token` (0600, once; the value
   is never printed); the operator session's `.mcp.json` sets `HEDDLE_COMMS_ROLE=operator` and
-  `HEDDLE_COMMS_OPERATOR_TOKEN=<file contents>` (constant-time compared). A model cannot edit its
-  own MCP config and agent sessions never see that env, so "origin-verified" means "configured as
-  the operator's session"; her posts carry tier `operator` (never wrapped untrusted). The operator
-  does not mint children. `HEDDLE_COMMS_ROLE=operator` WITHOUT a matching token binds nothing (the
-  server runs unbound and refuses sender tools) — no env-only escalation. **Rotate** with
-  `heddle-comms --init-operator-token --rotate`: the token is re-checked on every privileged call,
-  so already-running sessions with the old token lose the operator identity immediately. The
-  token value is never written to the log, the deliveries, tool outputs or warnings (tested).
+  `HEDDLE_COMMS_OPERATOR_TOKEN=<file contents>` (constant-time compared). The token path is a
+  **fixed trust root** (`~/.heddle/operator.token`, 0600 enforced with chmod even on rotation) — no
+  env var can point the server at another file. A model cannot edit its own MCP config and agent
+  sessions never see that env, so "origin-verified" means "configured as the operator's session";
+  her posts carry tier `operator` (never wrapped untrusted). The operator does not mint children.
+  `HEDDLE_COMMS_ROLE=operator` WITHOUT a matching token binds nothing (the server runs unbound and
+  refuses sender tools) — no env-only escalation; a worker (`HEDDLE_WORKER=1` /
+  `HEDDLE_COMMS_ADDRESS`) can never bind operator even if it inherited the operator session's env.
+  **Rotate** with `heddle-comms --init-operator-token --rotate`: the token is re-checked on every
+  privileged call AND in the push/heartbeat loop, so an already-running session loses the operator
+  identity immediately — tools refused, presence unregistered, push stopped, `comms_whoami` says
+  `revoked`. The token value is never written to the log, the deliveries, tool outputs or warnings
+  (tested). `log_sent` mirrors DIRECT sends only (rooms/@all always go through `post_message`).
 
   How Maya becomes operator (5 lines):
   1. `heddle-comms --init-operator-token` (once) → prints the path only.

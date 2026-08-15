@@ -128,6 +128,8 @@ interface Held {
   target: string;
   heldAt: number;
   attempts: number;
+  /** Part of an @all fan-out: "no live session" means inbox (logged), never a transient failure. */
+  broadcast?: boolean;
 }
 
 /** Default target state: the dispatch ledger knows in-flight vs finished; nothing knows "gate" yet. */
@@ -263,7 +265,7 @@ export class Broker {
    * open or list the sender as a member; and no other holder's floor lease may be live. With
    * `holdFloor` the sender takes (or renews) the floor as part of the check.
    */
-  private checkRoom(from: string, room: string, holdFloor: boolean): { code: RefusalCode; reason: string; retryAfterMs?: number } | null {
+  private checkRoom(from: string, room: string, holdFloor: boolean): { code: RefusalCode; reason: string; retryAfterMs?: number } | { acquired: boolean } {
     const r = this.log.room(room);
     if (!r) return { code: 'no-such-room', reason: `${room} does not exist (rooms are created by the operator or an orchestrator)` };
     if (from !== 'operator' && !r.open && !this.log.member(room, from)) {
@@ -281,8 +283,9 @@ export class Broker {
         const now = this.log.floor(room);
         return { code: 'floor-held', reason: `${now?.holder ?? 'someone'} took the floor of ${room} first`, retryAfterMs: now ? Math.max(0, Date.parse(now.expiresAt) - this.now()) : 0 };
       }
+      return { acquired: holdFloor && !floor }; // newly taken for this post (a renewal is not "new")
     }
-    return null;
+    return { acquired: false };
   }
 
   /** Who may govern rooms: the operator and fleet agents (orchestrators). Children never. */
@@ -318,9 +321,14 @@ export class Broker {
     return { member: this.log.addMember({ room, address, by: actor }) };
   }
 
+  /** Remove a member: anyone may leave; an orchestrator may remove its own children; the operator anyone. */
   removeMember(actor: string, room: string, address: string): { removed: boolean } | Extract<PostResult, { outcome: 'refused' }> {
-    if (!this.governs(actor) && actor !== address) {
-      return this.governanceRefusal(actor, room, `${actor} may not remove ${address} from ${room}`) as Extract<PostResult, { outcome: 'refused' }>;
+    const refused = (reason: string) => this.governanceRefusal(actor, room, reason) as Extract<PostResult, { outcome: 'refused' }>;
+    if (!this.log.room(room)) return this.refuse(actor, room, 'no-such-room', `no such room ${room}`) as Extract<PostResult, { outcome: 'refused' }>;
+    if (actor !== address && actor !== 'operator') {
+      const target = parseAddress(address);
+      const ownChild = this.governs(actor) && target?.kind === 'child' && target.parent === actor;
+      if (!ownChild) return refused(`${actor} may not remove ${address} from ${room} (only yourself, your own children, or the operator)`);
     }
     return { removed: this.log.removeMember(room, address) };
   }
@@ -328,16 +336,21 @@ export class Broker {
   /** Take/renew the floor of a room the actor may post to. */
   acquireFloor(actor: string, room: string, leaseMs?: number): { floor: FloorRecord } | Extract<PostResult, { outcome: 'refused' }> {
     const gate = this.checkRoom(actor, room, false);
-    if (gate) return this.refuse(actor, room, gate.code, gate.reason, undefined, gate.retryAfterMs) as Extract<PostResult, { outcome: 'refused' }>;
-    const floor = this.log.acquireFloor(room, actor, leaseMs);
+    if ('code' in gate) return this.refuse(actor, room, gate.code, gate.reason, undefined, gate.retryAfterMs) as Extract<PostResult, { outcome: 'refused' }>;
+    let floor: FloorRecord | null;
+    try { floor = this.log.acquireFloor(room, actor, leaseMs); } catch (err) {
+      return this.refuse(actor, room, 'room-governance', (err as Error).message ?? String(err)) as Extract<PostResult, { outcome: 'refused' }>;
+    }
     if (!floor) {
-      const held = this.log.floor(room)!;
-      return this.refuse(actor, room, 'floor-held', `${held.holder} holds the floor of ${room}`, undefined, Math.max(0, Date.parse(held.expiresAt) - this.now())) as Extract<PostResult, { outcome: 'refused' }>;
+      const held = this.log.floor(room); // may already be free again — then just say retry now
+      return this.refuse(actor, room, 'floor-held', held ? `${held.holder} holds the floor of ${room}` : `the floor of ${room} was taken and released while you asked; retry`,
+        undefined, held ? Math.max(0, Date.parse(held.expiresAt) - this.now()) : 0) as Extract<PostResult, { outcome: 'refused' }>;
     }
     return { floor };
   }
 
-  releaseFloor(actor: string, room: string): { released: boolean } {
+  releaseFloor(actor: string, room: string): { released: boolean } | Extract<PostResult, { outcome: 'refused' }> {
+    if (!this.log.room(room)) return this.refuse(actor, room, 'no-such-room', `no such room ${room}`) as Extract<PostResult, { outcome: 'refused' }>;
     return { released: this.log.releaseFloor(room, actor) };
   }
 
@@ -358,9 +371,11 @@ export class Broker {
 
     const constraint = this.checkConstraints(req.from, to, req.body ?? '');
     if (constraint) return this.refuse(req.from, to, constraint.code, constraint.reason + via, undefined, constraint.retryAfterMs);
+    let floorTakenHere = false;
     if (kind === 'room') {
       const gate = this.checkRoom(req.from, to, req.holdFloor === true);
-      if (gate) return this.refuse(req.from, to, gate.code, gate.reason, undefined, gate.retryAfterMs);
+      if ('code' in gate) return this.refuse(req.from, to, gate.code, gate.reason, undefined, gate.retryAfterMs);
+      floorTakenHere = gate.acquired;
     }
     const pairKey = `${req.from}->${to}`;
 
@@ -375,6 +390,7 @@ export class Broker {
         meta: { ...callerMeta, ...(to !== req.to ? { resolvedFrom: req.to } : {}) },
       });
     } catch (err) {
+      if (floorTakenHere) this.log.releaseFloor(to, req.from); // no message → no floor
       return this.refuse(req.from, to, 'invalid-message', (err as Error).message ?? String(err));
     }
     this.consume(pairKey);
@@ -429,7 +445,7 @@ export class Broker {
     const queuedBehind = this.held.some((h) => h.target === target);
     const state = queuedBehind ? 'permission-gate' : await this.stateOf(target);
     if (state === 'permission-gate') {
-      this.held.push({ record, envelope, target, heldAt: this.now(), attempts: 1 }); // the hold itself is attempt 1
+      this.held.push({ record, envelope, target, heldAt: this.now(), attempts: 1, broadcast: opts.broadcast === true }); // the hold itself is attempt 1
       const code = queuedBehind ? 'queued-behind-held' : 'permission-gate';
       this.log.recordDelivery({ messageId: record.id, from, to: target, outcome: 'held', code, transport: this.transport.name });
       return { outcome: 'held', code };
@@ -522,6 +538,11 @@ export class Broker {
       const res = await this.deliverSerialized(h.target, { record: h.record, envelope: h.envelope, target: h.target, attempt: h.attempts });
       if (res.ok) {
         this.recordHold(h, 'released', 'gate-cleared', res.reason ?? null);
+        released += 1; done.push(h);
+        continue;
+      }
+      if (h.broadcast && res.code === 'no-live-session') {  // a broadcast recipient without a channel pulls — not a failure
+        this.log.recordDelivery({ messageId: h.record.id, from: h.record.from, to: h.target, outcome: 'logged', code: 'inbox', reason: res.reason ?? null, transport: this.transport.name, attempt: h.attempts });
         released += 1; done.push(h);
         continue;
       }

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, readFileSync, statSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, statSync, existsSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -22,10 +22,11 @@ describe('heddle-comms server (in-process)', () => {
   const servers: CommsServer[] = [];
   const clients: Client[] = [];
 
-  const baseEnv = () => ({ HEDDLE_COMMS_DB: dbPath, HEDDLE_OPERATOR_TOKEN_PATH: tokenPath, HEDDLE_LEDGER_DB: join(dir, 'no-such-ledger.db') });
+  const baseEnv = () => ({ HEDDLE_COMMS_DB: dbPath, HEDDLE_LEDGER_DB: join(dir, 'no-such-ledger.db') });
+  const initToken = (opts: { rotate?: boolean } = {}) => initOperatorToken({ ...opts, path: tokenPath });
 
   async function connect(env: Record<string, string>) {
-    const server = createCommsServer({ env: { ...baseEnv(), ...env }, cwd: dir, warn: (m) => warnings.push(m) });
+    const server = createCommsServer({ env: { ...baseEnv(), ...env }, cwd: dir, warn: (m) => warnings.push(m), operatorTokenPath: tokenPath });
     const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
     const client = new Client({ name: 'test', version: '0' }, { capabilities: {} });
     await server.start(serverSide);
@@ -55,20 +56,20 @@ describe('heddle-comms server (in-process)', () => {
 
   it('binds an agent from HEDDLE_AGENT, refuses "operator" from the agent sources, and starts unbound otherwise', () => {
     const w: string[] = [];
-    expect(resolveCommsIdentity({ ...baseEnv(), HEDDLE_AGENT: 'V' }, dir, (m) => w.push(m))).toEqual({ identity: 'V', isOperator: false });
-    expect(resolveCommsIdentity({ ...baseEnv(), FLEET_AGENT: 'K.2' }, dir, (m) => w.push(m))).toEqual({ identity: 'K.2', isOperator: false });
-    expect(resolveCommsIdentity({ ...baseEnv(), HEDDLE_AGENT: 'operator' }, dir, (m) => w.push(m))).toEqual({ identity: null, isOperator: false });
+    expect(resolveCommsIdentity({ ...baseEnv(), HEDDLE_AGENT: 'V' }, dir, (m) => w.push(m), tokenPath)).toEqual({ identity: 'V', isOperator: false });
+    expect(resolveCommsIdentity({ ...baseEnv(), FLEET_AGENT: 'K.2' }, dir, (m) => w.push(m), tokenPath)).toEqual({ identity: 'K.2', isOperator: false });
+    expect(resolveCommsIdentity({ ...baseEnv(), HEDDLE_AGENT: 'operator' }, dir, (m) => w.push(m), tokenPath)).toEqual({ identity: null, isOperator: false });
     expect(w.some((m) => m.includes('refusing to bind the operator identity'))).toBe(true);
-    expect(resolveCommsIdentity({ ...baseEnv() }, dir, (m) => w.push(m))).toEqual({ identity: null, isOperator: false });
+    expect(resolveCommsIdentity({ ...baseEnv() }, dir, (m) => w.push(m), tokenPath)).toEqual({ identity: null, isOperator: false });
   });
 
   it('operator: binds ONLY with the matching token; env-only role is refused; the whole session then posts as operator', async () => {
-    const created = initOperatorToken(baseEnv());
+    const created = initToken();
     expect(created.action).toBe('created');
     expect(statSync(tokenPath).mode & 0o777).toBe(0o600);
     const token = readFileSync(tokenPath, 'utf8').trim();
     expect(token).toMatch(/^[0-9a-f]{48}$/);
-    expect(initOperatorToken(baseEnv()).action).toBe('kept'); // never overwritten by accident
+    expect(initToken().action).toBe('kept'); // never overwritten by accident
     expect(readFileSync(tokenPath, 'utf8').trim()).toBe(token);
 
     // Role without token → refused (unbound), with a warning; wrong token → refused.
@@ -104,29 +105,74 @@ describe('heddle-comms server (in-process)', () => {
   });
 
   it('a token rotation invalidates a running operator session immediately, and the new token binds', async () => {
-    initOperatorToken(baseEnv());
+    initToken();
     const oldToken = readFileSync(tokenPath, 'utf8').trim();
     const op = await connect({ HEDDLE_COMMS_ROLE: 'operator', HEDDLE_COMMS_OPERATOR_TOKEN: oldToken });
     expect((await call(op.client, 'post_message', { to: '#fleet', body: 'before rotation' })).parsed).toMatchObject({ tier: 'operator' });
 
-    const rotated = initOperatorToken(baseEnv(), { rotate: true });
+    const rotated = initToken({ rotate: true });
     expect(rotated.action).toBe('rotated');
     const newToken = readFileSync(tokenPath, 'utf8').trim();
     expect(newToken).not.toBe(oldToken);
-    expect(operatorTokenMatches({ ...baseEnv(), HEDDLE_COMMS_OPERATOR_TOKEN: oldToken })).toBe(false);
-    expect(operatorTokenMatches({ ...baseEnv(), HEDDLE_COMMS_OPERATOR_TOKEN: newToken })).toBe(true);
+    expect(operatorTokenMatches({ ...baseEnv(), HEDDLE_COMMS_OPERATOR_TOKEN: oldToken }, tokenPath)).toBe(false);
+    expect(operatorTokenMatches({ ...baseEnv(), HEDDLE_COMMS_OPERATOR_TOKEN: newToken }, tokenPath)).toBe(true);
 
     // The already-running session with the OLD token can no longer act as operator.
     const after = await call(op.client, 'post_message', { to: '#fleet', body: 'after rotation' });
     expect(after.isError).toBe(true);
     expect(after.text).toMatch(/operator token no longer matches/);
+    // …its whoami says revoked, and a push-mode operator session loses its presence row + stops pumping.
+    expect((await call(op.client, 'comms_whoami')).parsed).toMatchObject({ identity: null, revoked: true, operator: false });
     // A session configured with the new token binds.
     const fresh = await connect({ HEDDLE_COMMS_ROLE: 'operator', HEDDLE_COMMS_OPERATOR_TOKEN: newToken });
     expect(fresh.server.identity).toBe('operator');
   });
 
+  it('a rotated push-mode operator session drops its presence and stops receiving channel events', async () => {
+    initToken();
+    const token = readFileSync(tokenPath, 'utf8').trim();
+    const events: unknown[] = [];
+    const push = createCommsServer({ env: { ...baseEnv(), HEDDLE_COMMS_ROLE: 'operator', HEDDLE_COMMS_OPERATOR_TOKEN: token, HEDDLE_COMMS_PUSH: '1' }, cwd: dir, warn: (m) => warnings.push(m), operatorTokenPath: tokenPath });
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: 'test', version: '0' }, { capabilities: {} });
+    client.fallbackNotificationHandler = async (n) => { events.push(n); };
+    await push.start(serverSide); await client.connect(clientSide);
+    servers.push(push); clients.push(client);
+    expect(new CommsLog(dbPath).liveSession('operator')).not.toBeNull();
+    initToken({ rotate: true });
+    const probe = new CommsLog(dbPath);
+    probe.append({ from: 'K', to: 'operator', body: 'after rotation' });
+    probe.close();
+    await new Promise((r) => setTimeout(r, 1300)); // one loop cycle
+    expect(events).toEqual([]);                    // nothing pushed to the revoked session
+    expect(new CommsLog(dbPath).liveSession('operator')).toBeNull(); // presence gone
+    expect(warnings.some((m) => m.includes('operator credential revoked'))).toBe(true);
+  }, 10_000);
+
+  it('workers can never bind operator, even with an inherited operator env; the token path is not env-overridable', () => {
+    initToken();
+    const token = readFileSync(tokenPath, 'utf8').trim();
+    const w: string[] = [];
+    // A heddle-dispatched worker that inherited the operator session's env binds as the WORKER, never operator.
+    expect(resolveCommsIdentity({ ...baseEnv(), HEDDLE_COMMS_ROLE: 'operator', HEDDLE_COMMS_OPERATOR_TOKEN: token, HEDDLE_WORKER: '1', HEDDLE_COMMS_ADDRESS: 'K.3' }, dir, (m) => w.push(m), tokenPath))
+      .toEqual({ identity: 'K.3', isOperator: false });
+    expect(w.some((m) => m.includes('workers are never the operator'))).toBe(true);
+    // The trust root cannot be moved by env: a process pointing at its own token file does not become operator.
+    const rogue = join(dir, 'rogue.token');
+    initOperatorToken({ path: rogue });
+    const rogueToken = readFileSync(rogue, 'utf8').trim();
+    expect(resolveCommsIdentity({ ...baseEnv(), HEDDLE_COMMS_ROLE: 'operator', HEDDLE_COMMS_OPERATOR_TOKEN: rogueToken, HEDDLE_OPERATOR_TOKEN_PATH: rogue }, dir, () => undefined, tokenPath))
+      .toEqual({ identity: null, isOperator: false });
+    // Permissions are enforced on rotate and on an existing loose file.
+    initToken({ rotate: true });
+    expect(statSync(tokenPath).mode & 0o777).toBe(0o600);
+    chmodSync(tokenPath, 0o644);
+    initToken();
+    expect(statSync(tokenPath).mode & 0o777).toBe(0o600);
+  });
+
   it('the token value never appears in the db, tool outputs, or warnings', async () => {
-    initOperatorToken(baseEnv());
+    initToken();
     const token = readFileSync(tokenPath, 'utf8').trim();
     const op = await connect({ HEDDLE_COMMS_ROLE: 'operator', HEDDLE_COMMS_OPERATOR_TOKEN: token });
     const outputs: string[] = [];
@@ -135,6 +181,7 @@ describe('heddle-comms server (in-process)', () => {
     outputs.push((await call(op.client, 'read_transcript', { all: true })).text);
     outputs.push((await call(op.client, 'list_rooms')).text);
     outputs.push((await call(op.client, 'post_message', { to: 'K.1', body: 'x', requested_tier: 'root' })).text); // an error path
+    outputs.push((await call(op.client, 'log_sent', { to: '#fleet', body: 'x' })).text); // refused: rooms don't go through log_sent
     const wrong = await connect({ HEDDLE_COMMS_ROLE: 'operator', HEDDLE_COMMS_OPERATOR_TOKEN: token + 'x' });
     outputs.push((await call(wrong.client, 'post_message', { to: '#fleet', body: 'x' })).text);
     for (const out of outputs) expect(out).not.toContain(token);

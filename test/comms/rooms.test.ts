@@ -120,8 +120,15 @@ describe('rooms (temp db)', () => {
     expectGovernanceRefusal(broker.addMember('K', '#missing', 'K'), 'K', '#missing');
     expect(broker.removeMember('K.1', '#hed-73', 'K.1')).toEqual({ removed: true });
     expectGovernanceRefusal(broker.removeMember('K.1', '#hed-73', 'R'), 'K.1', '#hed-73');
-    expect(broker.removeMember('K', '#hed-73', 'R')).toEqual({ removed: true });
+    // Removal mirrors addition: an orchestrator may remove itself or its OWN children, never a peer; the operator anyone.
+    expectGovernanceRefusal(broker.removeMember('K', '#hed-73', 'R'), 'K', '#hed-73');
+    broker.addMember('K', '#hed-73', 'K.1'); // (K.1 left itself above)
+    expect(broker.removeMember('K', '#hed-73', 'K.1')).toEqual({ removed: true });
+    expect(broker.removeMember('operator', '#hed-73', 'R')).toEqual({ removed: true });
     expect(broker.removeMember('operator', '#hed-73', 'R.1')).toEqual({ removed: true });
+    // A missing room is a no-such-room refusal, like every other room op.
+    expect(broker.removeMember('K', '#nope', 'K')).toMatchObject({ outcome: 'refused', code: 'no-such-room' });
+    expect(broker.releaseFloor('K', '#nope')).toMatchObject({ outcome: 'refused', code: 'no-such-room' });
   });
 
   it('enforces room existence and membership while allowing operator room posts', async () => {

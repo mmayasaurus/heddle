@@ -201,6 +201,8 @@ export interface SessionRecord {
 
 export const DEFAULT_ROOM = '#fleet';
 export const DEFAULT_FLOOR_LEASE_MS = 60_000;
+/** Nobody can lock a room for longer than this in one lease (renewals extend from `now`). */
+export const MAX_FLOOR_LEASE_MS = 10 * 60_000;
 
 export interface RoomRecord {
   name: string;
@@ -465,10 +467,9 @@ export class CommsLog {
     const parsed = requireAddress(input.name, 'to');
     if (parsed.kind !== 'room') throw new Error(`rooms are #names, got ${JSON.stringify(input.name)}`);
     if (!canSend(requireAddress(input.by, 'from'))) throw new Error('a room is created by an agent or the operator');
-    const existing = this.room(input.name);
-    if (existing) return existing;
     const ts = this.now();
-    this.db.prepare('INSERT INTO rooms (name, created_by, created_at, topic, open) VALUES (?, ?, ?, ?, ?)')
+    // Concurrency-safe idempotency: two servers starting on a fresh shared db both "create" #fleet.
+    this.db.prepare('INSERT INTO rooms (name, created_by, created_at, topic, open) VALUES (?, ?, ?, ?, ?) ON CONFLICT(name) DO NOTHING')
       .run(input.name, input.by, ts, input.topic ?? null, input.open ? 1 : 0);
     return this.room(input.name)!;
   }
@@ -536,6 +537,7 @@ export class CommsLog {
    */
   acquireFloor(room: string, holder: string, leaseMs = DEFAULT_FLOOR_LEASE_MS): FloorRecord | null {
     if (!Number.isFinite(leaseMs) || leaseMs <= 0) throw new Error('leaseMs must be a positive number');
+    if (leaseMs > MAX_FLOOR_LEASE_MS) throw new Error(`leaseMs must be at most ${MAX_FLOOR_LEASE_MS} ms`);
     if (!this.room(room)) throw new Error(`no such room ${room}`);
     const now = this.now();
     let out: FloorRecord | null = null;
@@ -543,7 +545,9 @@ export class CommsLog {
     try {
       const current = this.floor(room);
       if (current && current.holder !== holder) { this.db.exec('COMMIT'); return null; }
-      const expires = new Date(Date.parse(now) + leaseMs).toISOString();
+      // A renewal never shortens a longer lease the holder already has.
+      const proposed = Date.parse(now) + leaseMs;
+      const expires = new Date(current && current.holder === holder ? Math.max(proposed, Date.parse(current.expiresAt)) : proposed).toISOString();
       this.db.prepare(`
         INSERT INTO room_floor (room, holder, since, expires_at) VALUES (?, ?, ?, ?)
         ON CONFLICT(room) DO UPDATE SET holder = excluded.holder, since = CASE WHEN room_floor.holder = excluded.holder THEN room_floor.since ELSE excluded.since END, expires_at = excluded.expires_at

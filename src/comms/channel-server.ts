@@ -12,7 +12,7 @@ import { createCommsServer, initOperatorToken } from './server.js';
  */
 
 if (process.argv.includes('--init-operator-token')) {
-  const r = initOperatorToken(process.env, { rotate: process.argv.includes('--rotate') });
+  const r = initOperatorToken({ rotate: process.argv.includes('--rotate') });
   process.stdout.write(
     `operator token ${r.action}: ${r.path}\n` +
     (r.action === 'kept' ? '(already existed — pass --rotate to replace it)\n' : '') +
