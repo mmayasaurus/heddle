@@ -54,3 +54,21 @@ describe('identity resolution and attribution', () => {
     expect(attributeDispatch(unbound, undefined)).toEqual({ orchestrator: null, identitySource: null });
   });
 });
+
+describe('worker env — parent identity is stripped', () => {
+  it('buildWorkerEnv drops HEDDLE_AGENT/FLEET_AGENT from the child env but keeps the worker stamps it is given', async () => {
+    const { buildWorkerEnv } = await import('../src/env.js');
+    const saved = { HEDDLE_AGENT: process.env.HEDDLE_AGENT, FLEET_AGENT: process.env.FLEET_AGENT };
+    process.env.HEDDLE_AGENT = 'U';
+    process.env.FLEET_AGENT = 'K';
+    try {
+      const { env, stripped } = buildWorkerEnv({ overrides: { HEDDLE_WORKER: '1', HEDDLE_PARENT: 'U', HEDDLE_DISPATCH_ID: '9' } });
+      expect(env.HEDDLE_AGENT).toBeUndefined();
+      expect(env.FLEET_AGENT).toBeUndefined();
+      expect(stripped).toEqual(expect.arrayContaining(['HEDDLE_AGENT', 'FLEET_AGENT']));
+      expect(env).toMatchObject({ HEDDLE_WORKER: '1', HEDDLE_PARENT: 'U', HEDDLE_DISPATCH_ID: '9' });
+    } finally {
+      for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+    }
+  });
+});

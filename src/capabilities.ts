@@ -41,8 +41,21 @@ export interface CapabilityDecision {
   refusal?: { code: 'capability-denied'; reason: string };
 }
 
+/** Operator-owned switches from the routing YAML (`policy.capabilities`). */
+export interface CapabilityPolicy {
+  /** exec-privileged is refused unless the OPERATOR enabled it here — the model's `opt_in` alone is not enough. */
+  allowExecPrivileged: boolean;
+}
+export const DEFAULT_CAPABILITY_POLICY: CapabilityPolicy = { allowExecPrivileged: false };
+
+export function capabilityPolicy(table: { policy: Record<string, unknown> }): CapabilityPolicy {
+  const node = (table.policy as any)?.capabilities ?? {};
+  return { allowExecPrivileged: node.allow_exec_privileged === true };
+}
+
 export function decideCapabilities(
   provider: string, requested: readonly string[] | undefined, optIn: boolean,
+  policy: CapabilityPolicy = DEFAULT_CAPABILITY_POLICY,
 ): CapabilityDecision {
   const asked = [...new Set((requested ?? []).map((c) => c.trim()).filter(Boolean))];
   if (asked.length === 0) return { granted: [] };
@@ -60,16 +73,31 @@ export function decideCapabilities(
   }
   const granted = CAPABILITIES.filter((c) => asked.includes(c));
 
-  if (granted.includes('exec-privileged') && !optIn) {
-    return {
-      granted: [],
-      refusal: {
-        code: 'capability-denied',
-        reason: 'capability "exec-privileged" runs the worker OUTSIDE its sandbox (codex ' +
-          'danger-full-access: can push to remotes, run deploy scripts, touch $HOME) and requires ' +
-          '`opt_in: true` on the call — pass it only when the operator has agreed.',
-      },
-    };
+  if (granted.includes('exec-privileged')) {
+    // Two keys: the OPERATOR enables it in the routing YAML (policy.capabilities.allow_exec_privileged),
+    // AND the call says opt_in:true. A model-controlled tool argument alone can never widen the sandbox.
+    if (!policy.allowExecPrivileged) {
+      return {
+        granted: [],
+        refusal: {
+          code: 'capability-denied',
+          reason: 'capability "exec-privileged" (no sandbox: codex danger-full-access) is disabled by the ' +
+            'operator — routing.v0.yaml policy.capabilities.allow_exec_privileged is not true. A tool ' +
+            'argument cannot enable it.',
+        },
+      };
+    }
+    if (!optIn) {
+      return {
+        granted: [],
+        refusal: {
+          code: 'capability-denied',
+          reason: 'capability "exec-privileged" runs the worker OUTSIDE its sandbox (codex ' +
+            'danger-full-access: can push to remotes, run deploy scripts, touch $HOME) and additionally ' +
+            'requires `opt_in: true` on the call.',
+        },
+      };
+    }
   }
 
   const enforceable = ENFORCEABLE[provider] ?? [];

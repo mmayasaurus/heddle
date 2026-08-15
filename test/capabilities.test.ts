@@ -15,12 +15,17 @@ describe('decideCapabilities', () => {
     expect(decideCapabilities('codex', ['browse', 'net', 'net'], false)).toEqual({ granted: ['net', 'browse'] });
   });
 
-  it('requires explicit opt-in before granting exec-privileged', () => {
-    const refused = decideCapabilities('codex', ['exec-privileged'], false);
-    expect(refused.refusal).toMatchObject({ code: 'capability-denied' });
-    expect(refused.refusal?.reason).toContain('opt_in: true');
-    expect(refused.refusal?.reason).toContain('exec-privileged');
-    expect(decideCapabilities('codex', ['exec-privileged'], true)).toEqual({ granted: ['exec-privileged'] });
+  it('refuses exec-privileged unless the OPERATOR enabled it in policy AND the call opted in (two keys)', () => {
+    const operatorOff = decideCapabilities('codex', ['exec-privileged'], true);
+    expect(operatorOff.refusal).toMatchObject({ code: 'capability-denied' });
+    expect(operatorOff.refusal?.reason).toContain('policy.capabilities.allow_exec_privileged');
+    expect(operatorOff.refusal?.reason).toContain('A tool argument cannot enable it');
+    const on = { allowExecPrivileged: true };
+    const noOptIn = decideCapabilities('codex', ['exec-privileged'], false, on);
+    expect(noOptIn.refusal).toMatchObject({ code: 'capability-denied' });
+    expect(noOptIn.refusal?.reason).toContain('opt_in: true');
+    expect(noOptIn.refusal?.reason).toContain('exec-privileged');
+    expect(decideCapabilities('codex', ['exec-privileged'], true, on)).toEqual({ granted: ['exec-privileged'] });
   });
 
   it('refuses an unknown capability before granting any known capability', () => {
@@ -39,7 +44,10 @@ describe('decideCapabilities', () => {
   });
 
   it('checks unknown tokens before opt-in and opt-in before provider enforceability', () => {
-    expect(decideCapabilities('cursor', ['exec-privileged'], false).refusal?.reason).toContain('opt_in: true');
-    expect(decideCapabilities('cursor', ['bogus', 'exec-privileged'], false).refusal?.reason).toContain('unknown capability');
+    const on = { allowExecPrivileged: true };
+    expect(decideCapabilities('cursor', ['exec-privileged'], false, on).refusal?.reason).toContain('opt_in: true');
+    expect(decideCapabilities('cursor', ['bogus', 'exec-privileged'], false, on).refusal?.reason).toContain('unknown capability');
+    // operator gate is checked before opt-in
+    expect(decideCapabilities('cursor', ['exec-privileged'], false).refusal?.reason).toContain('allow_exec_privileged');
   });
 });

@@ -34,9 +34,12 @@ describe('dispatch — structural caps', () => {
     const outcome = await dispatch({ taskClass: 'bulk-mechanical', prompt: 'x', cwd: tempDir(), identity }, ledger, () => fakeAdapter().adapter);
     expect(outcome).toMatchObject({ orchestrator: 'K', identitySource: 'worker-parent', refusal: { code: 'depth-1' } });
     expect(ledger.recent(1)[0]).toMatchObject({ orchestrator: 'K', identity_source: 'worker-parent', refusal: 'depth-1' });
-    // a worker whose parent is unknown stays unattributed
+    // a worker whose parent is unknown is still marked as a nested attempt (unattributed)
     const orphan = await dispatch({ taskClass: 'bulk-mechanical', prompt: 'x', cwd: tempDir(), identity: { agent: null, source: 'unbound', worker: { dispatchId: null, parent: null } } }, ledger, () => fakeAdapter().adapter);
-    expect(orphan).toMatchObject({ orchestrator: null, identitySource: null, refusal: { code: 'depth-1' } });
+    expect(orphan).toMatchObject({ orchestrator: null, identitySource: 'worker-parent', refusal: { code: 'depth-1' } });
+    // and an inherited/planted bound identity inside a worker does not make it look like the parent's own dispatch
+    const spoofed = await dispatch({ taskClass: 'bulk-mechanical', prompt: 'x', cwd: tempDir(), identity: { agent: 'K', source: 'env:HEDDLE_AGENT', worker: { dispatchId: 3, parent: null } } }, ledger, () => fakeAdapter().adapter);
+    expect(spoofed).toMatchObject({ orchestrator: 'K', identitySource: 'worker-parent', refusal: { code: 'depth-1' } });
   });
 
   it('attributes ledger rows to bound identity before a caller orchestrator', async () => {
@@ -68,9 +71,25 @@ describe('dispatch — structural caps', () => {
     expect(granted.capabilities).toEqual(['net', 'browse']); expect(fake.calls[0].opts.capabilities).toEqual(['net', 'browse']); expect(ledger.recent(1)[0].capabilities).toBe('net,browse');
     const denied = fakeAdapter();
     const refusal = await dispatch({ taskClass: 'bulk-mechanical', prompt: 'x', cwd, capabilities: ['exec-privileged'], identity: unbound }, ledger, () => denied.adapter);
-    expect(refusal.refusal?.code).toBe('capability-denied'); expect(denied.calls).toHaveLength(0); expect(ledger.recent(1)[0]).toMatchObject({ refusal: 'capability-denied', finished_at: expect.any(String) });
-    const privileged = await dispatch({ taskClass: 'bulk-mechanical', prompt: 'x', cwd, capabilities: ['exec-privileged'], optIn: true, identity: unbound }, ledger, () => fake.adapter);
-    expect(privileged.capabilities).toEqual(['exec-privileged']);
+    expect(refusal.refusal?.code).toBe('capability-denied'); expect(denied.calls).toHaveLength(0);
+    // the refusal row records what was ASKED
+    expect(ledger.recent(1)[0]).toMatchObject({ refusal: 'capability-denied', capabilities: 'exec-privileged', finished_at: expect.any(String) });
+    // opt_in alone is NOT enough with the shipped policy (operator gate off) …
+    const optInOnly = await dispatch({ taskClass: 'bulk-mechanical', prompt: 'x', cwd, capabilities: ['exec-privileged'], optIn: true, identity: unbound }, ledger, () => denied.adapter);
+    expect(optInOnly.refusal?.code).toBe('capability-denied'); expect(optInOnly.refusal?.reason).toContain('allow_exec_privileged'); expect(denied.calls).toHaveLength(0);
+    // … but with an operator-enabled table (HEDDLE_ROUTING) + opt_in it is granted
+    const yamlPath = join(tempDir(), 'routing.yaml');
+    const { writeFileSync, readFileSync: rf } = await import('node:fs');
+    const shipped = rf(join(process.cwd(), 'routing', 'routing.v0.yaml'), 'utf8');
+    writeFileSync(yamlPath, shipped.replace('allow_exec_privileged: false', 'allow_exec_privileged: true'));
+    const prev = process.env.HEDDLE_ROUTING;
+    try {
+      process.env.HEDDLE_ROUTING = yamlPath;
+      const privileged = await dispatch({ taskClass: 'bulk-mechanical', prompt: 'x', cwd, capabilities: ['exec-privileged'], optIn: true, identity: unbound }, ledger, () => fake.adapter);
+      expect(privileged.capabilities).toEqual(['exec-privileged']);
+    } finally {
+      if (prev === undefined) delete process.env.HEDDLE_ROUTING; else process.env.HEDDLE_ROUTING = prev;
+    }
     const cursor = fakeAdapter();
     const cursorRefusal = await dispatch({ taskClass: 'scaffold', prompt: 'x', cwd, capabilities: ['net'], identity: unbound }, ledger, () => cursor.adapter);
     expect(cursorRefusal.refusal?.code).toBe('capability-denied'); expect(cursor.calls).toHaveLength(0);

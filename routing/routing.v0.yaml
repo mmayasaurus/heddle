@@ -14,6 +14,9 @@ policy:
     ollama_cloud: excluded            # reserved for PR reviewer bots (account-scoped limits)
   official_binaries_only: true        # each vendor's own CLI + own auth; never a third-party
                                       # client wearing another vendor's credentials (see README)
+  capabilities:                       # HED-2 — operator-owned switches for worker capability grants
+    allow_exec_privileged: false      # exec-privileged (codex danger-full-access, no sandbox) stays REFUSED
+                                      #   until the operator flips this; the call must ALSO pass opt_in.
   structural_caps:                    # HED-2 (Scape-derived, clean-room) — enforced in src/dispatch.ts
     max_children_per_orchestrator: 8  # in-flight workers per orchestrator; the 9th is REFUSED (ledgered)
     in_flight_stale_after_ms: 10800000  # 3h: an orphaned in-flight row stops holding a slot after this

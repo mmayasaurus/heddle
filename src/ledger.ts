@@ -257,6 +257,20 @@ export class Ledger {
     );
   }
 
+  /**
+   * Manual close of an ORPHANED row (heddle ledger finish): only succeeds while the row is still in
+   * flight, atomically — a worker's own finish() (real outcome) is never overwritten by it, and a
+   * manual close never races a completing worker into two writers. Returns false when nothing was
+   * closed (no such row, or already finished).
+   */
+  closeIfInFlight(id: number, error: string): boolean {
+    const info = this.db.prepare(`
+      UPDATE dispatches SET ok = 0, error = ?, finished_at = ?
+      WHERE id = ? AND finished_at IS NULL
+    `).run(error, new Date().toISOString(), id);
+    return Number(info.changes) > 0;
+  }
+
   recent(limit = 20, issue?: string): Record<string, unknown>[] {
     const sql = issue
       ? 'SELECT * FROM dispatches WHERE issue = ? ORDER BY id DESC LIMIT ?'
