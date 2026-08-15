@@ -65,6 +65,9 @@ server.tool(
     resume: z.string().optional().describe('Resume a prior worker session by its sessionId.'),
     codex_home: z.string().optional().describe('Account selection for codex workers (CODEX_HOME path).'),
     opt_in: z.boolean().optional().describe('Required for task classes gated behind explicit opt-in, and to grant the exec-privileged capability.'),
+    author_provider: z.string().optional().describe('adversarial-review: the provider that AUTHORED the change (claude | codex | cursor | gemini). The reviewer will be a DIFFERENT provider (reviewer_pool); recorded on the review row for pair scoring.'),
+    author_dispatch_id: z.number().optional().describe('adversarial-review: ledger id of the dispatch that produced the change, if any (lineage).'),
+    diff_base: z.string().optional().describe('adversarial-review: a git ref; heddle prepends "review `git diff <ref>...HEAD`" to your prompt.'),
     in_session: z.boolean().optional().describe('Claude classes: return the in-session (Agent tool) instruction instead of spawning a headless claude worker.'),
     account_pin: z.string().optional().describe('Claude classes: pin a registry account id (~/.heddle/accounts.json); default = most 5h headroom.'),
     capabilities: z.array(z.string()).optional().describe(
@@ -98,6 +101,9 @@ server.tool(
         capabilities: a.capabilities,
         inSession: a.in_session,
         accountPin: a.account_pin,
+        authorProvider: a.author_provider,
+        authorDispatchId: a.author_dispatch_id,
+        diffBase: a.diff_base,
         identity: IDENTITY,
       });
       const { raw, ...summary } = res;
@@ -181,6 +187,41 @@ server.tool(
   async (a) => {
     try { return text(await assessResult(a.task, a.output, a.worker_ok ?? true, a.cwd)); }
     catch (err) { return errorText(`assess_result failed: ${(err as Error).message ?? String(err)}`); }
+  },
+);
+
+server.tool(
+  'record_review_outcome',
+  'adversarial-review follow-up: after you (the author) triaged a reviewer\'s findings, record how many ' +
+    'there were and how many you accepted. This is the score that tunes reviewer pairs ' +
+    '(review_stats). Call it once per review dispatch (ledgerId of the dispatch_worker result).',
+  {
+    dispatch_id: z.number().describe('The review dispatch\'s ledgerId.'),
+    findings_total: z.number().describe('How many findings the reviewer reported (from its VERDICT line).'),
+    findings_accepted: z.number().describe('How many you accepted as real (fixed or agreed).'),
+    notes: z.string().optional().describe('Optional: which were false positives and why.'),
+  },
+  async (a) => {
+    try {
+      const ledger = new Ledger();
+      const ok = ledger.recordReviewOutcome(a.dispatch_id, { findingsTotal: a.findings_total, findingsAccepted: a.findings_accepted, notes: a.notes });
+      if (!ok) return errorText(`no review row for dispatch #${a.dispatch_id} — was it dispatched with the adversarial-review class?`);
+      return text({ recorded: true, review: ledger.getReview(a.dispatch_id) });
+    } catch (err) { return errorText(`record_review_outcome failed: ${err instanceof Error ? err.message : String(err)}`); }
+  },
+);
+
+server.tool(
+  'review_stats',
+  'Adversarial-review scoreboard: per author→reviewer provider pair — reviews, scored reviews, findings, ' +
+    'accepted findings, acceptance rate, mandate violations — plus the most recent reviews. Use it to pick ' +
+    'the reviewer family that finds real problems for a given author family.',
+  { limit: z.number().optional().describe('Recent reviews to include (default 10).') },
+  async (a) => {
+    try {
+      const ledger = new Ledger();
+      return text({ pairs: ledger.reviewPairStats(), recent: ledger.recentReviews(a.limit ?? 10) });
+    } catch (err) { return errorText(`review_stats failed: ${err instanceof Error ? err.message : String(err)}`); }
   },
 );
 

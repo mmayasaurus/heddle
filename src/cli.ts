@@ -37,6 +37,9 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
       --capabilities a,b   GRANT worker capabilities: net | browse | exec-privileged (default: none)
       --in-session         claude classes: return the in-session (Agent tool) instruction instead of a headless worker
       --account <id>       claude classes: pin the registry account (default: most 5h headroom)
+      --author-provider <p>  adversarial-review: who authored the change — the reviewer will be a different provider
+      --author-dispatch <id> adversarial-review: ledger id of the authoring dispatch (lineage)
+      --diff-base <ref>    adversarial-review: heddle prepends "review git diff <ref>...HEAD" to the task
       --json               machine-readable result
 
   heddle classify-effort --class <c> --task "<prompt>" [--json]   difficulty → effort (cheap model)
@@ -52,6 +55,8 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
   heddle ledger [--issue SPI-n] [--limit N] [--json]
   heddle ledger finish <id> --error "<why>"   close an orphaned in-flight row (ok=0)
   heddle usage [--since <iso>] [--json]    per-provider totals
+  heddle reviews [--limit N] [--json]      adversarial-review scoreboard (author→reviewer pairs) + recent reviews
+  heddle review-outcome <dispatch-id> --total N --accepted M [--notes "…"]   record how many findings you accepted
 `;
 
 function arg(flag: string): string | undefined {
@@ -112,6 +117,9 @@ try {
         capabilities: arg('--capabilities')?.split(',').map((s) => s.trim()).filter(Boolean),
         inSession: has('--in-session'),
         accountPin: arg('--account'),
+        authorProvider: arg('--author-provider'),
+        authorDispatchId: arg('--author-dispatch') ? Number(arg('--author-dispatch')) : undefined,
+        diffBase: arg('--diff-base'),
       });
 
       const { raw, ...summary } = res;
@@ -255,6 +263,41 @@ try {
             (r.duration_ms ? ` ${(Number(r.duration_ms) / 1000).toFixed(1)}s` : '') +
             ` in=${r.input_tokens ?? '?'} out=${r.output_tokens ?? '?'}`).join('\n')
         : '(ledger empty)');
+      break;
+    }
+
+    case 'reviews': {
+      const ledger = new Ledger();
+      const pairs = ledger.reviewPairStats();
+      const recent = ledger.recentReviews(Number(arg('--limit') ?? 10));
+      out(json, { pairs, recent }, () => (pairs.length
+        ? 'author → reviewer        reviews scored findings accepted rate   mandate-viol\n' + pairs.map((p) =>
+            `${String(p.author_provider ?? '?').padEnd(7)} → ${String(p.reviewer_provider).padEnd(9)} ` +
+            `${String(p.reviews).padStart(7)} ${String(p.scored).padStart(6)} ${String(p.findings_total).padStart(8)} ` +
+            `${String(p.findings_accepted).padStart(8)} ${p.acceptance_rate === null ? '   —' : String(p.acceptance_rate).padStart(5)} ` +
+            `${String(p.mandate_violations).padStart(12)}`).join('\n')
+        : '(no adversarial reviews yet)') +
+        (recent.length ? '\n\nrecent:\n' + recent.map((r) => `#${r.dispatch_id} ${r.author_provider ?? '?'} → ${r.reviewer_provider}/${r.reviewer_model}` +
+            (r.mandate_ok === 0 ? '  [MANDATE VIOLATION]' : '') +
+            (r.outcome_at ? `  ${r.findings_accepted}/${r.findings_total} accepted` : '  (unscored)') +
+            (r.issue ? `  ${r.issue}` : '')).join('\n') : ''));
+      break;
+    }
+
+    case 'review-outcome': {
+      const id = Number(process.argv[3]);
+      const total = Number(arg('--total'));
+      const accepted = Number(arg('--accepted'));
+      if (!Number.isInteger(id) || !Number.isInteger(total) || !Number.isInteger(accepted)) {
+        console.error('usage: heddle review-outcome <dispatch-id> --total N --accepted M [--notes "…"]');
+        process.exit(2);
+      }
+      const ledger = new Ledger();
+      if (!ledger.recordReviewOutcome(id, { findingsTotal: total, findingsAccepted: accepted, notes: arg('--notes') })) {
+        console.error(`heddle: no review row for dispatch #${id} (was it an adversarial-review dispatch?)`);
+        process.exit(1);
+      }
+      out(json, ledger.getReview(id), () => `recorded #${id}: ${accepted}/${total} findings accepted`);
       break;
     }
 

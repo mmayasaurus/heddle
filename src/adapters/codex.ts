@@ -43,7 +43,8 @@ export class CodexAdapter implements WorkerAdapter {
    */
   buildArgs(prompt: string, opts: DispatchOptions): string[] {
     const caps = new Set(opts.capabilities ?? []);
-    const sandbox = caps.has('exec-privileged') ? 'danger-full-access' : this.sandbox;
+    // read-only (HED-3 reviewers) wins over everything: a reviewer never gets a writable sandbox.
+    const sandbox = opts.readOnly ? 'read-only' : caps.has('exec-privileged') ? 'danger-full-access' : this.sandbox;
     const args = ['exec', '--json', '--skip-git-repo-check',
       '--sandbox', sandbox, '-c', 'approval_policy="never"'];
     if (caps.has('net')) args.push('-c', 'sandbox_workspace_write.network_access=true');

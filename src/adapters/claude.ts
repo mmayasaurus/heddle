@@ -117,7 +117,10 @@ export class ClaudeAdapter implements WorkerAdapter {
     if (opts.resume) args.push('--resume', opts.resume);
     if (opts.systemPromptAppend) args.push('--append-system-prompt', opts.systemPromptAppend);
     if (opts.mcpConfigPath) args.push('--mcp-config', opts.mcpConfigPath, '--strict-mcp-config');
-    if (caps.has('exec-privileged')) {
+    if (opts.readOnly) {
+      // HED-3 reviewers: only the read tools exist for the session — no Edit/Write/Bash at all.
+      args.push('--tools', 'Read', 'Grep', 'Glob', '--permission-mode', 'acceptEdits');
+    } else if (caps.has('exec-privileged')) {
       args.push('--dangerously-skip-permissions');
     } else {
       const tools = [...this.allowedTools, ...(caps.has('browse') ? ['WebFetch', 'WebSearch'] : [])];
