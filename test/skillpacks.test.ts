@@ -1,9 +1,8 @@
-import { describe, it, expect, afterEach } from 'vitest';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { describe, it, expect } from 'vitest';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { dispatch } from '../src/dispatch.js';
-import { Ledger } from '../src/ledger.js';
+import { useTempResources, fakeAdapter } from './helpers.js';
 import { MANDATORY_PACKS, listPacks, withMandatoryPacks } from '../src/skillpacks.js';
 import type { WorkerAdapter } from '../src/types.js';
 
@@ -39,39 +38,13 @@ describe('skill packs — mandatory union rule', () => {
 });
 
 describe('dispatch — mandatory skill materialization', () => {
-  const dirs: string[] = [];
-  const ledgers: Ledger[] = [];
-
-  afterEach(() => {
-    for (const ledger of ledgers) ledger.close();
-    for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
-    dirs.length = 0;
-    ledgers.length = 0;
-  });
-
-  function tempDir(): string {
-    const dir = mkdtempSync(join(tmpdir(), 'heddle-skillpacks-test-'));
-    dirs.push(dir);
-    return dir;
-  }
-
-  function fakeAdapter(onDispatch: (cwd: string) => void): WorkerAdapter {
-    return {
-      name: 'fake',
-      provider: 'codex',
-      dispatch: async (_prompt, opts) => {
-        onDispatch(opts.cwd);
-        return { ok: true, output: 'done', exitCode: 0 };
-      },
-    };
-  }
+  const { tempDir, tempLedger } = useTempResources('heddle-skillpacks-test-');
 
   it('materializes caller skills together with worker-role and restores AGENTS.md after a direct dispatch', async () => {
     const cwd = tempDir();
-    const ledger = new Ledger(join(tempDir(), 'ledger.db'));
-    ledgers.push(ledger);
-    let agentsDuringDispatch = '';
-    const adapter = fakeAdapter((workerCwd) => { agentsDuringDispatch = readFileSync(join(workerCwd, 'AGENTS.md'), 'utf8'); });
+    const ledger = tempLedger();
+    const fake = fakeAdapter();
+    const adapter = fake.adapter;
 
     const outcome = await dispatch(
       { provider: 'codex', model: 'gpt-5.6-luna', prompt: 'x', cwd, skills: ['quality-gate'], orchestrator: 'U' },
@@ -79,8 +52,8 @@ describe('dispatch — mandatory skill materialization', () => {
       () => adapter,
     );
 
-    expect(agentsDuringDispatch).toContain('### worker-role');
-    expect(agentsDuringDispatch).toContain('### quality-gate');
+    expect(fake.calls[0].agents).toContain('### worker-role');
+    expect(fake.calls[0].agents).toContain('### quality-gate');
     expect(existsSync(join(cwd, 'AGENTS.md'))).toBe(false);
     const [row] = ledger.recent(1);
     expect(row.skills).toBe('worker-role,quality-gate');
@@ -91,15 +64,14 @@ describe('dispatch — mandatory skill materialization', () => {
 
   it('unions worker-role into routing defaults before materializing a bulk-mechanical dispatch', async () => {
     const cwd = tempDir();
-    const ledger = new Ledger(join(tempDir(), 'ledger.db'));
-    ledgers.push(ledger);
-    let agentsDuringDispatch = '';
-    const adapter = fakeAdapter((workerCwd) => { agentsDuringDispatch = readFileSync(join(workerCwd, 'AGENTS.md'), 'utf8'); });
+    const ledger = tempLedger();
+    const fake = fakeAdapter();
+    const adapter = fake.adapter;
 
     await dispatch({ taskClass: 'bulk-mechanical', prompt: 'x', cwd }, ledger, () => adapter);
 
-    expect(agentsDuringDispatch).toContain('### worker-role');
-    expect(agentsDuringDispatch).toContain('### quality-gate');
+    expect(fake.calls[0].agents).toContain('### worker-role');
+    expect(fake.calls[0].agents).toContain('### quality-gate');
     const [row] = ledger.recent(1);
     expect(row.skills).toBe('worker-role,quality-gate');
     expect(row.task_class).toBe('bulk-mechanical');
@@ -107,22 +79,11 @@ describe('dispatch — mandatory skill materialization', () => {
 });
 
 describe('dispatch — fallback carries the class packs', () => {
-  const dirs: string[] = [];
-  const ledgers: Ledger[] = [];
-
-  afterEach(() => {
-    for (const ledger of ledgers) ledger.close();
-    for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
-    dirs.length = 0;
-    ledgers.length = 0;
-  });
+  const { tempDir, tempLedger } = useTempResources('heddle-skillpacks-fallback-test-');
 
   it('materializes the bulk-mechanical packs again when its fallback is dispatched', async () => {
-    const cwd = mkdtempSync(join(tmpdir(), 'heddle-skillpacks-fallback-test-'));
-    const ledgerDir = mkdtempSync(join(tmpdir(), 'heddle-skillpacks-fallback-ledger-test-'));
-    const ledger = new Ledger(join(ledgerDir, 'ledger.db'));
-    dirs.push(cwd, ledgerDir);
-    ledgers.push(ledger);
+    const cwd = tempDir();
+    const ledger = tempLedger();
     const calls: { model: string; agents: string }[] = [];
     const adapter: WorkerAdapter = {
       name: 'fake', provider: 'codex',

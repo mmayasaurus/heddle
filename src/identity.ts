@@ -82,7 +82,8 @@ export function resolveIdentity(cwd: string = process.cwd(), env: NodeJS.Process
  */
 export function attributeDispatch(bound: BoundIdentity, callerAgent?: string | null): {
   orchestrator: string | null;
-  identitySource: 'bound' | 'caller' | null;
+  /** `worker-parent` is set by the dispatcher for a refused nested dispatch (attributed to the spawner). */
+  identitySource: 'bound' | 'caller' | 'worker-parent' | null;
   /** Set when a caller-supplied agent disagreed with the bound identity (bound wins). */
   ignoredCallerAgent?: string;
 } {

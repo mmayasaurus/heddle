@@ -93,7 +93,7 @@ export interface DispatchOutcome extends WorkerResult {
   usedFallback: boolean;
   /** Who this dispatch is attributed to in the ledger, and how that was decided. */
   orchestrator: string | null;
-  identitySource: 'bound' | 'caller' | null;
+  identitySource: 'bound' | 'caller' | 'worker-parent' | null;
   /** Set when a caller-supplied `agent` disagreed with the process-bound identity (bound won). */
   ignoredCallerAgent?: string;
   /** How the provider runs workers (`in-session-subagent` = the orchestrator's own Agent tool). */
@@ -286,11 +286,13 @@ export async function dispatch(
 ): Promise<DispatchOutcome> {
   const table = loadRouting();
   const identity = req.identity ?? resolveIdentity(req.cwd);
-  const ctx: DispatchContext = {
-    table, ledger, adapterFor, identity,
-    attribution: attributeDispatch(identity, req.orchestrator),
-    caps: structuralCaps(table),
-  };
+  let attribution = attributeDispatch(identity, req.orchestrator);
+  // A worker that tries to dispatch has no identity of its own; attribute the (refused) attempt to
+  // the orchestrator that spawned it, so the parent's ledger shows it. Marked as such.
+  if (!attribution.orchestrator && identity.worker?.parent) {
+    attribution = { orchestrator: identity.worker.parent, identitySource: 'worker-parent' };
+  }
+  const ctx: DispatchContext = { table, ledger, adapterFor, identity, attribution, caps: structuralCaps(table) };
 
   // Auto-effort (opt-in): classify the sub-task's difficulty and pin the effort, unless the caller
   // already set one. Best-effort — a classifier failure falls through to the route/default effort.
