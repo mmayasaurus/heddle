@@ -129,7 +129,7 @@ try {
           (res.refusal ? ` [refused: ${res.refusal.code}]` : '') +
           (res.durationMs ? ` · ${(res.durationMs / 1000).toFixed(1)}s` : '') +
           (res.sessionId ? `\n  resume: ${res.sessionId}` : '');
-        return res.ok ? `${head}\n\n${res.output}` : `${head}\n  error: ${res.error}`;
+        return res.ok ? `${head}\n\n${res.output}` : `${head}\n  error: ${res.error}` + (res.output ? `\n\n${res.output}` : '');
       });
       process.exit(res.ok ? 0 : 1);
       break;
@@ -150,6 +150,7 @@ try {
         taskClass, provider, model, prompt: '(dry run)', cwd: arg('--cwd') ?? process.cwd(),
         optIn: has('--opt-in'), env: Object.keys(env).length ? env : undefined,
         inSession: has('--in-session'), accountPin: arg('--account'),
+        authorProvider: arg('--author-provider'),
       });
       const summary = {
         task_class: plan.route.taskClass,
@@ -164,10 +165,14 @@ try {
         account: plan.account,
         account_pick: plan.accountPick ? { id: plan.accountPick.account.id, used_pct: plan.accountPick.usedPct, reason: plan.accountPick.reason, config_dir: plan.accountPick.account.configDir } : null,
         account_advice: plan.accountAdvice?.line ?? null,
+        reviewer_pick: plan.reviewerPick?.reason ?? null,
+        would_refuse_same_provider: plan.sameProviderReview ?? null,
         skills: plan.skillsForRefusal,
       };
       out(json, summary, () =>
         `${plan.route.taskClass}` +
+        (summary.would_refuse_same_provider ? `\n  ✗ WOULD REFUSE (same-provider-review): ${summary.would_refuse_same_provider}` : '') +
+        (summary.reviewer_pick ? `\n  reviewer: ${summary.reviewer_pick}` : '') +
         (summary.refusal ? `\n  ✗ WOULD REFUSE (${summary.refusal.code}): ${summary.refusal.reason}`
           : `\n  → ${summary.would_run}${summary.in_session ? '  [in-session: use your Agent tool]' : ''}` +
             (summary.routed_away_for_cap ? '  (routed away for cap)' : '')) +
@@ -207,6 +212,8 @@ try {
         (r.execution === 'in-session-subagent' ? '  [in-session: use your Agent tool — heddle dispatch refuses it]' : '') +
         (r.provider === 'claude' ? '  [claude: headless on the account with most headroom; --in-session keeps the subagent protocol]' : '') +
         (r.edits_code ? '  [edits code]' : '') +
+        (r.read_only ? '  [read-only]' : '') +
+        (r.reviewer_pool.length ? `  pool: ${r.reviewer_pool.join(' → ')}` : '') +
         `\n${''.padEnd(23)}skills: ${r.skills.join(', ') || '(none)'}` +
         (r.mcp.length ? `  mcp: ${r.mcp.join(', ')}` : '') +
         (r.why ? `\n${''.padEnd(23)}why: ${r.why}` : '')).join('\n'));

@@ -98,9 +98,10 @@ export function validateWorkerMcp(provider: string, serverNames: string[]): void
  * heddle writes a per-dispatch JSON in the OS temp dir — nothing touches the worktree — and removes it
  * afterwards. Returns null when no servers were requested.
  */
-export function claudeMcpConfigFile(serverNames: string[]): { path: string; cleanup: () => void } | null {
-  if (serverNames.length === 0) return null;
-  const servers = resolveMcpServers(serverNames);
+export function claudeMcpConfigFile(serverNames: string[]): { path: string; cleanup: () => void } {
+  // An EMPTY config is deliberate: paired with --strict-mcp-config it hides the operator's global
+  // servers from the worker (see src/adapters/claude.ts).
+  const servers = serverNames.length ? resolveMcpServers(serverNames) : {};
   const dir = mkdtempSync(join(tmpdir(), 'heddle-claude-mcp-'));
   const path = join(dir, 'mcp.json');
   writeFileSync(path, JSON.stringify({ mcpServers: servers }, null, 2), 'utf8');

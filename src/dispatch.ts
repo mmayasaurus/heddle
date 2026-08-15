@@ -10,7 +10,7 @@ import {
 import { materializeAgentsMd, readPack, withMandatoryPacks, composePacks } from './skillpacks.js';
 import { materializeWorkerMcp, validateWorkerMcp, codexMcpFlags, claudeMcpConfigFile } from './mcp.js';
 import { classifyEffort, assessResult, type ResultAssessment } from './classify.js';
-import { pickReviewer, snapshotWorktree, sameSnapshot, diffInstruction, type ReviewerPick } from './review.js';
+import { pickReviewer, snapshotWorktree, sameSnapshot, diffInstruction, normalizeProvider, type ReviewerPick } from './review.js';
 import { decideCapabilities, capabilityPolicy } from './capabilities.js';
 import { resolveIdentity, attributeDispatch, WORKER_ENV, type BoundIdentity } from './identity.js';
 import { readProviderCaps, type CapsByProvider } from './usage.js';
@@ -94,6 +94,8 @@ export interface DispatchRequest {
    * the review row so reviewer pairs can be scored.
    */
   authorProvider?: string;
+  /** HED-3: the model that authored the change, if known (recorded on the review row). */
+  authorModel?: string;
   /** HED-3: the ledger id of the dispatch that produced the change (lineage), if any. */
   authorDispatchId?: number;
   /** HED-3: a git ref; heddle prepends "review `git diff <ref>...HEAD`" to the prompt. */
@@ -176,7 +178,7 @@ interface DispatchContext {
   /** HED-78: the Claude account (env) a headless claude worker runs under. */
   claudeAccount?: AccountPick | null;
   /** HED-3: set for review classes. */
-  review?: { authorProvider: string | null; authorDispatchId: number | null; reviewerPick?: string };
+  review?: { authorProvider: string | null; authorModel: string | null; authorDispatchId: number | null; reviewerPick?: string };
 }
 
 function baseRecord(
@@ -263,7 +265,7 @@ async function runTarget(
   // HED-3: review rows carry the author→reviewer pair from the moment the row exists.
   if (ctx.review) {
     ctx.ledger.recordReview({
-      dispatchId: ledgerId, authorProvider: ctx.review.authorProvider, authorModel: null,
+      dispatchId: ledgerId, authorProvider: ctx.review.authorProvider, authorModel: ctx.review.authorModel,
       authorDispatchId: ctx.review.authorDispatchId, reviewerProvider: target.provider, reviewerModel: target.model,
     });
   }
@@ -305,8 +307,8 @@ async function runTarget(
     let mcpConfigPath: string | undefined;
     if (isClaude) {
       systemPromptAppend = skills.length ? composePacks(skills) : undefined;
-      const mcpFile = claudeMcpConfigFile(mcp);
-      if (mcpFile) { mcpConfigPath = mcpFile.path; restoreMcp = mcpFile.cleanup; }
+      const mcpFile = claudeMcpConfigFile(mcp); // always a file (possibly empty) → --strict-mcp-config
+      mcpConfigPath = mcpFile.path; restoreMcp = mcpFile.cleanup;
     } else {
       restoreSkills = materializeAgentsMd(req.cwd, skills);
       restoreMcp = materializeWorkerMcp(req.cwd, target.provider, mcp);
@@ -346,7 +348,10 @@ async function runTarget(
     mandateOk = sameSnapshot(before, snapshotWorktree(req.cwd));
     if (ctx.review) ctx.ledger.setReviewMandate(ledgerId, mandateOk);
     if (mandateOk === false) {
-      const note = 'MANDATE VIOLATION: the read-only worker changed the worktree (git status/diff differ from before the run) — inspect `git status`/`git diff` before trusting the findings; nothing was reverted';
+      // A reviewer that changed the worktree did NOT do the job it was given: the dispatch is not ok
+      // (ledger ok=0), the findings are still returned, nothing is reverted (operator's call).
+      const note = 'MANDATE VIOLATION: the read-only worker changed the worktree (content digest of HEAD + tracked/untracked files + stash differs from before the run) — inspect `git status`/`git diff` before trusting the findings; nothing was reverted';
+      result.ok = false;
       result.error = result.error ? `${result.error}; ${note}` : note;
     }
   }
@@ -419,7 +424,10 @@ export async function dispatch(
   ctx.claudeAccount = plan.accountPick;
   const { route, target, fallback, origin, skillsForRefusal } = plan;
   if (route.reviewerPool || route.readOnly) {
-    ctx.review = { authorProvider: req.authorProvider ?? null, authorDispatchId: req.authorDispatchId ?? null, reviewerPick: plan.reviewerPick?.reason };
+    ctx.review = {
+      authorProvider: normalizeProvider(req.authorProvider) ?? null, authorModel: req.authorModel ?? null,
+      authorDispatchId: req.authorDispatchId ?? null, reviewerPick: plan.reviewerPick?.reason,
+    };
   }
   if (req.diffBase) req = { ...req, prompt: diffInstruction(req.diffBase) + req.prompt };
 
@@ -474,6 +482,7 @@ export async function dispatch(
   // Primary failed and the table names a fallback — try it, recording the origin so the ledger
   // shows which routes actually hold up in practice. A fallback that is itself in-session (custom
   // tables) gets the same structured refusal instead of a throw.
+  if (route.reviewerPool && fallback.provider === normalizeProvider(req.authorProvider)) return primary; // never review with the author's family
   const fbExecution = fallback.provider === 'claude'
     ? (req.inSession ? 'in-session-subagent' : 'headless')
     : providerExecution(table, fallback.provider);
@@ -532,6 +541,7 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
   let notDispatchable = false;
   let reviewerPick: ReviewerPick | null = null;
   let sameProviderReview: string | undefined;
+  const author = normalizeProvider(req.authorProvider);
   if (!req.taskClass) {
     // Direct path, no class: orchestrator named the model. Full dynamic choice, still policy-fenced.
     if (!(req.provider && req.model)) {
@@ -565,23 +575,21 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
       const explicit = directRoute(table, req.provider, req.model, req.skills ?? route.skills, req.mcp ?? route.mcp);
       target = { ...explicit, effort: req.effort };
       origin = 'explicit';
-      // A review must be by a different family — naming the author's own provider is refused.
-      if (route.reviewerPool && req.authorProvider && req.provider === req.authorProvider) {
-        sameProviderReview = `task class "${route.taskClass}" requires a reviewer from a DIFFERENT provider than the ` +
-          `author (${req.authorProvider}); the explicit route ${req.provider}/${req.model} is the author's own family.`;
-      }
     } else {
       target = route;
       fallback = route.fallback;
       // HED-3: when the class primary is the author's provider, take the first differing pool entry.
-      const pick = route.reviewerPool ? pickReviewer(route, req.authorProvider) : null;
+      const pick = route.reviewerPool ? pickReviewer(route, author) : null;
       if (pick) {
         reviewerPick = pick;
         target = { ...route, provider: pick.provider, model: pick.model };
-        // the class fallback may itself be the author's family — drop it rather than review with the author
-        fallback = route.fallback && route.fallback.provider !== req.authorProvider ? route.fallback : undefined;
+        // a fallback identical to the pick would just re-run the same reviewer — drop it
+        if (fallback && fallback.provider === pick.provider && fallback.model === pick.model) fallback = undefined;
       }
     }
+    // HED-3 review classes: the author's family never reviews — not as the named route, not as the
+    // class fallback, and (below, after cap-aware routing) not as the effective target.
+    if (route.reviewerPool && fallback && fallback.provider === author) fallback = undefined;
   }
 
   // Cap-aware routing (HED-67): may swap target→fallback, or refuse a metered pool. Explicit routes
@@ -594,6 +602,22 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
   target = decision.target;
   fallback = decision.fallback;
   if (reviewerPick) decision.routeReason = `${decision.routeReason}; reviewer ${reviewerPick.reason}`;
+  // HED-3 invariant, checked on the EFFECTIVE target (after explicit route / pool pick / cap-aware
+  // route-away): a review class never runs on the author's family. author_provider is REQUIRED for
+  // review classes — an orchestrator reviewing its own edits passes 'claude'.
+  if (route.reviewerPool && !notDispatchable) {
+    if (!author) {
+      throw new Error(
+        `task class "${route.taskClass}" requires author_provider (the provider that WROTE the change — for your ` +
+        `own edits, "claude"): the reviewer must be a different model family, and the pair is what the ledger scores.`,
+      );
+    }
+    if (target.provider === author) {
+      sameProviderReview = `task class "${route.taskClass}" requires a reviewer from a DIFFERENT provider than the ` +
+        `author (${author}); the effective route ${target.provider}/${target.model} is the author's own family` +
+        (origin === 'explicit' ? ' (named explicitly)' : decision.routedAwayForCap ? ' (cap-aware route-away landed there)' : '') + '.';
+    }
+  }
 
   // Claude runs headless by default (HED-78); `inSession` keeps the shared-cache subagent protocol.
   const execution = target.provider === 'claude'

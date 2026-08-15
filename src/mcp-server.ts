@@ -66,6 +66,7 @@ server.tool(
     codex_home: z.string().optional().describe('Account selection for codex workers (CODEX_HOME path).'),
     opt_in: z.boolean().optional().describe('Required for task classes gated behind explicit opt-in, and to grant the exec-privileged capability.'),
     author_provider: z.string().optional().describe('adversarial-review: the provider that AUTHORED the change (claude | codex | cursor | gemini). The reviewer will be a DIFFERENT provider (reviewer_pool); recorded on the review row for pair scoring.'),
+    author_model: z.string().optional().describe('adversarial-review: the model that authored the change, if known (recorded for pair scoring).'),
     author_dispatch_id: z.number().optional().describe('adversarial-review: ledger id of the dispatch that produced the change, if any (lineage).'),
     diff_base: z.string().optional().describe('adversarial-review: a git ref; heddle prepends "review `git diff <ref>...HEAD`" to your prompt.'),
     in_session: z.boolean().optional().describe('Claude classes: return the in-session (Agent tool) instruction instead of spawning a headless claude worker.'),
@@ -102,6 +103,7 @@ server.tool(
         inSession: a.in_session,
         accountPin: a.account_pin,
         authorProvider: a.author_provider,
+        authorModel: a.author_model,
         authorDispatchId: a.author_dispatch_id,
         diffBase: a.diff_base,
         identity: IDENTITY,
@@ -128,6 +130,7 @@ server.tool(
     codex_home: z.string().optional(),
     in_session: z.boolean().optional(),
     account_pin: z.string().optional(),
+    author_provider: z.string().optional(),
   },
   async (a) => {
     try {
@@ -136,7 +139,7 @@ server.tool(
       const plan = planDispatch({
         taskClass: a.task_class, provider: a.provider, model: a.model, prompt: '(dry run)',
         cwd: process.cwd(), optIn: a.opt_in, env: Object.keys(env).length ? env : undefined, identity: IDENTITY,
-        inSession: a.in_session, accountPin: a.account_pin,
+        inSession: a.in_session, accountPin: a.account_pin, authorProvider: a.author_provider,
       });
       return text({
         task_class: plan.route.taskClass,
@@ -150,6 +153,8 @@ server.tool(
         account: plan.account,
         account_pick: plan.accountPick ? { id: plan.accountPick.account.id, used_pct: plan.accountPick.usedPct, reason: plan.accountPick.reason } : null,
         account_advice: plan.accountAdvice?.line ?? null,
+        reviewer_pick: plan.reviewerPick?.reason ?? null,
+        would_refuse_same_provider: plan.sameProviderReview ?? null,
         skills: plan.skillsForRefusal,
       });
     } catch (err) {

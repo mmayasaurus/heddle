@@ -116,9 +116,14 @@ export class ClaudeAdapter implements WorkerAdapter {
     if (opts.effort) args.push('--effort', opts.effort);
     if (opts.resume) args.push('--resume', opts.resume);
     if (opts.systemPromptAppend) args.push('--append-system-prompt', opts.systemPromptAppend);
+    // ALWAYS strict: a worker sees only the MCP servers heddle attached (the dispatcher writes an
+    // empty config when none) — never the operator's global servers (Serena can EDIT code, Linear /
+    // Supabase / argent act on live systems). Verified live 2026-08-15: without this a `--tools
+    // Read,Grep,Glob` "read-only" reviewer still had Serena's replace_content available.
     if (opts.mcpConfigPath) args.push('--mcp-config', opts.mcpConfigPath, '--strict-mcp-config');
     if (opts.readOnly) {
-      // HED-3 reviewers: only the read tools exist for the session — no Edit/Write/Bash at all.
+      // HED-3 reviewers: only the read built-ins exist for the session — no Edit/Write/Bash at all
+      // (`--tools` restricts the built-in set; verified live: Write reported disabled, no file created).
       args.push('--tools', 'Read', 'Grep', 'Glob', '--permission-mode', 'acceptEdits');
     } else if (caps.has('exec-privileged')) {
       args.push('--dangerously-skip-permissions');

@@ -177,6 +177,7 @@ export class Ledger {
     // this file; wait briefly for a writer instead of failing with SQLITE_BUSY, including during the
     // migration window below (check, then ALTER).
     this.db.exec('PRAGMA busy_timeout = 5000;');
+    this.db.exec('PRAGMA foreign_keys = ON;'); // reviews.dispatch_id must be a real dispatch
     this.db.exec(SCHEMA);
     const have = new Set(
       (this.db.prepare('PRAGMA table_info(dispatches)').all() as { name: string }[]).map((c) => c.name),
@@ -315,10 +316,15 @@ export class Ledger {
     dispatchId: number; authorProvider: string | null; authorModel: string | null; authorDispatchId: number | null;
     reviewerProvider: string; reviewerModel: string;
   }): void {
+    // Upsert that never wipes mandate_ok / findings / notes / outcome_at (INSERT OR REPLACE would).
     this.db.prepare(`
-      INSERT OR REPLACE INTO reviews
+      INSERT INTO reviews
         (dispatch_id, author_provider, author_model, author_dispatch_id, reviewer_provider, reviewer_model, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(dispatch_id) DO UPDATE SET
+        author_provider = excluded.author_provider, author_model = excluded.author_model,
+        author_dispatch_id = excluded.author_dispatch_id, reviewer_provider = excluded.reviewer_provider,
+        reviewer_model = excluded.reviewer_model
     `).run(r.dispatchId, r.authorProvider, r.authorModel, r.authorDispatchId, r.reviewerProvider, r.reviewerModel, new Date().toISOString());
   }
 
