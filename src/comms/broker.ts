@@ -448,7 +448,8 @@ export class Broker {
     for (const ev of this.log.openHolds()) { // SQL: held rows with no later resolving event — whole log, oldest first
       const record = ev.messageId == null ? null : this.log.get(ev.messageId);
       if (!record || this.held.some((h) => h.record.id === record.id && h.target === ev.to)) continue;
-      this.held.push({ record, envelope: renderEnvelope(record), target: ev.to, heldAt: Date.parse(ev.ts), attempts: 1 });
+      const heldAt = Date.parse(ev.ts);
+      this.held.push({ record, envelope: renderEnvelope(record), target: ev.to, heldAt: Number.isFinite(heldAt) ? heldAt : this.now(), attempts: 1 });
       restored += 1;
     }
     return restored;

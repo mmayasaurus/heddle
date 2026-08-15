@@ -388,8 +388,9 @@ export class CommsLog {
 
   /**
    * Holds still owed a release or a timeout: `held` events with no later resolving event for the
-   * same (message, target) — resolving = `released`, `sent`, or `failed`/`hold-timeout`. (A later
-   * `failed` with another code is a transient transport failure: the entry is still held.)
+   * same (message, target) — resolving = `released`, `sent`, `logged` (broadcast → inbox), or
+   * `failed`/`hold-timeout`. (A later `failed` with another code is a transient transport failure:
+   * the entry is still held.)
    */
   openHolds(): DeliveryEvent[] {
     const rows = this.db.prepare(`
@@ -397,7 +398,7 @@ export class CommsLog {
       WHERE d.outcome = 'held' AND NOT EXISTS (
         SELECT 1 FROM deliveries e
         WHERE e.message_id = d.message_id AND e.target = d.target AND e.id > d.id
-          AND (e.outcome IN ('released', 'sent') OR (e.outcome = 'failed' AND e.code = 'hold-timeout'))
+          AND (e.outcome IN ('released', 'sent', 'logged') OR (e.outcome = 'failed' AND e.code = 'hold-timeout'))
       )
       ORDER BY d.id ASC
     `).all();
