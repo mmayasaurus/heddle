@@ -58,8 +58,12 @@ permissions: {}
 
 # Superseded runs are cancelled (hosted minutes are free but finite, and only
 # the latest commit's results matter — nothing here maintains a living comment).
+# `edited` events that are NOT a base-branch change get their own `noop`
+# group: cancellation happens at run creation, before the job-level guards
+# skip them, so without this a title edit would kill an in-flight scan of the
+# same PR (cubic, dashboard#5 r2).
 concurrency:
-  group: det-review-${{ github.event.pull_request.number || github.ref }}
+  group: det-review-${{ github.event.pull_request.number || github.ref }}-${{ (github.event.action != 'edited' || github.event.changes.base.ref.from != '') && 'scan' || 'noop' }}
   cancel-in-progress: true
 
 jobs:
