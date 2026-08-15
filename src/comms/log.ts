@@ -387,8 +387,8 @@ export class CommsLog {
         (p.kind === 'child' ? ' — children cannot mint children (depth 1)' : ''),
       );
     }
-    if (input.dispatchId != null && !Number.isInteger(input.dispatchId)) {
-      throw new Error('dispatchId must be an integer ledger row id');
+    if (input.dispatchId != null && (!Number.isInteger(input.dispatchId) || input.dispatchId < 1)) {
+      throw new Error('dispatchId must be a positive integer ledger row id');
     }
     const ts = this.now();
     let minted: string;
