@@ -1,0 +1,241 @@
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
+import { CommsLog, COMMS_SCHEMA_VERSION } from '../../src/comms/log.js';
+
+/**
+ * CommsLog against a TEMP database — never the default ~/.heddle/comms.db (that is the fleet's
+ * real conversation history). Same pattern as test/ledger.test.ts.
+ */
+describe('CommsLog (temp db)', () => {
+  let dir: string;
+  let path: string;
+  let log: CommsLog;
+  let tick = 0;
+  // Deterministic, strictly increasing clock so `sinceTs` behaviour is testable.
+  const clock = () => new Date(Date.UTC(2026, 7, 15, 12, 0, tick++)).toISOString();
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'heddle-comms-test-'));
+    path = join(dir, 'comms.db');
+    tick = 0;
+    log = new CommsLog(path, { now: clock });
+  });
+  afterEach(() => {
+    log.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  // ------------------------------------------------------------ writer
+
+  it('appends a message with safe defaults and reads it back intact', () => {
+    const rec = log.append({ from: 'K', to: '#fleet', body: 'hello fleet', meta: { transport: 'test', n: 1 } });
+    expect(rec.id).toBe(1);
+    expect(rec.ts).toBe('2026-08-15T12:00:00.000Z');
+    expect(rec).toMatchObject({
+      from: 'K', to: '#fleet', body: 'hello fleet', kind: 'chat', tier: 'untrusted', verified: false,
+      replyTo: null, issue: null, dispatchId: null, meta: { transport: 'test', n: 1 },
+    });
+    expect(log.get(1)).toEqual(rec);
+    expect(log.get(999)).toBeNull();
+    expect(log.latestId()).toBe(1);
+    expect(log.count()).toBe(1);
+  });
+
+  it('records reply_to / issue / dispatch_id / kind when given', () => {
+    const q = log.append({ from: 'K', to: 'R', body: 'question?', issue: 'HED-4' });
+    const a = log.append({ from: 'R', to: 'K', body: 'answer.', kind: 'status', replyTo: q.id, dispatchId: 42, issue: 'HED-4' });
+    expect(a).toMatchObject({ kind: 'status', replyTo: q.id, dispatchId: 42, issue: 'HED-4' });
+  });
+
+  it('refuses garbage before it reaches the database', () => {
+    expect(() => log.append({ from: '#fleet', to: 'K', body: 'x' })).toThrow(/rooms and @all cannot send/);
+    expect(() => log.append({ from: '@all', to: 'K', body: 'x' })).toThrow(/rooms and @all cannot send/);
+    expect(() => log.append({ from: 'K L', to: 'R', body: 'x' })).toThrow(/invalid from address/);
+    expect(() => log.append({ from: 'K', to: 'K.1.1', body: 'x' })).toThrow(/invalid to address/);
+    expect(() => log.append({ from: 'K', to: 'R', body: '' })).toThrow(/non-empty/);
+    expect(() => log.append({ from: 'K', to: 'R', body: 'x', kind: 'gossip' as never })).toThrow(/unknown message kind/);
+    expect(() => log.append({ from: 'K', to: 'R', body: 'x', tier: 'root' as never })).toThrow(/unknown tier/);
+    expect(() => log.append({ from: 'K', to: 'R', body: 'x', replyTo: 1.5 })).toThrow(/replyTo/);
+    expect(log.count()).toBe(0);
+    // A refused append leaves no participant side-effects behind either.
+    expect(log.participants()).toEqual([]);
+  });
+
+  it('never stores a directive the broker did not verify — at the API AND at the database', () => {
+    expect(() => log.append({ from: 'K', to: 'K.1', body: 'do it', tier: 'directive' })).toThrow(/verified by the broker/);
+    expect(() => log.append({ from: 'K', to: 'K.1', body: 'do it', tier: 'directive', verified: false })).toThrow(/verified by the broker/);
+
+    // Bypass the class entirely: a raw INSERT with tier=directive/verified=0 must still be refused.
+    const raw = new DatabaseSync(path);
+    try {
+      expect(() => raw.prepare(
+        "INSERT INTO messages (ts, sender, target, body, tier, verified) VALUES ('t', 'K', 'K.1', 'spoof', 'directive', 0)",
+      ).run()).toThrow(/CHECK constraint failed/);
+    } finally { raw.close(); }
+    expect(log.count()).toBe(0);
+  });
+
+  it('is append-only: UPDATE and DELETE are refused by the database itself', () => {
+    const rec = log.append({ from: 'K', to: 'R', body: 'original' });
+    const raw = new DatabaseSync(path);
+    try {
+      expect(() => raw.prepare("UPDATE messages SET body = 'tampered' WHERE id = ?").run(rec.id)).toThrow(/append-only: UPDATE refused/);
+      expect(() => raw.prepare('DELETE FROM messages WHERE id = ?').run(rec.id)).toThrow(/append-only: DELETE refused/);
+    } finally { raw.close(); }
+    expect(log.get(rec.id)?.body).toBe('original');
+    expect(log.count()).toBe(1);
+  });
+
+  // ------------------------------------------------------------ transcript API
+
+  function seedConversation() {
+    log.mintChild('K'); // K.1
+    log.append({ from: 'K', to: '#fleet', body: 'room 1' });          // 1
+    log.append({ from: 'K', to: 'R', body: 'dm K→R' });                // 2
+    log.append({ from: 'R', to: 'K', body: 'dm R→K' });                // 3
+    log.append({ from: 'R', to: '#fleet', body: 'room 2' });          // 4
+    log.append({ from: 'V', to: 'K', body: 'dm V→K' });                // 5
+    log.append({ from: 'V', to: '@all', body: 'broadcast' });         // 6
+    log.append({ from: 'K', to: 'K.1', body: 'to child' });            // 7
+    log.append({ from: 'K.1', to: 'K', body: 'from child' });          // 8
+    log.append({ from: 'K', to: '#other', body: 'other room' });      // 9
+  }
+
+  it('transcript({room}) returns only that room, oldest first, with exclusive id cursors and paging', () => {
+    seedConversation();
+    const all = log.transcript({ room: '#fleet' });
+    expect(all.map((m) => [m.id, m.body])).toEqual([[1, 'room 1'], [4, 'room 2']]);
+
+    expect(log.transcript({ room: '#fleet' }, { sinceId: 1 }).map((m) => m.id)).toEqual([4]);
+    expect(log.transcript({ room: '#fleet' }, { sinceId: 4 })).toEqual([]);
+
+    // Paging: limit 1, then continue from the last id.
+    const page1 = log.transcript({ room: '#fleet' }, { limit: 1 });
+    expect(page1.map((m) => m.id)).toEqual([1]);
+    const page2 = log.transcript({ room: '#fleet' }, { limit: 1, sinceId: page1[0].id });
+    expect(page2.map((m) => m.id)).toEqual([4]);
+  });
+
+  it('transcript({pair}) is the DM thread in both directions and nothing else', () => {
+    seedConversation();
+    expect(log.transcript({ pair: ['K', 'R'] }).map((m) => m.body)).toEqual(['dm K→R', 'dm R→K']);
+    expect(log.transcript({ pair: ['R', 'K'] }).map((m) => m.body)).toEqual(['dm K→R', 'dm R→K']);
+    expect(log.transcript({ pair: ['K', 'K.1'] }).map((m) => m.body)).toEqual(['to child', 'from child']);
+    expect(log.transcript({ pair: ['V', 'R'] })).toEqual([]);
+  });
+
+  it('transcript({inbox}) is direct messages to me plus @all broadcasts — not rooms, not others', () => {
+    seedConversation();
+    expect(log.transcript({ inbox: 'K' }).map((m) => m.body)).toEqual(['dm R→K', 'dm V→K', 'broadcast', 'from child']);
+    expect(log.transcript({ inbox: 'K.1' }).map((m) => m.body)).toEqual(['broadcast', 'to child']);
+    expect(log.transcript({ inbox: 'V' }).map((m) => m.body)).toEqual(['broadcast']);
+  });
+
+  it('transcript({all}) with sinceTs is a strict timestamp cursor', () => {
+    seedConversation();
+    const everything = log.transcript({ all: true });
+    expect(everything.map((m) => m.id)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    const later = log.transcript({ all: true }, { sinceTs: everything[5].ts });
+    expect(later.map((m) => m.id)).toEqual([7, 8, 9]);
+    // Both cursors apply together (AND).
+    expect(log.transcript({ all: true }, { sinceTs: everything[5].ts, sinceId: 8 }).map((m) => m.id)).toEqual([9]);
+  });
+
+  it('transcript rejects malformed scopes and cursors', () => {
+    expect(() => log.transcript({ room: 'K' })).toThrow(/must be a #room/);
+    expect(() => log.transcript({ inbox: '#fleet' })).toThrow(/agent\/child\/operator/);
+    expect(() => log.transcript({ pair: ['K', 'nope nope'] })).toThrow(/invalid to address/);
+    expect(() => log.transcript({} as never)).toThrow(/scope must be one of/);
+    expect(() => log.transcript({ all: true }, { sinceId: -1 })).toThrow(/sinceId/);
+    expect(() => log.transcript({ all: true }, { sinceTs: 'yesterday' })).toThrow(/ISO-8601/);
+    expect(() => log.transcript({ all: true }, { limit: 0 })).toThrow(/limit/);
+  });
+
+  // ------------------------------------------------------------ participants
+
+  it('registers agents and the operator on first send, and refreshes last_seen after', () => {
+    log.append({ from: 'K', to: '#fleet', body: 'a' });          // ts 12:00:00
+    log.append({ from: 'operator', to: 'K', body: 'b' });        // ts 12:00:01
+    log.append({ from: 'K', to: '#fleet', body: 'c' });          // ts 12:00:02
+    const k = log.participant('K')!;
+    expect(k).toMatchObject({ kind: 'agent', parent: null, seq: null, dispatchId: null });
+    expect(k.firstSeen).toBe('2026-08-15T12:00:00.000Z');
+    expect(k.lastSeen).toBe('2026-08-15T12:00:02.000Z');
+    expect(log.participant('operator')?.kind).toBe('operator');
+    // Targets are NOT registered by being messaged.
+    expect(log.participant('#fleet')).toBeNull();
+  });
+
+  it('mints children per parent with lineage, and refuses depth > 1', () => {
+    const k1 = log.mintChild('K', { dispatchId: 17, label: 'codex scaffold' });
+    const k2 = log.mintChild('K');
+    const r1 = log.mintChild('R', { dispatchId: 18 });
+    expect(k1).toMatchObject({ address: 'K.1', kind: 'child', parent: 'K', seq: 1, dispatchId: 17, label: 'codex scaffold' });
+    expect(k2).toMatchObject({ address: 'K.2', parent: 'K', seq: 2, dispatchId: null });
+    expect(r1).toMatchObject({ address: 'R.1', parent: 'R', seq: 1, dispatchId: 18 });
+    // Minting registers the parent as an agent.
+    expect(log.participant('K')?.kind).toBe('agent');
+    expect(log.participants({ parent: 'K' }).map((p) => p.address)).toEqual(['K.1', 'K.2']);
+
+    expect(() => log.mintChild('K.1')).toThrow(/depth 1/);
+    expect(() => log.mintChild('operator')).toThrow(/parent must be a fleet agent/);
+    expect(() => log.mintChild('#fleet')).toThrow(/parent must be a fleet agent/);
+    expect(() => log.mintChild('K', { dispatchId: 1.5 })).toThrow(/dispatchId/);
+  });
+
+  it('a child can only send once it has been minted — addresses do not fabricate lineage', () => {
+    expect(() => log.append({ from: 'K.1', to: 'K', body: 'hi' })).toThrow(/must be minted/);
+    log.mintChild('K');
+    const rec = log.append({ from: 'K.1', to: 'K', body: 'hi' });
+    expect(rec.from).toBe('K.1');
+    expect(log.participant('K.1')?.lastSeen).toBe(rec.ts);
+    // Sending TO an unminted child is allowed (the broker decides deliverability, the log records intent).
+    expect(log.append({ from: 'K', to: 'K.9', body: 'are you there' }).to).toBe('K.9');
+  });
+
+  it('register() takes agents/operator, keeps first_seen, and refreshes label + last_seen', () => {
+    const first = log.register({ address: 'S', label: 'repo-workflows lane' });
+    const again = log.register({ address: 'S' });
+    expect(again.firstSeen).toBe(first.firstSeen);
+    expect(again.lastSeen > first.lastSeen).toBe(true);
+    expect(again.label).toBe('repo-workflows lane'); // null label does not erase the old one
+    expect(log.register({ address: 'S', label: 'renamed' }).label).toBe('renamed');
+    expect(log.register({ address: 'operator' }).kind).toBe('operator');
+    expect(() => log.register({ address: 'S.1' })).toThrow(/minted via mintChild/);
+    expect(() => log.register({ address: '#fleet' })).toThrow(/register\(\) takes/);
+  });
+
+  // ------------------------------------------------------------ durability
+
+  it('persists across close/reopen and stamps the schema version', () => {
+    log.mintChild('K');
+    log.append({ from: 'K.1', to: 'K', body: 'still here' });
+    log.close();
+    log = new CommsLog(path);
+    expect(log.count()).toBe(1);
+    expect(log.get(1)?.body).toBe('still here');
+    expect(log.participant('K.1')?.parent).toBe('K');
+    const raw = new DatabaseSync(path);
+    try {
+      expect((raw.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(COMMS_SCHEMA_VERSION);
+      expect((raw.prepare('PRAGMA journal_mode').get() as { journal_mode: string }).journal_mode).toBe('wal');
+    } finally { raw.close(); }
+  });
+
+  it('two writers on the same file interleave safely with monotonic ids', () => {
+    const other = new CommsLog(path);
+    try {
+      const a = log.append({ from: 'K', to: 'R', body: 'from first handle' });
+      const b = other.append({ from: 'R', to: 'K', body: 'from second handle' });
+      const c = log.append({ from: 'K', to: 'R', body: 'first again' });
+      expect([a.id, b.id, c.id]).toEqual([1, 2, 3]);
+      expect(other.transcript({ pair: ['K', 'R'] }).map((m) => m.id)).toEqual([1, 2, 3]);
+      // Child sequences are allocated under a write lock, so two handles never mint the same seq.
+      expect(log.mintChild('K').address).toBe('K.1');
+      expect(other.mintChild('K').address).toBe('K.2');
+    } finally { other.close(); }
+  });
+});
