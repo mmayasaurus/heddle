@@ -330,6 +330,7 @@ export async function dispatch(
   let target: RouteTarget;
   let fallback: RouteTarget | undefined;
   let origin: InSessionOrigin = 'class';
+  let notDispatchable = false;
   if (!req.taskClass) {
     // Direct path, no class: orchestrator named the model. Full dynamic choice, still policy-fenced.
     if (!(req.provider && req.model)) {
@@ -346,7 +347,17 @@ export async function dispatch(
         (route.note ? ` — ${route.note}` : '') + '. Pass optIn/--opt-in to proceed.',
       );
     }
-    if (req.provider && req.model) {
+    // A non-dispatchable class (`orchestration`) is refused on EVERY path — a named subprocess route
+    // does not turn the orchestrator's own work into a worker task. Decided here, before any route is
+    // resolved, so an excluded/unknown named provider still gets the structured, ledgered refusal.
+    if (!route.dispatchable) {
+      // depth-1 still wins for a worker (checked below via identity) — but the plan just marks it.
+      target = req.provider && req.model
+        ? { ...route, provider: req.provider, model: req.model, skills: req.skills ?? route.skills, mcp: req.mcp ?? route.mcp }
+        : route;
+      origin = req.provider && req.model ? 'explicit' : 'class';
+      notDispatchable = true;
+    } else if (req.provider && req.model) {
       // Class + explicit provider/model: the class supplies policy (default skills/mcp, opt-in
       // gate, ledger task_class), the named route replaces the table's — no fallback, naming it
       // is the choice. Effort is deliberately NOT inherited (per-provider vocabulary).
@@ -377,7 +388,7 @@ export async function dispatch(
   // A named subprocess route does not turn the orchestrator's own work into a worker task. The
   // structured fields + ledger row report the route the caller actually named (target), the class
   // stays the ledger's task_class.
-  if (!route.dispatchable) return refuseNotDispatchable({ ...route, provider: target.provider, model: target.model }, req, ctx);
+  if (notDispatchable) return refuseNotDispatchable({ ...route, provider: target.provider, model: target.model }, req, ctx);
 
   // ---- Claude-primary → structured, ledgered in-session refusal (HED-18) ----------------------
   const execution = providerExecution(table, target.provider);
