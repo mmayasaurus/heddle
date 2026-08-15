@@ -224,6 +224,12 @@ export class Ledger {
     return (sinceIso ? stmt.all(sinceIso) : stmt.all()) as Record<string, unknown>[];
   }
 
+  /** One dispatch row by id, or null. Read-only lookup — the comms broker verifies lineage with it. */
+  get(id: number): Record<string, unknown> | null {
+    const row = this.db.prepare('SELECT * FROM dispatches WHERE id = ?').get(id);
+    return (row as Record<string, unknown> | undefined) ?? null;
+  }
+
   close(): void {
     this.db.close();
   }
