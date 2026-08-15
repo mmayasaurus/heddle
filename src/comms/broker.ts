@@ -115,6 +115,8 @@ export type PostResult =
 export type RefusalCode =
   | 'unknown-target' | 'ambiguous-target' | 'no-orchestrator' | 'body-too-large' | 'rate-limited' | 'invalid-message';
 
+type AcceptedBase = { messageId: number; to: string; tier: Tier; envelope: string };
+
 interface Held {
   record: MessageRecord;
   envelope: string;
@@ -283,31 +285,36 @@ export class Broker {
     this.consume(pairKey);
     const { record, envelope } = enveloped;
     const base = { messageId: record.id, to, tier: record.tier, envelope };
-
-    if (kind === 'room') {
-      // Pull model: rooms are read when an agent wants to know; nothing is injected.
-      this.log.recordDelivery({ messageId: record.id, from: req.from, to, outcome: 'logged', code: 'room-pull', transport: this.transport.name });
-      return { ...base, outcome: 'logged', code: 'room-pull' };
-    }
-    if (kind === 'broadcast') {
-      const recipients = this.log.participants().map((p) => p.address).filter((a) => a !== req.from);
-      if (recipients.length === 0) {
-        this.log.recordDelivery({ messageId: record.id, from: req.from, to, outcome: 'logged', code: 'no-recipients', transport: this.transport.name });
-        return { ...base, outcome: 'logged', code: 'no-recipients' };
-      }
-      // Fan-out runs concurrently ACROSS recipients; per-recipient serialization still holds because
-      // each dispatchTo goes through that recipient's delivery chain.
-      const outcomes = await Promise.all(recipients.map((r) => this.dispatchTo(record, envelope, r, req.from)));
-      const failed = outcomes.filter((o) => o.outcome === 'failed').length;
-      const heldN = outcomes.filter((o) => o.outcome === 'held').length;
-      const n = recipients.length;
-      if (failed && heldN) return { ...base, outcome: 'failed', code: 'partial-mixed', reason: `${failed}/${n} recipients failed, ${heldN}/${n} held at a permission gate` };
-      if (failed) return { ...base, outcome: 'failed', code: 'partial', reason: `${failed}/${n} recipients failed` };
-      if (heldN) return { ...base, outcome: 'held', code: 'partial-hold', reason: `${heldN}/${n} recipients held at a permission gate` };
-      return { ...base, outcome: 'sent', code: 'broadcast' };
-    }
+    if (kind === 'room') return this.deliverRoom(record, base);
+    if (kind === 'broadcast') return this.deliverBroadcast(record, envelope, base);
     const d = await this.dispatchTo(record, envelope, to, req.from);
     return { ...base, outcome: d.outcome, code: d.code, ...(d.reason ? { reason: d.reason } : {}) };
+  }
+
+  /** Pull model: rooms are read when an agent wants to know; nothing is injected. */
+  private deliverRoom(record: MessageRecord, base: AcceptedBase): PostResult {
+    this.log.recordDelivery({ messageId: record.id, from: record.from, to: record.to, outcome: 'logged', code: 'room-pull', transport: this.transport.name });
+    return { ...base, outcome: 'logged', code: 'room-pull' };
+  }
+
+  /**
+   * @all fan-out: concurrent ACROSS recipients (per-recipient serialization still holds — each
+   * dispatchTo goes through that recipient's delivery chain); the result summarises the fan-out.
+   */
+  private async deliverBroadcast(record: MessageRecord, envelope: string, base: AcceptedBase): Promise<PostResult> {
+    const recipients = this.log.participants().map((p) => p.address).filter((a) => a !== record.from);
+    if (recipients.length === 0) {
+      this.log.recordDelivery({ messageId: record.id, from: record.from, to: record.to, outcome: 'logged', code: 'no-recipients', transport: this.transport.name });
+      return { ...base, outcome: 'logged', code: 'no-recipients' };
+    }
+    const outcomes = await Promise.all(recipients.map((r) => this.dispatchTo(record, envelope, r, record.from)));
+    const failed = outcomes.filter((o) => o.outcome === 'failed').length;
+    const heldN = outcomes.filter((o) => o.outcome === 'held').length;
+    const n = recipients.length;
+    if (failed && heldN) return { ...base, outcome: 'failed', code: 'partial-mixed', reason: `${failed}/${n} recipients failed, ${heldN}/${n} held at a permission gate` };
+    if (failed) return { ...base, outcome: 'failed', code: 'partial', reason: `${failed}/${n} recipients failed` };
+    if (heldN) return { ...base, outcome: 'held', code: 'partial-hold', reason: `${heldN}/${n} recipients held at a permission gate` };
+    return { ...base, outcome: 'sent', code: 'broadcast' };
   }
 
   /** Hold if the target is at a permission gate, else inject (serialized per target). */
@@ -381,38 +388,46 @@ export class Broker {
 
   private async pumpOnce(): Promise<{ released: number; failed: number; stillHeld: number }> {
     const batch = [...this.held];               // snapshot; post() may push more meanwhile
-    const done = new Set<Held>();
     const byTarget = new Map<string, Held[]>();
     for (const h of batch) (byTarget.get(h.target) ?? byTarget.set(h.target, []).get(h.target)!).push(h);
-    let released = 0, failed = 0;
-    await Promise.all([...byTarget.values()].map(async (entries) => {
-      for (const h of entries) {                // in order; a still-held entry blocks the rest of its target
-        const expired = this.now() - h.heldAt > this.holdMaxMs;
-        if (expired) {                          // the contract is a MAX hold time — stale instructions are not injected late
-          h.attempts += 1;
-          this.log.recordDelivery({ messageId: h.record.id, from: h.record.from, to: h.target, outcome: 'failed', code: 'hold-timeout',
-            reason: `held ${this.now() - h.heldAt}ms (max ${this.holdMaxMs}ms); recipient can still pull it`, transport: this.transport.name, attempt: h.attempts });
-          failed += 1; done.add(h);
-          continue;
-        }
-        if (await this.stateOf(h.target) === 'permission-gate') return; // still gated: this target keeps its order (not an attempt)
-        h.attempts += 1;                        // a real delivery attempt (the hold itself was attempt 1)
-        const res = await this.deliverSerialized(h.target, { record: h.record, envelope: h.envelope, target: h.target, attempt: h.attempts });
-        if (res.ok) {
-          this.log.recordDelivery({ messageId: h.record.id, from: h.record.from, to: h.target, outcome: 'released', code: 'gate-cleared',
-            reason: res.reason ?? null, transport: this.transport.name, attempt: h.attempts });
-          released += 1; done.add(h);
-          continue;
-        }
-        // Transient transport failure after the gate cleared: keep the entry for the next pump (until
-        // holdMaxMs) — every attempt is a typed row, so a flapping transport is visible, not silent.
-        this.log.recordDelivery({ messageId: h.record.id, from: h.record.from, to: h.target, outcome: 'failed', code: res.code,
-          reason: res.reason ?? null, transport: this.transport.name, attempt: h.attempts });
-        return;                                 // keep order behind the failed entry
-      }
-    }));
+    const results = await Promise.all([...byTarget.values()].map((entries) => this.pumpTarget(entries)));
+    const done = new Set<Held>(results.flatMap((r) => r.done));
+    const released = results.reduce((n, r) => n + r.released, 0);
+    const failed = results.reduce((n, r) => n + r.failed, 0);
     this.held = this.held.filter((h) => !done.has(h)); // entries pushed during the run survive
     return { released, failed, stillHeld: this.held.length };
+  }
+
+  /** One target's held entries, in order; a still-held or failed entry blocks the ones behind it. */
+  private async pumpTarget(entries: Held[]): Promise<{ done: Held[]; released: number; failed: number }> {
+    const done: Held[] = [];
+    let released = 0, failed = 0;
+    for (const h of entries) {
+      const age = this.now() - h.heldAt;
+      if (age > this.holdMaxMs) {               // the contract is a MAX hold time — stale instructions are not injected late
+        h.attempts += 1;
+        this.recordHold(h, 'failed', 'hold-timeout', `held ${age}ms (max ${this.holdMaxMs}ms); recipient can still pull it`);
+        failed += 1; done.push(h);
+        continue;
+      }
+      if (await this.stateOf(h.target) === 'permission-gate') break; // still gated (not an attempt); order kept
+      h.attempts += 1;                          // a real delivery attempt (the hold itself was attempt 1)
+      const res = await this.deliverSerialized(h.target, { record: h.record, envelope: h.envelope, target: h.target, attempt: h.attempts });
+      if (res.ok) {
+        this.recordHold(h, 'released', 'gate-cleared', res.reason ?? null);
+        released += 1; done.push(h);
+        continue;
+      }
+      // Transient transport failure after the gate cleared: keep the entry for the next pump (until
+      // holdMaxMs) — every attempt is a typed row, so a flapping transport is visible, not silent.
+      this.recordHold(h, 'failed', res.code, res.reason ?? null);
+      break;                                    // keep order behind the failed entry
+    }
+    return { done, released, failed };
+  }
+
+  private recordHold(h: Held, outcome: 'released' | 'failed', code: string, reason: string | null): void {
+    this.log.recordDelivery({ messageId: h.record.id, from: h.record.from, to: h.target, outcome, code, reason, transport: this.transport.name, attempt: h.attempts });
   }
 
   /**
