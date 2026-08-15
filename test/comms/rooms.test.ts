@@ -187,6 +187,20 @@ describe('rooms (temp db)', () => {
     expect(log.openHolds()).toEqual([]);                                             // a restart will not replay it
   });
 
+  it('a broadcast hold RESTORED after a restart keeps its inbox-not-failed contract', async () => {
+    log.registerSession({ address: 'R' }); log.mintChild('K');
+    const state = { states: new Map<string, 'idle' | 'busy' | 'permission-gate' | 'exited' | 'unknown'>(), state(a: string) { return this.states.get(a) ?? 'unknown'; } };
+    state.states.set('K.1', 'permission-gate');
+    const before = new Broker({ log, transport: channelTransport(log), targetState: state, now, holdMaxMs: 1000 });
+    await before.post({ from: 'K', to: '@all', body: 'survives restart' });
+    // "restart": a fresh broker rebuilds the hold from the log — the @all marker must come back with it.
+    const after = new Broker({ log, transport: channelTransport(log), targetState: state, now, holdMaxMs: 1000 });
+    expect(after.restoreHeld({ sender: 'K' })).toBe(1);
+    advance(1001);
+    expect(await after.pump()).toEqual({ released: 1, failed: 0, stillHeld: 0 });
+    expect(log.deliveries({ target: 'K.1' }).at(-1)).toMatchObject({ outcome: 'logged', code: 'inbox' }); // never failed/hold-timeout
+  });
+
   it('broadcasts to live sessions and durable inboxes with ChannelTransport', async () => {
     log.register({ address: 'R' });
     log.registerSession({ address: 'R', sessionId: 'r-live' });

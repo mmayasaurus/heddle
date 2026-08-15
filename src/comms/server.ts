@@ -202,7 +202,14 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
   mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     const a = (req.params.arguments ?? {}) as Record<string, unknown>;
     try {
-      switch (req.params.name) {
+      return await dispatchTool(req.params.name, a);
+    } catch (err) {
+      return errorText(`${req.params.name} failed: ${errorMessage(err)}`);
+    }
+  });
+
+  async function dispatchTool(name: string, a: Record<string, unknown>) {
+      switch (name) {
         case 'post_message': return text(await postMessage(a));
         case 'read_transcript': return text(readTranscript(a));
         case 'check_inbox': {
@@ -246,12 +253,9 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
           identity: operatorStillValid() ? me : null, revoked: !operatorStillValid(), sessionName, worker: isWorker, operator: isOperator && operatorStillValid(), pushEnabled, session: me ? log.session(me) : null,
           rooms: me ? log.roomsFor(me).map((r) => r.name) : [], liveSessions: log.liveSessions(), sendMessageLimits: SENDMESSAGE_LIMITS,
         });
-        default: return errorText(`unknown tool: ${req.params.name}`);
+        default: return errorText(`unknown tool: ${name}`);
       }
-    } catch (err) {
-      return errorText(`${req.params.name} failed: ${errorMessage(err)}`);
-    }
-  });
+  }
 
   async function postMessage(a: Record<string, unknown>) {
     const who = requireMe();
@@ -346,7 +350,7 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
     if (timer) clearTimeout(timer);
     if (heartbeat) clearInterval(heartbeat);
     try { if (me && pushEnabled) log.unregisterSession(me, instanceId); } catch (err) { warn(`unregister failed: ${errorMessage(err)}`); }
-    try { await mcp.close(); } catch { /* transport already gone */ }
+    try { await mcp.close(); } catch (err) { warn(`mcp close failed (transport likely already gone): ${errorMessage(err)}`); }
     try { log.close(); } catch (err) { warn(`log close failed: ${errorMessage(err)}`); }
     if (ownsLedger) { try { (ledger as Ledger | null)?.close?.(); } catch (err) { warn(`ledger close failed: ${errorMessage(err)}`); } }
   }

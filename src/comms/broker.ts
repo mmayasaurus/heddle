@@ -1,6 +1,6 @@
 import type { CommsLog, RoomRecord, RoomMember, FloorRecord } from './log.js';
 import { postEnveloped, renderEnvelope, type LineageSource } from './envelope.js';
-import { canSend, parseAddress, type AddressKind } from './address.js';
+import { BROADCAST, canSend, parseAddress, type AddressKind } from './address.js';
 import type { DeliveryOutcome, MessageKind, MessageRecord, Tier } from './types.js';
 
 /**
@@ -596,7 +596,9 @@ export class Broker {
       // heddle-comms per session, shared db) restores only its own, or two brokers would race.
       if (opts.sender && record.from !== opts.sender) continue;
       const heldAt = Date.parse(ev.ts);
-      this.held.push({ record, envelope: renderEnvelope(record), target: ev.to, heldAt: Number.isFinite(heldAt) ? heldAt : this.now(), attempts: 1 });
+      // The broadcast flag survives restarts: an @all hold restored from the log keeps its
+      // inbox-not-failed contract (the record's target says what it was).
+      this.held.push({ record, envelope: renderEnvelope(record), target: ev.to, heldAt: Number.isFinite(heldAt) ? heldAt : this.now(), attempts: 1, broadcast: record.to === BROADCAST });
       restored += 1;
     }
     return restored;

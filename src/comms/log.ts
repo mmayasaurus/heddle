@@ -653,10 +653,15 @@ export class CommsLog {
     return (rows as unknown as DRow[]).map(toDelivery);
   }
 
-  /** The highest message id this identity's channel has written (`sent`/`channel-written`), or null. */
+  /**
+   * The highest message id this identity's channel has written (`sent`/`channel-written`), or
+   * null. Filtered by the pump's own code — the SENDER side also records transport 'channel'
+   * rows (`queued-for-channel`, `no-live-session`) for the same target, and those say nothing
+   * about what reached the session.
+   */
   lastChannelWrite(address: string): number | null {
     const row = this.db.prepare(
-      "SELECT MAX(message_id) AS id FROM deliveries WHERE target = ? AND transport = 'channel' AND outcome = 'sent'",
+      "SELECT MAX(message_id) AS id FROM deliveries WHERE target = ? AND transport = 'channel' AND outcome = 'sent' AND code = 'channel-written'",
     ).get(address) as { id: number | null };
     return row.id == null ? null : Number(row.id);
   }
@@ -668,9 +673,9 @@ export class CommsLog {
   oldestUnresolvedChannelFailure(address: string): number | null {
     const failed = this.db.prepare(`
       SELECT MIN(d.message_id) AS id FROM deliveries d
-      WHERE d.target = ? AND d.transport = 'channel' AND d.outcome = 'failed'
+      WHERE d.target = ? AND d.transport = 'channel' AND d.outcome = 'failed' AND d.code = 'channel-error'
         AND NOT EXISTS (SELECT 1 FROM deliveries e WHERE e.target = d.target AND e.message_id = d.message_id
-                        AND e.transport = 'channel' AND e.outcome = 'sent' AND e.id > d.id)
+                        AND e.transport = 'channel' AND e.outcome = 'sent' AND e.code = 'channel-written' AND e.id > d.id)
     `).get(address) as { id: number | null };
     return failed.id == null ? null : Number(failed.id);
   }
@@ -678,7 +683,7 @@ export class CommsLog {
   /** Message ids > sinceId that this identity's channel already wrote successfully — never re-emit these. */
   channelWrittenIds(address: string, sinceId: number): Set<number> {
     const rows = this.db.prepare(
-      "SELECT DISTINCT message_id AS id FROM deliveries WHERE target = ? AND transport = 'channel' AND outcome = 'sent' AND message_id > ?",
+      "SELECT DISTINCT message_id AS id FROM deliveries WHERE target = ? AND transport = 'channel' AND outcome = 'sent' AND code = 'channel-written' AND message_id > ?",
     ).all(address, sinceId) as unknown as { id: number }[];
     return new Set(rows.map((r) => Number(r.id)));
   }
