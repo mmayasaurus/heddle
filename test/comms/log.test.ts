@@ -292,6 +292,8 @@ describe('CommsLog (temp db)', () => {
     expect(() => log.mintChild('operator')).toThrow(/parent must be a fleet agent/);
     expect(() => log.mintChild('#fleet')).toThrow(/parent must be a fleet agent/);
     expect(() => log.mintChild('K', { dispatchId: 1.5 })).toThrow(/dispatchId/);
+    expect(() => log.mintChild('K', { dispatchId: 0 })).toThrow(/positive integer/);
+    expect(() => log.mintChild('K', { dispatchId: -3 })).toThrow(/positive integer/);
   });
 
   it('a child can only send once it has been minted — addresses do not fabricate lineage', () => {
