@@ -3,7 +3,7 @@
 // pollute stdout parsing for agents, so it is suppressed at the entry point only —
 // `--disable-warning=<type>` silences just that category (`--no-warnings` would hide every
 // process warning; its `=…` suffix is ignored — verified Node 22.23, 2026-08-15).
-import { dispatch } from './dispatch.js';
+import { dispatch, planDispatch } from './dispatch.js';
 import { Ledger } from './ledger.js';
 import { loadRouting, describeTaskClasses } from './routing.js';
 import { listPacks, withMandatoryPacks } from './skillpacks.js';
@@ -40,6 +40,9 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
   heddle classify-effort --class <c> --task "<prompt>" [--json]   difficulty → effort (cheap model)
   heddle assess --task "<prompt>" --output "<worker output>" [--ok] [--json]
                                  judge a worker result: done | needs-rework | needs-human
+  heddle route (--class <c> | --provider <p> --model <m>) [--class <c> --provider <p> --model <m>] [--opt-in] [--json]
+                                 DRY RUN: where a dispatch would go right now and why (live caps, cap-aware
+                                 routing, account advice) — no ledger row, no worker
   heddle classes [--json]        task classes: route, why, default skill packs, edits-code
   heddle packs                   list available skill packs
   heddle whoami [--json]         this process's bound identity (HEDDLE_AGENT / FLEET_AGENT / .fleet-agent) + worker context
@@ -117,6 +120,47 @@ try {
         return res.ok ? `${head}\n\n${res.output}` : `${head}\n  error: ${res.error}`;
       });
       process.exit(res.ok ? 0 : 1);
+      break;
+    }
+
+    case 'route': {
+      const taskClass = arg('--class');
+      const provider = arg('--provider');
+      const model = arg('--model');
+      if (!taskClass && !(provider && model)) {
+        console.error('route requires --class <c> and/or --provider <p> --model <m>');
+        process.exit(2);
+      }
+      const env: Record<string, string> = {};
+      const codexHome = arg('--codex-home');
+      if (codexHome) env.CODEX_HOME = codexHome;
+      const plan = planDispatch({
+        taskClass, provider, model, prompt: '(dry run)', cwd: arg('--cwd') ?? process.cwd(),
+        optIn: has('--opt-in'), env: Object.keys(env).length ? env : undefined,
+      });
+      const summary = {
+        task_class: plan.route.taskClass,
+        would_run: plan.decision.refusal ? null : `${plan.target.provider}/${plan.target.model}`,
+        execution: plan.execution ?? null,
+        in_session: plan.execution === 'in-session-subagent',
+        routed_away_for_cap: plan.decision.routedAwayForCap,
+        remaining_fallback: plan.fallback ? `${plan.fallback.provider}/${plan.fallback.model}` : null,
+        route_reason: plan.decision.routeReason,
+        refusal: plan.decision.refusal ?? null,
+        checks: plan.decision.checks,
+        account: plan.account,
+        account_advice: plan.accountAdvice?.line ?? null,
+        skills: plan.skillsForRefusal,
+      };
+      out(json, summary, () =>
+        `${plan.route.taskClass}` +
+        (summary.refusal ? `\n  ✗ WOULD REFUSE (${summary.refusal.code}): ${summary.refusal.reason}`
+          : `\n  → ${summary.would_run}${summary.in_session ? '  [in-session: use your Agent tool]' : ''}` +
+            (summary.routed_away_for_cap ? '  (routed away for cap)' : '')) +
+        `\n  reason: ${summary.route_reason}` +
+        (summary.remaining_fallback ? `\n  fallback if it fails: ${summary.remaining_fallback}` : '') +
+        (summary.account_advice ? `\n  ${summary.account_advice}` : '') +
+        `\n  checks:\n    - ${summary.checks.join('\n    - ')}`);
       break;
     }
 
