@@ -463,12 +463,26 @@ a room when they want to; `@all` / `@agent` are the guaranteed-delivery exceptio
   `queued-for-channel` where the recipient has a live channel session, `logged` / `inbox` where it
   must pull; the result reason reads `N/M pushed, K/M to inbox`.
 - **Operator send**: the `operator` identity binds ONLY through a configuration-level credential
-  — `heddle-comms --init-operator-token` writes `~/.heddle/operator.token` (0600, once); the
-  operator session's `.mcp.json` sets `HEDDLE_COMMS_ROLE=operator` and
+  — `heddle-comms --init-operator-token` writes `~/.heddle/operator.token` (0600, once; the value
+  is never printed); the operator session's `.mcp.json` sets `HEDDLE_COMMS_ROLE=operator` and
   `HEDDLE_COMMS_OPERATOR_TOKEN=<file contents>` (constant-time compared). A model cannot edit its
   own MCP config and agent sessions never see that env, so "origin-verified" means "configured as
   the operator's session"; her posts carry tier `operator` (never wrapped untrusted). The operator
-  does not mint children.
+  does not mint children. `HEDDLE_COMMS_ROLE=operator` WITHOUT a matching token binds nothing (the
+  server runs unbound and refuses sender tools) — no env-only escalation. **Rotate** with
+  `heddle-comms --init-operator-token --rotate`: the token is re-checked on every privileged call,
+  so already-running sessions with the old token lose the operator identity immediately. The
+  token value is never written to the log, the deliveries, tool outputs or warnings (tested).
+
+  How Maya becomes operator (5 lines):
+  1. `heddle-comms --init-operator-token` (once) → prints the path only.
+  2. In her session's `.mcp.json`: `"heddle-comms": { "command": "heddle-comms", "env": {
+     "HEDDLE_COMMS_ROLE": "operator", "HEDDLE_COMMS_OPERATOR_TOKEN": "<contents of the file>",
+     "HEDDLE_COMMS_PUSH": "1" } }`.
+  3. Start the session with `--dangerously-load-development-channels server:heddle-comms` (push;
+     without it: pull-only, still operator).
+  4. `comms_whoami` → `identity: operator`; `post_message` to `#fleet` / `@all` → tier `operator`.
+  5. To revoke: `--rotate`, then update step 2.
 - **MCP tools**: `create_room {name, topic?, open?}`, `join_room {room, address?}`, `leave_room`,
   `list_rooms` (rooms you may post to, with members + floor), `acquire_floor {room, lease_ms?}`,
   `release_floor {room}`; `post_message` routes `#room` / `@all` and accepts `hold_floor` /
