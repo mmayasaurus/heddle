@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import type { CommsLog } from './log.js';
-import { parseAddress } from './address.js';
+import { canSend, parseAddress, requireAddress } from './address.js';
 import { TIERS, type Evidence, type MessageRecord, type NewMessage, type Tier, type TierDecision } from './types.js';
 import { seal } from './seal.js';
 
@@ -74,6 +74,16 @@ export type LineageCode =
   | 'target-unknown' | 'not-dispatching-orchestrator'
   | 'ledger-unavailable' | 'ledger-row-missing' | 'ledger-orchestrator-mismatch';
 
+export type TierCode = LineageCode | 'verified-origin' | 'not-operator-origin' | 'requested-agent-message';
+
+/** The closed vocabulary a header may carry. Anything else is omitted, never munged into the frame. */
+export const TIER_CODES: ReadonlySet<string> = new Set<TierCode>([
+  'verified-ledger', 'verified-registry', 'invalid-sender', 'invalid-target', 'target-not-child',
+  'sender-is-child', 'sender-not-agent', 'target-unknown', 'not-dispatching-orchestrator',
+  'ledger-unavailable', 'ledger-row-missing', 'ledger-orchestrator-mismatch',
+  'verified-origin', 'not-operator-origin', 'requested-agent-message',
+]);
+
 export interface TierRequest {
   from: string;
   to: string;
@@ -85,6 +95,13 @@ export interface TierRequest {
 }
 
 // ---------------------------------------------------------------------------- verification
+
+/** "an agent" / "a room" / "the operator" — for audit-trail prose only, never headers. */
+function describe(kind: string): string {
+  if (kind === 'operator') return 'the operator';
+  if (kind === 'broadcast') return 'the @all broadcast';
+  return `${/^[aeiou]/i.test(kind) ? 'an' : 'a'} ${kind}`;
+}
 
 /**
  * Can `sender` issue an ORCHESTRATOR DIRECTIVE to `target`? All of these must hold:
@@ -105,7 +122,7 @@ export function verifyLineage(sender: string, target: string, ctx: VerifyContext
   if (!from) return no('invalid-sender', `sender ${JSON.stringify(sender)} is not a valid address`);
   if (!to) return no('invalid-target', `target ${JSON.stringify(target)} is not a valid address`);
   if (to.kind !== 'child') {
-    return no('target-not-child', `directives are only addressed to the sender's own children (K.1-style targets); ${target} is a ${to.kind}`);
+    return no('target-not-child', `directives are only addressed to the sender's own children (K.1-style targets); ${target} is ${describe(to.kind)}`);
   }
   if (from.kind === 'child') return no('sender-is-child', `children cannot issue directives (${sender} is a child)`);
   if (from.kind !== 'agent') return no('sender-not-agent', `only fleet agents issue directives (${sender} is ${from.kind})`);
@@ -145,7 +162,11 @@ export function decideTier(req: TierRequest, ctx: VerifyContext): TierDecision {
   if (requested !== null && !TIERS.includes(requested)) {
     throw new Error(`unknown requestedTier ${JSON.stringify(requested)}`);
   }
-  const from = parseAddress(req.from);
+  // Never seal a decision about addresses that cannot exist — a verified tier for an undeliverable
+  // target would be a lie the log could later store.
+  const from = requireAddress(req.from, 'from');
+  requireAddress(req.to, 'to');
+  if (!canSend(from)) throw new Error(`invalid from address ${JSON.stringify(req.from)}: rooms and @all cannot send`);
   const base = { from: req.from, to: req.to, requestedTier: requested, downgradedFrom: null as Tier | null };
 
   // Explicit demotion is always honoured — nothing to verify.
@@ -155,7 +176,7 @@ export function decideTier(req: TierRequest, ctx: VerifyContext): TierDecision {
   }
 
   // Operator: verified by origin — the address itself is the credential (bound by the operator surface).
-  if (from?.kind === 'operator') {
+  if (from.kind === 'operator') {
     return seal({ ...base, tier: 'operator', verified: true, evidence: 'origin',
       code: 'verified-origin', reason: 'operator surface bound the sender address', dispatchId: null });
   }
@@ -163,7 +184,7 @@ export function decideTier(req: TierRequest, ctx: VerifyContext): TierDecision {
     return seal({
       ...base, downgradedFrom: 'operator', tier: 'agent-message', verified: false, evidence: null,
       code: 'not-operator-origin',
-      reason: `only the operator address carries operator authority (${req.from} is ${from?.kind ?? 'invalid'})`,
+      reason: `only the operator address carries operator authority (${req.from} is ${describe(from.kind)})`,
       dispatchId: null,
     });
   }
@@ -230,9 +251,11 @@ export function renderEnvelope(record: MessageRecord, opts: RenderOptions = {}):
     }
     default: {
       const parts = [`${FRAME_OPEN} ${UNTRUSTED_LABEL}`, route, ...stamp, `nonce ${nonce}`];
+      // Both values are broker-written (RESERVED_META_KEYS are stripped from caller meta) and are
+      // rendered only if they are in the closed vocabulary — never munged, never free text.
       const down = meta.downgradedFrom;
-      if (typeof down === 'string' && TIERS.includes(down as Tier)) {
-        const code = typeof meta.tierCode === 'string' ? meta.tierCode.replace(/[^a-z0-9-]/g, '') : 'refused';
+      const code = meta.tierCode;
+      if (typeof down === 'string' && TIERS.includes(down as Tier) && typeof code === 'string' && TIER_CODES.has(code)) {
         parts.push(`refused: ${down} (${code})`);
       }
       header = parts.join(' · ');
@@ -243,16 +266,21 @@ export function renderEnvelope(record: MessageRecord, opts: RenderOptions = {}):
   return `${header}\n${escapeBody(record.body)}\n${footer}`;
 }
 
+/** Characters that can start a "line" in some renderer, or hide before a marker without being whitespace. */
+const LINE_BREAKS = /\r\n?|\u000b|\u000c|\u0085|\u2028|\u2029/g;
+const INVISIBLE_PREFIX = /^[\s\u200b-\u200f\u2060\ufeff\u00ad\u180e]*/;
+
 /**
- * Normalise line breaks (CRLF, CR, U+2028/2029 → LF) and escape any line whose first non-blank
- * characters are a frame marker. Everything else is untouched.
+ * Normalise every line separator (CRLF, CR, VT, FF, NEL, U+2028/2029 → LF) and escape any line
+ * that starts with a frame marker after leading whitespace OR invisible characters (zero-width
+ * space/joiners, BOM, soft hyphen, …). Everything else is untouched.
  */
 export function escapeBody(body: string): string {
   return body
-    .replace(/\r\n?|\u2028|\u2029/g, '\n')
+    .replace(LINE_BREAKS, '\n')
     .split('\n')
     .map((line) => {
-      const t = line.trimStart();
+      const t = line.replace(INVISIBLE_PREFIX, '');
       return t.startsWith(FRAME_OPEN) || t.startsWith(FRAME_CLOSE) ? ESCAPE + line : line;
     })
     .join('\n');
