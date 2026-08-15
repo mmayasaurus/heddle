@@ -272,7 +272,13 @@ async function runTarget(
     let systemPromptAppend: string | undefined;
     let mcpConfigPath: string | undefined;
     if (isClaude) {
-      systemPromptAppend = skills.length ? composePacks(skills) : undefined;
+      const discovery = mcp.includes('memtrace')
+        ? '\n\n---\n\nMemtrace MCP is attached: for code discovery use find_symbol / find_code FIRST ' +
+          '(graph + semantic search), get_impact before changing a symbol — never blind-grep the tree. ' +
+          'A zero-hit is not proof of absence; broaden the query.'
+        : '';
+      const packText = skills.length ? composePacks(skills) : '';
+      systemPromptAppend = (packText + discovery) || undefined;
       const mcpFile = claudeMcpConfigFile(mcp);
       if (mcpFile) { mcpConfigPath = mcpFile.path; restoreMcp = mcpFile.cleanup; }
     } else {
