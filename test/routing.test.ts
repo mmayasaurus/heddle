@@ -157,8 +157,7 @@ task_classes: { synthetic: { provider: codex, model: m1, skills: quality-gate } 
 providers: { codex: {} }
 task_classes: { synthetic: { provider: codex, model: m1, mcp: memtrace } }
 `;
-    expect(() => syntheticTable(skillsYaml)).not.toThrow();
-    expect(() => syntheticTable(mcpYaml)).not.toThrow();
+    // loadRouting itself must accept these files — the assignments below fail the test if it throws.
     const skillsTable = syntheticTable(skillsYaml);
     const mcpTable = syntheticTable(mcpYaml);
     expect(() => resolveRoute(skillsTable, 'synthetic')).toThrow(/skills must be a list of strings/);

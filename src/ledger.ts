@@ -143,7 +143,15 @@ export class Ledger {
     const have = new Set(
       (this.db.prepare('PRAGMA table_info(dispatches)').all() as { name: string }[]).map((c) => c.name),
     );
-    for (const m of MIGRATIONS) if (!have.has(m.column)) this.db.exec(m.ddl);
+    for (const m of MIGRATIONS) {
+      if (have.has(m.column)) continue;
+      // Several heddle processes may open a pre-migration ledger at once (MCP servers, CLIs, the
+      // dashboard); if another one added the column between our check and our ALTER, SQLite says
+      // "duplicate column name" — that is success, not failure.
+      try { this.db.exec(m.ddl); } catch (err) {
+        if (!/duplicate column name/i.test(err instanceof Error ? err.message : String(err))) throw err;
+      }
+    }
     this.db.exec(LINEAGE_TRIGGER);
   }
 
@@ -271,17 +279,23 @@ export class Ledger {
     ).all(cutoff) as Record<string, unknown>[];
   }
 
-  /** Aggregate usage by provider — the raw material for the savings stat. */
+  /**
+   * Aggregate usage by provider — the raw material for the savings stat. Refusals (no worker was
+   * spawned) are NOT dispatches: they are excluded from `dispatches`/`succeeded`/tokens and reported
+   * separately as `refusals`, so a stream of claude-in-session refusals cannot masquerade as failed
+   * Claude runs in success rates or savings math.
+   */
   usageByProvider(sinceIso?: string): Record<string, unknown>[] {
     const where = sinceIso ? 'WHERE started_at >= ?' : '';
     const stmt = this.db.prepare(`
       SELECT provider,
-             COUNT(*) AS dispatches,
-             SUM(ok) AS succeeded,
-             SUM(COALESCE(input_tokens,0)) AS input_tokens,
-             SUM(COALESCE(cached_input_tokens,0)) AS cached_tokens,
-             SUM(COALESCE(output_tokens,0)) AS output_tokens,
-             SUM(COALESCE(duration_ms,0)) AS duration_ms
+             SUM(CASE WHEN refusal IS NULL THEN 1 ELSE 0 END) AS dispatches,
+             SUM(CASE WHEN refusal IS NULL THEN ok ELSE 0 END) AS succeeded,
+             SUM(CASE WHEN refusal IS NOT NULL THEN 1 ELSE 0 END) AS refusals,
+             SUM(CASE WHEN refusal IS NULL THEN COALESCE(input_tokens,0) ELSE 0 END) AS input_tokens,
+             SUM(CASE WHEN refusal IS NULL THEN COALESCE(cached_input_tokens,0) ELSE 0 END) AS cached_tokens,
+             SUM(CASE WHEN refusal IS NULL THEN COALESCE(output_tokens,0) ELSE 0 END) AS output_tokens,
+             SUM(CASE WHEN refusal IS NULL THEN COALESCE(duration_ms,0) ELSE 0 END) AS duration_ms
       FROM dispatches ${where}
       GROUP BY provider ORDER BY dispatches DESC
     `);

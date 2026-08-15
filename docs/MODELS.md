@@ -164,8 +164,10 @@ choosing a worker instead:
 - **Class + explicit route:** `dispatch_worker` accepts `task_class` **and**
   `provider`+`model` together — the class supplies the policy (default packs,
   MCP, opt-in gate, ledger `task_class`), the named provider/model replaces the
-  route, no fallback (naming it is the choice). This is how a class such as
-  `adversarial-review` runs on "any provider except the author's".
+  route, no fallback (naming it is the choice). This is how a review class
+  can run on "any provider except the author's" (e.g. the planned
+  `adversarial-review` class, HED-3 — not in the table yet). `provider` and
+  `model` must be given together (a lone half is rejected).
 - **Claude-primary classes** (`execution: in-session-subagent` —
   implementation, deep-implementation, research-summarize, orchestration) are
   the orchestrator's own Agent-tool subagents, not subprocesses. Since HED-18
@@ -174,6 +176,10 @@ choosing a worker instead:
   and ledgers it (`refusal` column), where `instruction` names the model, the
   class packs/MCP to give your subagent, and the declared fallback you can name
   as `provider`+`model` to run it as a subprocess instead. No auto-fallback.
+  `orchestration` is `dispatchable: false` — it is the orchestrator's OWN work;
+  its refusal says "continue in-session" and suggests no worker pack. Refusal
+  rows are excluded from `heddle usage` dispatch/success counts (reported as a
+  separate `refusals` column).
 - **Dispatch-guidance hook** (`dist/hook-dispatch-guidance.js`, a Claude Code
   PreToolUse hook on `mcp__heddle__dispatch_worker`): warns — never blocks —
   when (1) a code-editing class (`edits_code: true`) is dispatched with no
@@ -188,10 +194,13 @@ choosing a worker instead:
   (user scope — orchestrators run in many repos):
 
   ```json
-  "PreToolUse": [{ "matcher": "mcp__heddle__dispatch_worker", "hooks": [{
-    "type": "command", "timeout": 10,
-    "command": "node --disable-warning=ExperimentalWarning /Users/<you>/Developer/heddle/dist/hook-dispatch-guidance.js" }] }]
+  { "hooks": { "PreToolUse": [ { "matcher": "mcp__heddle__dispatch_worker", "hooks": [ {
+      "type": "command", "timeout": 10,
+      "command": "node --disable-warning=ExperimentalWarning /Users/<you>/Developer/heddle/dist/hook-dispatch-guidance.js"
+  } ] } ] } }
   ```
+  (merge into your existing `hooks` object — `PreToolUse` must be nested under `"hooks"`, not at the
+  settings root).
   Point it at the SAME checkout's `dist/` that your `~/.claude.json` heddle
   MCP entry uses (the canonical clone, not a transient worktree); honors
   `HEDDLE_ROUTING` like the server. Not registered by heddle itself — the

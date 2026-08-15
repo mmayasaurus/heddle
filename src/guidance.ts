@@ -56,7 +56,8 @@ export function dispatchGuidance(table: RoutingTable, input: DispatchGuidanceInp
   const warnings: GuidanceWarning[] = [];
   const cls = input.task_class;
   if (!cls) return warnings; // direct provider/model path — no class policy to check
-  if (!(cls in table.taskClasses)) return warnings; // unknown class: the dispatcher will say so
+  // Own-property check: `"toString" in {}` is true via the prototype and would make resolveRoute throw.
+  if (!Object.prototype.hasOwnProperty.call(table.taskClasses, cls)) return warnings; // unknown: the dispatcher will say so
 
   const route = resolveRoute(table, cls);
   const optInMissing = Boolean(route.requiresExplicitOptIn) && input.opt_in !== true;
@@ -90,14 +91,21 @@ export function dispatchGuidance(table: RoutingTable, input: DispatchGuidanceInp
   }
 
   if (optInMissing) {
+    // With an explicit provider/model the dispatcher runs THAT route (class = policy), so describe it —
+    // the class's own route/cost note would misstate what is about to happen.
+    const explicit = input.provider && input.model ? `${input.provider}/${input.model}` : null;
     warnings.push({
       code: 'opt-in-required',
       task_class: cls,
       message:
         `heddle: task class "${cls}" requires explicit opt-in and this call has no \`opt_in: true\` — ` +
-        `the dispatcher WILL REFUSE it. Why it is gated: ${route.note ?? 'see routing.v0.yaml'}. ` +
-        `Routes to ${route.provider}/${route.model}. Pass \`opt_in: true\` only if the cost is ` +
-        `justified (ask the operator first); otherwise pick a class that is not gated (see list_task_classes).`,
+        `the dispatcher WILL REFUSE it. Why the class is gated: ${route.note ?? 'see routing.v0.yaml'}. ` +
+        (explicit
+          ? `This call names the explicit route ${explicit} under the class's policy (the class's own route ` +
+            `${route.provider}/${route.model} will not run). `
+          : `Routes to ${route.provider}/${route.model}. `) +
+        `Pass \`opt_in: true\` only if the cost is justified (ask the operator first); otherwise pick a ` +
+        `class that is not gated (see list_task_classes).`,
     });
   }
 

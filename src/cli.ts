@@ -145,6 +145,7 @@ try {
         (r.effort ? ` (${r.effort})` : '') +
         (r.fallback ? `  ↳ ${r.fallback}` : '') +
         (r.opt_in_required ? '  [opt-in required]' : '') +
+        (r.execution === 'in-session-subagent' ? '  [in-session: use your Agent tool — heddle dispatch refuses it]' : '') +
         (r.edits_code ? '  [edits code]' : '') +
         `\n${''.padEnd(23)}skills: ${r.skills.join(', ') || '(none)'}` +
         (r.mcp.length ? `  mcp: ${r.mcp.join(', ')}` : '') +

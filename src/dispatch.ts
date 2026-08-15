@@ -277,6 +277,7 @@ async function runTarget(
     orchestrator: ctx.attribution.orchestrator,
     identitySource: ctx.attribution.identitySource,
     ...(ctx.attribution.ignoredCallerAgent ? { ignoredCallerAgent: ctx.attribution.ignoredCallerAgent } : {}),
+    execution: providerExecution(ctx.table, target.provider),
   };
 }
 
@@ -301,9 +302,18 @@ export async function dispatch(
   }
 
   // ---- Resolve the route + policy (HED-1 contract) -------------------------------------------
+  // A route override is provider AND model, or neither — a lone half would silently run the class's
+  // default route (or the wrong one), so it is rejected outright.
+  if (Boolean(req.provider) !== Boolean(req.model)) {
+    throw new Error(
+      `dispatch: provider and model must be given together (got provider=${JSON.stringify(req.provider ?? null)}, ` +
+      `model=${JSON.stringify(req.model ?? null)})`,
+    );
+  }
   let route: Route;
   let target: RouteTarget;
   let fallback: RouteTarget | undefined;
+  let origin: InSessionOrigin = 'class';
   if (!req.taskClass) {
     // Direct path, no class: orchestrator named the model. Full dynamic choice, still policy-fenced.
     if (!(req.provider && req.model)) {
@@ -311,6 +321,7 @@ export async function dispatch(
     }
     route = directRoute(table, req.provider, req.model, req.skills, req.mcp);
     target = route;
+    origin = 'direct';
   } else {
     route = resolveRoute(table, req.taskClass);
     if (route.requiresExplicitOptIn && !req.optIn) {
@@ -325,6 +336,7 @@ export async function dispatch(
       // is the choice. Effort is deliberately NOT inherited (per-provider vocabulary).
       const explicit = directRoute(table, req.provider, req.model, req.skills ?? route.skills, req.mcp ?? route.mcp);
       target = { ...explicit, effort: req.effort };
+      origin = 'explicit';
     } else {
       target = route;
       fallback = route.fallback;
@@ -348,7 +360,12 @@ export async function dispatch(
   // ---- Claude-primary → structured, ledgered in-session refusal (HED-18) ----------------------
   const execution = providerExecution(table, target.provider);
   if (execution === 'in-session-subagent') {
-    return refuseInSession({ ...target, taskClass: route.taskClass, fallback }, req, ctx, execution);
+    // The class's declared fallback rides along even on the explicit path — the instruction can still
+    // name a subprocess route (class = policy).
+    return refuseInSession(
+      { ...target, taskClass: route.taskClass, dispatchable: route.dispatchable, fallback: route.fallback },
+      req, ctx, execution, origin,
+    );
   }
 
   // ---- Run (capabilities + max-children are decided per target inside runTarget) --------------
@@ -356,25 +373,47 @@ export async function dispatch(
   if (primary.ok || primary.refusal || req.noFallback || !fallback) return primary;
 
   // Primary failed and the table names a fallback — try it, recording the origin so the ledger
-  // shows which routes actually hold up in practice.
+  // shows which routes actually hold up in practice. A fallback that is itself in-session (custom
+  // tables) gets the same structured refusal instead of a throw.
+  const fbExecution = providerExecution(table, fallback.provider);
+  if (fbExecution === 'in-session-subagent') {
+    return refuseInSession(
+      { ...fallback, taskClass: route.taskClass, dispatchable: route.dispatchable, fallback: undefined },
+      req, ctx, fbExecution, 'fallback', `${route.provider}/${route.model}`,
+    );
+  }
   return runTarget(fallback, req, ctx, route, `${route.provider}/${route.model}`);
 }
 
+/** How the in-session route was chosen — the refusal reason must not misstate the YAML policy. */
+type InSessionOrigin = 'direct' | 'class' | 'explicit' | 'fallback';
+
 function refuseInSession(
-  route: RouteTarget & { taskClass: string; fallback?: RouteTarget }, req: DispatchRequest,
-  ctx: DispatchContext, execution: string,
+  route: RouteTarget & { taskClass: string; dispatchable: boolean; fallback?: RouteTarget },
+  req: DispatchRequest, ctx: DispatchContext, execution: string, origin: InSessionOrigin,
+  fellBackFrom: string | null = null,
 ): DispatchOutcome {
-  const skills = withMandatoryPacks(req.skills ?? route.skills ?? []);
-  const alt = route.fallback ? ` To run it as a subprocess instead, name provider+model explicitly ` +
+  // `orchestration` (dispatchable: false) is the orchestrator's OWN work — no worker pack applies.
+  const skills = route.dispatchable ? withMandatoryPacks(req.skills ?? route.skills ?? []) : (req.skills ?? route.skills ?? []);
+  const mcp = req.mcp ?? route.mcp ?? []; // the caller's override wins, exactly as it would on a run
+  const alt = route.fallback && route.dispatchable ? ` To run it as a subprocess instead, name provider+model explicitly ` +
     `(e.g. provider="${route.fallback.provider}", model="${route.fallback.model}" — the class's ` +
     `declared fallback) with the same task_class.` : '';
-  const reason = (route.taskClass.startsWith('direct:')
-      ? `direct route ${route.provider}/${route.model} names a provider that`
-      : `task class "${route.taskClass}" routes to ${route.provider}/${route.model}, which`) +
-    ` runs as an in-session subagent of the orchestrator, not a subprocess heddle can spawn.`;
-  const instruction =
-    `Use your own Agent tool with model "${route.model}" and skills [${skills.join(', ')}]` +
-    (route.mcp?.length ? ` and MCP [${route.mcp.join(', ')}]` : '') + `.` + alt;
+  const head = {
+    direct: `direct route ${route.provider}/${route.model} names a provider that`,
+    class: `task class "${route.taskClass}" routes to ${route.provider}/${route.model}, which`,
+    explicit: `task class "${route.taskClass}" was given the explicit route ${route.provider}/${route.model}, which`,
+    fallback: `task class "${route.taskClass}" fell back to ${route.provider}/${route.model} (its declared fallback), which`,
+  }[origin];
+  const reason = `${head} runs as an in-session subagent of the orchestrator, not a subprocess heddle can spawn.`;
+  const instruction = route.dispatchable
+    ? `Use your own Agent tool with model "${route.model}" and skills [${skills.join(', ')}]` +
+      (mcp.length ? ` and MCP [${mcp.join(', ')}]` : '') + `.` + alt
+    : `"${route.taskClass}" is the orchestrator's own in-session work (dispatchable: false) — ` +
+      `continue yourself; there is nothing to delegate.`;
+  const id = ctx.ledger.refuse(
+    baseRecord(ctx, req, route.taskClass, route, skills, fellBackFrom), 'claude-in-session', reason,
+  );
   return refusalOutcome(ctx, req, route.taskClass, route, skills,
-    { code: 'claude-in-session', reason, instruction }, { execution });
+    { code: 'claude-in-session', reason, instruction }, { execution, usedFallback: fellBackFrom !== null }, id);
 }
