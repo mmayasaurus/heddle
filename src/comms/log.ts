@@ -5,9 +5,10 @@ import { homedir } from 'node:os';
 import {
   MESSAGE_KINDS, PRIVILEGED_TIERS, TIERS,
   type MessageKind, type MessageRecord, type NewMessage, type Participant, type ParticipantKind,
-  type Tier, type TranscriptQuery, type TranscriptScope,
+  type Tier, type TierDecision, type TranscriptQuery, type TranscriptScope,
 } from './types.js';
 import { BROADCAST, canSend, childAddress, parseAddress, requireAddress } from './address.js';
+import { isSealed } from './seal.js';
 
 /**
  * Comms log — the durable, append-only record of every brokered message (SPEC §9).
@@ -20,7 +21,9 @@ import { BROADCAST, canSend, childAddress, parseAddress, requireAddress } from '
  *
  * Also owns the participant registry: fleet agents/operator register themselves on first send;
  * children ("K.1", "K.2") are MINTED here by their parent — the row that later lets the envelope
- * layer verify "K really is K.2's dispatching orchestrator" (HED-5).
+ * layer verify "K really is K.2's dispatching orchestrator" (HED-5). Lineage columns are frozen
+ * by a trigger once written (only last_seen/label may change), a child's address must equal
+ * parent.seq (CHECK), and a dispatch-ledger row binds to at most one child.
  *
  * Same style as src/ledger.ts: node:sqlite (built into Node 22, no native dependency), WAL,
  * ~/.heddle/comms.db. Facts are persisted; anything derived (unread counts, held queues) is
@@ -65,16 +68,28 @@ BEGIN SELECT RAISE(ABORT, 'comms log is append-only: DELETE refused'); END;
 CREATE TABLE IF NOT EXISTS participants (
   address     TEXT PRIMARY KEY,
   kind        TEXT NOT NULL,
-  parent      TEXT,
+  parent      TEXT REFERENCES participants(address),
   seq         INTEGER,
   dispatch_id INTEGER,
   label       TEXT,
   first_seen  TEXT NOT NULL,
   last_seen   TEXT NOT NULL,
   CHECK (kind IN ('agent', 'child', 'operator')),
+  -- A child's address IS its lineage (parent.seq); agents/operator carry no lineage columns.
+  CHECK ((kind = 'child' AND parent IS NOT NULL AND seq IS NOT NULL AND address = parent || '.' || seq)
+      OR (kind <> 'child' AND parent IS NULL AND seq IS NULL AND dispatch_id IS NULL)),
   UNIQUE (parent, seq)
 );
 CREATE INDEX IF NOT EXISTS idx_participants_parent ON participants(parent, seq);
+-- One dispatch-ledger row anchors at most one child.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_participants_dispatch ON participants(dispatch_id)
+  WHERE dispatch_id IS NOT NULL;
+-- Lineage is written once. Only last_seen/label may change afterwards — a raw UPDATE cannot
+-- re-parent a child ("I am now your orchestrator") or re-point it at another dispatch.
+CREATE TRIGGER IF NOT EXISTS participants_lineage_immutable BEFORE UPDATE ON participants
+WHEN NEW.address <> OLD.address OR NEW.kind <> OLD.kind OR NEW.parent IS NOT OLD.parent
+  OR NEW.seq IS NOT OLD.seq OR NEW.dispatch_id IS NOT OLD.dispatch_id
+BEGIN SELECT RAISE(ABORT, 'participant lineage is immutable: only last_seen/label may change'); END;
 `;
 
 export interface CommsLogOptions {
@@ -103,6 +118,7 @@ export class CommsLog {
     // WAL + a busy timeout: many agent processes share this file and write concurrently.
     this.db.exec('PRAGMA journal_mode = WAL;');
     this.db.exec('PRAGMA busy_timeout = 5000;');
+    this.db.exec('PRAGMA foreign_keys = ON;');
     this.db.exec(SCHEMA);
     this.db.exec(`PRAGMA user_version = ${COMMS_SCHEMA_VERSION};`);
     this.now = opts.now ?? (() => new Date().toISOString());
@@ -111,13 +127,16 @@ export class CommsLog {
   // ---------------------------------------------------------------- writer
 
   /**
-   * Append one message. Validates addresses/kind/tier, registers a first-time agent/operator
-   * sender, refuses unminted children (their lineage would be fiction), and returns the row.
-   * The tier is whatever the caller (the envelope layer) decided — a privileged tier (operator,
-   * orchestrator-directive) must arrive with `verified: true`, and agent-message must not, or it
-   * is refused here AND by the DB CHECK constraint.
+   * Append one message. Validates addresses/kind, registers a first-time agent/operator sender,
+   * refuses unminted children (their lineage would be fiction), and returns the row.
+   *
+   * Without a `decision` the row is `agent-message` / unverified — always safe. A privileged tier
+   * can ONLY be stored by passing the broker's own sealed TierDecision for this exact (from, to):
+   * a JSON look-alike is refused (not sealed), a decision for another pair is refused, and an
+   * `operator` decision is additionally refused unless `from` really is the operator address.
+   * The DB CHECK (verified <=> privileged) backs all of this up against raw INSERTs.
    */
-  append(msg: NewMessage): MessageRecord {
+  append(msg: NewMessage, decision?: TierDecision): MessageRecord {
     const from = requireAddress(msg.from, 'from');
     if (!canSend(from)) {
       throw new Error(`invalid from address ${JSON.stringify(msg.from)}: rooms and @all cannot send`);
@@ -128,19 +147,48 @@ export class CommsLog {
     }
     const kind: MessageKind = msg.kind ?? 'chat';
     if (!MESSAGE_KINDS.includes(kind)) throw new Error(`unknown message kind ${JSON.stringify(kind)}`);
-    const tier: Tier = msg.tier ?? 'agent-message';
-    if (!TIERS.includes(tier)) throw new Error(`unknown tier ${JSON.stringify(tier)}`);
-    const verified = msg.verified === true;
-    if (PRIVILEGED_TIERS.includes(tier) && !verified) {
-      throw new Error(`tier "${tier}" must be verified by the broker; senders cannot self-assign it`);
-    }
-    if (!PRIVILEGED_TIERS.includes(tier) && verified) {
-      throw new Error('an agent-message cannot be marked verified');
-    }
     if (msg.replyTo != null && !Number.isInteger(msg.replyTo)) {
       throw new Error('replyTo must be a message id');
     }
-    const meta = msg.meta == null ? null : JSON.stringify(msg.meta);
+
+    let tier: Tier = 'agent-message';
+    let verified = false;
+    let dispatchId = msg.dispatchId ?? null;
+    const metaObj: Record<string, unknown> | null = msg.meta == null ? null : { ...msg.meta };
+    if (decision !== undefined) {
+      if (!isSealed(decision)) {
+        throw new Error('tier decisions must come from the broker (decideTier); this one is not sealed');
+      }
+      if (decision.from !== msg.from || decision.to !== msg.to) {
+        throw new Error(`tier decision is for ${decision.from}→${decision.to}, not ${msg.from}→${msg.to}`);
+      }
+      if (!TIERS.includes(decision.tier)) throw new Error(`unknown tier ${JSON.stringify(decision.tier)}`);
+      const privileged = PRIVILEGED_TIERS.includes(decision.tier);
+      if (privileged !== (decision.verified === true)) {
+        throw new Error(`inconsistent tier decision: ${decision.tier} with verified=${String(decision.verified)}`);
+      }
+      if (decision.tier === 'operator' && from.kind !== 'operator') {
+        throw new Error(`operator tier requires the operator sender address, not ${msg.from}`);
+      }
+      tier = decision.tier;
+      verified = decision.verified === true;
+      dispatchId = dispatchId ?? decision.dispatchId ?? null;
+      const m = metaObj ?? {};
+      m.tierCode = decision.code;
+      m.tierReason = decision.reason;
+      if (decision.evidence) m.lineage = decision.evidence;
+      if (decision.requestedTier) m.requestedTier = decision.requestedTier;
+      if (decision.downgradedFrom) m.downgradedFrom = decision.downgradedFrom;
+      return this.insert(msg, from, kind, tier, verified, dispatchId, m);
+    }
+    return this.insert(msg, from, kind, tier, verified, dispatchId, metaObj);
+  }
+
+  private insert(
+    msg: NewMessage, from: ReturnType<typeof requireAddress>, kind: MessageKind, tier: Tier,
+    verified: boolean, dispatchId: number | null, metaObj: Record<string, unknown> | null,
+  ): MessageRecord {
+    const meta = metaObj == null ? null : JSON.stringify(metaObj);
     const ts = this.now();
 
     this.db.exec('BEGIN IMMEDIATE');
@@ -161,7 +209,7 @@ export class CommsLog {
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         ts, msg.from, msg.to, kind, tier, verified ? 1 : 0, msg.body,
-        msg.replyTo ?? null, msg.issue ?? null, msg.dispatchId ?? null, meta,
+        msg.replyTo ?? null, msg.issue ?? null, dispatchId, meta,
       );
       this.db.exec('COMMIT');
       const rec = this.get(Number(info.lastInsertRowid));
@@ -281,6 +329,11 @@ export class CommsLog {
       ).get(p.raw) as { seq: number };
       const seq = Number(row.seq);
       const address = childAddress(p.raw, seq);
+      if (input.dispatchId != null) {
+        const taken = this.db.prepare('SELECT address FROM participants WHERE dispatch_id = ?')
+          .get(input.dispatchId) as { address: string } | undefined;
+        if (taken) throw new Error(`dispatch #${input.dispatchId} is already bound to child ${taken.address}`);
+      }
       this.db.prepare(`
         INSERT INTO participants (address, kind, parent, seq, dispatch_id, label, first_seen, last_seen)
         VALUES (?, 'child', ?, ?, ?, ?, ?, ?)

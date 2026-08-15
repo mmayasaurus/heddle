@@ -36,7 +36,10 @@ export type MessageKind = 'chat' | 'handoff' | 'status' | 'needs-human' | 'permi
 export const MESSAGE_KINDS: readonly MessageKind[] =
   ['chat', 'handoff', 'status', 'needs-human', 'permission-request'];
 
-/** What a writer hands the log. `tier`/`verified` default to agent-message/false when omitted. */
+/**
+ * What a writer hands the log. There is deliberately NO tier/verified here: a message is
+ * agent-message unless the broker's verifier hands `append()` a sealed TierDecision alongside it.
+ */
 export interface NewMessage {
   /** Sender address — a fleet id ("K", "codex-B"), a child ("K.2"), or "operator". */
   from: string;
@@ -44,13 +47,6 @@ export interface NewMessage {
   to: string;
   body: string;
   kind?: MessageKind;
-  /**
-   * Tier as decided by the envelope layer. Callers writing to the log directly should leave
-   * this unset (→ agent-message); the DB refuses a privileged tier that is not `verified`.
-   */
-  tier?: Tier;
-  /** True iff the broker verified the sender's origin (operator) or lineage (directive). */
-  verified?: boolean;
   /** Message id this one answers. */
   replyTo?: number | null;
   /** Issue this conversation serves (e.g. "SPI-712", "HED-4"). */
@@ -76,6 +72,39 @@ export interface MessageRecord {
   issue: string | null;
   dispatchId: number | null;
   meta: Record<string, unknown> | null;
+}
+
+/** How a privileged tier was verified. */
+export type Evidence =
+  /** operator: the operator surface bound the sender address. */
+  | 'origin'
+  /** orchestrator-directive: dispatch-ledger row names the sender as the child's orchestrator. */
+  | 'ledger'
+  /** orchestrator-directive: in-session child, minted by the sender (no ledger row exists). */
+  | 'registry';
+
+/**
+ * The broker's tier decision for one (from, to) pair — produced ONLY by decideTier() (envelope.ts)
+ * and sealed in-process (seal.ts). `CommsLog.append` requires a sealed decision to store any
+ * privileged tier; a plain JSON look-alike is refused.
+ */
+export interface TierDecision {
+  from: string;
+  to: string;
+  tier: Tier;
+  /** True iff `tier` is privileged — verified by origin (operator) or lineage (directive). */
+  verified: boolean;
+  evidence: Evidence | null;
+  /** Machine-readable outcome, e.g. "verified-ledger", "not-dispatching-orchestrator". Header-safe. */
+  code: string;
+  /** Human-readable detail for the audit trail (meta.tierReason). Never rendered into a header. */
+  reason: string;
+  /** Ledger row that anchors the lineage, when the child was heddle-dispatched. */
+  dispatchId: number | null;
+  /** What the sender asked for (null = auto). */
+  requestedTier: Tier | null;
+  /** Set when a requested privileged tier was refused. */
+  downgradedFrom: Tier | null;
 }
 
 /** Who can send/receive. Fleet agents and the operator register themselves; children are minted. */

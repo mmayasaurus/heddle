@@ -8,7 +8,7 @@ Node 22's native `node:sqlite` in WAL mode following the style of the dispatch l
 Currently, only the storage foundation exists (HED-4). No delivery or transport layer, no
 trust-tiered envelopes (HED-5), no delivery discipline (HED-6), no SendMessage bridge (HED-7), no
 MCP tools, and no room UI exist yet. Until HED-5 lands every row is `tier = agent-message`,
-`verified = 0` — the log accepts a privileged tier only from the broker's verifier.
+`verified = 0` — the log accepts a privileged tier only with the broker verifier's sealed decision.
 
 ### Trust model
 
@@ -91,9 +91,17 @@ Tracks known entities and subagent lineage:
 - `first_seen` (TEXT NOT NULL): ISO-8601 UTC timestamp when first seen.
 - `last_seen` (TEXT NOT NULL): ISO-8601 UTC timestamp when last updated.
 
-Constraints on `participants`:
+Constraints on `participants` (lineage is a security input for HED-5, so it is frozen):
 - `CHECK (kind IN ('agent', 'child', 'operator'))`
-- `UNIQUE (parent, seq)`
+- `CHECK` child shape: a child has `parent` + `seq` and `address = parent || '.' || seq`; agents /
+  operator carry no `parent`/`seq`/`dispatch_id`. A raw INSERT cannot register `K.1` under `R`.
+- `parent REFERENCES participants(address)` (`PRAGMA foreign_keys = ON`) — a child's parent row
+  must exist.
+- `UNIQUE (parent, seq)`; partial unique index `idx_participants_dispatch` on `dispatch_id` — one
+  dispatch-ledger row anchors at most one child (`mintChild` reports the existing binding).
+- Trigger `participants_lineage_immutable`: any `UPDATE` that changes `address`, `kind`, `parent`,
+  `seq` or `dispatch_id` is refused; only `last_seen` / `label` may change. A raw
+  `UPDATE participants SET parent = 'R'` ("I am now your orchestrator") is impossible.
 - Index: `idx_participants_parent` ON `participants(parent, seq)`.
 
 ## API — CommsLog
@@ -104,12 +112,16 @@ The `CommsLog` class (`src/comms/log.ts`) manages persistence and participant re
 
 - `constructor(path?: string, opts?: CommsLogOptions)`
   Defaults to `~/.heddle/comms.db`. Supports `':memory:'` and custom clock via `opts.now`.
-- `append(msg: NewMessage): MessageRecord`
+- `append(msg: NewMessage, decision?: TierDecision): MessageRecord`
   Validates `from`/`to` addresses, checks `canSend(from)`, verifies non-empty `body`, validates
-  `kind` and `tier`. Auto-registers agent/operator senders; rejects unminted children. Refuses
-  an unverified privileged tier and a "verified" agent-message in code (and by DB CHECK).
-  Defaults: `kind = chat`, `tier = agent-message`, `verified = false`. Returns the written
-  `MessageRecord`.
+  `kind`. Auto-registers agent/operator senders; rejects unminted children. `NewMessage` has NO
+  tier/verified fields: without a `decision` the row is `agent-message` / unverified. A privileged
+  tier is stored only with the broker's own **sealed** `TierDecision` (produced by `decideTier`,
+  see Envelopes) for this exact `(from, to)` — an unsealed JSON look-alike, a decision for another
+  pair, an inconsistent one, or an `operator` decision whose sender is not `operator` are all
+  refused. The decision's `code` / `reason` / `evidence` / `requestedTier` / `downgradedFrom` land
+  in `meta` (`tierCode`, `tierReason`, `lineage`, `requestedTier`, `downgradedFrom`). Defaults:
+  `kind = chat`. Returns the written `MessageRecord`.
 - `get(id: number): MessageRecord | null`
   Retrieves a single message by ID.
 - `latestId(): number`

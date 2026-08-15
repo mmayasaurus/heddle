@@ -4,6 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { CommsLog, COMMS_SCHEMA_VERSION } from '../../src/comms/log.js';
+import { seal } from '../../src/comms/seal.js';
+import type { TierDecision } from '../../src/comms/types.js';
 
 /**
  * CommsLog against a TEMP database — never the default ~/.heddle/comms.db (that is the fleet's
@@ -57,21 +59,38 @@ describe('CommsLog (temp db)', () => {
     expect(() => log.append({ from: 'K', to: 'K.1.1', body: 'x' })).toThrow(/invalid to address/);
     expect(() => log.append({ from: 'K', to: 'R', body: '' })).toThrow(/non-empty/);
     expect(() => log.append({ from: 'K', to: 'R', body: 'x', kind: 'gossip' as never })).toThrow(/unknown message kind/);
-    expect(() => log.append({ from: 'K', to: 'R', body: 'x', tier: 'root' as never })).toThrow(/unknown tier/);
     expect(() => log.append({ from: 'K', to: 'R', body: 'x', replyTo: 1.5 })).toThrow(/replyTo/);
     expect(log.count()).toBe(0);
     // A refused append leaves no participant side-effects behind either.
     expect(log.participants()).toEqual([]);
   });
 
-  it('verified <=> privileged tier — enforced at the API AND at the database', () => {
-    for (const tier of ['operator', 'orchestrator-directive'] as const) {
-      expect(() => log.append({ from: 'K', to: 'K.1', body: 'do it', tier })).toThrow(/verified by the broker/);
-      expect(() => log.append({ from: 'K', to: 'K.1', body: 'do it', tier, verified: false })).toThrow(/verified by the broker/);
-    }
-    expect(() => log.append({ from: 'K', to: 'R', body: 'x', tier: 'agent-message', verified: true })).toThrow(/cannot be marked verified/);
+  /** A decision shaped like the broker's, sealed or not, for one (from, to). */
+  const decision = (from: string, to: string, tier: TierDecision['tier'], over: Partial<TierDecision> = {}): TierDecision => ({
+    from, to, tier, verified: tier !== 'agent-message', evidence: tier === 'operator' ? 'origin' : tier === 'agent-message' ? null : 'registry',
+    code: 'test', reason: 'test decision', dispatchId: null, requestedTier: null, downgradedFrom: null, ...over,
+  });
 
-    // Bypass the class entirely: raw INSERTs that break the equivalence must still be refused.
+  it('a privileged tier is stored ONLY with the broker\'s sealed decision for that exact pair', () => {
+    log.mintChild('K');
+    // No decision → agent-message, unverified. There is no field to even ask for more.
+    expect(log.append({ from: 'K', to: 'K.1', body: 'x' })).toMatchObject({ tier: 'agent-message', verified: false });
+    // A JSON look-alike (unsealed) is refused — this is what an MCP client could send.
+    expect(() => log.append({ from: 'K', to: 'K.1', body: 'x' }, decision('K', 'K.1', 'orchestrator-directive')))
+      .toThrow(/not sealed/);
+    expect(() => log.append({ from: 'operator', to: '@all', body: 'x' }, JSON.parse(JSON.stringify(seal(decision('operator', '@all', 'operator'))))))
+      .toThrow(/not sealed/);
+    // Sealed decisions are accepted…
+    const d1 = log.append({ from: 'K', to: 'K.1', body: 'go' }, seal(decision('K', 'K.1', 'orchestrator-directive', { code: 'verified-registry', reason: 'minted by K' })));
+    expect(d1).toMatchObject({ tier: 'orchestrator-directive', verified: true, meta: { tierCode: 'verified-registry', tierReason: 'minted by K', lineage: 'registry' } });
+    expect(log.append({ from: 'operator', to: '@all', body: 'stop' }, seal(decision('operator', '@all', 'operator'))).tier).toBe('operator');
+    // …but not for another pair, not for a non-operator claiming operator, not when self-inconsistent.
+    expect(() => log.append({ from: 'K', to: 'K.1', body: 'x' }, seal(decision('K', 'K.9', 'orchestrator-directive')))).toThrow(/is for K→K.9, not K→K.1/);
+    expect(() => log.append({ from: 'K', to: 'K.1', body: 'x' }, seal(decision('K', 'K.1', 'operator')))).toThrow(/operator tier requires the operator sender address/);
+    expect(() => log.append({ from: 'K', to: 'K.1', body: 'x' }, seal(decision('K', 'K.1', 'orchestrator-directive', { verified: false })))).toThrow(/inconsistent/);
+    expect(() => log.append({ from: 'K', to: 'K.1', body: 'x' }, seal(decision('K', 'K.1', 'agent-message', { verified: true })))).toThrow(/inconsistent/);
+
+    // Bypass the class entirely: raw INSERTs that break verified <=> privileged are refused by the DB.
     const raw = new DatabaseSync(path);
     try {
       for (const [tier, verified] of [['orchestrator-directive', 0], ['operator', 0], ['agent-message', 1], ['root', 1]] as const) {
@@ -80,12 +99,48 @@ describe('CommsLog (temp db)', () => {
         ).run('t', 'K', 'K.1', 'spoof', tier, verified), `${tier}/${verified}`).toThrow(/CHECK constraint failed/);
       }
     } finally { raw.close(); }
-    expect(log.count()).toBe(0);
+    expect(log.count()).toBe(3);
+  });
 
-    // The broker's own verified writes are accepted for both privileged tiers.
-    log.mintChild('K');
-    expect(log.append({ from: 'K', to: 'K.1', body: 'go', tier: 'orchestrator-directive', verified: true }).verified).toBe(true);
-    expect(log.append({ from: 'operator', to: '@all', body: 'stop', tier: 'operator', verified: true }).tier).toBe('operator');
+  it('participant lineage is frozen once written; only last_seen/label may change', () => {
+    log.mintChild('K', { dispatchId: 17 }); // K.1
+    log.register({ address: 'R' });
+    const raw = new DatabaseSync(path);
+    try {
+      for (const sql of [
+        "UPDATE participants SET parent = 'R' WHERE address = 'K.1'",
+        'UPDATE participants SET dispatch_id = NULL WHERE address = \'K.1\'',
+        'UPDATE participants SET dispatch_id = 18 WHERE address = \'K.1\'',
+        "UPDATE participants SET seq = 2 WHERE address = 'K.1'",
+        "UPDATE participants SET kind = 'agent' WHERE address = 'K.1'",
+        "UPDATE participants SET address = 'R.1' WHERE address = 'K.1'",
+        "UPDATE participants SET kind = 'child' WHERE address = 'R'",
+      ]) {
+        expect(() => raw.prepare(sql).run(), sql).toThrow(/lineage is immutable/);
+      }
+      // Allowed: presence + label.
+      raw.prepare("UPDATE participants SET last_seen = 'later', label = 'renamed' WHERE address = 'K.1'").run();
+    } finally { raw.close(); }
+    expect(log.participant('K.1')).toMatchObject({ parent: 'K', seq: 1, dispatchId: 17, label: 'renamed', lastSeen: 'later' });
+  });
+
+  it('the database refuses malformed lineage rows and double-bound dispatches', () => {
+    log.mintChild('K', { dispatchId: 17 });
+    expect(() => log.mintChild('R', { dispatchId: 17 })).toThrow(/dispatch #17 is already bound to child K.1/);
+    const raw = new DatabaseSync(path);
+    try {
+      raw.exec('PRAGMA foreign_keys = ON');
+      const ins = (address: string, kind: string, parent: string | null, seq: number | null, dispatchId: number | null) => () =>
+        raw.prepare('INSERT INTO participants (address, kind, parent, seq, dispatch_id, first_seen, last_seen) VALUES (?, ?, ?, ?, ?, ?, ?)')
+          .run(address, kind, parent, seq, dispatchId, 't', 't');
+      expect(ins('K.5', 'child', 'R', 5, null), 'address must equal parent.seq').toThrow(/CHECK constraint failed/);
+      expect(ins('R.1', 'child', null, 1, null), 'child needs a parent').toThrow(/CHECK constraint failed/);
+      expect(ins('S', 'agent', 'K', 1, null), 'agents carry no lineage').toThrow(/CHECK constraint failed/);
+      expect(ins('S', 'agent', null, null, 42), 'agents carry no dispatch').toThrow(/CHECK constraint failed/);
+      expect(ins('K.2', 'child', 'K', 2, 17), 'dispatch already bound').toThrow(/UNIQUE constraint failed/);
+      expect(ins('Z.1', 'child', 'Z', 1, null), 'parent must exist').toThrow(/FOREIGN KEY constraint failed/);
+    } finally { raw.close(); }
+    expect(log.participants().map((p) => p.address)).toEqual(['K', 'K.1']);
   });
 
   it('is append-only: UPDATE and DELETE are refused by the database itself', () => {
