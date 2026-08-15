@@ -223,8 +223,10 @@ export async function dispatch(
   if (!route.dispatchable) {
     // Report the route the caller actually named (if any) so the structured fields, the ledger row
     // and the reason agree; the class stays the ledger's task_class.
+    // (Not via directRoute(): it throws for excluded/held/unknown providers, and a non-dispatchable
+    // class must refuse — and be ledgered — whatever provider was named.)
     const named = req.provider && req.model
-      ? { ...route, ...directRoute(table, req.provider, req.model, req.skills ?? route.skills, req.mcp ?? route.mcp), taskClass: route.taskClass }
+      ? { ...route, provider: req.provider, model: req.model, skills: req.skills ?? route.skills, mcp: req.mcp ?? route.mcp }
       : route;
     return refuseNotDispatchable(named, req, ledger, table);
   }
