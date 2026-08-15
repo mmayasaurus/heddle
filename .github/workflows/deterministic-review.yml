@@ -112,6 +112,11 @@ jobs:
         # only applies it to UNTRACKED files, and PR files are tracked.
         run: |
           set -u
+          # Container jobs: the workspace is owned by the runner uid, git in
+          # this step runs as the image user, and actions/checkout writes its
+          # safe.directory entry to a TEMPORARY HOME — so without this line
+          # every git call below dies with "dubious ownership" (round-4 run).
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           if [ -n "$BASELINE" ]; then
             git ls-files -- '.semgrepignore' '*/.semgrepignore' | while IFS= read -r f; do
               git rm -q -- "$f"
@@ -186,6 +191,13 @@ jobs:
         # --redact keeps values out of logs AND out of the report; the report
         # is uploaded to code scanning below (rule/file/line only).
         #
+        # FAIL-CLOSED (round-3/4 lesson): gitleaks exits 0 with "0 commits
+        # scanned … no leaks found" when its internal `git log` fails — the
+        # round-3 run did exactly that (dubious-ownership error in the
+        # container) and went GREEN with an EMPTY scan. So the step computes
+        # the expected non-merge commit count itself and refuses any run whose
+        # log shows a git/tool error or a different scanned count.
+        #
         # Suppressions are PR-CONTROLLED (.gitleaks.toml, .gitleaksignore,
         # inline `gitleaks:allow` comments) — a PR (or fork) that ships a
         # lenient config would otherwise scan itself green. So the scan always
@@ -197,7 +209,17 @@ jobs:
         # (Spinventory det-tier finding, #2077).
         run: |
           set -u
+          # Container jobs: see the semgrep step — without this every git call
+          # (ours AND gitleaks' own) fails with "dubious ownership".
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           echo "scanning $BASE..$HEAD"
+          # gitleaks scans NON-merge commits (`git log -p` shows no diff for a
+          # merge), so that is the count it must report back.
+          EXPECTED=$(git rev-list --count --no-merges "$BASE..$HEAD")
+          echo "non-merge commits in range: $EXPECTED"
+          if [ "$EXPECTED" -lt 1 ]; then
+            echo "::error::empty commit range $BASE..$HEAD — nothing to scan; NOT a clean pass"; exit 1
+          fi
           S="${RUNNER_TEMP:-/tmp}/gitleaks-base"; mkdir -p "$S/ignore"
           if git cat-file -e "$BASE:.gitleaks.toml" 2>/dev/null; then
             git show "$BASE:.gitleaks.toml" > "$S/gitleaks.toml"
@@ -218,20 +240,30 @@ jobs:
             [ -e "$f" ] && mv -f -- "$f" "$S/pr-copy-$f"
           done
           # `|| rc=$?` — the runner's `sh -e` would otherwise abort on the
-          # exit-2 hit before the summary line below is written.
+          # exit-2 hit before the checks below run. gitleaks logs to stderr;
+          # captured to a file so the count/error checks can read it, then
+          # echoed so the run log still shows everything (values redacted).
           rc=0
           gitleaks git --log-opts="$BASE..$HEAD" --redact --no-banner \
             --config="$S/gitleaks.toml" --gitleaks-ignore-path="$S/ignore" \
             --ignore-gitleaks-allow \
-            --exit-code 2 --report-format sarif --report-path gitleaks.sarif . || rc=$?
+            --exit-code 2 --report-format sarif --report-path gitleaks.sarif . \
+            2>"$S/gitleaks.log" || rc=$?
+          cat "$S/gitleaks.log"
+          SCANNED=$(grep -oE '[0-9]+ commits? scanned' "$S/gitleaks.log" | grep -oE '^[0-9]+' | head -1)
+          if grep -qE '\bERR\b|\[git\]|fatal:' "$S/gitleaks.log" || [ -z "${SCANNED:-}" ] || [ "$SCANNED" -ne "$EXPECTED" ]; then
+            echo "::error::gitleaks did not cleanly scan the whole range (scanned=${SCANNED:-none}, expected=$EXPECTED, or a git/tool error was logged) — NOT a clean pass"
+            echo "gitleaks: ❌ **scan incomplete** (scanned=${SCANNED:-none}, expected=$EXPECTED, or a git/tool error) — see the job log; NOT a clean pass" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
           # Three-dot: files changed BY THIS PR (merge-base..head), not base-vs-head.
           if git diff --name-only "$BASE...$HEAD" -- .gitleaks.toml .gitleaksignore | grep -q .; then
             echo "⚠️ this PR modifies a gitleaks suppression file (.gitleaks.toml / .gitleaksignore). The scan above used the BASE branch's copy, so this verdict is unaffected — but review the suppression change itself by hand." >> "$GITHUB_STEP_SUMMARY"
             echo "::warning::this PR modifies a gitleaks suppression file — the scan used the base branch's copy; review the change by hand."
           fi
           case "$rc" in
-            0) echo "gitleaks: no secrets found in $BASE..$HEAD (base-branch suppressions, inline allows ignored)" >> "$GITHUB_STEP_SUMMARY" ;;
-            2) echo "gitleaks: 🔑 **possible secret(s) found** in this PR's commits — see the job log (values redacted); rotate anything real." >> "$GITHUB_STEP_SUMMARY" ;;
+            0) echo "gitleaks: no secrets found in $BASE..$HEAD ($SCANNED non-merge commit(s) scanned; base-branch suppressions, inline allows ignored)" >> "$GITHUB_STEP_SUMMARY" ;;
+            2) echo "gitleaks: 🔑 **possible secret(s) found** in this PR's commits ($SCANNED scanned) — see the job log (values redacted); rotate anything real." >> "$GITHUB_STEP_SUMMARY" ;;
             *) echo "gitleaks: tool error (exit $rc) — NOT a clean pass" >> "$GITHUB_STEP_SUMMARY" ;;
           esac
           exit "$rc"
