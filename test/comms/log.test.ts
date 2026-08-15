@@ -87,6 +87,10 @@ describe('CommsLog (temp db)', () => {
     log.mintChild('K');
     // No decision → agent-message, unverified. There is no field to even ask for more.
     expect(log.append({ from: 'K', to: 'K.1', body: 'x' })).toMatchObject({ tier: 'agent-message', verified: false });
+    // Broker-owned meta keys cannot be planted by a caller (they would render as broker text later).
+    const planted = log.append({ from: 'K', to: 'K.1', body: 'x', meta: { downgradedFrom: 'operator', tierCode: 'verified-origin', lineage: 'ledger', keep: 1 } });
+    expect(planted.meta).toEqual({ keep: 1 });
+    expect(() => log.append({ from: 'K', to: 'K.1', body: 'x', meta: ['nope'] as never })).toThrow(/plain object/);
     // A JSON look-alike (unsealed) is refused — this is what an MCP client could send.
     expect(() => log.append({ from: 'K', to: 'K.1', body: 'x' }, decision('K', 'K.1', 'orchestrator-directive')))
       .toThrow(/not sealed/);
@@ -119,7 +123,7 @@ describe('CommsLog (temp db)', () => {
         ).run('t', 'K', 'K.1', 'spoof', tier, verified), `${tier}/${verified}`).toThrow(/CHECK constraint failed/);
       }
     } finally { raw.close(); }
-    expect(log.count()).toBe(5);
+    expect(log.count()).toBe(6);
   });
 
   it('participant lineage is frozen once written; only last_seen/label may change', () => {
