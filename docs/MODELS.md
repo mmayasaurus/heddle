@@ -115,3 +115,21 @@ fields to be added to the routing YAML — this doc stays the narrative). A
 PreToolUse hook on `dispatch_worker` warns on empty skills for code-editing
 classes and on `second-opinion-hard` without opt-in, so fit+cost surface at
 the moment of choosing a worker.
+
+## Known routing pitfalls (2026-08-15)
+
+Learned from Agent V's HED-4/5 dispatches (ledger #35–41); policy until the linked tickets
+land.
+
+- **No `mcp` on gemini-routed classes** (`documentation`, `gemini-analysis`, and the
+  `second-opinion` fallback): worker MCP attachment for agy/gemini is not implemented, and the
+  throw happens after `ledger.start()` outside the try/finally — the ledger row is orphaned
+  in-flight and skill restores are skipped (HED-63). Dispatch gemini classes without `mcp`.
+- **`second-opinion` (grok-4.6-high) with memtrace attached is unreliable on long read-and-review
+  prompts** — a design-review dispatch timed out at 600 s with no result JSON. Prefer no `mcp` and
+  paste the relevant code/design into the prompt.
+- **`documentation` output must be fact-checked against the code** — it drafts structure and
+  schema/API sections well but fabricated roadmap items (invented "WebSocket push, queues,
+  dispatch handles" for a ticket that says nothing of the kind). `assess_result` caught it
+  (`needs-rework`); a human/orchestrator read is still required.
+
