@@ -60,6 +60,8 @@ src/smoke.ts           `npm run build && node dist/smoke.js <adapter> "<prompt>"
 
 ## Dev
 
+CI, scanners and the review-sweep rules: [`docs/CI.md`](docs/CI.md).
+
 ```bash
 npm install
 npm run build          # tsc
