@@ -4,6 +4,9 @@
   "private": true,
   "description": "Cross-provider agent orchestration for subscription coding CLIs — routing, skill packs, inter-agent comms, and a visibility dashboard.",
   "type": "module",
+  "engines": {
+    "node": ">=22.12.0"
+  },
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit -p tsconfig.test.json",
