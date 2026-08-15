@@ -1,4 +1,4 @@
-import { isCodeEditingClass, resolveRoute, type RoutingTable } from './routing.js';
+import { isCodeEditingClass, resolveRoute, type Route, type RoutingTable } from './routing.js';
 import { MANDATORY_PACKS, withMandatoryPacks } from './skillpacks.js';
 
 /**
@@ -53,63 +53,68 @@ export function taskFitPacks(table: RoutingTable, input: DispatchGuidanceInput):
 }
 
 export function dispatchGuidance(table: RoutingTable, input: DispatchGuidanceInput): GuidanceWarning[] {
-  const warnings: GuidanceWarning[] = [];
   const cls = input.task_class;
-  if (!cls) return warnings; // direct provider/model path — no class policy to check
+  if (!cls) return []; // direct provider/model path — no class policy to check
   // Own-property check: `"toString" in {}` is true via the prototype and would make resolveRoute throw.
-  if (!Object.prototype.hasOwnProperty.call(table.taskClasses, cls)) return warnings; // unknown: the dispatcher will say so
+  if (!Object.prototype.hasOwnProperty.call(table.taskClasses, cls)) return []; // unknown: the dispatcher will say so
 
   const route = resolveRoute(table, cls);
   const optInMissing = Boolean(route.requiresExplicitOptIn) && input.opt_in !== true;
-
-  if (isCodeEditingClass(table, cls)) {
-    const defaults = withMandatoryPacks(route.skills ?? []);
-    const recommended = defaults.filter((p) => !(MANDATORY_PACKS as readonly string[]).includes(p));
-    const carried = taskFitPacks(table, input);
-    const missingFit = recommended.length
-      ? !recommended.some((p) => carried.includes(p))
-      : carried.length === 0;
-    if (missingFit) {
-      warnings.push({
-        code: 'code-editing-class-without-skills',
-        task_class: cls,
-        message:
-          `heddle: task class "${cls}" EDITS CODE but this dispatch carries ` +
-          (carried.length
-            ? `none of its recommended packs (only [${carried.join(', ')}] plus the mandatory ${MANDATORY_PACKS.join(', ')})`
-            : `no task-fit skill packs — only the mandatory ${MANDATORY_PACKS.join(', ')}`) +
-          `. The worker gets no verification / discovery discipline. ` +
-          (recommended.length
-            ? `Recommended for ${cls}: ${recommended.join(', ')} — omit \`skills\` to get the class default ` +
-              `[${defaults.join(', ')}], or pass an explicit list that includes at least one of them.`
-            : `The routing table lists no default packs for ${cls} either — consider quality-gate ` +
-              `(verification) and code-discovery (graph-first navigation), or add defaults to routing.v0.yaml.`) +
-          // Don't promise "will still run" when the opt-in warning below says the opposite.
-          (optInMissing ? '' : ' (Nudge only — the dispatch will still run.)'),
-      });
-    }
-  }
-
-  if (optInMissing) {
-    // With an explicit provider/model the dispatcher runs THAT route (class = policy), so describe it —
-    // the class's own route/cost note would misstate what is about to happen.
-    const explicit = input.provider && input.model ? `${input.provider}/${input.model}` : null;
-    warnings.push({
-      code: 'opt-in-required',
-      task_class: cls,
-      message:
-        `heddle: task class "${cls}" requires explicit opt-in and this call has no \`opt_in: true\` — ` +
-        `the dispatcher WILL REFUSE it. Why the class is gated: ${route.note ?? 'see routing.v0.yaml'}. ` +
-        (explicit
-          ? `This call names the explicit route ${explicit} under the class's policy` +
-            (explicit !== `${route.provider}/${route.model}` ? ` (the class's own route ${route.provider}/${route.model} will not run)` : '') + `. `
-          : `Routes to ${route.provider}/${route.model}. `) +
-        `Pass \`opt_in: true\` only if the cost is justified (ask the operator first); otherwise pick a ` +
-        `class that is not gated (see list_task_classes).`,
-    });
-  }
-
+  const warnings: GuidanceWarning[] = [];
+  const fit = isCodeEditingClass(table, cls) ? codeEditingWarning(table, input, route, cls, optInMissing) : null;
+  if (fit) warnings.push(fit);
+  if (optInMissing) warnings.push(optInWarning(input, route, cls));
   return warnings;
+}
+
+/** Rule 1 — a code-editing class carrying none of its recommended packs. */
+function codeEditingWarning(
+  table: RoutingTable, input: DispatchGuidanceInput, route: Route, cls: string, optInMissing: boolean,
+): GuidanceWarning | null {
+  const defaults = withMandatoryPacks(route.skills ?? []);
+  const recommended = defaults.filter((p) => !(MANDATORY_PACKS as readonly string[]).includes(p));
+  const carried = taskFitPacks(table, input);
+  const missingFit = recommended.length ? !recommended.some((p) => carried.includes(p)) : carried.length === 0;
+  if (!missingFit) return null;
+  const carriedText = carried.length
+    ? `none of its recommended packs (only [${carried.join(', ')}] plus the mandatory ${MANDATORY_PACKS.join(', ')})`
+    : `no task-fit skill packs — only the mandatory ${MANDATORY_PACKS.join(', ')}`;
+  const adviceText = recommended.length
+    ? `Recommended for ${cls}: ${recommended.join(', ')} — omit \`skills\` to get the class default ` +
+      `[${defaults.join(', ')}], or pass an explicit list that includes at least one of them.`
+    : `The routing table lists no default packs for ${cls} either — consider quality-gate ` +
+      `(verification) and code-discovery (graph-first navigation), or add defaults to routing.v0.yaml.`;
+  return {
+    code: 'code-editing-class-without-skills',
+    task_class: cls,
+    message:
+      `heddle: task class "${cls}" EDITS CODE but this dispatch carries ${carriedText}. The worker gets no ` +
+      `verification / discovery discipline. ${adviceText}` +
+      // Don't promise "will still run" when the opt-in warning says the opposite.
+      (optInMissing ? '' : ' (Nudge only — the dispatch will still run.)'),
+  };
+}
+
+/** Rule 2 — an opt-in-gated class called without opt_in (the dispatcher will refuse it). */
+function optInWarning(input: DispatchGuidanceInput, route: Route, cls: string): GuidanceWarning {
+  // With an explicit provider/model the dispatcher runs THAT route (class = policy), so describe it —
+  // the class's own route/cost note would misstate what is about to happen.
+  const explicit = input.provider && input.model ? `${input.provider}/${input.model}` : null;
+  const classRoute = `${route.provider}/${route.model}`;
+  const routeText = explicit
+    ? `This call names the explicit route ${explicit} under the class's policy` +
+      (explicit !== classRoute ? ` (the class's own route ${classRoute} will not run)` : '') + `. `
+    : `Routes to ${classRoute}. `;
+  return {
+    code: 'opt-in-required',
+    task_class: cls,
+    message:
+      `heddle: task class "${cls}" requires explicit opt-in and this call has no \`opt_in: true\` — ` +
+      `the dispatcher WILL REFUSE it. Why the class is gated: ${route.note ?? 'see routing.v0.yaml'}. ` +
+      routeText +
+      `Pass \`opt_in: true\` only if the cost is justified (ask the operator first); otherwise pick a ` +
+      `class that is not gated (see list_task_classes).`,
+  };
 }
 
 /**

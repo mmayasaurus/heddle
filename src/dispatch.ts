@@ -177,6 +177,60 @@ async function runTarget(
   };
 }
 
+/** What a request resolves to before anything runs: the class route + policy, the effective target,
+ *  the fallback still available, and how the target was chosen. Throws on caller/config errors. */
+interface ResolvedRequest {
+  route: Route;
+  target: RouteTarget;
+  fallback?: RouteTarget;
+  origin: InSessionOrigin;
+  /** Set for a `dispatchable: false` class — refused before any route runs. */
+  notDispatchable: boolean;
+}
+
+/** Resolve the class/route contract (HED-1) — pure with respect to the ledger and workers. */
+function resolveRequest(req: DispatchRequest, table: RoutingTable): ResolvedRequest {
+  // A route override is provider AND model, or neither — a lone half would silently run the class's
+  // default route (or the wrong one), so it is rejected outright.
+  if (Boolean(req.provider) !== Boolean(req.model)) {
+    throw new Error(
+      `dispatch: provider and model must be given together (got provider=${JSON.stringify(req.provider ?? null)}, ` +
+      `model=${JSON.stringify(req.model ?? null)})`,
+    );
+  }
+  // Direct path, no class: orchestrator named the model. Full dynamic choice, still policy-fenced.
+  if (!req.taskClass) {
+    if (!(req.provider && req.model)) throw new Error('dispatch requires either a task class or an explicit provider+model');
+    const route = directRoute(table, req.provider, req.model, req.skills, req.mcp);
+    return { route, target: route, origin: 'direct', notDispatchable: false };
+  }
+  const route = resolveRoute(table, req.taskClass);
+  if (route.requiresExplicitOptIn && !req.optIn) {
+    throw new Error(
+      `task class "${req.taskClass}" requires explicit opt-in` +
+      (route.note ? ` — ${route.note}` : '') + '. Pass optIn/--opt-in to proceed.',
+    );
+  }
+  // A non-dispatchable class (`orchestration`) is refused on EVERY path — a named subprocess route
+  // does not turn the orchestrator's own work into a worker task. The named provider/model are set
+  // directly (not via directRoute(), which throws for excluded/held/unknown providers — the class
+  // must refuse, and be ledgered, whatever was named); the class stays the ledger's task_class.
+  if (!route.dispatchable) {
+    const named = req.provider && req.model
+      ? { ...route, provider: req.provider, model: req.model, skills: req.skills ?? route.skills, mcp: req.mcp ?? route.mcp }
+      : route;
+    return { route, target: named, origin: req.provider && req.model ? 'explicit' : 'class', notDispatchable: true };
+  }
+  // Class + explicit provider/model: the class supplies policy (default skills/mcp, opt-in gate,
+  // ledger task_class), the named route replaces the table's — no fallback, naming it is the choice.
+  // Effort is deliberately NOT inherited from the class (per-provider vocabulary).
+  if (req.provider && req.model) {
+    const explicit = directRoute(table, req.provider, req.model, req.skills ?? route.skills, req.mcp ?? route.mcp);
+    return { route, target: { ...explicit, effort: req.effort }, origin: 'explicit', notDispatchable: false };
+  }
+  return { route, target: route, fallback: route.fallback, origin: 'class', notDispatchable: false };
+}
+
 export async function dispatch(
   req: DispatchRequest, ledger = new Ledger(), adapterFor: AdapterFactory = defaultAdapterFor,
 ): Promise<DispatchOutcome> {
@@ -191,85 +245,34 @@ export async function dispatch(
     } catch { /* fall through */ }
   }
 
-  // A route override is provider AND model, or neither — a lone half would silently run the class's
-  // default route (or the wrong one), so it is rejected outright.
-  if (Boolean(req.provider) !== Boolean(req.model)) {
-    throw new Error(
-      `dispatch: provider and model must be given together (got provider=${JSON.stringify(req.provider ?? null)}, ` +
-      `model=${JSON.stringify(req.model ?? null)})`,
-    );
-  }
+  const { route, target, fallback, origin, notDispatchable } = resolveRequest(req, table);
+  if (notDispatchable) return refuseNotDispatchable({ ...route, provider: target.provider, model: target.model, skills: target.skills, mcp: target.mcp }, req, ledger, table);
 
-  // Direct path, no class: orchestrator named the model. Full dynamic choice, still policy-fenced.
-  if (!req.taskClass) {
-    if (req.provider && req.model) {
-      const route = directRoute(table, req.provider, req.model, req.skills, req.mcp);
-      const execution = providerExecution(table, route.provider);
-      if (execution === 'in-session-subagent') return refuseInSession(route, req, ledger, execution, 'direct');
-      return runTarget(route, req, ledger, route, null, adapterFor, table);
-    }
-    throw new Error('dispatch requires either a task class or an explicit provider+model');
-  }
-
-  const route = resolveRoute(table, req.taskClass);
-  if (route.requiresExplicitOptIn && !req.optIn) {
-    throw new Error(
-      `task class "${req.taskClass}" requires explicit opt-in` +
-      (route.note ? ` — ${route.note}` : '') + '. Pass optIn/--opt-in to proceed.',
-    );
-  }
-  // A non-dispatchable class (`orchestration`) is refused on EVERY path — a named subprocess route
-  // does not turn the orchestrator's own work into a worker task.
-  if (!route.dispatchable) {
-    // Report the route the caller actually named (if any) so the structured fields, the ledger row
-    // and the reason agree; the class stays the ledger's task_class.
-    // (Not via directRoute(): it throws for excluded/held/unknown providers, and a non-dispatchable
-    // class must refuse — and be ledgered — whatever provider was named.)
-    const named = req.provider && req.model
-      ? { ...route, provider: req.provider, model: req.model, skills: req.skills ?? route.skills, mcp: req.mcp ?? route.mcp }
-      : route;
-    return refuseNotDispatchable(named, req, ledger, table);
-  }
-
-  // Class + explicit provider/model: the class supplies policy (default skills/mcp, opt-in gate,
-  // ledger task_class), the named route replaces the table's — no fallback, naming it is the choice.
-  if (req.provider && req.model) {
-    const explicit = directRoute(table, req.provider, req.model, req.skills ?? route.skills, req.mcp ?? route.mcp);
-    const execution = providerExecution(table, explicit.provider);
-    if (execution === 'in-session-subagent') {
-      // Keep the class's declared fallback so the instruction can still name a subprocess route.
-      return refuseInSession(
-        { ...route, provider: explicit.provider, model: explicit.model, skills: explicit.skills, mcp: explicit.mcp },
-        req, ledger, execution, 'explicit',
-      );
-    }
-    // Effort is deliberately NOT inherited from the class (per-provider vocabulary) — pass it explicitly.
-    const target: RouteTarget = { ...explicit, effort: req.effort };
-    return runTarget(target, req, ledger, route, null, adapterFor, table);
-  }
-
-  // Claude-primary classes run as the orchestrator's OWN in-session subagents (shared prompt cache,
+  // Claude-primary routes run as the orchestrator's OWN in-session subagents (shared prompt cache,
   // flat pool — src/adapters/claude.ts), so a subprocess dispatcher cannot run them. Return a
   // structured, ledgered refusal instead of throwing (decided 2026-08-15, HED-18): the orchestrator
   // uses its Agent tool with the routed model, or names provider+model to run the class elsewhere.
-  const execution = providerExecution(table, route.provider);
-  if (execution === 'in-session-subagent') return refuseInSession(route, req, ledger, execution, 'class');
+  // The class's declared fallback rides along on the explicit path so the instruction can still
+  // name a subprocess route (class = policy).
+  const execution = providerExecution(table, target.provider);
+  if (execution === 'in-session-subagent') {
+    return refuseInSession({ ...route, provider: target.provider, model: target.model, skills: target.skills, mcp: target.mcp }, req, ledger, execution, origin);
+  }
 
-  const primary = await runTarget(route, req, ledger, route, null, adapterFor, table);
-  if (primary.ok || req.noFallback || !route.fallback) return primary;
+  const primary = await runTarget(target, req, ledger, route, null, adapterFor, table);
+  if (primary.ok || req.noFallback || !fallback) return primary;
 
   // Primary failed and the table names a fallback — try it, recording the origin so the ledger
   // shows which routes actually hold up in practice. A fallback that is itself in-session (custom
   // tables) gets the same structured refusal instead of a throw.
-  const fbExecution = providerExecution(table, route.fallback.provider);
+  const fbExecution = providerExecution(table, fallback.provider);
   if (fbExecution === 'in-session-subagent') {
     return refuseInSession(
-      { ...route, provider: route.fallback.provider, model: route.fallback.model,
-        skills: route.fallback.skills, mcp: route.fallback.mcp, fallback: undefined },
+      { ...route, provider: fallback.provider, model: fallback.model, skills: fallback.skills, mcp: fallback.mcp, fallback: undefined },
       req, ledger, fbExecution, 'fallback', `${route.provider}/${route.model}`,
     );
   }
-  return runTarget(route.fallback, req, ledger, route, `${route.provider}/${route.model}`, adapterFor, table);
+  return runTarget(fallback, req, ledger, route, `${route.provider}/${route.model}`, adapterFor, table);
 }
 
 /** How the in-session route was chosen — the refusal reason must not misstate the YAML policy. */
