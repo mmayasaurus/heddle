@@ -42,6 +42,9 @@ const mcp = new Server(
 );
 
 const broker = new Broker({ log, ledger, transport: new ChannelTransport(log) });
+// A restart must not orphan messages that were held at a permission gate before it.
+const restored = broker.restoreHeld();
+if (restored) process.stderr.write(`heddle-comms: restored ${restored} held message(s) from the log\n`);
 
 // ---------------------------------------------------------------------------- tools
 
