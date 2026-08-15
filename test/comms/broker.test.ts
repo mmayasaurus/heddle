@@ -259,6 +259,16 @@ describe('Broker (temp db)', () => {
       expect(result.reason).toMatch(/1\/3 recipients failed, 1\/3 held/);
     });
 
+    it('a broadcast also charges each recipient pair, so @all cannot bypass the per-recipient rate limit', async () => {
+      log.register({ address: 'R' });
+      const broker = newBroker({ rateLimit: { max: 2, burst: 2 } });
+      expect(await post(broker, 'K', '@all')).toMatchObject({ outcome: 'sent' });   // K→@all 1/2, K→R 1/2
+      expect(await post(broker, 'K', 'R')).toMatchObject({ outcome: 'sent' });      // K→R 2/2
+      expect(await post(broker, 'K', 'R')).toMatchObject({ outcome: 'refused', code: 'rate-limited' });
+      expect(await post(broker, 'K', '@all')).toMatchObject({ outcome: 'sent' });   // K→@all 2/2 still admitted
+      expect(await post(broker, 'K', '@all')).toMatchObject({ outcome: 'refused', code: 'rate-limited' });
+    });
+
     it('logs a broadcast with no other recipients', async () => {
       const result = await post(newBroker(), 'K', '@all');
       expect(result).toMatchObject({ outcome: 'logged', code: 'no-recipients' });

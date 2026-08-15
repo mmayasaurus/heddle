@@ -16,7 +16,10 @@ import type { DeliveryOutcome, MessageKind, MessageRecord, Tier } from './types.
  *   hold at gate          if the target sits at a permission gate, the message is logged but not
  *                         injected; `pump()` releases it when the gate clears (or fails it after
  *                         holdMaxMs — the recipient can still pull it from the log).
- *   serialization         one in-flight injection per target; later ones queue behind it.
+ *   serialization         one in-flight injection per target within this broker; later ones queue
+ *                         behind it. Across processes the guarantee comes from the transport: with
+ *                         the channel transport the RECIPIENT's single pump performs every injection
+ *                         into its session, so ordering holds fleet-wide.
  *   typed outcomes        every decision is a `deliveries` row: sent / held / released / refused /
  *                         failed / logged — never a boolean.
  *
@@ -315,6 +318,9 @@ export class Broker {
       this.log.recordDelivery({ messageId: record.id, from: record.from, to: record.to, outcome: 'logged', code: 'no-recipients', transport: this.transport.name });
       return { ...base, outcome: 'logged', code: 'no-recipients' };
     }
+    // A broadcast also charges each (from → recipient) budget, so @all is not a way around the
+    // per-recipient rate limit (the broadcast itself was admitted on the from → @all budget).
+    for (const r of recipients) this.consume(`${record.from}->${r}`);
     const outcomes = await Promise.all(recipients.map((r) => this.dispatchTo(record, envelope, r, record.from)));
     const failed = outcomes.filter((o) => o.outcome === 'failed').length;
     const heldN = outcomes.filter((o) => o.outcome === 'held').length;
