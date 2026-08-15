@@ -375,15 +375,7 @@ export class CommsLog {
 
   /** Record one typed delivery outcome (sent / held / released / refused / failed / logged). */
   recordDelivery(ev: NewDeliveryEvent): DeliveryEvent {
-    if (!DELIVERY_OUTCOMES.includes(ev.outcome)) throw new Error(`unknown delivery outcome ${JSON.stringify(ev.outcome)}`);
-    if (typeof ev.code !== 'string' || !/^[a-z0-9-]{1,64}$/.test(ev.code)) throw new Error('delivery code must be a short kebab-case token');
-    if (ev.messageId != null && (!Number.isInteger(ev.messageId) || ev.messageId < 1)) throw new Error('messageId must be a positive id');
-    const attempt = ev.attempt ?? 1;
-    if (!Number.isInteger(attempt) || attempt < 1) throw new Error('attempt must be a positive integer');
-    // Invariants: a refusal never has a message row (nothing was accepted); every other outcome is
-    // ABOUT an existing message.
-    if (ev.outcome === 'refused' && ev.messageId != null) throw new Error('a refused delivery cannot reference a message (nothing was accepted)');
-    if (ev.outcome !== 'refused' && ev.messageId == null) throw new Error(`a ${ev.outcome} delivery must reference the message it is about`);
+    const attempt = validateDeliveryEvent(ev);
     if (ev.messageId != null && !this.db.prepare('SELECT 1 FROM messages WHERE id = ?').get(ev.messageId)) {
       throw new Error(`delivery for message ${ev.messageId}, which does not exist`);
     }
@@ -454,6 +446,22 @@ export class CommsLog {
   private touch(address: string, ts: string): void {
     this.db.prepare('UPDATE participants SET last_seen = ? WHERE address = ?').run(ts, address);
   }
+}
+
+// ------------------------------------------------------------------ delivery helpers
+
+/** Shape + invariant checks for a delivery event; returns the attempt number to store. */
+function validateDeliveryEvent(ev: NewDeliveryEvent): number {
+  if (!DELIVERY_OUTCOMES.includes(ev.outcome)) throw new Error(`unknown delivery outcome ${JSON.stringify(ev.outcome)}`);
+  if (typeof ev.code !== 'string' || !/^[a-z0-9-]{1,64}$/.test(ev.code)) throw new Error('delivery code must be a short kebab-case token');
+  if (ev.messageId != null && (!Number.isInteger(ev.messageId) || ev.messageId < 1)) throw new Error('messageId must be a positive id');
+  const attempt = ev.attempt ?? 1;
+  if (!Number.isInteger(attempt) || attempt < 1) throw new Error('attempt must be a positive integer');
+  // Invariants: a refusal never has a message row (nothing was accepted); every other outcome is
+  // ABOUT an existing message.
+  if (ev.outcome === 'refused' && ev.messageId != null) throw new Error('a refused delivery cannot reference a message (nothing was accepted)');
+  if (ev.outcome !== 'refused' && ev.messageId == null) throw new Error(`a ${ev.outcome} delivery must reference the message it is about`);
+  return attempt;
 }
 
 // ------------------------------------------------------------------ transcript helpers
