@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS messages (
   body        TEXT    NOT NULL,
   reply_to    INTEGER,
   issue       TEXT,
+  thread      TEXT,
   dispatch_id INTEGER,
   meta        TEXT,
   CHECK (tier IN ('operator', 'orchestrator-directive', 'agent-message')),
@@ -58,12 +59,18 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE INDEX IF NOT EXISTS idx_messages_target ON messages(target, id);
 CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages(sender, id);
 CREATE INDEX IF NOT EXISTS idx_messages_ts     ON messages(ts);
+CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(thread, id);
 
 -- Append-only, enforced by the database: no process, however well-meaning, rewrites history.
 CREATE TRIGGER IF NOT EXISTS messages_append_only_update BEFORE UPDATE ON messages
 BEGIN SELECT RAISE(ABORT, 'comms log is append-only: UPDATE refused'); END;
 CREATE TRIGGER IF NOT EXISTS messages_append_only_delete BEFORE DELETE ON messages
 BEGIN SELECT RAISE(ABORT, 'comms log is append-only: DELETE refused'); END;
+-- Every sender is a registered participant (agents/operator self-register in the same
+-- transaction; children exist only once minted) — a raw INSERT cannot speak as an unminted child.
+CREATE TRIGGER IF NOT EXISTS messages_sender_registered BEFORE INSERT ON messages
+WHEN NOT EXISTS (SELECT 1 FROM participants WHERE address = NEW.sender)
+BEGIN SELECT RAISE(ABORT, 'sender is not a registered participant'); END;
 
 CREATE TABLE IF NOT EXISTS participants (
   address     TEXT PRIMARY KEY,
@@ -78,6 +85,9 @@ CREATE TABLE IF NOT EXISTS participants (
   -- A child's address IS its lineage (parent.seq); agents/operator carry no lineage columns.
   CHECK ((kind = 'child' AND parent IS NOT NULL AND seq IS NOT NULL AND address = parent || '.' || seq)
       OR (kind <> 'child' AND parent IS NULL AND seq IS NULL AND dispatch_id IS NULL)),
+  -- The address form decides the kind: dotted addresses are children, nothing else may be.
+  CHECK ((kind = 'child') = (instr(address, '.') > 0)),
+  CHECK (kind <> 'operator' OR address = 'operator'),
   UNIQUE (parent, seq)
 );
 CREATE INDEX IF NOT EXISTS idx_participants_parent ON participants(parent, seq);
@@ -89,6 +99,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_participants_dispatch ON participants(disp
 CREATE TRIGGER IF NOT EXISTS participants_lineage_immutable BEFORE UPDATE ON participants
 WHEN NEW.address <> OLD.address OR NEW.kind <> OLD.kind OR NEW.parent IS NOT OLD.parent
   OR NEW.seq IS NOT OLD.seq OR NEW.dispatch_id IS NOT OLD.dispatch_id
+  OR NEW.first_seen <> OLD.first_seen
 BEGIN SELECT RAISE(ABORT, 'participant lineage is immutable: only last_seen/label may change'); END;
 `;
 
@@ -111,16 +122,34 @@ export interface MintChildInput {
 export class CommsLog {
   private db: DatabaseSync;
   private now: () => string;
+  private closed = false;
 
   constructor(path: string = DEFAULT_COMMS_PATH, opts: CommsLogOptions = {}) {
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
-    this.db = new DatabaseSync(path);
-    // WAL + a busy timeout: many agent processes share this file and write concurrently.
-    this.db.exec('PRAGMA journal_mode = WAL;');
-    this.db.exec('PRAGMA busy_timeout = 5000;');
-    this.db.exec('PRAGMA foreign_keys = ON;');
-    this.db.exec(SCHEMA);
-    this.db.exec(`PRAGMA user_version = ${COMMS_SCHEMA_VERSION};`);
+    // Set up on a local handle; `this.db` is assigned only once the connection is fully usable, so a
+    // constructor failure never leaves a half-initialised object (and closes what it opened).
+    const db = new DatabaseSync(path);
+    try {
+      // WAL + a busy timeout: many agent processes share this file and write concurrently.
+      db.exec('PRAGMA journal_mode = WAL;');
+      db.exec('PRAGMA busy_timeout = 5000;');
+      db.exec('PRAGMA foreign_keys = ON;');
+      // Never clobber a version we do not understand: a newer heddle may have migrated this file
+      // (many processes share it), and an older shape needs an explicit migration, not relabelling.
+      const found = Number((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version);
+      if (found > COMMS_SCHEMA_VERSION) {
+        throw new Error(`comms db ${path} is schema v${found}; this heddle understands v${COMMS_SCHEMA_VERSION} — upgrade heddle`);
+      }
+      if (found !== 0 && found !== COMMS_SCHEMA_VERSION) {
+        throw new Error(`comms db ${path} is schema v${found}; no migration to v${COMMS_SCHEMA_VERSION} exists`);
+      }
+      db.exec(SCHEMA); // idempotent (IF NOT EXISTS) — creates a fresh db, no-op on a current one
+      if (found === 0) db.exec(`PRAGMA user_version = ${COMMS_SCHEMA_VERSION};`);
+    } catch (err) {
+      db.close();
+      throw err;
+    }
+    this.db = db;
     this.now = opts.now ?? (() => new Date().toISOString());
   }
 
@@ -147,8 +176,17 @@ export class CommsLog {
     }
     const kind: MessageKind = msg.kind ?? 'chat';
     if (!MESSAGE_KINDS.includes(kind)) throw new Error(`unknown message kind ${JSON.stringify(kind)}`);
-    if (msg.replyTo != null && !Number.isInteger(msg.replyTo)) {
-      throw new Error('replyTo must be a message id');
+    if (msg.replyTo != null && (!Number.isInteger(msg.replyTo) || msg.replyTo < 1)) {
+      throw new Error('replyTo must be a positive message id');
+    }
+    if (msg.dispatchId != null && (!Number.isInteger(msg.dispatchId) || msg.dispatchId < 1)) {
+      throw new Error('dispatchId must be a positive integer ledger row id');
+    }
+    if (msg.issue != null && (typeof msg.issue !== 'string' || msg.issue.length === 0 || msg.issue.length > 64)) {
+      throw new Error('issue must be a non-empty string (max 64 chars)');
+    }
+    if (msg.thread != null && (typeof msg.thread !== 'string' || msg.thread.length === 0 || msg.thread.length > 128)) {
+      throw new Error('thread must be a non-empty string (max 128 chars)');
     }
 
     let tier: Tier = 'agent-message';
@@ -172,7 +210,13 @@ export class CommsLog {
       }
       tier = decision.tier;
       verified = decision.verified === true;
-      dispatchId = dispatchId ?? decision.dispatchId ?? null;
+      // The verifier's dispatch anchor is authoritative; a caller value may only agree with it.
+      if (decision.dispatchId != null) {
+        if (dispatchId != null && dispatchId !== decision.dispatchId) {
+          throw new Error(`dispatchId ${dispatchId} contradicts the verified lineage (#${decision.dispatchId})`);
+        }
+        dispatchId = decision.dispatchId;
+      }
       const m = metaObj ?? {};
       m.tierCode = decision.code;
       m.tierReason = decision.reason;
@@ -191,10 +235,11 @@ export class CommsLog {
     const meta = metaObj == null ? null : JSON.stringify(metaObj);
     const ts = this.now();
 
+    let id: number;
     this.db.exec('BEGIN IMMEDIATE');
     try {
       if (from.kind === 'child') {
-        if (!this.participant(from.raw)) {
+        if (this.participant(from.raw)?.kind !== 'child') {
           throw new Error(
             `unknown child address ${JSON.stringify(from.raw)}: children must be minted by their ` +
             'parent via mintChild() before they can send',
@@ -204,21 +249,26 @@ export class CommsLog {
       } else {
         this.upsertParticipant(from.raw, from.kind === 'operator' ? 'operator' : 'agent', null, ts);
       }
+      if (msg.replyTo != null && !this.db.prepare('SELECT 1 FROM messages WHERE id = ?').get(msg.replyTo)) {
+        throw new Error(`replyTo ${msg.replyTo} does not exist (the log is append-only — a dangling reply would be permanent)`);
+      }
       const info = this.db.prepare(`
-        INSERT INTO messages (ts, sender, target, kind, tier, verified, body, reply_to, issue, dispatch_id, meta)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO messages (ts, sender, target, kind, tier, verified, body, reply_to, issue, thread, dispatch_id, meta)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         ts, msg.from, msg.to, kind, tier, verified ? 1 : 0, msg.body,
-        msg.replyTo ?? null, msg.issue ?? null, dispatchId, meta,
+        msg.replyTo ?? null, msg.issue ?? null, msg.thread ?? null, dispatchId, meta,
       );
+      id = Number(info.lastInsertRowid);
       this.db.exec('COMMIT');
-      const rec = this.get(Number(info.lastInsertRowid));
-      if (!rec) throw new Error('append succeeded but the row could not be read back');
-      return rec;
     } catch (err) {
       this.db.exec('ROLLBACK');
       throw err;
     }
+    // Read back only after the transaction is fully committed — never inside the ROLLBACK guard.
+    const rec = this.get(id);
+    if (!rec) throw new Error('append committed but the row could not be read back');
+    return rec;
   }
 
   // ---------------------------------------------------------------- reader
@@ -255,8 +305,9 @@ export class CommsLog {
       params.push(scope.room);
     } else if ('pair' in scope) {
       const [a, b] = scope.pair;
-      requireAddress(a, 'from');
-      requireAddress(b, 'to');
+      if (!canSend(requireAddress(a, 'from')) || !canSend(requireAddress(b, 'to'))) {
+        throw new Error('transcript scope.pair must name two agent/child/operator addresses (a DM thread — rooms and @all are not peers)');
+      }
       where.push('((sender = ? AND target = ?) OR (sender = ? AND target = ?))');
       params.push(a, b, b, a);
     } else if ('inbox' in scope) {
@@ -264,7 +315,7 @@ export class CommsLog {
       if (!canSend(me)) throw new Error(`transcript scope.inbox must be an agent/child/operator address`);
       where.push('(target = ? OR target = ?)');
       params.push(scope.inbox, BROADCAST);
-    } else if (!('all' in scope)) {
+    } else if (!('all' in scope) || scope.all !== true) {
       throw new Error('transcript scope must be one of { room }, { pair }, { inbox }, { all: true }');
     }
 
@@ -277,8 +328,15 @@ export class CommsLog {
       if (typeof q.sinceTs !== 'string' || Number.isNaN(Date.parse(q.sinceTs))) {
         throw new Error('sinceTs must be an ISO-8601 timestamp');
       }
+      // Compare instants, not spellings: stored ts are canonical UTC "Z" strings, so canonicalise
+      // the cursor the same way (an offset form like +02:00 would otherwise sort lexically).
       where.push('ts > ?');
-      params.push(q.sinceTs);
+      params.push(new Date(q.sinceTs).toISOString());
+    }
+    if (q.thread != null) {
+      if (typeof q.thread !== 'string' || q.thread.length === 0) throw new Error('thread must be a non-empty string');
+      where.push('thread = ?');
+      params.push(q.thread);
     }
     const limit = q.limit ?? 200;
     if (!Number.isInteger(limit) || limit <= 0) throw new Error('limit must be a positive integer');
@@ -321,6 +379,7 @@ export class CommsLog {
       throw new Error('dispatchId must be an integer ledger row id');
     }
     const ts = this.now();
+    let minted: string;
     this.db.exec('BEGIN IMMEDIATE');
     try {
       this.upsertParticipant(p.raw, 'agent', null, ts);
@@ -339,11 +398,12 @@ export class CommsLog {
         VALUES (?, 'child', ?, ?, ?, ?, ?, ?)
       `).run(address, p.raw, seq, input.dispatchId ?? null, input.label ?? null, ts, ts);
       this.db.exec('COMMIT');
-      return this.participant(address)!;
+      minted = address;
     } catch (err) {
       this.db.exec('ROLLBACK');
       throw err;
     }
+    return this.participant(minted)!;
   }
 
   participant(address: string): Participant | null {
@@ -359,7 +419,10 @@ export class CommsLog {
     return (rows as unknown as PRow[]).map(toParticipant);
   }
 
+  /** Idempotent: closing twice is a no-op, so teardown paths can call it defensively. */
   close(): void {
+    if (this.closed) return;
+    this.closed = true;
     this.db.close();
   }
 
@@ -384,7 +447,7 @@ export class CommsLog {
 
 interface Row {
   id: number; ts: string; sender: string; target: string; kind: string; tier: string;
-  verified: number; body: string; reply_to: number | null; issue: string | null;
+  verified: number; body: string; reply_to: number | null; issue: string | null; thread: string | null;
   dispatch_id: number | null; meta: string | null;
 }
 
@@ -402,7 +465,7 @@ function toRecord(r: Row): MessageRecord {
     id: Number(r.id), ts: r.ts, from: r.sender, to: r.target,
     kind: r.kind as MessageKind, tier: r.tier as Tier, verified: r.verified === 1,
     body: r.body, replyTo: r.reply_to == null ? null : Number(r.reply_to),
-    issue: r.issue, dispatchId: r.dispatch_id == null ? null : Number(r.dispatch_id), meta,
+    issue: r.issue, thread: r.thread ?? null, dispatchId: r.dispatch_id == null ? null : Number(r.dispatch_id), meta,
   };
 }
 

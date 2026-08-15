@@ -8,7 +8,9 @@ Node 22's native `node:sqlite` in WAL mode following the style of the dispatch l
 Currently, only the storage foundation exists (HED-4). No delivery or transport layer, no
 trust-tiered envelopes (HED-5), no delivery discipline (HED-6), no SendMessage bridge (HED-7), no
 MCP tools, and no room UI exist yet. Until HED-5 lands every row is `tier = agent-message`,
-`verified = 0` — the log accepts a privileged tier only with the broker verifier's sealed decision.
+`verified = 0` — the log accepts a privileged tier only with the broker verifier's sealed decision
+(an in-process trust-boundary check: the seal cannot cross a JSON/MCP/socket boundary; code that
+can import `seal.ts` is inside the boundary by definition).
 
 ### Trust model
 
@@ -42,9 +44,12 @@ Addresses identify senders and receivers. Five forms exist (`src/comms/address.t
 
 ## Schema
 
-The database uses `PRAGMA user_version = 1` (`COMMS_SCHEMA_VERSION`), WAL journal mode, and
-`PRAGMA busy_timeout = 5000` because multiple agent processes share the file and write
-concurrently.
+The database uses `PRAGMA user_version = 1` (`COMMS_SCHEMA_VERSION`), WAL journal mode,
+`PRAGMA foreign_keys = ON`, and `PRAGMA busy_timeout = 5000` because multiple agent processes
+share the file and write concurrently. On open the constructor READS `user_version` first: `0`
+⇒ fresh file, create schema and stamp the version; equal ⇒ open; anything else ⇒ throw (a newer
+heddle may have migrated the shared file — never relabel it; an older shape needs an explicit
+migration). `PRAGMA user_version` is written only when initialising a fresh database.
 
 ### `messages` table
 
@@ -62,8 +67,12 @@ Stores immutable log entries:
 - `verified` (INTEGER NOT NULL DEFAULT 0): `1` iff the tier is privileged (`operator` /
   `orchestrator-directive`) — the broker checked origin or lineage. Equivalence enforced by CHECK.
 - `body` (TEXT NOT NULL): Non-empty text content.
-- `reply_to` (INTEGER): Optional row id of the message being answered.
+- `reply_to` (INTEGER): Optional row id of the message being answered — must exist at append time
+  (the log is append-only, so a dangling reply would be permanent).
 - `issue` (TEXT): Optional issue ref (e.g. `"SPI-712"`, `"HED-4"`).
+- `thread` (TEXT): Optional opaque conversation id chosen by the sender (e.g. `"HED-4/review-2"`)
+  so concurrent conversations between the same parties stay separable; filter with
+  `TranscriptQuery.thread`.
 - `dispatch_id` (INTEGER): Optional dispatch-ledger row id anchoring lineage.
 - `meta` (TEXT): Optional JSON string for extra metadata (transport, model, etc.).
 
@@ -75,8 +84,12 @@ Constraints and triggers on `messages`:
   raw `INSERT`), and an agent-message never claims verification.
 - Triggers `messages_append_only_update` and `messages_append_only_delete` abort any `UPDATE`
   or `DELETE` operations at the database level.
+- Trigger `messages_sender_registered` (BEFORE INSERT): the sender must be a registered
+  participant — agents/operator self-register in the same transaction, children exist only once
+  minted — so a raw `INSERT` cannot speak as an unminted child either.
 - Indexes: `idx_messages_target` ON `messages(target, id)`, `idx_messages_sender` ON
-  `messages(sender, id)`, `idx_messages_ts` ON `messages(ts)`.
+  `messages(sender, id)`, `idx_messages_ts` ON `messages(ts)`, `idx_messages_thread` ON
+  `messages(thread, id)`.
 
 ### `participants` table
 
@@ -95,12 +108,14 @@ Constraints on `participants` (lineage is a security input for HED-5, so it is f
 - `CHECK (kind IN ('agent', 'child', 'operator'))`
 - `CHECK` child shape: a child has `parent` + `seq` and `address = parent || '.' || seq`; agents /
   operator carry no `parent`/`seq`/`dispatch_id`. A raw INSERT cannot register `K.1` under `R`.
+- `CHECK` the address form decides the kind: dotted addresses are children and nothing else may
+  be; only the literal `operator` is the operator.
 - `parent REFERENCES participants(address)` (`PRAGMA foreign_keys = ON`) — a child's parent row
   must exist.
 - `UNIQUE (parent, seq)`; partial unique index `idx_participants_dispatch` on `dispatch_id` — one
   dispatch-ledger row anchors at most one child (`mintChild` reports the existing binding).
 - Trigger `participants_lineage_immutable`: any `UPDATE` that changes `address`, `kind`, `parent`,
-  `seq` or `dispatch_id` is refused; only `last_seen` / `label` may change. A raw
+  `seq`, `dispatch_id` or `first_seen` is refused; only `last_seen` / `label` may change. A raw
   `UPDATE participants SET parent = 'R'` ("I am now your orchestrator") is impossible.
 - Index: `idx_participants_parent` ON `participants(parent, seq)`.
 
@@ -119,9 +134,12 @@ The `CommsLog` class (`src/comms/log.ts`) manages persistence and participant re
   tier is stored only with the broker's own **sealed** `TierDecision` (produced by `decideTier`,
   see Envelopes) for this exact `(from, to)` — an unsealed JSON look-alike, a decision for another
   pair, an inconsistent one, or an `operator` decision whose sender is not `operator` are all
-  refused. The decision's `code` / `reason` / `evidence` / `requestedTier` / `downgradedFrom` land
-  in `meta` (`tierCode`, `tierReason`, `lineage`, `requestedTier`, `downgradedFrom`). Defaults:
-  `kind = chat`. Returns the written `MessageRecord`.
+  refused. Sealed decisions are frozen (seal-then-mutate is impossible) and their `dispatchId` is
+  authoritative (a contradicting caller value is refused). The decision's `code` / `reason` /
+  `evidence` / `requestedTier` / `downgradedFrom` land in `meta` (`tierCode`, `tierReason`,
+  `lineage`, `requestedTier`, `downgradedFrom`). Also validated: `replyTo` positive AND existing,
+  `dispatchId` positive integer, `issue` ≤ 64 chars, `thread` ≤ 128 chars. Defaults: `kind = chat`.
+  Returns the written `MessageRecord`.
 - `get(id: number): MessageRecord | null`
   Retrieves a single message by ID.
 - `latestId(): number`
@@ -132,12 +150,14 @@ The `CommsLog` class (`src/comms/log.ts`) manages persistence and participant re
   Reads a slice of the log ordered oldest-first (`ORDER BY id ASC`).
   - Scopes:
     - `{ room: string }`: Messages sent to `#room`.
-    - `{ pair: [string, string] }`: DM thread between two addresses in both directions.
+    - `{ pair: [string, string] }`: DM thread between two agent/child/operator addresses in both
+      directions (rooms and `@all` are not peers — refused).
     - `{ inbox: string }`: Direct messages to target plus `@all` broadcasts (NOT rooms).
     - `{ all: true }`: Entire message log.
-  - Query options: `sinceId` (exclusive ID cursor), `sinceTs` (exclusive timestamp cursor,
-    combines with `sinceId` via AND), `limit` (default 200). Page by passing the last ID as
-    `sinceId`.
+  - Query options: `sinceId` (exclusive ID cursor), `sinceTs` (exclusive timestamp cursor —
+    compared as an INSTANT: any ISO-8601 form is canonicalised to the stored UTC `Z` shape),
+    `thread` (narrow any scope to one thread), `limit` (default 200). Cursors combine via AND.
+    Page by passing the last ID as `sinceId`. `{ all: true }` must be literally `true`.
 - `register(input: RegisterInput): Participant`
   Registers or refreshes a fleet agent or operator address. Updates `last_seen` and `label`;
   preserves `first_seen`. Rejects child addresses.

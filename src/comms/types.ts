@@ -47,10 +47,16 @@ export interface NewMessage {
   to: string;
   body: string;
   kind?: MessageKind;
-  /** Message id this one answers. */
+  /** Message id this one answers. Must be an existing message (checked at append time). */
   replyTo?: number | null;
   /** Issue this conversation serves (e.g. "SPI-712", "HED-4"). */
   issue?: string | null;
+  /**
+   * Opaque conversation id chosen by the sender (e.g. "HED-4/review-2") so concurrent
+   * conversations between the same parties stay separable — the log is append-only, so a thread
+   * cannot be assigned after the fact.
+   */
+  thread?: string | null;
   /** Dispatch-ledger row that anchors this message's lineage, when known. */
   dispatchId?: number | null;
   /** Free-form JSON: transport, mentions, requested tier + downgrade reason, model, … */
@@ -70,6 +76,7 @@ export interface MessageRecord {
   body: string;
   replyTo: number | null;
   issue: string | null;
+  thread: string | null;
   dispatchId: number | null;
   meta: Record<string, unknown> | null;
 }
@@ -84,15 +91,17 @@ export type Evidence =
   | 'registry';
 
 /**
- * The broker's tier decision for one (from, to) pair — produced ONLY by decideTier() (envelope.ts)
- * and sealed in-process (seal.ts). `CommsLog.append` requires a sealed decision to store any
- * privileged tier; a plain JSON look-alike is refused.
+ * The broker's tier decision for one (from, to) pair — produced ONLY by the verifier
+ * (`decideTier` in the envelope layer, HED-5) and sealed + frozen in-process (seal.ts).
+ * `CommsLog.append` requires a sealed decision to store any privileged tier; a plain JSON
+ * look-alike is refused. This is an in-process trust-boundary check: any code that can import
+ * seal.ts is inside the boundary by definition.
  */
 export interface TierDecision {
   from: string;
   to: string;
   tier: Tier;
-  /** True iff `tier` is privileged — verified by origin (operator) or lineage (directive). */
+  /** True iff `tier` is privileged — verified by origin (operator) or lineage (orchestrator-directive). */
   verified: boolean;
   evidence: Evidence | null;
   /** Machine-readable outcome, e.g. "verified-ledger", "not-dispatching-orchestrator". Header-safe. */
@@ -142,4 +151,6 @@ export interface TranscriptQuery {
   sinceTs?: string;
   /** Max rows (default 200). Rows come back oldest-first; page with the last id as sinceId. */
   limit?: number;
+  /** Narrow any scope to one conversation thread (see NewMessage.thread). */
+  thread?: string;
 }

@@ -36,9 +36,14 @@ describe('comms address grammar', () => {
     expect(canSend(parseAddress('@all')!)).toBe(false);
   });
 
-  it('childAddress round-trips through parseAddress', () => {
+  it('childAddress round-trips through parseAddress and refuses to build garbage', () => {
     const addr = childAddress('R', 7);
     expect(addr).toBe('R.7');
     expect(parseAddress(addr)).toEqual({ raw: 'R.7', kind: 'child', parent: 'R', seq: 7 });
+    expect(() => childAddress('R.1', 1)).toThrow(/parent must be a fleet agent/);
+    expect(() => childAddress('#fleet', 1)).toThrow(/parent must be a fleet agent/);
+    expect(() => childAddress('R', 0)).toThrow(/positive integer/);
+    expect(() => childAddress('R', 1.5)).toThrow(/positive integer/);
+    expect(() => childAddress('R', 1e12)).toThrow(/positive integer/);
   });
 });
