@@ -330,10 +330,11 @@ describe('CommsLog (temp db)', () => {
     expect(log.count()).toBe(1);
   });
 
-  it('persists across close/reopen and stamps the schema version', () => {
+  it('persists across close/reopen and stamps the schema version; close() is idempotent', () => {
     log.mintChild('K');
     log.append({ from: 'K.1', to: 'K', body: 'still here' });
     log.close();
+    expect(() => log.close()).not.toThrow();
     log = new CommsLog(path);
     expect(log.count()).toBe(1);
     expect(log.get(1)?.body).toBe('still here');

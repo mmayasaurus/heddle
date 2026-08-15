@@ -122,27 +122,34 @@ export interface MintChildInput {
 export class CommsLog {
   private db: DatabaseSync;
   private now: () => string;
+  private closed = false;
 
   constructor(path: string = DEFAULT_COMMS_PATH, opts: CommsLogOptions = {}) {
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
-    this.db = new DatabaseSync(path);
-    // WAL + a busy timeout: many agent processes share this file and write concurrently.
-    this.db.exec('PRAGMA journal_mode = WAL;');
-    this.db.exec('PRAGMA busy_timeout = 5000;');
-    this.db.exec('PRAGMA foreign_keys = ON;');
-    // Never clobber a version we do not understand: a newer heddle may have migrated this file
-    // (many processes share it), and an older shape needs an explicit migration, not relabelling.
-    const found = Number((this.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version);
-    if (found > COMMS_SCHEMA_VERSION) {
-      this.db.close();
-      throw new Error(`comms db ${path} is schema v${found}; this heddle understands v${COMMS_SCHEMA_VERSION} — upgrade heddle`);
+    // Set up on a local handle; `this.db` is assigned only once the connection is fully usable, so a
+    // constructor failure never leaves a half-initialised object (and closes what it opened).
+    const db = new DatabaseSync(path);
+    try {
+      // WAL + a busy timeout: many agent processes share this file and write concurrently.
+      db.exec('PRAGMA journal_mode = WAL;');
+      db.exec('PRAGMA busy_timeout = 5000;');
+      db.exec('PRAGMA foreign_keys = ON;');
+      // Never clobber a version we do not understand: a newer heddle may have migrated this file
+      // (many processes share it), and an older shape needs an explicit migration, not relabelling.
+      const found = Number((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version);
+      if (found > COMMS_SCHEMA_VERSION) {
+        throw new Error(`comms db ${path} is schema v${found}; this heddle understands v${COMMS_SCHEMA_VERSION} — upgrade heddle`);
+      }
+      if (found !== 0 && found !== COMMS_SCHEMA_VERSION) {
+        throw new Error(`comms db ${path} is schema v${found}; no migration to v${COMMS_SCHEMA_VERSION} exists`);
+      }
+      db.exec(SCHEMA); // idempotent (IF NOT EXISTS) — creates a fresh db, no-op on a current one
+      if (found === 0) db.exec(`PRAGMA user_version = ${COMMS_SCHEMA_VERSION};`);
+    } catch (err) {
+      db.close();
+      throw err;
     }
-    if (found !== 0 && found !== COMMS_SCHEMA_VERSION) {
-      this.db.close();
-      throw new Error(`comms db ${path} is schema v${found}; no migration to v${COMMS_SCHEMA_VERSION} exists`);
-    }
-    this.db.exec(SCHEMA); // idempotent (IF NOT EXISTS) — creates a fresh db, no-op on a current one
-    if (found === 0) this.db.exec(`PRAGMA user_version = ${COMMS_SCHEMA_VERSION};`);
+    this.db = db;
     this.now = opts.now ?? (() => new Date().toISOString());
   }
 
@@ -412,7 +419,10 @@ export class CommsLog {
     return (rows as unknown as PRow[]).map(toParticipant);
   }
 
+  /** Idempotent: closing twice is a no-op, so teardown paths can call it defensively. */
   close(): void {
+    if (this.closed) return;
+    this.closed = true;
     this.db.close();
   }
 
