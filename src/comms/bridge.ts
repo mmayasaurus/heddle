@@ -34,7 +34,8 @@ import type { MessageRecord } from './types.js';
 export function errorMessage(err: unknown): string {
   if (err instanceof Error) return err.message || err.name;
   if (err === null || err === undefined) return 'unknown error (nothing thrown)';
-  return typeof err === 'string' ? err : JSON.stringify(err);
+  if (typeof err === 'string') return err;
+  try { return JSON.stringify(err) ?? String(err); } catch { return String(err); } // circular / unserialisable
 }
 
 /** Documented limits of the tactical layer — surfaced to operators and in COMMS.md. */
