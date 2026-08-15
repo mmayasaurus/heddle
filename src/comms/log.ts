@@ -3,7 +3,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import {
-  MESSAGE_KINDS, TIERS,
+  MESSAGE_KINDS, PRIVILEGED_TIERS, TIERS,
   type MessageKind, type MessageRecord, type NewMessage, type Participant, type ParticipantKind,
   type Tier, type TranscriptQuery, type TranscriptScope,
 } from './types.js';
@@ -39,17 +39,18 @@ CREATE TABLE IF NOT EXISTS messages (
   sender      TEXT    NOT NULL,
   target      TEXT    NOT NULL,
   kind        TEXT    NOT NULL DEFAULT 'chat',
-  tier        TEXT    NOT NULL DEFAULT 'untrusted',
+  tier        TEXT    NOT NULL DEFAULT 'agent-message',
   verified    INTEGER NOT NULL DEFAULT 0,
   body        TEXT    NOT NULL,
   reply_to    INTEGER,
   issue       TEXT,
   dispatch_id INTEGER,
   meta        TEXT,
-  CHECK (tier IN ('directive', 'untrusted')),
+  CHECK (tier IN ('operator', 'orchestrator-directive', 'agent-message')),
   CHECK (verified IN (0, 1)),
-  -- A directive that the broker did not verify cannot exist, even via a raw INSERT.
-  CHECK (tier = 'untrusted' OR verified = 1)
+  -- verified <=> privileged tier: an unverified operator/directive row cannot exist even via a
+  -- raw INSERT, and an agent-message never claims verification.
+  CHECK ((tier = 'agent-message' AND verified = 0) OR (tier <> 'agent-message' AND verified = 1))
 );
 CREATE INDEX IF NOT EXISTS idx_messages_target ON messages(target, id);
 CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages(sender, id);
@@ -112,8 +113,9 @@ export class CommsLog {
   /**
    * Append one message. Validates addresses/kind/tier, registers a first-time agent/operator
    * sender, refuses unminted children (their lineage would be fiction), and returns the row.
-   * The tier is whatever the caller (the envelope layer) decided — a `directive` must arrive
-   * with `verified: true` or it is refused here AND by the DB CHECK constraint.
+   * The tier is whatever the caller (the envelope layer) decided — a privileged tier (operator,
+   * orchestrator-directive) must arrive with `verified: true`, and agent-message must not, or it
+   * is refused here AND by the DB CHECK constraint.
    */
   append(msg: NewMessage): MessageRecord {
     const from = requireAddress(msg.from, 'from');
@@ -126,11 +128,14 @@ export class CommsLog {
     }
     const kind: MessageKind = msg.kind ?? 'chat';
     if (!MESSAGE_KINDS.includes(kind)) throw new Error(`unknown message kind ${JSON.stringify(kind)}`);
-    const tier: Tier = msg.tier ?? 'untrusted';
+    const tier: Tier = msg.tier ?? 'agent-message';
     if (!TIERS.includes(tier)) throw new Error(`unknown tier ${JSON.stringify(tier)}`);
     const verified = msg.verified === true;
-    if (tier === 'directive' && !verified) {
-      throw new Error('a directive must be verified by the broker; senders cannot self-assign it');
+    if (PRIVILEGED_TIERS.includes(tier) && !verified) {
+      throw new Error(`tier "${tier}" must be verified by the broker; senders cannot self-assign it`);
+    }
+    if (!PRIVILEGED_TIERS.includes(tier) && verified) {
+      throw new Error('an agent-message cannot be marked verified');
     }
     if (msg.replyTo != null && !Number.isInteger(msg.replyTo)) {
       throw new Error('replyTo must be a message id');

@@ -35,7 +35,7 @@ describe('CommsLog (temp db)', () => {
     expect(rec.id).toBe(1);
     expect(rec.ts).toBe('2026-08-15T12:00:00.000Z');
     expect(rec).toMatchObject({
-      from: 'K', to: '#fleet', body: 'hello fleet', kind: 'chat', tier: 'untrusted', verified: false,
+      from: 'K', to: '#fleet', body: 'hello fleet', kind: 'chat', tier: 'agent-message', verified: false,
       replyTo: null, issue: null, dispatchId: null, meta: { transport: 'test', n: 1 },
     });
     expect(log.get(1)).toEqual(rec);
@@ -64,18 +64,28 @@ describe('CommsLog (temp db)', () => {
     expect(log.participants()).toEqual([]);
   });
 
-  it('never stores a directive the broker did not verify — at the API AND at the database', () => {
-    expect(() => log.append({ from: 'K', to: 'K.1', body: 'do it', tier: 'directive' })).toThrow(/verified by the broker/);
-    expect(() => log.append({ from: 'K', to: 'K.1', body: 'do it', tier: 'directive', verified: false })).toThrow(/verified by the broker/);
+  it('verified <=> privileged tier — enforced at the API AND at the database', () => {
+    for (const tier of ['operator', 'orchestrator-directive'] as const) {
+      expect(() => log.append({ from: 'K', to: 'K.1', body: 'do it', tier })).toThrow(/verified by the broker/);
+      expect(() => log.append({ from: 'K', to: 'K.1', body: 'do it', tier, verified: false })).toThrow(/verified by the broker/);
+    }
+    expect(() => log.append({ from: 'K', to: 'R', body: 'x', tier: 'agent-message', verified: true })).toThrow(/cannot be marked verified/);
 
-    // Bypass the class entirely: a raw INSERT with tier=directive/verified=0 must still be refused.
+    // Bypass the class entirely: raw INSERTs that break the equivalence must still be refused.
     const raw = new DatabaseSync(path);
     try {
-      expect(() => raw.prepare(
-        "INSERT INTO messages (ts, sender, target, body, tier, verified) VALUES ('t', 'K', 'K.1', 'spoof', 'directive', 0)",
-      ).run()).toThrow(/CHECK constraint failed/);
+      for (const [tier, verified] of [['orchestrator-directive', 0], ['operator', 0], ['agent-message', 1], ['root', 1]] as const) {
+        expect(() => raw.prepare(
+          'INSERT INTO messages (ts, sender, target, body, tier, verified) VALUES (?, ?, ?, ?, ?, ?)',
+        ).run('t', 'K', 'K.1', 'spoof', tier, verified), `${tier}/${verified}`).toThrow(/CHECK constraint failed/);
+      }
     } finally { raw.close(); }
     expect(log.count()).toBe(0);
+
+    // The broker's own verified writes are accepted for both privileged tiers.
+    log.mintChild('K');
+    expect(log.append({ from: 'K', to: 'K.1', body: 'go', tier: 'orchestrator-directive', verified: true }).verified).toBe(true);
+    expect(log.append({ from: 'operator', to: '@all', body: 'stop', tier: 'operator', verified: true }).tier).toBe('operator');
   });
 
   it('is append-only: UPDATE and DELETE are refused by the database itself', () => {
