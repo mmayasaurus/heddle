@@ -463,7 +463,7 @@ function applyDecision(
     }
     dispatchId = decision.dispatchId;
   }
-  const m: Record<string, unknown> = { ...(meta ?? {}), tierCode: decision.code, tierReason: decision.reason };
+  const m: Record<string, unknown> = { ...meta, tierCode: decision.code, tierReason: decision.reason };
   if (decision.evidence) m.lineage = decision.evidence;
   if (decision.requestedTier) m.requestedTier = decision.requestedTier;
   if (decision.downgradedFrom) m.downgradedFrom = decision.downgradedFrom;
