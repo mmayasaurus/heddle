@@ -116,6 +116,13 @@ export type RefusalCode =
   | 'unknown-target' | 'ambiguous-target' | 'no-orchestrator' | 'body-too-large' | 'rate-limited' | 'invalid-message';
 
 type AcceptedBase = { messageId: number; to: string; tier: Tier; envelope: string };
+type Refusal = Extract<PostResult, { outcome: 'refused' }>;
+type Resolved = { address: string; kind: AddressKind };
+type Constraint = { code: RefusalCode; reason: string; retryAfterMs?: number };
+type Dispatched = { outcome: 'sent' | 'held' | 'failed' | 'logged'; code: string; reason?: string };
+type PumpTargetResult = { done: Held[]; released: number; failed: number };
+type PumpResult = { released: number; failed: number; stillHeld: number };
+type HeldSummary = { messageId: number; target: string; heldAt: number; attempts: number };
 
 interface Held {
   record: MessageRecord;
@@ -152,7 +159,7 @@ export class Broker {
   /** Per-target delivery chains — the "one in-flight injection per target" rule. */
   private readonly chains = new Map<string, Promise<unknown>>();
   private held: Held[] = [];
-  private pumping: Promise<{ released: number; failed: number; stillHeld: number }> | null = null;
+  private pumping: Promise<PumpResult> | null = null;
   private sweepCounter = 0;
 
   constructor(opts: BrokerOptions) {
@@ -160,7 +167,7 @@ export class Broker {
     this.ledger = opts.ledger ?? null;
     this.transport = opts.transport;
     this.targetState = opts.targetState ?? new LedgerTargetState(opts.log, opts.ledger);
-    this.rate = { ...DEFAULT_RATE_LIMIT, ...(opts.rateLimit ?? {}) };
+    this.rate = { ...DEFAULT_RATE_LIMIT, ...opts.rateLimit };
     this.maxBodyBytes = opts.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
     this.holdMaxMs = opts.holdMaxMs ?? DEFAULT_HOLD_MAX_MS;
     this.now = opts.now ?? Date.now;
@@ -182,7 +189,7 @@ export class Broker {
    * Registered participants take precedence over the bare grammar because almost every fleet id
    * is ALSO a valid address form — "codex" must mean codex-B when that is the only codex-*.
    */
-  resolveTarget(from: string, to: string): { address: string; kind: AddressKind } | Extract<PostResult, { outcome: 'refused' }> {
+  resolveTarget(from: string, to: string): Resolved | Refusal {
     if (to === ORCHESTRATOR_ALIAS) {
       const me = this.log.participant(from);
       if (!me || me.kind !== 'child' || !me.parent) {
@@ -238,7 +245,7 @@ export class Broker {
   // ------------------------------------------------------------------ pre-flight
 
   /** Size cap + rate limit. Returns null when the post may proceed. */
-  private checkConstraints(from: string, to: string, body: string): { code: RefusalCode; reason: string; retryAfterMs?: number } | null {
+  private checkConstraints(from: string, to: string, body: string): Constraint | null {
     const bytes = Buffer.byteLength(body, 'utf8');
     if (bytes > this.maxBodyBytes) return { code: 'body-too-large', reason: `body is ${bytes} bytes; cap is ${this.maxBodyBytes}` };
     const pairKey = `${from}->${to}`;
@@ -370,7 +377,7 @@ export class Broker {
   // ------------------------------------------------------------------ holds
 
   /** Messages currently held (target at a permission gate), oldest first. */
-  heldMessages(): ReadonlyArray<{ messageId: number; target: string; heldAt: number; attempts: number }> {
+  heldMessages(): ReadonlyArray<HeldSummary> {
     return this.held.map((h) => ({ messageId: h.record.id, target: h.target, heldAt: h.heldAt, attempts: h.attempts }));
   }
 
@@ -381,13 +388,13 @@ export class Broker {
    * concurrently, same-target entries strictly in order. Entries that arrive while a pump is
    * running are untouched by it and picked up by the next one.
    */
-  pump(): Promise<{ released: number; failed: number; stillHeld: number }> {
+  pump(): Promise<PumpResult> {
     if (this.pumping) return this.pumping;
     this.pumping = this.pumpOnce().finally(() => { this.pumping = null; });
     return this.pumping;
   }
 
-  private async pumpOnce(): Promise<{ released: number; failed: number; stillHeld: number }> {
+  private async pumpOnce(): Promise<PumpResult> {
     const batch = [...this.held];               // snapshot; post() may push more meanwhile
     const byTarget = new Map<string, Held[]>();
     for (const h of batch) (byTarget.get(h.target) ?? byTarget.set(h.target, []).get(h.target)!).push(h);
@@ -400,7 +407,7 @@ export class Broker {
   }
 
   /** One target's held entries, in order; a still-held or failed entry blocks the ones behind it. */
-  private async pumpTarget(entries: Held[]): Promise<{ done: Held[]; released: number; failed: number }> {
+  private async pumpTarget(entries: Held[]): Promise<PumpTargetResult> {
     const done: Held[] = [];
     let released = 0, failed = 0;
     for (const h of entries) {
