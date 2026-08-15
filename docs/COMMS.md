@@ -493,6 +493,26 @@ a room when they want to; `@all` / `@agent` are the guaranteed-delivery exceptio
   `release_floor {room}`; `post_message` routes `#room` / `@all` and accepts `hold_floor` /
   `release_floor`; `read_transcript { room, since_id }` reads a room.
 
+## Non-Claude orchestrators (HED-72, comms half)
+
+`heddle-comms` is a plain stdio MCP server, so any MCP-capable CLI can use the **pull-model**
+tools (`post_message`, `check_inbox`, `read_transcript`, rooms, …) with the same identity rules
+(`HEDDLE_AGENT` in the server's env). What they cannot get is **push**: `notifications/claude/channel`
+is a Claude Code channel — other CLIs read their inbox when they want to (`check_inbox`), which
+is the room's pull model anyway. Verified from each CLI's own `--help` on 2026-08-15:
+
+- **Codex CLI**: `codex mcp add heddle-comms --env HEDDLE_AGENT=codex-B -- heddle-comms`
+  (stdio; `--env` sets the server's environment; `codex mcp list` / `remove`).
+- **cursor-agent**: declare the server in `.cursor/mcp.json` (project) or `~/.cursor/mcp.json`
+  (`{ "mcpServers": { "heddle-comms": { "command": "heddle-comms", "env": { "HEDDLE_AGENT": "…" } } } }`),
+  then `agent mcp enable heddle-comms` (approved list); `agent mcp list` / `list-tools heddle-comms`.
+- **agy (Antigravity)**: no MCP flag in `agy --help`; heddle's own worker MCP attachment for agy
+  is unimplemented for the same reason (`.agents/mcp_config.json` schema unverified against the
+  Antigravity docs) — not documented here until verified.
+
+Live verification with a Codex session as orchestrator is pending (HED-72). Identity/env for
+dispatched workers (`HEDDLE_COMMS_ADDRESS`, `HEDDLE_WORKER`) is U's HED-2.
+
 ## Roadmap
 
 - **HED-4:** Comms log & address grammar — durable append-only storage and registry (built).
