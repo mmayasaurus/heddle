@@ -77,9 +77,9 @@ describe('cap-aware routing', () => {
 
   it('honors enabled policy settings and custom route-away thresholds', () => {
     expect(capAwarePolicy(table)).toEqual({ enabled: true, routeAwayAtPct: 90 });
-    const disabledPath = join(tempDir(), 'disabled.yaml'); writeFileSync(disabledPath, 'policy: {cap_aware_routing: {enabled: false}}\ntask_classes: {bulk: {provider: codex, model: m}}\n');
+    const disabledPath = join(tempDir(), 'disabled.yaml'); writeFileSync(disabledPath, 'policy: {cap_aware_routing: {enabled: false}}\nproviders: {codex: {}}\ntask_classes: {bulk: {provider: codex, model: m}}\n');
     const disabled = loadRouting(disabledPath); const target = resolveRoute(disabled, 'bulk'); expect(decideRoute(disabled, target, undefined, caps({ codex: 99 }), { explicit: false }).routeReason).toBe('cap-aware routing disabled (policy)');
-    const thresholdPath = join(tempDir(), 'threshold.yaml'); writeFileSync(thresholdPath, 'policy: {cap_aware_routing: {route_away_at_pct: 50}}\ntask_classes: {bulk: {provider: codex, model: m, fallback: {provider: cursor, model: c}}}\n');
+    const thresholdPath = join(tempDir(), 'threshold.yaml'); writeFileSync(thresholdPath, 'policy: {cap_aware_routing: {route_away_at_pct: 50}}\nproviders: {codex: {}, cursor: {}}\ntask_classes: {bulk: {provider: codex, model: m, fallback: {provider: cursor, model: c}}}\n');
     const threshold = loadRouting(thresholdPath); const r = resolveRoute(threshold, 'bulk'); expect(decideRoute(threshold, r, r.fallback, { ...caps({ codex: 60 }), ...cursorCaps({ total: 10, api: 10 }) }, { explicit: false }).routedAwayForCap).toBe(true);
   });
 
