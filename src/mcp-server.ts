@@ -29,6 +29,13 @@ const server = new McpServer({ name: 'heddle', version: '0.0.1' });
 // (HEDDLE_WORKER=1) every dispatch is refused with `depth-1` (src/identity.ts, src/dispatch.ts).
 const IDENTITY = resolveIdentity();
 
+// One ledger handle per server process: node:sqlite connections are cheap but not free, and a
+// long-lived MCP server polled by check_workers/recent_dispatches would otherwise accumulate them.
+let LEDGER: Ledger | undefined;
+function ledger(): Ledger {
+  return (LEDGER ??= new Ledger());
+}
+
 function text(obj: unknown) {
   return { content: [{ type: 'text' as const, text: typeof obj === 'string' ? obj : JSON.stringify(obj, null, 2) }] };
 }
@@ -165,7 +172,7 @@ server.tool(
   'List dispatches still in flight (started, not yet finished) for this heddle instance, plus this ' +
     "server's bound identity (who dispatches are attributed to) and whether it is running inside a worker.",
   {},
-  async () => text({ identity: IDENTITY, in_flight: new Ledger().inFlight() }),
+  async () => text({ identity: IDENTITY, in_flight: ledger().inFlight() }),
 );
 
 server.tool(
@@ -176,7 +183,7 @@ server.tool(
     issue: z.string().optional().describe('Filter to one Linear issue, e.g. SPI-712.'),
     limit: z.number().optional().describe('Max rows (default 20).'),
   },
-  async (a) => text(new Ledger().recent(a.limit ?? 20, a.issue)),
+  async (a) => text(ledger().recent(a.limit ?? 20, a.issue)),
 );
 
 const transport = new StdioServerTransport();

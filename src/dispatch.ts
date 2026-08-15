@@ -257,7 +257,9 @@ async function runTarget(
     // reported in the outcome error instead).
     for (const restore of [restoreMcp, restoreSkills]) {
       try { restore(); } catch (err) {
-        const note = `restore failed: ${err instanceof Error ? err.message : String(err)}`;
+        // Non-fatal by convention: `cleanup-warning:` on an ok=1 row means the WORK succeeded but a
+        // materialized file could not be restored — inspect the worktree; the result stands.
+        const note = `cleanup-warning: restore failed: ${err instanceof Error ? err.message : String(err)}`;
         result = result! ?? { ok: false, output: '', exitCode: null, error: note };
         result.error = result.error ? `${result.error}; ${note}` : note;
       }
@@ -307,15 +309,10 @@ export async function dispatch(
   }
   const ctx: DispatchContext = { table, ledger, adapterFor, identity, attribution, caps: structuralCaps(table) };
 
-  // Auto-effort (opt-in): classify the sub-task's difficulty and pin the effort, unless the caller
-  // already set one. Best-effort — a classifier failure falls through to the route/default effort.
-  // Skipped entirely inside a worker: depth-1 below refuses anyway, and the classifier is a spawn.
-  if (req.autoEffort && !req.effort && !identity.worker) {
-    const ctxLabel = req.taskClass ?? (req.provider && req.model ? `${req.provider}/${req.model}` : 'general');
-    try {
-      req = { ...req, effort: await classifyEffort(ctxLabel, req.prompt, req.cwd) };
-    } catch { /* fall through */ }
-  }
+  // ---- Structural cap: depth-1 — decided before ANY resolution can throw or spend anything ----
+  // A worker dispatching an opt-in class (or a malformed request) still gets a ledgered, attributed
+  // depth-1 refusal, never a bare throw, and never costs a classifier spawn.
+  if (identity.worker) return refuseDepth1(req, ctx, table);
 
   // ---- Resolve the route + policy (HED-1 contract) -------------------------------------------
   // A route override is provider AND model, or neither — a lone half would silently run the class's
@@ -369,21 +366,6 @@ export async function dispatch(
       fallback = route.fallback;
     }
   }
-  const skillsForRefusal = withMandatoryPacks(req.skills ?? target.skills ?? []);
-
-  // ---- Structural cap: depth-1 — a worker cannot dispatch workers -----------------------------
-  if (identity.worker) {
-    const w = identity.worker;
-    const reason =
-      `depth-1 cap: this process is a heddle WORKER (HEDDLE_WORKER=1` +
-      (w.dispatchId !== null ? `, dispatch #${w.dispatchId}` : '') +
-      (w.parent ? `, parent ${w.parent}` : '') + `) — workers cannot dispatch workers.`;
-    return refusalOutcome(ctx, req, route.taskClass, target, skillsForRefusal, {
-      code: 'depth-1', reason,
-      instruction: 'Finish your own task and report; ask your orchestrator to dispatch further work.',
-    });
-  }
-
   // ---- Non-dispatchable class (`orchestration`) — refused on EVERY path ------------------------
   // A named subprocess route does not turn the orchestrator's own work into a worker task. The
   // structured fields + ledger row report the route the caller actually named (target), the class
@@ -400,6 +382,18 @@ export async function dispatch(
       req, ctx, execution, origin,
     );
   }
+  // Auto-effort (opt-in): classify the sub-task's difficulty and pin the effort, unless the caller
+  // already set one. Runs only after every plan-level refusal gate has passed — a refused dispatch
+  // never spends a classifier (a max-children refusal can still waste one: that count is
+  // transactional inside runTarget). Best-effort; failures are noted, not fatal.
+  if (req.autoEffort && !req.effort) {
+    try {
+      req = { ...req, effort: await classifyEffort(route.taskClass, req.prompt, req.cwd) };
+    } catch (err) {
+      process.stderr.write(`heddle: auto-effort classification failed (${err instanceof Error ? err.message : String(err)}) — using the route default\n`);
+    }
+  }
+
   // ---- Run (capabilities + max-children are decided per target inside runTarget) --------------
   const primary = await runTarget(target, req, ctx, route, null);
   if (primary.ok || primary.refusal || req.noFallback || !fallback) return primary;
@@ -419,6 +413,31 @@ export async function dispatch(
 
 /** How the in-session route was chosen — the refusal reason must not misstate the YAML policy. */
 type InSessionOrigin = 'direct' | 'class' | 'explicit' | 'fallback';
+
+/** depth-1 refusal for a WORKER — ledgered and attributed even when the request would not have
+ *  planned (opt-in gate, malformed request): the record is best-effort from the raw request. */
+function refuseDepth1(req: DispatchRequest, ctx: DispatchContext, table: RoutingTable): DispatchOutcome {
+  const w = ctx.identity.worker!;
+  const reason =
+    `depth-1 cap: this process is a heddle WORKER (HEDDLE_WORKER=1` +
+    (w.dispatchId !== null ? `, dispatch #${w.dispatchId}` : '') +
+    (w.parent ? `, parent ${w.parent}` : '') + `) — workers cannot dispatch workers.`;
+  let taskClass = req.taskClass ?? (req.provider && req.model ? `direct:${req.provider}/${req.model}` : 'unplanned');
+  let target: RouteTarget = { provider: req.provider ?? 'unknown', model: req.model ?? 'unknown', skills: req.skills, mcp: req.mcp };
+  let skills = req.skills ?? [];
+  try {
+    if (req.taskClass && Object.prototype.hasOwnProperty.call(table.taskClasses, req.taskClass)) {
+      const route = resolveRoute(table, req.taskClass);
+      taskClass = route.taskClass;
+      target = req.provider && req.model ? { ...route, provider: req.provider, model: req.model } : route;
+      skills = route.dispatchable ? withMandatoryPacks(req.skills ?? route.skills ?? []) : (req.skills ?? route.skills ?? []);
+    }
+  } catch { /* best-effort — the refusal stands regardless */ }
+  return refusalOutcome(ctx, req, taskClass, target, skills, {
+    code: 'depth-1', reason,
+    instruction: 'Finish your own task and report; ask your orchestrator to dispatch further work.',
+  });
+}
 
 function refuseNotDispatchable(route: Route, req: DispatchRequest, ctx: DispatchContext): DispatchOutcome {
   const skills = req.skills ?? route.skills ?? []; // never a worker → no mandatory pack

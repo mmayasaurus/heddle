@@ -100,7 +100,7 @@ export function decideCapabilities(
     }
   }
 
-  const enforceable = ENFORCEABLE[provider] ?? [];
+  const enforceable = Object.prototype.hasOwnProperty.call(ENFORCEABLE, provider) ? ENFORCEABLE[provider] : [];
   const unenforceable = granted.filter((c) => !enforceable.includes(c));
   if (unenforceable.length) {
     return {
