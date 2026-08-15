@@ -152,24 +152,45 @@ jobs:
         # POSIX sh (container job — see the semgrep step). Exit code 2 = leaks
         # found (job goes red); anything else non-zero = tool/infra error.
         # --redact keeps values out of logs AND out of the report; the report
-        # is uploaded to code scanning below (rule/file/line only). Suppression
-        # files (.gitleaks.toml / .gitleaksignore) are PR-controlled: a PR that
-        # touches them is flagged in the summary so a "clean" result on such a
-        # PR is reviewed by hand (Spinventory det-tier finding, #2077).
+        # is uploaded to code scanning below (rule/file/line only).
+        #
+        # Suppressions are PR-CONTROLLED (.gitleaks.toml, .gitleaksignore,
+        # inline `gitleaks:allow` comments) — a PR (or fork) that ships a
+        # lenient config would otherwise scan itself green. So the scan always
+        # uses the BASE branch's suppression files (a default-rules stub when
+        # the base has none), never the PR's, and inline allow-comments are
+        # ignored. Consequence: a suppression must land on main first (its own
+        # config-only PR, reviewed by a human) before a PR can benefit from it.
+        # A PR that touches those files is additionally flagged in the summary
+        # (Spinventory det-tier finding, #2077).
         run: |
           set -u
           echo "scanning $BASE..$HEAD"
+          S="${RUNNER_TEMP:-/tmp}/gitleaks-base"; mkdir -p "$S/ignore"
+          if git cat-file -e "$BASE:.gitleaks.toml" 2>/dev/null; then
+            git show "$BASE:.gitleaks.toml" > "$S/gitleaks.toml"
+            echo "using .gitleaks.toml from the base branch"
+          else
+            printf '[extend]\nuseDefault = true\n' > "$S/gitleaks.toml"
+          fi
+          if git cat-file -e "$BASE:.gitleaksignore" 2>/dev/null; then
+            git show "$BASE:.gitleaksignore" > "$S/ignore/.gitleaksignore"
+            echo "using .gitleaksignore from the base branch"
+          fi
           # `|| rc=$?` — the runner's `sh -e` would otherwise abort on the
           # exit-2 hit before the summary line below is written.
           rc=0
           gitleaks git --log-opts="$BASE..$HEAD" --redact --no-banner \
+            --config="$S/gitleaks.toml" --gitleaks-ignore-path="$S/ignore" \
+            --ignore-gitleaks-allow \
             --exit-code 2 --report-format sarif --report-path gitleaks.sarif . || rc=$?
-          if git diff --name-only "$BASE" "$HEAD" -- .gitleaks.toml .gitleaksignore | grep -q .; then
-            echo "⚠️ this PR modifies a gitleaks suppression file (.gitleaks.toml / .gitleaksignore) — review the change by hand before trusting a clean result." >> "$GITHUB_STEP_SUMMARY"
-            echo "::warning::this PR modifies a gitleaks suppression file — review by hand before trusting a clean result."
+          # Three-dot: files changed BY THIS PR (merge-base..head), not base-vs-head.
+          if git diff --name-only "$BASE...$HEAD" -- .gitleaks.toml .gitleaksignore | grep -q .; then
+            echo "⚠️ this PR modifies a gitleaks suppression file (.gitleaks.toml / .gitleaksignore). The scan above used the BASE branch's copy, so this verdict is unaffected — but review the suppression change itself by hand." >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning::this PR modifies a gitleaks suppression file — the scan used the base branch's copy; review the change by hand."
           fi
           case "$rc" in
-            0) echo "gitleaks: no secrets found in $BASE..$HEAD" >> "$GITHUB_STEP_SUMMARY" ;;
+            0) echo "gitleaks: no secrets found in $BASE..$HEAD (base-branch suppressions, inline allows ignored)" >> "$GITHUB_STEP_SUMMARY" ;;
             2) echo "gitleaks: 🔑 **possible secret(s) found** in this PR's commits — see the job log (values redacted); rotate anything real." >> "$GITHUB_STEP_SUMMARY" ;;
             *) echo "gitleaks: tool error (exit $rc) — NOT a clean pass" >> "$GITHUB_STEP_SUMMARY" ;;
           esac

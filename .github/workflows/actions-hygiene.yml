@@ -11,9 +11,12 @@
 #                and surface as the "Code scanning results / zizmor" check.
 #
 # Runs on the PR's own copy of the workflows, so a PR that edits CI audits
-# itself. Both tools run for fork PRs too; zizmor's SARIF upload needs a write
-# token, so for forks it prints findings to the log instead (same audit, same
-# verdict — different surface).
+# itself. Both tools run for fork PRs too. zizmor's two modes differ in
+# POSTURE, not just surface: same-repo PRs / main uploads SARIF and is
+# report-only (blocking would come from a ruleset requiring the code-scanning
+# check — not configured yet, HED-13); fork PRs run in plain mode, which
+# prints findings and FAILS the job on them — a stricter default for the
+# higher-risk case (workflow edits from outside).
 name: Workflow Hygiene
 
 on:
@@ -69,8 +72,8 @@ jobs:
 
       # zizmor's official action; defaults = persona regular, online audits on
       # (uses the job token for read-only GitHub API lookups). SARIF upload
-      # only where the token can write (main pushes + same-repo PRs); fork PRs
-      # get the findings printed to the console instead.
+      # (report-only) where the token can write — main pushes + same-repo PRs;
+      # fork PRs run plain mode: findings print to the console and red the job.
       - name: zizmor
         uses: zizmorcore/zizmor-action@3dc1ecc9bcb9e94e9b2c709687979e1298497054 # v0.6.2
         with:
