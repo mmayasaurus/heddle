@@ -1,7 +1,7 @@
 import type { CommsLog } from './log.js';
 import type { Delivery, Transport, TransportOutcome } from './broker.js';
 import { UNTRUSTED_LABEL, DIRECTIVE_LABEL, OPERATOR_LABEL } from './envelope.js';
-import { parseAddress } from './address.js';
+import { BROADCAST } from './address.js';
 import type { MessageRecord } from './types.js';
 
 /**
@@ -101,34 +101,47 @@ export class ChannelTransport implements Transport {
  */
 export class InboundPump {
   private cursor: number;
+  private ticking = false;
   constructor(
     private log: CommsLog,
     private me: string,
     private emit: (event: ChannelEvent, record: MessageRecord) => Promise<void> | void,
     opts: { sinceId?: number } = {},
   ) {
-    this.cursor = opts.sinceId ?? log.latestId();
+    // Resume from durable state: the last row this identity's channel wrote — so a crash between
+    // "queued-for-channel" and the push is not a silent loss. First run ever: start at the tail
+    // (never replay history into a session).
+    this.cursor = opts.sinceId ?? log.lastChannelWrite(me) ?? log.latestId();
   }
 
   get position(): number { return this.cursor; }
 
-  /** Deliver everything new since the cursor. Returns how many events were emitted. */
+  /**
+   * Deliver everything new since the cursor. Re-entrant calls (a timer firing while a slow emit is
+   * awaited) do nothing — the same row must never be emitted twice.
+   */
   async tick(): Promise<{ emitted: number; failed: number }> {
-    const rows = this.log.transcript({ inbox: this.me }, { sinceId: this.cursor, limit: 100 });
-    let emitted = 0, failed = 0;
-    for (const r of rows) {
-      this.cursor = Math.max(this.cursor, r.id);
-      if (r.from === this.me) continue; // my own broadcasts are not news to me
-      try {
-        await this.emit(toChannelEvent(r), r);
-        this.log.recordDelivery({ messageId: r.id, from: r.from, to: this.me, outcome: 'sent', code: 'channel-written', transport: 'channel' });
-        emitted += 1;
-      } catch (err) {
-        this.log.recordDelivery({ messageId: r.id, from: r.from, to: this.me, outcome: 'failed', code: 'channel-error', reason: (err as Error).message ?? String(err), transport: 'channel' });
-        failed += 1;
+    if (this.ticking) return { emitted: 0, failed: 0 };
+    this.ticking = true;
+    try {
+      const rows = this.log.transcript({ inbox: this.me }, { sinceId: this.cursor, limit: 100 });
+      let emitted = 0, failed = 0;
+      for (const r of rows) {
+        this.cursor = Math.max(this.cursor, r.id);
+        if (r.from === this.me && r.to === BROADCAST) continue; // my own broadcast is not news to me (a self-DM is)
+        try {
+          await this.emit(toChannelEvent(r), r);
+          this.log.recordDelivery({ messageId: r.id, from: r.from, to: this.me, outcome: 'sent', code: 'channel-written', transport: 'channel' });
+          emitted += 1;
+        } catch (err) {
+          this.log.recordDelivery({ messageId: r.id, from: r.from, to: this.me, outcome: 'failed', code: 'channel-error', reason: (err as Error).message ?? String(err), transport: 'channel' });
+          failed += 1;
+        }
       }
+      return { emitted, failed };
+    } finally {
+      this.ticking = false;
     }
-    return { emitted, failed };
   }
 }
 
@@ -155,10 +168,15 @@ export function sendMessageHint(record: MessageRecord, envelope: string, session
   };
 }
 
-/** Record that the model delivered an existing brokered message tactically via SendMessage. */
-export function confirmSent(log: CommsLog, messageId: number, opts: { from: string; to?: string; ok?: boolean; reason?: string } = { from: '' }): void {
+/**
+ * Record that the model delivered an existing brokered message tactically via SendMessage. Only
+ * the message's own sender (the bound identity of the calling process) may confirm it — nobody
+ * else can forge delivery records on another agent's behalf.
+ */
+export function confirmSent(log: CommsLog, messageId: number, opts: { from: string; to?: string; ok?: boolean; reason?: string }): void {
   const rec = log.get(messageId);
   if (!rec) throw new Error(`message ${messageId} does not exist`);
+  if (rec.from !== opts.from) throw new Error(`message ${messageId} was sent by ${rec.from}, not ${opts.from}; only the sender may confirm its delivery`);
   const ok = opts.ok !== false;
   log.recordDelivery({
     messageId, from: rec.from, to: opts.to ?? rec.to, outcome: ok ? 'sent' : 'failed',
@@ -179,18 +197,20 @@ export function mirrorSent(log: CommsLog, input: { from: string; to: string; bod
   return rec;
 }
 
+/** The neutral sender every mirrored inbound SendMessage is recorded under. Reserved. */
+export const PEER_ADDRESS = 'peer';
+
 /**
- * Mirror a `<cross-session-message from="uds:…" from-name="R">` the model received. The sender is
- * the peer session's name when it is a valid address (fleet convention: it is the fleet id);
- * otherwise the row is recorded from `peer` and the raw name/uds go into meta.
+ * Mirror a `<cross-session-message from="uds:…" from-name="R">` the model received. The `from-name`
+ * is chosen by the peer session (and relayed by the model), so it is NOT trusted as an identity:
+ * the row is always recorded from `peer` with the claimed name / uds / mode in meta. Readers key
+ * trust off `tier` / `verified`, never off a claimed name.
  */
 export function mirrorReceived(
   log: CommsLog, input: { fromName: string; fromUds?: string | null; to: string; body: string; fromMode?: string | null },
 ): MessageRecord {
-  const parsed = parseAddress(input.fromName);
-  const from = parsed && (parsed.kind === 'agent' || parsed.kind === 'child') ? input.fromName : 'peer';
   const rec = log.append({
-    from, to: input.to, body: input.body,
+    from: PEER_ADDRESS, to: input.to, body: input.body,
     meta: {
       transport: 'sendmessage', direction: 'in', fromName: input.fromName,
       ...(input.fromUds ? { fromUds: input.fromUds } : {}), ...(input.fromMode ? { fromMode: input.fromMode } : {}),

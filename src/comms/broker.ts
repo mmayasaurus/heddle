@@ -420,11 +420,14 @@ export class Broker {
    * LAST delivery event for a target is `held` is still owed a release/timeout. Call once at
    * startup (channel server does); returns how many were restored.
    */
-  restoreHeld(): number {
+  restoreHeld(opts: { sender?: string } = {}): number {
     let restored = 0;
     for (const ev of this.log.openHolds()) { // SQL: held rows with no later resolving event — whole log, oldest first
       const record = ev.messageId == null ? null : this.log.get(ev.messageId);
       if (!record || this.held.some((h) => h.record.id === record.id && h.target === ev.to)) continue;
+      // Holds belong to the process that POSTED the message; a multi-broker deployment (one
+      // heddle-comms per session, shared db) restores only its own, or two brokers would race.
+      if (opts.sender && record.from !== opts.sender) continue;
       this.held.push({ record, envelope: renderEnvelope(record), target: ev.to, heldAt: Date.parse(ev.ts), attempts: 1 });
       restored += 1;
     }

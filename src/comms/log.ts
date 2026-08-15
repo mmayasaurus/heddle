@@ -490,6 +490,14 @@ export class CommsLog {
     return (rows as unknown as DRow[]).map(toDelivery);
   }
 
+  /** The highest message id this identity's channel has written (`sent`/`channel-written`), or null. */
+  lastChannelWrite(address: string): number | null {
+    const row = this.db.prepare(
+      "SELECT MAX(message_id) AS id FROM deliveries WHERE target = ? AND transport = 'channel' AND outcome = 'sent'",
+    ).get(address) as { id: number | null };
+    return row.id == null ? null : Number(row.id);
+  }
+
   delivery(id: number): DeliveryEvent | null {
     const row = this.db.prepare('SELECT * FROM deliveries WHERE id = ?').get(id) as unknown as DRow | undefined;
     return row ? toDelivery(row) : null;

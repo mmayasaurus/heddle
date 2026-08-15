@@ -5,7 +5,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprot
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { CommsLog, DEFAULT_COMMS_PATH } from './log.js';
-import { Ledger } from '../ledger.js';
+import { Ledger, DEFAULT_LEDGER_PATH } from '../ledger.js';
 import { Broker } from './broker.js';
 import { ChannelTransport, InboundPump, CHANNEL_INSTRUCTIONS, SENDMESSAGE_LIMITS, sendMessageHint, confirmSent, mirrorSent, mirrorReceived } from './bridge.js';
 import { parseAddress } from './address.js';
@@ -24,14 +24,23 @@ import { TIERS, MESSAGE_KINDS, type Tier, type MessageKind } from './types.js';
  * Identity is bound ONCE at startup from the process environment (never chosen by the model):
  *   HEDDLE_AGENT → FLEET_AGENT → HEDDLE_COMMS_ADDRESS (a heddle-dispatched worker) → a
  *   `.fleet-agent` file walking up from cwd → unbound (tools that need a sender refuse).
- * A worker (HEDDLE_WORKER=1) may not mint children — depth 1.
+ * Only agent/child addresses bind here — `operator` needs the operator surface (HED-65), never an
+ * env var an agent session could set. A worker (HEDDLE_WORKER=1) may not mint children — depth 1.
+ *
+ * PUSH IS OPT-IN: Claude Code gives a server no way to know whether it was loaded as a channel,
+ * and it drops channel events silently when it was not. So presence (the `sessions` row that
+ * makes senders get "queued-for-channel") and the inbound pump run only when the launcher says
+ * the flag is on: HEDDLE_COMMS_PUSH=1. Without it this session is pull-only and senders are told
+ * "no-live-session" (+ the SendMessage hint) — honest, never "delivered" into a void.
  */
 
 const log = new CommsLog(process.env.HEDDLE_COMMS_DB || DEFAULT_COMMS_PATH);
-const ledger = safeLedger();
+const ledger = openLedgerIfPresent();
 const me = resolveCommsIdentity();
 const isWorker = process.env.HEDDLE_WORKER === '1';
+const pushEnabled = process.env.HEDDLE_COMMS_PUSH === '1';
 const sessionName = process.env.HEDDLE_SESSION_NAME || me;
+const warn = (msg: string) => process.stderr.write(`heddle-comms: ${msg}\n`);
 
 const mcp = new Server(
   { name: 'heddle-comms', version: '0.0.1' },
@@ -41,10 +50,13 @@ const mcp = new Server(
   },
 );
 
-const broker = new Broker({ log, ledger, transport: new ChannelTransport(log) });
-// A restart must not orphan messages that were held at a permission gate before it.
-const restored = broker.restoreHeld();
-if (restored) process.stderr.write(`heddle-comms: restored ${restored} held message(s) from the log\n`);
+const broker = new Broker({ log, ledger, transport: new ChannelTransport(log), onWarning: warn });
+// A restart must not orphan messages that were held at a permission gate before it — but only the
+// ones THIS identity posted (one broker per session on a shared db).
+if (me) {
+  const restored = broker.restoreHeld({ sender: me });
+  if (restored) warn(`restored ${restored} held message(s) posted by ${me}`);
+}
 
 // ---------------------------------------------------------------------------- tools
 
@@ -153,15 +165,15 @@ async function postMessage(a: Record<string, unknown>) {
     issue: str(a.issue) ?? null, thread: str(a.thread) ?? null, meta: { transport: 'heddle-comms' },
   });
   if (res.outcome === 'refused') return res;
-  const rec = log.get(res.messageId)!;
+  const rec = log.get(res.messageId);
   const targetKind = parseAddress(res.to)?.kind;
-  const tactical = (targetKind === 'agent' || targetKind === 'child') && res.code === 'no-live-session';
+  const tactical = rec !== null && (targetKind === 'agent' || targetKind === 'child') && res.code === 'no-live-session';
   return {
     ...res,
     note: tactical
       ? 'No live heddle-comms session for the target: it can pull this from the log, or deliver it now with SendMessage using sendMessage below, then call confirm_sent.'
       : res.code === 'queued-for-channel' ? 'Queued: the target\'s heddle-comms channel will inject it (structured <channel> event).' : undefined,
-    ...(tactical ? { sendMessage: sendMessageHint(rec, res.envelope, log.session(res.to)?.sessionName ?? null) } : {}),
+    ...(tactical && rec ? { sendMessage: sendMessageHint(rec, res.envelope, log.session(res.to)?.sessionName ?? null) } : {}),
   };
 }
 
@@ -177,17 +189,35 @@ function readTranscript(a: Record<string, unknown>) {
 
 // ---------------------------------------------------------------------------- session + pumps
 
-if (me) {
+let stopping = false;
+const bye = () => {
+  if (stopping) return;
+  stopping = true;
+  try { if (me && pushEnabled) log.unregisterSession(me); } catch (err) { warn(`unregister failed: ${(err as Error).message}`); }
+  try { log.close(); } catch (err) { warn(`log close failed: ${(err as Error).message}`); }
+  try { ledger?.close(); } catch (err) { warn(`ledger close failed: ${(err as Error).message}`); }
+  process.exit(0);
+};
+process.on('SIGTERM', bye); process.on('SIGINT', bye); process.stdin.on('close', bye);
+
+if (me && pushEnabled) {
   log.registerSession({
     address: me, sessionId: process.env.CLAUDE_CODE_SESSION_ID ?? null, sessionName,
     pid: process.env.CLAUDE_PID ? Number(process.env.CLAUDE_PID) : process.ppid, socket: process.env.CLAUDE_CODE_MESSAGING_SOCKET ?? null,
   });
   const inbound = new InboundPump(log, me, (event) => mcp.notification({ method: 'notifications/claude/channel', params: { content: event.content, meta: event.meta } }));
-  const heartbeat = setInterval(() => { try { log.heartbeatSession(me); } catch { /* keep going */ } }, 30_000);
-  const poll = setInterval(() => { void inbound.tick().catch(() => undefined); void broker.pump().catch(() => undefined); }, 1_000);
-  heartbeat.unref(); poll.unref();
-  const bye = () => { try { log.unregisterSession(me); log.close(); } catch { /* exiting */ } process.exit(0); };
-  process.on('SIGTERM', bye); process.on('SIGINT', bye); process.stdin.on('close', bye);
+  const heartbeat = setInterval(() => { try { log.heartbeatSession(me); } catch (err) { warn(`heartbeat failed: ${(err as Error).message}`); } }, 30_000);
+  heartbeat.unref();
+  // One loop, never overlapping: the next cycle is scheduled only after this one finished.
+  const cycle = async () => {
+    if (stopping) return;
+    try { await inbound.tick(); } catch (err) { warn(`inbound tick failed: ${(err as Error).message}`); }
+    try { await broker.pump(); } catch (err) { warn(`pump failed: ${(err as Error).message}`); }
+    setTimeout(cycle, 1_000).unref();
+  };
+  setTimeout(cycle, 1_000).unref();
+} else if (me) {
+  warn(`push disabled (HEDDLE_COMMS_PUSH is not 1): ${me} is pull-only — no presence row, no channel events`);
 }
 
 await mcp.connect(new StdioServerTransport());
@@ -196,14 +226,22 @@ await mcp.connect(new StdioServerTransport());
 
 function resolveCommsIdentity(): string | null {
   // TODO(HED-65/HED-2): switch to Agent U's src/identity.ts once it lands (same order, one module).
-  const fromEnv = process.env.HEDDLE_AGENT || process.env.FLEET_AGENT || process.env.HEDDLE_COMMS_ADDRESS;
-  if (fromEnv && parseAddress(fromEnv.trim())) return fromEnv.trim();
+  const bindable = (v: string | undefined): string | null => {
+    const s = v?.trim();
+    if (!s) return null;
+    const kind = parseAddress(s)?.kind;
+    if (kind === 'agent' || kind === 'child') return s;
+    if (kind === 'operator') warn('refusing to bind the operator identity from an env var / .fleet-agent — the operator surface binds it (HED-65)');
+    return null;
+  };
+  const fromEnv = bindable(process.env.HEDDLE_AGENT) ?? bindable(process.env.FLEET_AGENT) ?? bindable(process.env.HEDDLE_COMMS_ADDRESS);
+  if (fromEnv) return fromEnv;
   let dir = process.cwd();
   for (;;) {
     const f = join(dir, '.fleet-agent');
     if (existsSync(f)) {
-      const v = readFileSync(f, 'utf8').trim();
-      if (parseAddress(v)) return v;
+      const v = bindable(readFileSync(f, 'utf8'));
+      if (v) return v;
     }
     const up = dirname(dir);
     if (up === dir) return null;
@@ -211,8 +249,11 @@ function resolveCommsIdentity(): string | null {
   }
 }
 
-function safeLedger(): Ledger | null {
-  try { return new Ledger(); } catch { return null; }
+/** The dispatch ledger is consulted opportunistically for lineage; never create it as a side effect. */
+function openLedgerIfPresent(): Ledger | null {
+  const path = process.env.HEDDLE_LEDGER_DB || DEFAULT_LEDGER_PATH;
+  if (!existsSync(path)) return null;
+  try { return new Ledger(path); } catch (err) { warn(`ledger unavailable: ${(err as Error).message}`); return null; }
 }
 
 function requireMe(): string {

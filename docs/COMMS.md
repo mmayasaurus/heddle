@@ -373,21 +373,33 @@ One process per Claude Code session, spawned from `.mcp.json`:
 
 - **Identity is bound once at startup**, never chosen by the model: `HEDDLE_AGENT` →
   `FLEET_AGENT` → `HEDDLE_COMMS_ADDRESS` (a heddle-dispatched worker) → a `.fleet-agent` file
-  walking up from cwd → unbound (sender-requiring tools refuse). `HEDDLE_WORKER=1` forbids
-  `mint_child` (depth 1). `HEDDLE_COMMS_DB` overrides the db path (tests). This is HED-65's comms
-  half; it will switch to the shared `src/identity.ts` when that lands.
-- **Presence**: the server registers a `sessions` row for its address (session id, session
-  name — fleet convention: the fleet id —, pid, `CLAUDE_CODE_MESSAGING_SOCKET`) and heartbeats it
-  every 30 s (`DEFAULT_SESSION_STALE_MS` = 90 s); it unregisters on exit.
-- **Push (channel)**: every second the `InboundPump` reads new inbox rows for its identity
-  (direct + `@all`, starting at the log tail — never a replay) and emits
+  walking up from cwd → unbound (sender-requiring tools refuse). Only agent/child addresses bind
+  here — `operator` is refused from these sources (the operator surface binds it, HED-65).
+  `HEDDLE_WORKER=1` forbids `mint_child` (depth 1). `HEDDLE_COMMS_DB` / `HEDDLE_LEDGER_DB`
+  override the db paths (tests); the dispatch ledger is opened only if it already exists (never
+  created as a side effect). This is HED-65's comms half; it will switch to the shared
+  `src/identity.ts` when that lands.
+- **Push is opt-in — `HEDDLE_COMMS_PUSH=1`.** Claude Code gives a server no way to know whether it
+  was loaded as a channel and drops channel events silently when it was not, so presence and the
+  inbound pump run only when the launcher says the flag is on. Without it the session is pull-only
+  and senders get `no-live-session` + the SendMessage hint — never a false "delivered".
+- **Presence** (push mode): the server registers a `sessions` row for its address (session id,
+  session name — fleet convention: the fleet id —, pid, `CLAUDE_CODE_MESSAGING_SOCKET`) and
+  heartbeats it every 30 s (`DEFAULT_SESSION_STALE_MS` = 90 s); it unregisters on exit.
+- **Push (channel)**: one non-overlapping loop (next cycle scheduled after the previous finished)
+  runs the `InboundPump` — reads new inbox rows for its identity (direct + `@all`; own broadcasts
+  skipped, self-DMs delivered) resuming from the last row this identity's channel wrote (a crash
+  between "queued-for-channel" and the push is not a silent loss; a first-ever run starts at the
+  tail — never a replay), re-entrancy-guarded so a slow emit never double-delivers — and emits
   `notifications/claude/channel` with `content = body` and `meta` =
   `{ tier, sender, target, msg_id, kind, verified, ts, reply_to?, thread?, issue?, tier_code?, lineage? }`.
   Claude Code renders it as `<channel source="heddle-comms" tier="…" sender="…" msg_id="…">body</channel>`
   — the tier and provenance are **tag attributes rendered by Claude Code itself**, not text a body
   can imitate (the structured delivery the envelope review asked for). Each push is a typed
   delivery (`sent` / `channel-written`, or `failed` / `channel-error`). Claude Code does not ack
-  channel events, so `sent` means *written to the session*, never *read*.
+  channel events, so `sent` means *written to the session*, never *read*. `Broker.pump()` runs in
+  the same loop and `restoreHeld({ sender: me })` at startup — holds belong to the process that
+  posted them (one broker per session on a shared db).
 - **Push requires the session to be started as** `claude --dangerously-load-development-channels
   server:heddle-comms` (channels are a research preview; custom channels are allowlisted per
   entry, behind a warning dialog and the org policy `channelsEnabled`). Without the flag the
@@ -407,10 +419,12 @@ One process per Claude Code session, spawned from `.mcp.json`:
 `SendMessage` is a tool the *model* calls; Node cannot call it. The bridge therefore (a) tells
 the model exactly what to send (`sendMessageHint`: the rendered envelope, so the recipient sees
 the broker's frame) and (b) mirrors what was sent/received so the room stays complete:
-`confirm_sent` (a brokered message delivered tactically), `log_sent` (a raw nudge that bypassed
-the broker — stored as an untrusted agent-message), `log_received` (a
-`<cross-session-message from="uds:…" from-name="R">` — stored from `R` when the name is a valid
-fleet address, else from `peer` with the raw name in meta). Documented limits
+`confirm_sent` (a brokered message delivered tactically — only the message's own sender may
+confirm it), `log_sent` (a raw nudge that bypassed the broker — stored as an untrusted
+agent-message), `log_received` (a `<cross-session-message from="uds:…" from-name="R">` — the
+peer's `from-name` is a claim relayed by the model, so the row is ALWAYS stored from the reserved
+`peer` address with the claimed name / uds / mode in meta; readers key trust off `tier` /
+`verified`, never off a name). Documented limits
 (`SENDMESSAGE_LIMITS`): plain text only; ephemeral — no persistence or observe/read-back API
 upstream, the durable log is the only record; Claude-only; delivery may be *held* (permission-class
 asymmetry, approval dialog, `dialogExpiry` 5 min) or *refused* (`crossSessionInbound`); at most 100

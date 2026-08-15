@@ -131,6 +131,23 @@ describe('comms bridge (temp db)', () => {
       { messageId: broadcast.id, outcome: 'sent', code: 'channel-written', transport: 'channel' },
     ]);
     expect(await pump.tick()).toEqual({ emitted: 0, failed: 0 });
+    // A self-DM IS delivered (only own broadcasts are skipped)…
+    const selfDm = log.append({ from: 'K', to: 'K', body: 'note to self' });
+    expect(await pump.tick()).toEqual({ emitted: 1, failed: 0 });
+    expect(emitted.at(-1)).toBe(selfDm.id);
+    // …and a fresh pump for the same identity resumes from its last channel write, not the tail.
+    const later = log.append({ from: 'R', to: 'K', body: 'posted while K was down' });
+    const resumed: number[] = [];
+    await new InboundPump(log, 'K', (_e, r) => { resumed.push(r.id); }).tick();
+    expect(resumed).toEqual([later.id]);
+    // Re-entrancy: a tick that fires while another is awaiting an emit does nothing.
+    let release!: () => void;
+    const slow = new InboundPump(log, 'R', () => new Promise<void>((res) => { release = res; }));
+    log.append({ from: 'K', to: 'R', body: 'slow one' });
+    const first = slow.tick();
+    expect(await slow.tick()).toEqual({ emitted: 0, failed: 0 });
+    release();
+    expect(await first).toEqual({ emitted: 1, failed: 0 });
 
     const replayed: number[] = [];
     const replay = new InboundPump(log, 'K', (_event, record) => { replayed.push(record.id); }, { sinceId: 0 });
@@ -181,6 +198,8 @@ describe('comms bridge (temp db)', () => {
       { outcome: 'failed', code: 'sendmessage-failed', reason: 'recipient declined', transport: 'sendmessage', messageId: record.id },
     ]);
     expect(() => confirmSent(log, 999, { from: 'K' })).toThrow(/does not exist/);
+    // Only the sender may confirm its own message — no forged delivery records on someone else's behalf.
+    expect(() => confirmSent(log, record.id, { from: 'R' })).toThrow(/only the sender may confirm/);
   });
 
   it('mirrors outgoing SendMessage posts with durable transport provenance and delivery', () => {
@@ -195,9 +214,13 @@ describe('comms bridge (temp db)', () => {
   it('mirrors received SendMessage posts with safe sender attribution and provenance', () => {
     const fleet = mirrorReceived(log, { fromName: 'R', fromUds: 'uds:/r', fromMode: 'peer', to: 'K', body: 'from fleet' });
     const unknown = mirrorReceived(log, { fromName: 'my session name!', to: 'K', body: 'from stranger' });
-    expect(fleet).toMatchObject({ from: 'R', to: 'K', body: 'from fleet', meta: { transport: 'sendmessage', direction: 'in', fromName: 'R', fromUds: 'uds:/r', fromMode: 'peer' } });
+    // A peer session's from-name is a claim relayed by the model — never an identity: always `peer`, claim in meta.
+    expect(fleet).toMatchObject({ from: 'peer', to: 'K', body: 'from fleet', tier: 'agent-message', meta: { transport: 'sendmessage', direction: 'in', fromName: 'R', fromUds: 'uds:/r', fromMode: 'peer' } });
     expect(unknown).toMatchObject({ from: 'peer', to: 'K', body: 'from stranger', meta: { transport: 'sendmessage', direction: 'in', fromName: 'my session name!' } });
-    expect(log.deliveries().map((d) => ({ messageId: d.messageId, outcome: d.outcome, code: d.code, transport: d.transport }))).toEqual([
+    expect(log.participant('R')).toBeNull(); // no fleet identity gets registered by a claim
+    // Even an unminted child name cannot break the mirror.
+    expect(mirrorReceived(log, { fromName: 'K.9', to: 'K', body: 'x' }).from).toBe('peer');
+    expect(log.deliveries().slice(0, 2).map((d) => ({ messageId: d.messageId, outcome: d.outcome, code: d.code, transport: d.transport }))).toEqual([
       { messageId: fleet.id, outcome: 'sent', code: 'sendmessage-received', transport: 'sendmessage' },
       { messageId: unknown.id, outcome: 'sent', code: 'sendmessage-received', transport: 'sendmessage' },
     ]);
