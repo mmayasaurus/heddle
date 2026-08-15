@@ -218,7 +218,10 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           echo "scanning $BASE..$HEAD"
           # gitleaks scans NON-merge commits (`git log -p` shows no diff for a
-          # merge), so that is the count it must report back.
+          # merge; measured on v8.30.1: 1 merge in range → rev-list 4,
+          # --no-merges 3, gitleaks "3 commits scanned"). The guard below is
+          # `<` not `!=`, so a future gitleaks that counts merges cannot
+          # false-fail it, while an empty/short scan still does (gitar, r6).
           EXPECTED=$(git rev-list --count --no-merges "$BASE..$HEAD")
           echo "non-merge commits in range: $EXPECTED"
           if [ "$EXPECTED" -lt 1 ]; then
@@ -255,8 +258,8 @@ jobs:
             2>"$S/gitleaks.log" || rc=$?
           cat "$S/gitleaks.log"
           SCANNED=$(grep -oE '[0-9]+ commits? scanned' "$S/gitleaks.log" | grep -oE '^[0-9]+' | head -1)
-          if grep -qE '\bERR\b|\[git\]|fatal:' "$S/gitleaks.log" || [ -z "${SCANNED:-}" ] || [ "$SCANNED" -ne "$EXPECTED" ]; then
-            echo "::error::gitleaks did not cleanly scan the whole range (scanned=${SCANNED:-none}, expected=$EXPECTED, or a git/tool error was logged) — NOT a clean pass"
+          if grep -qE '\bERR\b|\[git\]|fatal:' "$S/gitleaks.log" || [ -z "${SCANNED:-}" ] || [ "$SCANNED" -lt "$EXPECTED" ]; then
+            echo "::error::gitleaks did not cleanly scan the whole range (scanned=${SCANNED:-none}, expected at least $EXPECTED, or a git/tool error was logged) — NOT a clean pass"
             echo "gitleaks: ❌ **scan incomplete** (scanned=${SCANNED:-none}, expected=$EXPECTED, or a git/tool error) — see the job log; NOT a clean pass" >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
