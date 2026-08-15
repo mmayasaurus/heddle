@@ -3,7 +3,7 @@ import { CodexAdapter } from './adapters/codex.js';
 import { CursorAdapter } from './adapters/cursor.js';
 import { Ledger } from './ledger.js';
 import { loadRouting, resolveRoute, directRoute, type Route, type RouteTarget } from './routing.js';
-import { materializeAgentsMd } from './skillpacks.js';
+import { materializeAgentsMd, withMandatoryPacks } from './skillpacks.js';
 import { materializeWorkerMcp, codexMcpFlags } from './mcp.js';
 import { classifyEffort } from './classify.js';
 import type { WorkerAdapter, WorkerResult } from './types.js';
@@ -54,7 +54,11 @@ export interface DispatchOutcome extends WorkerResult {
   usedFallback: boolean;
 }
 
-function adapterFor(provider: string): WorkerAdapter {
+/** Resolves a provider name to its adapter. Injectable into dispatch() so tests can run the full
+ *  dispatch pipeline (routing → skills/MCP materialization → ledger) against a fake worker. */
+export type AdapterFactory = (provider: string) => WorkerAdapter;
+
+export function defaultAdapterFor(provider: string): WorkerAdapter {
   switch (provider) {
     case 'codex': return new CodexAdapter();
     case 'cursor': return new CursorAdapter();
@@ -72,9 +76,11 @@ function adapterFor(provider: string): WorkerAdapter {
 
 async function runTarget(
   target: RouteTarget, req: DispatchRequest, ledger: Ledger, route: Route,
-  fellBackFrom: string | null,
+  fellBackFrom: string | null, adapterFor: AdapterFactory,
 ): Promise<DispatchOutcome> {
-  const skills = req.skills ?? target.skills ?? [];
+  // Caller's explicit list REPLACES the table default; the mandatory governance pack(s) are unioned
+  // into whichever applies (see skillpacks.ts) — the ledger records the result, so it is auditable.
+  const skills = withMandatoryPacks(req.skills ?? target.skills ?? []);
   const mcp = req.mcp ?? target.mcp ?? [];
   const adapter = adapterFor(target.provider);
 
@@ -146,7 +152,9 @@ async function runTarget(
   };
 }
 
-export async function dispatch(req: DispatchRequest, ledger = new Ledger()): Promise<DispatchOutcome> {
+export async function dispatch(
+  req: DispatchRequest, ledger = new Ledger(), adapterFor: AdapterFactory = defaultAdapterFor,
+): Promise<DispatchOutcome> {
   const table = loadRouting();
 
   // Auto-effort (opt-in): classify the sub-task's difficulty and pin the effort, unless the caller
@@ -161,7 +169,7 @@ export async function dispatch(req: DispatchRequest, ledger = new Ledger()): Pro
   // Direct path: orchestrator named the model. Full dynamic choice, still policy-fenced.
   if (req.provider && req.model) {
     const route = directRoute(table, req.provider, req.model, req.skills, req.mcp);
-    return runTarget(route, req, ledger, route, null);
+    return runTarget(route, req, ledger, route, null, adapterFor);
   }
   if (!req.taskClass) {
     throw new Error('dispatch requires either a task class or an explicit provider+model');
@@ -175,10 +183,10 @@ export async function dispatch(req: DispatchRequest, ledger = new Ledger()): Pro
     );
   }
 
-  const primary = await runTarget(route, req, ledger, route, null);
+  const primary = await runTarget(route, req, ledger, route, null, adapterFor);
   if (primary.ok || req.noFallback || !route.fallback) return primary;
 
   // Primary failed and the table names a fallback — try it, recording the origin so the ledger
   // shows which routes actually hold up in practice.
-  return runTarget(route.fallback, req, ledger, route, `${route.provider}/${route.model}`);
+  return runTarget(route.fallback, req, ledger, route, `${route.provider}/${route.model}`, adapterFor);
 }

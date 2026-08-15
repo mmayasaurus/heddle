@@ -52,11 +52,19 @@ project-agnostic.
 ```
 docs/ARCHITECTURE.md   five-layer design: workers · routing · broker · ownership · dashboard
 docs/LANDMINES.md      live-verified per-CLI gotchas (read before touching adapters)
-routing/routing.v0.yaml routing table draft: task-class → provider/model/effort/skills
+routing/routing.v0.yaml routing table: task-class → provider/model/effort/skills(+why, edits_code)
 src/types.ts           WorkerAdapter contract (ports-and-adapters)
-src/adapters/          codex · cursor (subprocess, verified) · claude (in-session protocol)
+src/adapters/          codex · cursor · agy (subprocess, verified) · claude (in-session protocol)
+src/mcp-server.ts      heddle MCP server (dispatch_worker, list_task_classes, assess_result, …)
+src/guidance.ts        dispatch-time guidance rules; src/hook-dispatch-guidance.ts = the PreToolUse hook
 src/smoke.ts           `npm run build && node dist/smoke.js <adapter> "<prompt>"`
+test/                  vitest suites (`npm test`)
 ```
+
+Dispatch-time guidance (HED-1): `list_task_classes` / `heddle classes` return each class's `why`,
+default `skills`, `edits_code`, `execution`; the PreToolUse hook `dist/hook-dispatch-guidance.js`
+nudges on no-task-fit-packs / missing opt-in (never blocks). Semantics + registration snippet:
+`docs/MODELS.md` → "Dispatch-time surfacing".
 
 ## Dev
 

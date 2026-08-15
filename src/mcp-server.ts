@@ -4,8 +4,8 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 import { dispatch } from './dispatch.js';
 import { Ledger } from './ledger.js';
-import { loadRouting, listTaskClasses, resolveRoute } from './routing.js';
-import { listPacks } from './skillpacks.js';
+import { loadRouting, describeTaskClasses } from './routing.js';
+import { listPacks, withMandatoryPacks } from './skillpacks.js';
 import { classifyEffort, assessResult } from './classify.js';
 
 /**
@@ -44,7 +44,10 @@ server.tool(
     cwd: z.string().optional().describe('Working directory for the worker (default: server cwd).'),
     issue: z.string().optional().describe('Linear issue this sub-task serves, e.g. SPI-712.'),
     agent: z.string().optional().describe("Dispatching orchestrator's fleet identity, e.g. K."),
-    skills: z.array(z.string()).optional().describe('Skill packs to load (see list_skill_packs).'),
+    skills: z.array(z.string()).optional().describe(
+      'Skill packs to load (see list_skill_packs). Omit to get the task class\'s default packs ' +
+      '(the `skills` column of list_task_classes); an explicit list REPLACES that default. ' +
+      '`worker-role` is always included either way.'),
     mcp: z.array(z.string()).optional().describe('Code-discovery MCP servers to attach, e.g. ["memtrace"].'),
     effort: z.string().optional().describe('Reasoning effort: codex minimal|low|medium|high|xhigh; agy low|medium|high.'),
     auto_effort: z.boolean().optional().describe('Classify the sub-task difficulty (cheap model) and pin effort automatically, if effort not set.'),
@@ -118,20 +121,15 @@ server.tool(
 
 server.tool(
   'list_task_classes',
-  'List routing task classes and where each routes (provider/model, fallback, opt-in). Consult ' +
-    'this to pick the right class before dispatching.',
+  'List routing task classes with dispatch-time guidance: where each routes (provider/model, ' +
+    'execution, effort, fallback, opt-in), WHY to pick it, the default skill packs a dispatch gets ' +
+    'when you omit `skills`, its default MCP servers, and whether its workers edit code. Consult ' +
+    'this to pick the right class — fit and cost, not a favorite model — before dispatching. ' +
+    '`execution: in-session-subagent` means use your own Agent tool with the routed model.',
   {},
   async () => {
     try {
-      const table = loadRouting();
-      const rows = listTaskClasses(table).map((c) => {
-        const r = resolveRoute(table, c);
-        return {
-          task_class: c, provider: r.provider, model: r.model,
-          fallback: r.fallback ? `${r.fallback.provider}/${r.fallback.model}` : null,
-          opt_in_required: r.requiresExplicitOptIn ?? false, note: r.note ?? null,
-        };
-      });
+      const rows = describeTaskClasses(loadRouting(), withMandatoryPacks);
       return text(rows);
     } catch (err) {
       return errorText(`could not load routing table: ${(err as Error).message ?? String(err)}`);

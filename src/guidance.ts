@@ -1,0 +1,116 @@
+import { isCodeEditingClass, resolveRoute, type RoutingTable } from './routing.js';
+import { MANDATORY_PACKS, withMandatoryPacks } from './skillpacks.js';
+
+/**
+ * Dispatch-time guidance — the pure logic behind the `dispatch_worker` PreToolUse hook
+ * (src/hook-dispatch-guidance.ts) and reusable by anything else that wants to sanity-check a
+ * dispatch request before it runs. It NEVER blocks: it returns warnings that surface fit + cost at
+ * the moment an orchestrator chooses a worker (docs/MODELS.md "Dispatch-time surfacing"). Two
+ * cases, both data-driven from the routing table, so a YAML change tunes them without a rebuild:
+ *
+ *  1. A code-editing class (`edits_code: true`) dispatched with NO task-fit skill packs — i.e. the
+ *     caller passed an explicit empty list, or omitted `skills` and the table lists none for the
+ *     class beyond the mandatory governance pack(s). Such a worker gets no quality-gate / discovery
+ *     discipline, the failure mode the packs exist to prevent.
+ *  2. A class that `requires_explicit_opt_in` (today: second-opinion-hard) dispatched without
+ *     `opt_in: true`. The dispatcher will REFUSE it anyway; the warning explains the cost up front
+ *     so the orchestrator picks knowingly instead of retrying blind.
+ *
+ * Direct provider/model dispatches have no class → nothing here applies to them by design; the
+ * class path is where the policy lives.
+ */
+
+/** The subset of a `dispatch_worker` call the guidance looks at (MCP tool_input field names). */
+export interface DispatchGuidanceInput {
+  task_class?: string;
+  provider?: string;
+  model?: string;
+  skills?: string[];
+  opt_in?: boolean;
+}
+
+export type GuidanceCode = 'code-editing-class-without-skills' | 'opt-in-required';
+
+export interface GuidanceWarning {
+  code: GuidanceCode;
+  task_class: string;
+  message: string;
+}
+
+/**
+ * Task-fit packs = everything the dispatch will materialize beyond the mandatory governance pack(s).
+ * Mirrors the dispatcher: an explicit `skills` list replaces the table default; worker-role is
+ * unioned in either way, so it is deliberately excluded from "does this dispatch carry any fit".
+ */
+export function taskFitPacks(table: RoutingTable, input: DispatchGuidanceInput): string[] {
+  const route = input.task_class ? resolveRoute(table, input.task_class) : undefined;
+  const effective = withMandatoryPacks(input.skills ?? route?.skills ?? []);
+  return effective.filter((p) => !(MANDATORY_PACKS as readonly string[]).includes(p));
+}
+
+export function dispatchGuidance(table: RoutingTable, input: DispatchGuidanceInput): GuidanceWarning[] {
+  const warnings: GuidanceWarning[] = [];
+  const cls = input.task_class;
+  if (!cls) return warnings; // direct provider/model path — no class policy to check
+  if (!(cls in table.taskClasses)) return warnings; // unknown class: the dispatcher will say so
+
+  const route = resolveRoute(table, cls);
+
+  if (isCodeEditingClass(table, cls) && taskFitPacks(table, input).length === 0) {
+    const defaults = withMandatoryPacks(route.skills ?? []);
+    const recommended = defaults.filter((p) => !(MANDATORY_PACKS as readonly string[]).includes(p));
+    warnings.push({
+      code: 'code-editing-class-without-skills',
+      task_class: cls,
+      message:
+        `heddle: task class "${cls}" EDITS CODE but this dispatch carries no task-fit skill packs — ` +
+        `only the mandatory ${MANDATORY_PACKS.join(', ')}. The worker gets no verification / discovery ` +
+        `discipline. ` +
+        (recommended.length
+          ? `Recommended for ${cls}: ${recommended.join(', ')} — omit \`skills\` to get the class default ` +
+            `[${defaults.join(', ')}], or pass an explicit list that includes them.`
+          : `The routing table lists no default packs for ${cls} either — consider quality-gate ` +
+            `(verification) and code-discovery (graph-first navigation), or add defaults to routing.v0.yaml.`) +
+        ` (Nudge only — the dispatch will still run.)`,
+    });
+  }
+
+  if (route.requiresExplicitOptIn && input.opt_in !== true) {
+    warnings.push({
+      code: 'opt-in-required',
+      task_class: cls,
+      message:
+        `heddle: task class "${cls}" requires explicit opt-in and this call has no \`opt_in: true\` — ` +
+        `the dispatcher WILL REFUSE it. Why it is gated: ${route.note ?? 'see routing.v0.yaml'}. ` +
+        `Routes to ${route.provider}/${route.model}. Pass \`opt_in: true\` only if the cost is ` +
+        `justified (ask Maya first), otherwise use a cheaper class such as second-opinion.`,
+    });
+  }
+
+  return warnings;
+}
+
+/**
+ * Claude Code PreToolUse hook response for a `dispatch_worker` call, or null when there is nothing
+ * to say (the hook then exits silently and the normal permission flow applies). Contract
+ * (code.claude.com/docs/en/hooks, verified 2026-08-15): `hookSpecificOutput.additionalContext` is
+ * added to the model's context; top-level `systemMessage` is shown to the user. No
+ * `permissionDecision` is set on purpose — this is a nudge, not a gate: it neither auto-allows the
+ * call (which would skip the user's own permission flow) nor blocks it.
+ */
+export function hookResponse(payload: unknown, table: RoutingTable): string | null {
+  const p = (payload ?? {}) as { tool_name?: unknown; tool_input?: unknown };
+  const toolName = typeof p.tool_name === 'string' ? p.tool_name : '';
+  // Matched by settings.json (`mcp__heddle__dispatch_worker`), but be defensive: any other tool → silent.
+  if (!/(^|__)dispatch_worker$/.test(toolName)) return null;
+  const input = (p.tool_input && typeof p.tool_input === 'object' ? p.tool_input : {}) as DispatchGuidanceInput;
+  const warnings = dispatchGuidance(table, input);
+  if (warnings.length === 0) return null;
+  return JSON.stringify({
+    hookSpecificOutput: {
+      hookEventName: 'PreToolUse',
+      additionalContext: warnings.map((w) => w.message).join('\n'),
+    },
+    systemMessage: `heddle dispatch guidance: ${warnings.map((w) => `${w.code} (${w.task_class})`).join('; ')}`,
+  });
+}

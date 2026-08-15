@@ -23,6 +23,13 @@ export interface RouteTarget {
 export interface Route extends RouteTarget {
   taskClass: string;
   fallback?: RouteTarget;
+  /** One-line "when to pick this class and why it routes there" (YAML `why:`). */
+  why?: string;
+  /**
+   * True when workers of this class change files (YAML `edits_code:`). Drives the dispatch-guidance
+   * hook's no-task-fit-packs nudge. Strictly the boolean `true` — anything else reads as false.
+   */
+  editsCode: boolean;
 }
 
 export interface RoutingTable {
@@ -83,11 +90,76 @@ export function resolveRoute(table: RoutingTable, taskClass: string): Route {
   if (providerCfg?.status === 'excluded') {
     throw new Error(`task class "${taskClass}" routes to excluded provider "${primary.provider}"`);
   }
-  return { taskClass, ...primary, fallback: toTarget(node.fallback) };
+  return {
+    taskClass,
+    ...primary,
+    fallback: toTarget(node.fallback),
+    why: typeof node.why === 'string' ? node.why : undefined,
+    editsCode: node.edits_code === true,
+  };
 }
 
 export function listTaskClasses(table: RoutingTable): string[] {
   return Object.keys(table.taskClasses);
+}
+
+/**
+ * The "code-editing class" classifier: does a dispatch of `taskClass` change files? Data-driven
+ * from the table's `edits_code:` field — never inferred from the class name. Unknown classes and
+ * direct routes (`direct:<provider>/<model>`) are NOT code-editing as far as the table knows.
+ */
+export function isCodeEditingClass(table: RoutingTable, taskClass: string): boolean {
+  const node = (table.taskClasses as any)[taskClass];
+  return Boolean(node) && node.edits_code === true;
+}
+
+/** One row per task class — the shared shape behind `list_task_classes` (MCP) and `heddle classes`. */
+export interface TaskClassDescription {
+  task_class: string;
+  provider: string;
+  model: string;
+  /** How the provider runs workers (`in-session-subagent` means: use your own Agent tool). */
+  execution: string | null;
+  effort: string | null;
+  fallback: string | null;
+  opt_in_required: boolean;
+  note: string | null;
+  why: string | null;
+  /**
+   * The packs a dispatch of this class receives when the caller omits `skills` — the table's
+   * default with the mandatory pack(s) unioned in, i.e. exactly what the ledger will record.
+   */
+  skills: string[];
+  mcp: string[];
+  edits_code: boolean;
+}
+
+/**
+ * Describe every task class with its routing AND its dispatch-time guidance (why + default skill
+ * packs + edits_code). `withMandatory` mirrors the dispatcher's own union rule so the listed
+ * `skills` are what a worker actually gets — pass `withMandatoryPacks` from skillpacks.ts.
+ */
+export function describeTaskClasses(
+  table: RoutingTable, withMandatory: (skills: string[]) => string[] = (s) => s,
+): TaskClassDescription[] {
+  return listTaskClasses(table).map((c) => {
+    const r = resolveRoute(table, c);
+    const execution = table.providers[r.provider]?.execution;
+    return {
+      task_class: c,
+      provider: r.provider,
+      model: r.model,
+      execution: typeof execution === 'string' ? execution : null,
+      effort: r.effort ?? null,
+      fallback: r.fallback ? `${r.fallback.provider}/${r.fallback.model}` : null,
+      opt_in_required: r.requiresExplicitOptIn ?? false,
+      note: r.note ?? null,
+      why: r.why ?? null,
+      skills: withMandatory(r.skills ?? []),
+      mcp: r.mcp ?? [],
+      edits_code: r.editsCode,
+    };
+  });
 }
 
 /**
@@ -106,5 +178,5 @@ export function directRoute(
   }
   if (cfg.status === 'excluded') throw new Error(`provider "${provider}" is excluded from orchestration`);
   if (cfg.status === 'held') throw new Error(`provider "${provider}" is on hold and not routable yet`);
-  return { taskClass: `direct:${provider}/${model}`, provider, model, skills, mcp };
+  return { taskClass: `direct:${provider}/${model}`, provider, model, skills, mcp, editsCode: false };
 }
