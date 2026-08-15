@@ -52,18 +52,26 @@ describe('dispatch — review fixes', () => {
     expect(overridden.refusal?.instruction).not.toContain('memtrace');
   });
 
-  it('refuses the non-dispatchable orchestration class without worker packs', async () => {
+  it('refuses the non-dispatchable orchestration class on every path, without worker packs', async () => {
     const ledger = tempLedger();
     const outcome = await dispatch(
       { taskClass: 'orchestration', prompt: 'x', cwd: tempDir() }, ledger, () => fakeAdapter().adapter,
     );
-    expect(outcome.refusal?.code).toBe('claude-in-session');
-    expect(outcome.refusal?.instruction).toContain('dispatchable: false');
-    expect(outcome.refusal?.instruction).toContain('continue yourself');
+    expect(outcome.refusal?.code).toBe('not-dispatchable');
+    expect(outcome.refusal?.reason).toContain('dispatchable: false');
+    expect(outcome.refusal?.instruction).toContain('Continue yourself');
     expect(outcome.refusal?.instruction).not.toContain('worker-role');
     expect(outcome.refusal?.instruction).not.toContain('Agent tool');
     expect(outcome.skills).toEqual([]);
-    expect(ledger.recent(1)[0].skills).toBeNull();
+    expect(ledger.recent(1)[0]).toMatchObject({ refusal: 'not-dispatchable', skills: null });
+    // naming a headless subprocess route does not turn the orchestrator's own work into a worker task
+    const fake = fakeAdapter();
+    const explicit = await dispatch(
+      { taskClass: 'orchestration', provider: 'codex', model: 'gpt-5.6-luna', prompt: 'x', cwd: tempDir() }, ledger, () => fake.adapter,
+    );
+    expect(explicit.refusal?.code).toBe('not-dispatchable');
+    expect(explicit.refusal?.reason).toContain('codex/gpt-5.6-luna');
+    expect(fake.calls).toHaveLength(0);
   });
 
   it('records a failed primary before refusing an in-session fallback', async () => {

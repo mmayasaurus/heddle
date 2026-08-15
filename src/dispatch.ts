@@ -76,7 +76,7 @@ export interface DispatchRequest {
  * `refusal` column.
  */
 export interface DispatchRefusal {
-  code: 'claude-in-session' | 'depth-1' | 'max-children' | 'capability-denied';
+  code: 'claude-in-session' | 'not-dispatchable' | 'depth-1' | 'max-children' | 'capability-denied';
   reason: string;
   /** What to do instead, when there is a clear alternative. */
   instruction?: string;
@@ -373,6 +373,10 @@ export async function dispatch(
     });
   }
 
+  // ---- Non-dispatchable class (`orchestration`) — refused on EVERY path ------------------------
+  // A named subprocess route does not turn the orchestrator's own work into a worker task.
+  if (!route.dispatchable) return refuseNotDispatchable(route, req, ctx);
+
   // ---- Claude-primary → structured, ledgered in-session refusal (HED-18) ----------------------
   const execution = providerExecution(table, target.provider);
   if (execution === 'in-session-subagent') {
@@ -383,7 +387,6 @@ export async function dispatch(
       req, ctx, execution, origin,
     );
   }
-
   // ---- Run (capabilities + max-children are decided per target inside runTarget) --------------
   const primary = await runTarget(target, req, ctx, route, null);
   if (primary.ok || primary.refusal || req.noFallback || !fallback) return primary;
@@ -403,6 +406,15 @@ export async function dispatch(
 
 /** How the in-session route was chosen — the refusal reason must not misstate the YAML policy. */
 type InSessionOrigin = 'direct' | 'class' | 'explicit' | 'fallback';
+
+function refuseNotDispatchable(route: Route, req: DispatchRequest, ctx: DispatchContext): DispatchOutcome {
+  const skills = req.skills ?? route.skills ?? []; // never a worker → no mandatory pack
+  const reason = `task class "${route.taskClass}" is not dispatchable (dispatchable: false) — it is the ` +
+    `orchestrator's own in-session work` + (req.provider && req.model ? `; naming a route (${req.provider}/${req.model}) does not change that` : '') + '.';
+  const instruction = `Continue yourself; there is nothing to delegate.`;
+  return refusalOutcome(ctx, req, route.taskClass, route, skills,
+    { code: 'not-dispatchable', reason, instruction }, { execution: providerExecution(ctx.table, route.provider) });
+}
 
 function refuseInSession(
   route: RouteTarget & { taskClass: string; dispatchable: boolean; fallback?: RouteTarget },

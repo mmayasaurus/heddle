@@ -182,6 +182,8 @@ export interface TaskClassDescription {
   skills: string[];
   mcp: string[];
   edits_code: boolean;
+  /** False for the orchestrator's own class (`orchestration`): every dispatch of it is refused. */
+  dispatchable: boolean;
 }
 
 /**
@@ -205,9 +207,12 @@ export function describeTaskClasses(
       opt_in_required: r.requiresExplicitOptIn ?? false,
       note: r.note ?? null,
       why: r.why ?? null,
-      skills: withMandatory(r.skills ?? []),
+      // A non-dispatchable class never gets a worker, so no mandatory worker pack applies (matches
+      // the refusal path in dispatch.ts, which records no skills for it).
+      skills: r.dispatchable ? withMandatory(r.skills ?? []) : (r.skills ?? []),
       mcp: r.mcp ?? [],
       edits_code: r.editsCode,
+      dispatchable: r.dispatchable,
     };
   });
 }
