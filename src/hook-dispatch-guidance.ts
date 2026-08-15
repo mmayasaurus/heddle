@@ -1,4 +1,4 @@
-#!/usr/bin/env -S node --no-warnings=ExperimentalWarning
+#!/usr/bin/env -S node --disable-warning=ExperimentalWarning
 import { loadRouting } from './routing.js';
 import { hookResponse } from './guidance.js';
 
@@ -17,10 +17,26 @@ import { hookResponse } from './guidance.js';
  *       "command": "node --no-warnings=ExperimentalWarning <heddle>/dist/hook-dispatch-guidance.js" } ] } ] }
  * `HEDDLE_ROUTING` is honored (same loader as the server), so an experiment table is checked too.
  */
+/** Claude Code writes the payload and closes stdin; if a host ever left the pipe open, waiting for
+ *  EOF would stall the dispatch until the hook timeout. Read until EOF OR this many ms of silence
+ *  after the last byte, whichever comes first — fast either way. */
+const STDIN_IDLE_MS = 1500;
+
+function readStdin(): Promise<string> {
+  return new Promise((resolve) => {
+    const chunks: Buffer[] = [];
+    let timer: NodeJS.Timeout | undefined;
+    const done = () => { if (timer) clearTimeout(timer); resolve(Buffer.concat(chunks).toString('utf8')); };
+    const arm = () => { if (timer) clearTimeout(timer); timer = setTimeout(done, STDIN_IDLE_MS); };
+    process.stdin.on('data', (c: Buffer) => { chunks.push(c); arm(); });
+    process.stdin.on('end', done);
+    process.stdin.on('error', done);
+    arm();
+  });
+}
+
 async function main(): Promise<void> {
-  const chunks: Buffer[] = [];
-  for await (const c of process.stdin) chunks.push(c as Buffer);
-  const raw = Buffer.concat(chunks).toString('utf8').trim();
+  const raw = (await readStdin()).trim();
   if (!raw) return;
   const payload: unknown = JSON.parse(raw);
   const out = hookResponse(payload, loadRouting());
@@ -30,8 +46,11 @@ async function main(): Promise<void> {
 try {
   await main();
 } catch (err) {
-  process.stderr.write(`heddle dispatch-guidance hook: ${(err as Error).message ?? String(err)} (failing open)\n`);
+  const msg = err instanceof Error ? err.message : String(err);
+  process.stderr.write(`heddle dispatch-guidance hook: ${msg} (failing open)\n`);
 }
 // No process.exit(): piped stdout can be asynchronous on some platforms and an early exit could
 // truncate the JSON. stdin is consumed and nothing else is pending, so the loop drains and exits 0.
 process.exitCode = 0;
+// stdin may still be open (idle-timeout path) — drop our reference so the loop can drain and exit.
+process.stdin.destroy();

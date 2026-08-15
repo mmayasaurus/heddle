@@ -41,6 +41,13 @@ export interface DispatchRecord {
   durationMs: number | null;
   /** Set when the routing table's primary choice failed and a fallback ran. */
   fellBackFrom: string | null;
+  /**
+   * Set when heddle itself declined to run the dispatch (no worker was spawned): a short machine
+   * code such as `claude-in-session`, `depth-1`, `max-children`, `capability-denied`. `error`
+   * carries the human-readable reason. Refusals are finished rows (ok=0) so they never look
+   * in-flight, and they are queryable separately from worker failures.
+   */
+  refusal: string | null;
   startedAt: string;
   finishedAt: string | null;
 }
@@ -66,6 +73,7 @@ CREATE TABLE IF NOT EXISTS dispatches (
   reasoning_tokens INTEGER,
   duration_ms INTEGER,
   fell_back_from TEXT,
+  refusal TEXT,
   started_at TEXT NOT NULL,
   finished_at TEXT
 );
@@ -73,6 +81,15 @@ CREATE INDEX IF NOT EXISTS idx_dispatches_issue ON dispatches(issue);
 CREATE INDEX IF NOT EXISTS idx_dispatches_orch ON dispatches(orchestrator);
 CREATE INDEX IF NOT EXISTS idx_dispatches_started ON dispatches(started_at);
 `;
+
+/**
+ * Columns added after the first schema shipped. `CREATE TABLE IF NOT EXISTS` never alters an
+ * existing table, so each is added with ALTER TABLE when missing — a real ledger (~/.heddle) predates
+ * them. Additive only; the dashboard reads columns by name, so extra columns are safe.
+ */
+const MIGRATIONS: { column: string; ddl: string }[] = [
+  { column: 'refusal', ddl: 'ALTER TABLE dispatches ADD COLUMN refusal TEXT' },
+];
 
 export class Ledger {
   private db: DatabaseSync;
@@ -82,11 +99,15 @@ export class Ledger {
     this.db = new DatabaseSync(path);
     this.db.exec('PRAGMA journal_mode = WAL;');
     this.db.exec(SCHEMA);
+    const have = new Set(
+      (this.db.prepare('PRAGMA table_info(dispatches)').all() as { name: string }[]).map((c) => c.name),
+    );
+    for (const m of MIGRATIONS) if (!have.has(m.column)) this.db.exec(m.ddl);
   }
 
   /** Record a dispatch at start; returns the row id to finish() later. */
   start(r: Omit<DispatchRecord, 'id' | 'ok' | 'error' | 'inputTokens' | 'cachedInputTokens' |
-    'outputTokens' | 'reasoningTokens' | 'durationMs' | 'finishedAt' | 'startedAt'>): number {
+    'outputTokens' | 'reasoningTokens' | 'durationMs' | 'finishedAt' | 'startedAt' | 'refusal'>): number {
     const stmt = this.db.prepare(`
       INSERT INTO dispatches
         (orchestrator, task_class, provider, model, skills, issue, pr, cwd, prompt_preview,
@@ -96,6 +117,28 @@ export class Ledger {
     const info = stmt.run(
       r.orchestrator, r.taskClass, r.provider, r.model, r.skills, r.issue, r.pr, r.cwd,
       r.promptPreview.slice(0, 500), r.sessionId, r.fellBackFrom, new Date().toISOString(),
+    );
+    return Number(info.lastInsertRowid);
+  }
+
+  /**
+   * Record a dispatch heddle REFUSED to run (policy/structural cap): a finished row, ok=0, with the
+   * refusal code and reason, so the decision is auditable and never shows as in-flight.
+   */
+  refuse(
+    r: Omit<DispatchRecord, 'id' | 'ok' | 'error' | 'inputTokens' | 'cachedInputTokens' |
+      'outputTokens' | 'reasoningTokens' | 'durationMs' | 'finishedAt' | 'startedAt' | 'refusal'>,
+    refusal: string, reason: string,
+  ): number {
+    const now = new Date().toISOString();
+    const info = this.db.prepare(`
+      INSERT INTO dispatches
+        (orchestrator, task_class, provider, model, skills, issue, pr, cwd, prompt_preview,
+         session_id, fell_back_from, refusal, ok, error, started_at, finished_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+    `).run(
+      r.orchestrator, r.taskClass, r.provider, r.model, r.skills, r.issue, r.pr, r.cwd,
+      r.promptPreview.slice(0, 500), r.sessionId, r.fellBackFrom, refusal, reason, now, now,
     );
     return Number(info.lastInsertRowid);
   }

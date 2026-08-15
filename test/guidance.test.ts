@@ -46,8 +46,30 @@ describe('dispatchGuidance', () => {
     expect(warnings[0].task_class).toBe('edit-with-defaults');
   });
 
-  it('accepts an explicit non-default task-fit pack for an editing dispatch', () => {
-    expect(dispatchGuidance(table, { task_class: 'edit-with-defaults', skills: ['supabase-dev'] })).toEqual([]);
+  it('warns when an editing dispatch carries only an unrelated pack and none of the class\'s recommended ones', () => {
+    const warnings = dispatchGuidance(table, { task_class: 'edit-with-defaults', skills: ['supabase-dev'] });
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0].code).toBe('code-editing-class-without-skills');
+    expect(warnings[0].message).toContain('none of its recommended packs');
+    expect(warnings[0].message).toContain('[supabase-dev]');
+    expect(warnings[0].message).toContain('quality-gate, code-discovery');
+  });
+
+  it('stays silent when an editing dispatch carries at least one of the recommended packs (a nudge, not a nag)', () => {
+    expect(dispatchGuidance(table, { task_class: 'edit-with-defaults', skills: ['quality-gate'] })).toEqual([]);
+    expect(dispatchGuidance(table, { task_class: 'edit-with-defaults', skills: ['supabase-dev', 'code-discovery'] })).toEqual([]);
+  });
+
+  it('accepts any task-fit pack when the class lists no recommended packs of its own', () => {
+    expect(dispatchGuidance(table, { task_class: 'edit-no-defaults', skills: ['supabase-dev'] })).toEqual([]);
+  });
+
+  it('drops the "will still run" tail when the opt-in warning says the dispatcher will refuse', () => {
+    const [skillsWarning, optIn] = dispatchGuidance(table, { task_class: 'gated-edit', skills: [] });
+    expect(skillsWarning.message).not.toContain('will still run');
+    expect(optIn.message).toContain('WILL REFUSE');
+    const [alone] = dispatchGuidance(table, { task_class: 'edit-with-defaults', skills: [] });
+    expect(alone.message).toContain('will still run');
   });
 
   it('does not warn about missing task-fit packs for a non-editing class', () => {

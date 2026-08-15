@@ -122,12 +122,27 @@ choosing a worker instead:
   narrative.
 - **Skill-pack semantics (decided 2026-08-15, Maya via Agent R):** the YAML
   `skills:` list **is the dispatch default** — omit `skills` and you get it. A
-  caller's explicit list **replaces** that default. `worker-role` is
-  **mandatory** and is unioned into every dispatch by the dispatcher
-  (`withMandatoryPacks`, both the task-class and the direct provider/model
-  path) — an explicit list adds to policy, it never removes worker-role. The
-  ledger's `skills` column records what was actually materialized, so it is
-  auditable.
+  caller's explicit list **replaces** those task-fit defaults (it does not
+  merge with them). Separately, `worker-role` is **mandatory**: the dispatcher
+  unions it into whichever list applies (`withMandatoryPacks`, task-class and
+  direct paths alike), so an explicit list can add packs but can never drop
+  worker-role. A class's fallback route inherits the class `skills`/`mcp`
+  unless the fallback node sets its own (effort is per-provider, not
+  inherited). The ledger's `skills` column records what was actually
+  materialized, so it is auditable.
+- **Class + explicit route:** `dispatch_worker` accepts `task_class` **and**
+  `provider`+`model` together — the class supplies the policy (default packs,
+  MCP, opt-in gate, ledger `task_class`), the named provider/model replaces the
+  route, no fallback (naming it is the choice). This is how a class such as
+  `adversarial-review` runs on "any provider except the author's".
+- **Claude-primary classes** (`execution: in-session-subagent` —
+  implementation, deep-implementation, research-summarize, orchestration) are
+  the orchestrator's own Agent-tool subagents, not subprocesses. Since HED-18
+  the dispatcher does not throw for them: it returns a structured refusal
+  `{ok:false, refusal:{code:"claude-in-session", reason, instruction}, execution}`
+  and ledgers it (`refusal` column), where `instruction` names the model, the
+  class packs/MCP to give your subagent, and the declared fallback you can name
+  as `provider`+`model` to run it as a subprocess instead. No auto-fallback.
 - **Dispatch-guidance hook** (`dist/hook-dispatch-guidance.js`, a Claude Code
   PreToolUse hook on `mcp__heddle__dispatch_worker`): warns — never blocks —
   when (1) a code-editing class (`edits_code: true`) is dispatched with no
@@ -146,6 +161,8 @@ choosing a worker instead:
     "type": "command", "timeout": 10,
     "command": "node --no-warnings=ExperimentalWarning /Users/<you>/Developer/heddle/dist/hook-dispatch-guidance.js" }] }]
   ```
-  Same node + `dist/` path pattern as the heddle MCP entry in `~/.claude.json`;
-  honors `HEDDLE_ROUTING` like the server. Not registered by heddle itself —
-  the operator (or a future plugin install) wires it.
+  Point it at the SAME checkout's `dist/` that your `~/.claude.json` heddle
+  MCP entry uses (the canonical clone, not a transient worktree); honors
+  `HEDDLE_ROUTING` like the server. Not registered by heddle itself — the
+  operator (or a future plugin install) wires it. Verified end-to-end on
+  Claude Code 2.1.232 (`additionalContext` reached the model verbatim).

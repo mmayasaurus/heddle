@@ -1,6 +1,8 @@
-#!/usr/bin/env -S node --no-warnings=ExperimentalWarning
+#!/usr/bin/env -S node --disable-warning=ExperimentalWarning
 // node:sqlite is stable enough for our use but still flagged experimental; the warning would
-// pollute stdout parsing for agents, so it is suppressed at the entry point only.
+// pollute stdout parsing for agents, so it is suppressed at the entry point only —
+// `--disable-warning=<type>` silences just that category (`--no-warnings` would hide every
+// process warning; its `=…` suffix is ignored — verified Node 22.23, 2026-08-15).
 import { dispatch } from './dispatch.js';
 import { Ledger } from './ledger.js';
 import { loadRouting, describeTaskClasses } from './routing.js';

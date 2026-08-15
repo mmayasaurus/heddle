@@ -1,4 +1,4 @@
-#!/usr/bin/env -S node --no-warnings=ExperimentalWarning
+#!/usr/bin/env -S node --disable-warning=ExperimentalWarning
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
@@ -33,14 +33,18 @@ function errorText(msg: string) {
 server.tool(
   'dispatch_worker',
   'Dispatch one sub-task to a best-fit worker model and return its result. Use a task class ' +
-    '(preferred — it carries the routing policy) OR name provider+model directly. Workers run on ' +
-    'subscription CLIs as subprocesses; this call blocks until the worker finishes (seconds to ' +
-    'minutes). Returns {ok, output, provider, model, sessionId (resume handle), usage, ledgerId}.',
+    '(preferred — it carries the routing policy: default skills/mcp, opt-in gate), OR name ' +
+    'provider+model directly, OR both (class = policy, named model = route, no fallback). Workers ' +
+    'run on subscription CLIs as subprocesses; this call blocks until the worker finishes (seconds ' +
+    'to minutes). Returns {ok, output, provider, model, skills, sessionId (resume handle), usage, ' +
+    'ledgerId}. Claude-primary classes (execution in-session-subagent) are NOT spawned: you get ' +
+    '{ok:false, refusal:{code:"claude-in-session", instruction}} — run them with your own Agent ' +
+    'tool as instructed, or name a subprocess provider+model.',
   {
     prompt: z.string().describe('The sub-task instructions for the worker.'),
-    task_class: z.string().optional().describe('Routing task class (see list_task_classes). Use this OR provider+model.'),
-    provider: z.string().optional().describe('Direct override: codex | cursor | gemini. Requires model.'),
-    model: z.string().optional().describe('Direct override: model id for provider (e.g. cursor-grok-4.5-high).'),
+    task_class: z.string().optional().describe('Routing task class (see list_task_classes) — supplies policy. Alone: the table\'s route. With provider+model: the named route under this class\'s policy.'),
+    provider: z.string().optional().describe('Explicit route: codex | cursor | gemini. Requires model. Without task_class = direct path.'),
+    model: z.string().optional().describe('Explicit route: model id for provider (e.g. cursor-grok-4.6-high).'),
     cwd: z.string().optional().describe('Working directory for the worker (default: server cwd).'),
     issue: z.string().optional().describe('Linear issue this sub-task serves, e.g. SPI-712.'),
     agent: z.string().optional().describe("Dispatching orchestrator's fleet identity, e.g. K."),

@@ -155,9 +155,14 @@ up + discarded the moment they're no longer used. Therefore:
   mcp/fallback — this is where policy lives, tunable in one YAML without a rebuild. Each class also
   carries dispatch-time guidance (`why:` one-liner, `edits_code:`) surfaced by `list_task_classes`.
   **Skill-pack semantics (DECIDED 2026-08-15, HED-1):** the class's `skills:` list IS the dispatch
-  default when the caller omits `skills`; an explicit list REPLACES it; `worker-role` is mandatory
-  and unioned into every dispatch (both paths) by the dispatcher — an explicit list adds to policy,
-  never removes governance. The ledger `skills` column records what was actually materialized.
+  default when the caller omits `skills`; an explicit list REPLACES those task-fit defaults;
+  separately `worker-role` is mandatory and unioned into whichever list applies (both paths) — an
+  explicit list can add packs but never drops worker-role. Fallback routes inherit class skills/mcp
+  (not effort). The ledger `skills` column records what was actually materialized.
+  **Class + explicit route:** `task_class` may be combined with `provider`+`model` — class = policy,
+  named model = route, no fallback. **Claude-primary classes** return a structured, ledgered
+  `claude-in-session` refusal (HED-18) instead of throwing: the orchestrator runs them as its own
+  subagent, or names the fallback provider/model explicitly.
 - **Direct path**: orchestrator names provider+model itself — full dynamic choice, still guarded.
 - **Race-and-merge ("fusion") mode** (CONFIRMED wanted, for hard / highest-quality tasks): fan ONE
   task out to a DIVERSE cross-provider set (e.g. Opus + gpt-5.6-sol + gemini-3.1-pro + kimi-k3 +

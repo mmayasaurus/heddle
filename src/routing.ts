@@ -61,7 +61,16 @@ export function loadRouting(path = defaultRoutingPath()): RoutingTable {
   };
 }
 
-function toTarget(node: any): RouteTarget | undefined {
+/** A YAML list field must be a list: `skills: quality-gate` (a bare string) would otherwise spread
+ *  into characters downstream and read as "has packs". Loud beats silent for a policy file. */
+function listField(node: any, key: string, where: string): string[] | undefined {
+  const v = node[key];
+  if (v === undefined || v === null) return undefined;
+  if (Array.isArray(v) && v.every((x) => typeof x === 'string')) return v;
+  throw new Error(`routing table: ${where}.${key} must be a list of strings (got ${JSON.stringify(v)})`);
+}
+
+function toTarget(node: any, where = 'task class'): RouteTarget | undefined {
   if (!node) return undefined;
   return {
     provider: node.provider,
@@ -69,8 +78,8 @@ function toTarget(node: any): RouteTarget | undefined {
     effort: node.effort,
     // Provider-specific flag keys stay explicit rather than magic: codex_flags today.
     extraFlags: node.codex_flags ?? node.extra_flags,
-    skills: node.skills,
-    mcp: node.mcp,
+    skills: listField(node, 'skills', where),
+    mcp: listField(node, 'mcp', where),
     requiresExplicitOptIn: node.requires_explicit_opt_in === true,
     note: node.note,
   };
@@ -82,7 +91,7 @@ export function resolveRoute(table: RoutingTable, taskClass: string): Route {
     const known = Object.keys(table.taskClasses).join(', ');
     throw new Error(`unknown task class "${taskClass}". Known classes: ${known}`);
   }
-  const primary = toTarget(node)!;
+  const primary = toTarget(node, `task_classes.${taskClass}`)!;
   if (!primary.provider || !primary.model) {
     throw new Error(`task class "${taskClass}" is missing provider or model`);
   }
@@ -90,13 +99,25 @@ export function resolveRoute(table: RoutingTable, taskClass: string): Route {
   if (providerCfg?.status === 'excluded') {
     throw new Error(`task class "${taskClass}" routes to excluded provider "${primary.provider}"`);
   }
+  // The fallback is a different ROUTE for the same CLASS, so class-level policy (skill packs, MCP
+  // servers) carries over unless the fallback node sets its own. Effort deliberately does not: its
+  // vocabulary is per provider (codex minimal…xhigh vs agy low|medium|high; cursor bakes it into
+  // the model id), so a primary's effort would be wrong or rejected on another provider.
+  const fb = toTarget(node.fallback, `task_classes.${taskClass}.fallback`);
+  const fallback = fb ? { ...fb, skills: fb.skills ?? primary.skills, mcp: fb.mcp ?? primary.mcp } : undefined;
   return {
     taskClass,
     ...primary,
-    fallback: toTarget(node.fallback),
+    fallback,
     why: typeof node.why === 'string' ? node.why : undefined,
     editsCode: node.edits_code === true,
   };
+}
+
+/** How a provider runs workers per the table (`in-session-subagent`, `headless`, …), if declared. */
+export function providerExecution(table: RoutingTable, provider: string): string | undefined {
+  const e = table.providers[provider]?.execution;
+  return typeof e === 'string' ? e : undefined;
 }
 
 export function listTaskClasses(table: RoutingTable): string[] {

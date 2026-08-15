@@ -8,16 +8,20 @@ import { MANDATORY_PACKS, withMandatoryPacks } from './skillpacks.js';
  * the moment an orchestrator chooses a worker (docs/MODELS.md "Dispatch-time surfacing"). Two
  * cases, both data-driven from the routing table, so a YAML change tunes them without a rebuild:
  *
- *  1. A code-editing class (`edits_code: true`) dispatched with NO task-fit skill packs — i.e. the
- *     caller passed an explicit empty list, or omitted `skills` and the table lists none for the
- *     class beyond the mandatory governance pack(s). Such a worker gets no quality-gate / discovery
- *     discipline, the failure mode the packs exist to prevent.
+ *  1. A code-editing class (`edits_code: true`) dispatched WITHOUT its task-fit packs: the class
+ *     lists recommended packs (its `skills:` default minus the mandatory governance pack) and the
+ *     dispatch carries NONE of them — an explicit `skills` list that dropped them all, e.g. `[]` or
+ *     `['worker-role']` or an unrelated project pack — or the class lists none and the dispatch has
+ *     no task-fit pack at all. Such a worker gets no quality-gate / discovery discipline, the
+ *     failure mode the packs exist to prevent. Carrying at least one recommended pack is enough (a
+ *     nudge, not a nag).
  *  2. A class that `requires_explicit_opt_in` (today: second-opinion-hard) dispatched without
  *     `opt_in: true`. The dispatcher will REFUSE it anyway; the warning explains the cost up front
  *     so the orchestrator picks knowingly instead of retrying blind.
  *
- * Direct provider/model dispatches have no class → nothing here applies to them by design; the
- * class path is where the policy lives.
+ * `provider`+`model` without a class → nothing here applies (the class path is where policy lives).
+ * `provider`+`model` WITH a class → the class still supplies the policy (dispatch.ts), so the
+ * warnings above apply unchanged.
  */
 
 /** The subset of a `dispatch_worker` call the guidance looks at (MCP tool_input field names). */
@@ -55,27 +59,37 @@ export function dispatchGuidance(table: RoutingTable, input: DispatchGuidanceInp
   if (!(cls in table.taskClasses)) return warnings; // unknown class: the dispatcher will say so
 
   const route = resolveRoute(table, cls);
+  const optInMissing = Boolean(route.requiresExplicitOptIn) && input.opt_in !== true;
 
-  if (isCodeEditingClass(table, cls) && taskFitPacks(table, input).length === 0) {
+  if (isCodeEditingClass(table, cls)) {
     const defaults = withMandatoryPacks(route.skills ?? []);
     const recommended = defaults.filter((p) => !(MANDATORY_PACKS as readonly string[]).includes(p));
-    warnings.push({
-      code: 'code-editing-class-without-skills',
-      task_class: cls,
-      message:
-        `heddle: task class "${cls}" EDITS CODE but this dispatch carries no task-fit skill packs — ` +
-        `only the mandatory ${MANDATORY_PACKS.join(', ')}. The worker gets no verification / discovery ` +
-        `discipline. ` +
-        (recommended.length
-          ? `Recommended for ${cls}: ${recommended.join(', ')} — omit \`skills\` to get the class default ` +
-            `[${defaults.join(', ')}], or pass an explicit list that includes them.`
-          : `The routing table lists no default packs for ${cls} either — consider quality-gate ` +
-            `(verification) and code-discovery (graph-first navigation), or add defaults to routing.v0.yaml.`) +
-        ` (Nudge only — the dispatch will still run.)`,
-    });
+    const carried = taskFitPacks(table, input);
+    const missingFit = recommended.length
+      ? !recommended.some((p) => carried.includes(p))
+      : carried.length === 0;
+    if (missingFit) {
+      warnings.push({
+        code: 'code-editing-class-without-skills',
+        task_class: cls,
+        message:
+          `heddle: task class "${cls}" EDITS CODE but this dispatch carries ` +
+          (carried.length
+            ? `none of its recommended packs (only [${carried.join(', ')}] plus the mandatory ${MANDATORY_PACKS.join(', ')})`
+            : `no task-fit skill packs — only the mandatory ${MANDATORY_PACKS.join(', ')}`) +
+          `. The worker gets no verification / discovery discipline. ` +
+          (recommended.length
+            ? `Recommended for ${cls}: ${recommended.join(', ')} — omit \`skills\` to get the class default ` +
+              `[${defaults.join(', ')}], or pass an explicit list that includes at least one of them.`
+            : `The routing table lists no default packs for ${cls} either — consider quality-gate ` +
+              `(verification) and code-discovery (graph-first navigation), or add defaults to routing.v0.yaml.`) +
+          // Don't promise "will still run" when the opt-in warning below says the opposite.
+          (optInMissing ? '' : ' (Nudge only — the dispatch will still run.)'),
+      });
+    }
   }
 
-  if (route.requiresExplicitOptIn && input.opt_in !== true) {
+  if (optInMissing) {
     warnings.push({
       code: 'opt-in-required',
       task_class: cls,
@@ -83,7 +97,7 @@ export function dispatchGuidance(table: RoutingTable, input: DispatchGuidanceInp
         `heddle: task class "${cls}" requires explicit opt-in and this call has no \`opt_in: true\` — ` +
         `the dispatcher WILL REFUSE it. Why it is gated: ${route.note ?? 'see routing.v0.yaml'}. ` +
         `Routes to ${route.provider}/${route.model}. Pass \`opt_in: true\` only if the cost is ` +
-        `justified (ask Maya first), otherwise use a cheaper class such as second-opinion.`,
+        `justified (ask the operator first); otherwise pick a class that is not gated (see list_task_classes).`,
     });
   }
 

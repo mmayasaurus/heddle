@@ -105,3 +105,43 @@ describe('dispatch — mandatory skill materialization', () => {
     expect(row.task_class).toBe('bulk-mechanical');
   });
 });
+
+describe('dispatch — fallback carries the class packs', () => {
+  const dirs: string[] = [];
+  const ledgers: Ledger[] = [];
+
+  afterEach(() => {
+    for (const ledger of ledgers) ledger.close();
+    for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
+    dirs.length = 0;
+    ledgers.length = 0;
+  });
+
+  it('materializes the bulk-mechanical packs again when its fallback is dispatched', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'heddle-skillpacks-fallback-test-'));
+    const ledgerDir = mkdtempSync(join(tmpdir(), 'heddle-skillpacks-fallback-ledger-test-'));
+    const ledger = new Ledger(join(ledgerDir, 'ledger.db'));
+    dirs.push(cwd, ledgerDir);
+    ledgers.push(ledger);
+    const calls: { model: string; agents: string }[] = [];
+    const adapter: WorkerAdapter = {
+      name: 'fake', provider: 'codex',
+      dispatch: async (_prompt, opts) => {
+        calls.push({ model: opts.model, agents: readFileSync(join(opts.cwd, 'AGENTS.md'), 'utf8') });
+        return calls.length === 1
+          ? { ok: false, output: '', exitCode: 1, error: 'primary down' }
+          : { ok: true, output: 'done', exitCode: 0 };
+      },
+    };
+
+    const outcome = await dispatch({ taskClass: 'bulk-mechanical', prompt: 'x', cwd }, ledger, () => adapter);
+
+    expect(calls).toHaveLength(2);
+    expect(calls[1].model).toBe('composer-2.5-fast');
+    expect(calls[1].agents).toContain('### quality-gate');
+    expect(calls[1].agents).toContain('### worker-role');
+    expect(outcome.usedFallback).toBe(true);
+    expect(outcome.skills).toEqual(['worker-role', 'quality-gate']);
+    expect(ledger.recent(2)[0]).toMatchObject({ fell_back_from: 'codex/gpt-5.6-luna', skills: 'worker-role,quality-gate' });
+  });
+});

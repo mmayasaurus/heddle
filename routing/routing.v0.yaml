@@ -82,10 +82,12 @@ providers:
 # so fit + cost are visible at the moment of choosing a worker; docs/MODELS.md is the narrative):
 #   why:        one line — when to pick this class and why it routes where it does.
 #   skills:     the skill packs a dispatch of this class gets when the caller passes none. This IS
-#               the dispatch DEFAULT (routing table = where policy lives), not a suggestion; a
-#               caller's explicit `skills` list REPLACES it. `worker-role` is mandatory for every
-#               delegated worker and is unioned in by the dispatcher regardless of what is listed
-#               here or passed by the caller (an explicit list adds to policy, never removes it).
+#               the dispatch DEFAULT (routing table = where policy lives), not a suggestion. A
+#               caller's explicit `skills` list REPLACES these task-fit defaults. Separately,
+#               `worker-role` is mandatory for every delegated worker: the dispatcher unions it into
+#               whichever list applies, so an explicit list can add packs but can never drop
+#               worker-role. A class's fallback route inherits `skills`/`mcp` unless the fallback
+#               node sets its own (effort is per-provider and is not inherited).
 #   edits_code: true for classes whose workers change files. Drives the dispatch-guidance hook's
 #               "code-editing class dispatched with no task-fit packs" nudge and the `worker-role`+
 #               `quality-gate` pairing rule in MODELS.md. Review/read-only classes are false.
