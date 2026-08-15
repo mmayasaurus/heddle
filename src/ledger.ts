@@ -98,6 +98,10 @@ export class Ledger {
     mkdirSync(dirname(path), { recursive: true });
     this.db = new DatabaseSync(path);
     this.db.exec('PRAGMA journal_mode = WAL;');
+    // Several heddle processes (one MCP server per orchestrator session, CLIs, the dashboard) share
+    // this file; wait briefly for a writer instead of failing with SQLITE_BUSY, including during the
+    // migration window below (check, then ALTER).
+    this.db.exec('PRAGMA busy_timeout = 5000;');
     this.db.exec(SCHEMA);
     const have = new Set(
       (this.db.prepare('PRAGMA table_info(dispatches)').all() as { name: string }[]).map((c) => c.name),
