@@ -9,7 +9,7 @@ installs) are tracked in Linear **HED-13**.
 
 | Workflow | Trigger | Jobs | Posture |
 |---|---|---|---|
-| `gate.yml` | push `main`, PRs to `main`, manual | **`gate`** — `npm ci` → `npm run typecheck` → `npm run build` → smoke the built CLI (`classes`/`packs --json` must be non-empty arrays) | the **required** merge check (job name `gate` is the ruleset's context string — don't rename) |
+| `gate.yml` | push `main`, PRs to `main`, manual | **`gate`** — `npm ci` → `npm run typecheck` (src + test) → `npm test` (vitest) → `npm run build` → smoke the built CLI (`classes`/`packs --json` must be non-empty arrays) | the **required** merge check (job name `gate` is the ruleset's context string — don't rename) |
 | `deterministic-review.yml` | PRs (incl. drafts for gitleaks; base-branch retargets), push `main` | **semgrep** (`p/typescript` + `p/nodejs`, diff-aware vs the PR base, full on `main`, SARIF → code scanning) · **gitleaks** (official CLI over exactly `base.sha..head.sha`) | semgrep report-only · gitleaks red on a hit (not required) |
 | `actions-hygiene.yml` | PRs / `main` pushes touching `.github/**` | **actionlint** · **zizmor** (SARIF → code scanning) | actionlint red on findings · zizmor report (same-repo) / red (forks) |
 | `.github/dependabot.yml` | weekly | grouped bumps of the hash-pinned actions, 7-day cooldown | — |
@@ -22,8 +22,10 @@ exists because an unconfigured DeepSource opened ~118 non-defect threads on one 
 ## Rules baked into the workflows (don't undo them casually)
 
 - **A green scanner check is not a scan — assert the scanned volume.** The gitleaks step computes
-  `git rev-list --count --no-merges base..head` itself and reds the job on any `ERR`/`[git]`/`fatal`
-  line in gitleaks' log or a "N commits scanned" mismatch. Origin: in a `container:` job the
+  `git rev-list --count --no-merges base..head` itself, runs gitleaks with `--no-color` so its log is
+  exactly zerolog's `<time> <LEVEL> <msg>`, and reds the job when any line's LEVEL is `ERR`/`FTL`
+  or the `INF N commits scanned` count is below the expected number (a finding whose path merely
+  contains "ERR" cannot trip it). Origin: in a `container:` job the
   workspace is owned by the runner uid and `actions/checkout` writes its `safe.directory` entry to a
   temporary HOME, so gitleaks' internal `git log` failed with "dubious ownership" — and gitleaks
   still exited 0 with "0 commits scanned … no leaks found". Two rounds of a PR were green with an
