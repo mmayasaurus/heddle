@@ -99,6 +99,13 @@ providers:
 #   edits_code: true for classes whose workers change files. Drives the dispatch-guidance hook's
 #               "code-editing class dispatched with no task-fit packs" nudge and the `worker-role`+
 #               `quality-gate` pairing rule in MODELS.md. Review/read-only classes are false.
+#   read_only:  (HED-3) the worker must not change the worktree: heddle passes a read-only sandbox where
+#               the CLI has one (codex --sandbox read-only; claude --tools Read,Grep,Glob) and always
+#               snapshots `git status`/`git diff` before+after — a mutated worktree is a MANDATE
+#               VIOLATION recorded on the review row (findings are still returned).
+#   auto_assess: (HED-3) run assess_result on the worker's output and return the assessment with it.
+#   reviewer_pool: (HED-3) ordered provider/model alternatives used when the caller names the
+#               author's provider (`author_provider`) — a reviewer must be a DIFFERENT family.
 task_classes:
   orchestration:            # decompose, integrate, judge, land — the orchestrator itself
     provider: claude
@@ -173,6 +180,20 @@ task_classes:
     why: cheap second draft to compare against a primary — same family as second-opinion, lower effort
     skills: [worker-role]
     edits_code: false
+  adversarial-review:       # HED-3 (Maya: "super important") — a DIFFERENT model family reviews a diff/
+    provider: cursor        #   worktree read-only, find-only; the author fixes; the ledger scores each
+    model: cursor-grok-4.6-high   # author→reviewer provider pair by accepted-finding rate.
+    fallback: {provider: gemini, model: gemini-3.1-pro-high}
+    reviewer_pool:          # first entry whose provider differs from `author_provider` is used
+      - {provider: cursor, model: cursor-grok-4.6-high}
+      - {provider: gemini, model: gemini-3.1-pro-high}
+      - {provider: codex, model: gpt-5.6-sol}
+      - {provider: claude, model: opus}
+    why: pre-PR adversarial review by another model family, read-only + find-only, with a test-quality lens (a toggle test is not a behavior test); the author fixes, the ledger scores reviewer pairs
+    skills: [worker-role, adversarial-review]
+    edits_code: false
+    read_only: true
+    auto_assess: true
   gemini-analysis:          # long-context reading, doc/log analysis, cross-checking
     provider: gemini
     model: gemini-3.1-pro-high
