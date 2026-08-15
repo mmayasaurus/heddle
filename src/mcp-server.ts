@@ -7,6 +7,7 @@ import { Ledger } from './ledger.js';
 import { loadRouting, describeTaskClasses } from './routing.js';
 import { listPacks, withMandatoryPacks } from './skillpacks.js';
 import { classifyEffort, assessResult } from './classify.js';
+import { resolveIdentity } from './identity.js';
 
 /**
  * heddle MCP server — the orchestration surface as MCP tools.
@@ -22,6 +23,11 @@ import { classifyEffort, assessResult } from './classify.js';
  */
 
 const server = new McpServer({ name: 'heddle', version: '0.0.1' });
+
+// Identity is bound ONCE, from this process's environment (HEDDLE_AGENT / FLEET_AGENT / .fleet-agent),
+// never from a tool argument — HED-65. If this server was started inside a heddle worker
+// (HEDDLE_WORKER=1) every dispatch is refused with `depth-1` (src/identity.ts, src/dispatch.ts).
+const IDENTITY = resolveIdentity();
 
 function text(obj: unknown) {
   return { content: [{ type: 'text' as const, text: typeof obj === 'string' ? obj : JSON.stringify(obj, null, 2) }] };
@@ -47,7 +53,7 @@ server.tool(
     model: z.string().optional().describe('Explicit route: model id for provider (e.g. cursor-grok-4.6-high).'),
     cwd: z.string().optional().describe('Working directory for the worker (default: server cwd).'),
     issue: z.string().optional().describe('Linear issue this sub-task serves, e.g. SPI-712.'),
-    agent: z.string().optional().describe("Dispatching orchestrator's fleet identity, e.g. K."),
+    agent: z.string().optional().describe("Dispatching orchestrator's fleet identity, e.g. K — used only when this heddle process has no bound identity (HEDDLE_AGENT/FLEET_AGENT/.fleet-agent); a bound identity always wins and the result says which."),
     skills: z.array(z.string()).optional().describe(
       'Skill packs to load (see list_skill_packs). Omit to get the task class\'s default packs ' +
       '(the `skills` column of list_task_classes); an explicit list REPLACES that default. ' +
@@ -57,7 +63,11 @@ server.tool(
     auto_effort: z.boolean().optional().describe('Classify the sub-task difficulty (cheap model) and pin effort automatically, if effort not set.'),
     resume: z.string().optional().describe('Resume a prior worker session by its sessionId.'),
     codex_home: z.string().optional().describe('Account selection for codex workers (CODEX_HOME path).'),
-    opt_in: z.boolean().optional().describe('Required for task classes gated behind explicit opt-in.'),
+    opt_in: z.boolean().optional().describe('Required for task classes gated behind explicit opt-in, and to grant the exec-privileged capability.'),
+    capabilities: z.array(z.string()).optional().describe(
+      'Capabilities to GRANT the worker: net | browse | exec-privileged (default: none — default-deny). ' +
+      'Grants are ledgered and passed only to a provider whose CLI can enforce them (codex); an ' +
+      'unenforceable or unknown grant is refused (refusal.code=capability-denied).'),
     no_fallback: z.boolean().optional().describe('Do not try the routing table fallback on failure.'),
     timeout_ms: z.number().optional().describe('Wall-clock budget (default 600000).'),
   },
@@ -82,6 +92,8 @@ server.tool(
         optIn: a.opt_in,
         noFallback: a.no_fallback,
         timeoutMs: a.timeout_ms,
+        capabilities: a.capabilities,
+        identity: IDENTITY,
       });
       const { raw, ...summary } = res;
       return text(summary);
@@ -150,9 +162,10 @@ server.tool(
 
 server.tool(
   'check_workers',
-  'List dispatches still in flight (started, not yet finished) for this heddle instance.',
+  'List dispatches still in flight (started, not yet finished) for this heddle instance, plus this ' +
+    "server's bound identity (who dispatches are attributed to) and whether it is running inside a worker.",
   {},
-  async () => text(new Ledger().inFlight()),
+  async () => text({ identity: IDENTITY, in_flight: new Ledger().inFlight() }),
 );
 
 server.tool(

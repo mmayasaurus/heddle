@@ -117,6 +117,25 @@ export function resolveRoute(table: RoutingTable, taskClass: string): Route {
   };
 }
 
+/** Structural caps (HED-2) — from `policy.structural_caps` in the routing YAML, with defaults. */
+export interface StructuralCaps {
+  /** Max workers one orchestrator may have in flight at once. */
+  max: number;
+  /** In-flight rows older than this are treated as orphaned and do not hold a slot. */
+  staleAfterMs: number;
+}
+export const DEFAULT_STRUCTURAL_CAPS: StructuralCaps = { max: 8, staleAfterMs: 3 * 60 * 60 * 1000 };
+
+export function structuralCaps(table: RoutingTable): StructuralCaps {
+  const node = (table.policy as any)?.structural_caps ?? {};
+  const max = Number(node.max_children_per_orchestrator);
+  const stale = Number(node.in_flight_stale_after_ms);
+  return {
+    max: Number.isInteger(max) && max > 0 ? max : DEFAULT_STRUCTURAL_CAPS.max,
+    staleAfterMs: Number.isFinite(stale) && stale > 0 ? stale : DEFAULT_STRUCTURAL_CAPS.staleAfterMs,
+  };
+}
+
 /** How a provider runs workers per the table (`in-session-subagent`, `headless`, …), if declared. */
 export function providerExecution(table: RoutingTable, provider: string): string | undefined {
   const e = table.providers[provider]?.execution;

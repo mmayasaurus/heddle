@@ -33,7 +33,7 @@ export interface DispatchGuidanceInput {
   opt_in?: boolean;
 }
 
-export type GuidanceCode = 'code-editing-class-without-skills' | 'opt-in-required';
+export type GuidanceCode = 'code-editing-class-without-skills' | 'opt-in-required' | 'subagent-dispatch';
 
 export interface GuidanceWarning {
   code: GuidanceCode;
@@ -113,12 +113,26 @@ export function dispatchGuidance(table: RoutingTable, input: DispatchGuidanceInp
  * call (which would skip the user's own permission flow) nor blocks it.
  */
 export function hookResponse(payload: unknown, table: RoutingTable): string | null {
-  const p = (payload ?? {}) as { tool_name?: unknown; tool_input?: unknown };
+  const p = (payload ?? {}) as { tool_name?: unknown; tool_input?: unknown; agent_id?: unknown; agent_type?: unknown };
   const toolName = typeof p.tool_name === 'string' ? p.tool_name : '';
   // Matched by settings.json (`mcp__heddle__dispatch_worker`), but be defensive: any other tool → silent.
   if (!/(^|__)dispatch_worker$/.test(toolName)) return null;
   const input = (p.tool_input && typeof p.tool_input === 'object' ? p.tool_input : {}) as DispatchGuidanceInput;
   const warnings = dispatchGuidance(table, input);
+  // Depth-1 (HED-2) for in-session Claude subagents: the hook payload carries `agent_id` only when
+  // the call comes from inside a subagent. The server cannot see that (it is the orchestrator's own
+  // MCP process), so this stays a nudge — subprocess workers are refused server-side.
+  if (typeof p.agent_id === 'string' && p.agent_id) {
+    warnings.push({
+      code: 'subagent-dispatch',
+      task_class: input.task_class ?? (input.provider && input.model ? `direct:${input.provider}/${input.model}` : '?'),
+      message:
+        `heddle: this dispatch_worker call comes from inside a subagent (${String(p.agent_type ?? 'agent')} ` +
+        `${p.agent_id}). Structural policy is depth-1 — workers do not dispatch workers; subprocess ` +
+        `workers are refused server-side, and an in-session subagent should hand further delegation ` +
+        `back to its orchestrator. (Nudge only.)`,
+    });
+  }
   if (warnings.length === 0) return null;
   return JSON.stringify({
     hookSpecificOutput: {

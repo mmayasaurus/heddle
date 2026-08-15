@@ -27,18 +27,21 @@ export class CodexAdapter implements WorkerAdapter {
     private readonly ignoreUserConfig = true,
   ) {}
 
-  async dispatch(prompt: string, opts: DispatchOptions): Promise<WorkerResult> {
-    // `approval_policy="never"` is load-bearing for headless work: without it, tool calls that
-    // would otherwise prompt — notably MCP tool calls (memtrace/serena) — are auto-cancelled with
-    // "user cancelled MCP tool call" because there is no TTY to approve them. `never` auto-proceeds
-    // within the sandbox, which is the correct unattended-worker posture. `codex exec` takes this
-    // via `-c` config override (there is no `--ask-for-approval` flag on the exec subcommand).
-    // Capability grants (src/capabilities.ts) → the only flags that widen the default-deny posture:
-    //  - exec-privileged: no sandbox at all (`danger-full-access`), operator-opted-in upstream;
-    //  - net: workspace-write keeps outbound network OFF by default (official sandbox docs) —
-    //    `sandbox_workspace_write.network_access=true` turns it on;
-    //  - browse: `web_search` defaults to "cached" (OpenAI index, no external access); "live" is
-    //    unrestricted retrieval.
+  /**
+   * The exact argv for one dispatch — pure, so tests can pin the invocation contract.
+   * `approval_policy="never"` is load-bearing for headless work: without it, tool calls that
+   * would otherwise prompt — notably MCP tool calls (memtrace/serena) — are auto-cancelled with
+   * "user cancelled MCP tool call" because there is no TTY to approve them. `never` auto-proceeds
+   * within the sandbox, which is the correct unattended-worker posture. `codex exec` takes this
+   * via `-c` config override (there is no `--ask-for-approval` flag on the exec subcommand).
+   * Capability grants (src/capabilities.ts) are the only flags that widen the default-deny posture:
+   *  - exec-privileged: no sandbox at all (`danger-full-access`), operator-opted-in upstream;
+   *  - net: workspace-write keeps outbound network OFF by default (official sandbox docs) —
+   *    `sandbox_workspace_write.network_access=true` turns it on;
+   *  - browse: `web_search` defaults to "cached" (OpenAI index, no external access); "live" is
+   *    unrestricted retrieval.
+   */
+  buildArgs(prompt: string, opts: DispatchOptions): string[] {
     const caps = new Set(opts.capabilities ?? []);
     const sandbox = caps.has('exec-privileged') ? 'danger-full-access' : this.sandbox;
     const args = ['exec', '--json', '--skip-git-repo-check',
@@ -49,6 +52,11 @@ export class CodexAdapter implements WorkerAdapter {
     if (opts.effort) args.push('-c', `model_reasoning_effort="${opts.effort}"`);
     if (opts.resume) args.push('resume', opts.resume);
     args.push('-m', opts.model, ...(opts.extraFlags ?? []), prompt);
+    return args;
+  }
+
+  async dispatch(prompt: string, opts: DispatchOptions): Promise<WorkerResult> {
+    const args = this.buildArgs(prompt, opts);
 
     const started = Date.now();
     const { stdout, stderr, exitCode } =

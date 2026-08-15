@@ -109,6 +109,37 @@ get a temporary `AGENTS.md` block (restored after dispatch).
 
 Authoritative contracts: `docs/LANDMINES.md`. Authoritative map: the YAML.
 
+## Structural caps (BUILT — HED-2, 2026-08-15; Scape-derived, clean-room)
+
+Enforced in `src/dispatch.ts`, not in prompts. Every refusal is a **finished
+ledger row** (`refusal` column = the code below, `error` = the reason) and a
+structured `{ok:false, refusal:{code, reason, instruction}}` result — never a
+silent no-op, never left in flight.
+
+| Cap | Rule | Refusal code |
+|---|---|---|
+| **depth-1** | A heddle **worker** cannot dispatch workers. Every worker subprocess is stamped `HEDDLE_WORKER=1`, `HEDDLE_DISPATCH_ID=<ledger id>`, `HEDDLE_PARENT=<orchestrator>`; a heddle MCP server or CLI started inside that env refuses every dispatch. In-session Claude subagents can't be told apart server-side (same MCP process as the orchestrator) — the dispatch-guidance hook nudges (`subagent-dispatch`) when the payload carries `agent_id`. | `depth-1` |
+| **max-children** | One orchestrator may have at most `policy.structural_caps.max_children_per_orchestrator` (default **8**) workers in flight; the count and the new row are written in ONE `BEGIN IMMEDIATE` transaction, so concurrent dispatches — even from different heddle processes — can't both slip under the cap. Rows older than `in_flight_stale_after_ms` (default 3 h) are orphans and don't hold a slot; close them with `heddle workers --stale <h>` + `heddle ledger finish <id> --error "…"`. | `max-children` |
+| **capabilities** | Default-deny. `dispatch_worker.capabilities` / `--capabilities` grants from the allowlist `net`, `browse`, `exec-privileged`; grants are ledgered (`capabilities` column) and passed **only** to a CLI that can enforce them. Unknown token, `exec-privileged` without `opt_in: true`, or a grant the provider can't enforce → refused, never pretended. | `capability-denied` |
+| **identity** | Who a dispatch is attributed to is bound ONCE per process (`HEDDLE_AGENT` → `FLEET_AGENT` → `.fleet-agent` file → unbound), never chosen by the model; the tool's `agent` arg is used only when unbound and the ledger records `identity_source` (`bound` / `caller`). `dispatches.id`/`orchestrator` are immutable (DB trigger). `heddle whoami` shows the binding. | — |
+
+Capability enforcement matrix (verified against each CLI's own docs/help,
+2026-08-15 — `docs/LANDMINES.md`):
+
+| Provider | `net` | `browse` | `exec-privileged` |
+|---|---|---|---|
+| codex | `-c sandbox_workspace_write.network_access=true` (workspace-write keeps network **off** by default) | `-c web_search="live"` (default `cached` = OpenAI index, no external access) | `--sandbox danger-full-access` |
+| cursor | — | — | — |
+| gemini (agy) | — | — | — |
+| claude | in-session (refused as `claude-in-session` first) | | |
+
+Cursor/agy have no per-capability flags heddle can pass, so a grant there is
+refused; note that their headless workers are also **not** network-fenced by
+heddle today (documented gap — their `--sandbox` flags exist but their
+network/fs semantics are unverified). Class + explicit route
+(`task_class` + `provider`/`model`) is the way to move a capability-needing task
+onto codex under the class's policy.
+
 ## Dispatch-time surfacing (BUILT — HED-1, 2026-08-15)
 
 The tiny SessionStart primer stays tiny; the guidance lives at the moment of

@@ -167,6 +167,21 @@ flags churn monthly.
   used-percentage + reset times. Unofficial and could break, but it's the only proactive quota
   signal available anywhere in this stack — reuse it for route-away-before-exhaustion.
 
+## Capabilities & sandboxes (HED-2, verified 2026-08-15)
+
+- **Codex `workspace-write` keeps outbound network OFF by default** (official sandbox docs: "the default
+  workspace-write sandbox mode keeps network access turned off unless you enable it in your
+  configuration") — enable per dispatch with `-c sandbox_workspace_write.network_access=true`. Codex
+  `web_search` defaults to `"cached"` (OpenAI-maintained index, no external access); `"live"` is
+  unrestricted retrieval; `--yolo`/full-access flips the default to live. `--sandbox
+  danger-full-access` = no sandbox, no approvals. These three are the ONLY capability flags heddle
+  passes (src/capabilities.ts → src/adapters/codex.ts `buildArgs`).
+- **cursor-agent has `--sandbox enabled|disabled` and agy has `--sandbox`** (terminal restrictions),
+  but neither documents network/filesystem semantics and neither has a network or web-search knob —
+  heddle therefore cannot enforce (or deny) `net`/`browse` on them: a grant is refused, and their
+  headless workers are NOT network-fenced by heddle today. Verifying what those `--sandbox` flags
+  actually restrict is a follow-up before default-enabling them.
+
 ## Worker MCP attachment (memtrace) — worktrees
 
 - **memtrace indexes the canonical checkout, not your worktree.** A worker dispatched into a git
