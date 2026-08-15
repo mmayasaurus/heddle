@@ -1,0 +1,42 @@
+import { describe, expect, it } from 'vitest';
+import { pickClaudeAccount, type ClaudeAccount } from '../src/capaware.js';
+import type { ProviderCaps } from '../src/usage.js';
+
+const registry: ClaudeAccount[] = [{ id: 'acct1', configDir: null }, { id: 'acct2', configDir: '/x/.claude-acct2' }, { id: 'acct3', configDir: '/x/.claude-acct3' }];
+const claudeCaps = (rows: Array<{ id: string; used: number | null; stale?: boolean }>): ProviderCaps => ({ provider: 'claude', source: 'limits.json', stale: false, capturedAt: 1, fiveHour: { usedPercentage: null, resetsAt: null }, sevenDay: { usedPercentage: null, resetsAt: null }, windows: {}, noteCodes: [], activeAccount: null, accounts: rows.map(({ id, used, stale = false }) => ({ id, fiveHour: { usedPercentage: used, resetsAt: null }, sevenDay: { usedPercentage: null, resetsAt: null }, windows: {}, noteCodes: [], limitReached: false, stale })) });
+
+describe('pickClaudeAccount', () => {
+  it('chooses the freshest registered account with the most five-hour headroom', () => {
+    const pick = pickClaudeAccount(claudeCaps([{ id: 'acct1', used: 68 }, { id: 'acct2', used: 1 }, { id: 'acct3', used: 1, stale: true }]), registry)!;
+    expect(pick).toMatchObject({ account: { id: 'acct2' }, usedPct: 1, env: { CLAUDE_CONFIG_DIR: '/x/.claude-acct2' }, envUnset: [] });
+    expect(pick.reason).toContain('account:acct2 (5h 1%, most headroom of 2 fresh)');
+  });
+
+  it('unsets the inherited config directory when the default login has the only fresh capture', () => {
+    const pick = pickClaudeAccount(claudeCaps([{ id: 'acct1', used: 68 }, { id: 'acct2', used: null, stale: true }, { id: 'acct3', used: null, stale: true }]), registry)!;
+    expect(pick).toMatchObject({ account: { id: 'acct1' }, env: {}, envUnset: ['CLAUDE_CONFIG_DIR'] });
+    expect(pick.reason).toContain('most headroom of 1 fresh');
+  });
+
+  it('falls back to the default account without fresh captures or the first account when none is default', () => {
+    expect(pickClaudeAccount(claudeCaps(registry.map((a) => ({ id: a.id, used: null, stale: true }))), registry)).toMatchObject({ account: { id: 'acct1' }, reason: expect.stringContaining('default (no fresh per-account caps)'), envUnset: ['CLAUDE_CONFIG_DIR'] });
+    expect(pickClaudeAccount(undefined, registry.slice(1))).toMatchObject({ account: { id: 'acct2' }, env: { CLAUDE_CONFIG_DIR: '/x/.claude-acct2' } });
+  });
+
+  it('honors a registered pin even when stale and rejects an unknown account pin with known ids', () => {
+    expect(pickClaudeAccount(claudeCaps([{ id: 'acct3', used: 1, stale: true }]), registry, { pin: 'acct3' })).toMatchObject({ account: { id: 'acct3' }, usedPct: null, reason: 'account:acct3 pinned', env: { CLAUDE_CONFIG_DIR: '/x/.claude-acct3' } });
+    expect(() => pickClaudeAccount(undefined, registry, { pin: 'nope' })).toThrow(/account_pin "nope".*acct1.*acct2.*acct3/);
+    expect(pickClaudeAccount(undefined, registry, { pin: 'acct1' })?.envUnset).toEqual(['CLAUDE_CONFIG_DIR']);
+  });
+
+  it('still selects the least-used fresh account when every account is at or over the route-away threshold', () => {
+    const pick = pickClaudeAccount(claudeCaps([{ id: 'acct1', used: 95 }, { id: 'acct2', used: 97 }]), registry, { routeAwayAtPct: 90 })!;
+    expect(pick.account.id).toBe('acct1');
+    expect(pick.reason).toContain('every fresh account is at/over 90%');
+  });
+
+  it('returns null for an empty registry and preserves registry order for equal fresh usage', () => {
+    expect(pickClaudeAccount(undefined, [])).toBeNull();
+    expect(pickClaudeAccount(claudeCaps([{ id: 'acct1', used: 20 }, { id: 'acct2', used: 20 }]), registry)?.account.id).toBe('acct1');
+  });
+});

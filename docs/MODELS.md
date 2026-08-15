@@ -150,23 +150,49 @@ and records why it chose what it chose (`route_reason` in the ledger).
   the `plan_dispatch` MCP tool print the decision, the checks, the remaining
   fallback and the account advice — no ledger row, no worker.
 
-## Claude accounts (HED-68 — advisory today)
+## Claude workers & automatic account switching (BUILT — HED-78, 2026-08-15)
 
-`~/.heddle/accounts.json` (`claude[]: {id, configDir|null, email, note}`;
-`configDir: null` = the default login — do NOT set `CLAUDE_CONFIG_DIR` for it,
-`claude auth status` reports logged-out that way) is the registry of Maya's
-Claude Max20 accounts. The statusline tap writes per-account caps to
-`~/.heddle/usage/claude-<acctId>.json`. Because heddle's Claude workers are the
-orchestrator's own in-session subagents (same account as the parent), heddle
-cannot rotate them by itself yet — so today it **advises**: every
-`claude-in-session` refusal, `heddle route implementation` and `plan_dispatch`
-end with `Claude accounts: acct3 has the most 5h headroom (12 % used); this
-session is on acct1 (43 %) — CLAUDE_CONFIG_DIR=…`, and the ledger `account`
-column records the advised account. Operating guidance until rotation is real:
-pin ~2 orchestrators per account. Codex workers record `account` =
-`basename(CODEX_HOME)` when the caller selects one. A true out-of-process
-Claude worker (headless `claude -p` under `CLAUDE_CONFIG_DIR`) is a design
-decision for Maya — drafted, not built (see the HED-67/68 PR).
+Maya: "Yes let's def build the auto account switching!" — so Claude classes now
+run as **out-of-process `claude -p` workers** on the registry account with the
+most 5h headroom (src/adapters/claude.ts + `pickClaudeAccount()` in
+src/capaware.ts), which ends the manual log-out/log-in juggling:
+
+- **Registry** `~/.heddle/accounts.json` (`claude[]: {id, configDir|null,
+  email, note}`; `configDir: null` = the default login — heddle UNSETS
+  `CLAUDE_CONFIG_DIR` for it: setting it explicitly to `~/.claude` changes
+  resolution and `claude auth status` reports logged-out, verified by R).
+  Per-account caps come from the tap's `~/.heddle/usage/claude-<acctId>.json`
+  (or the dashboard's `limits.json` account rows).
+- **Selection**: the account with the lowest 5h used% among those with a
+  FRESH capture; `account_pin` / `--account <id>` overrides; nothing fresh → the
+  default login. The ledger `account` column records the account actually
+  used and `route_reason` carries `account:<id> (5h x%, most headroom of N
+  fresh)` / `pinned` / `default (no fresh per-account caps)`.
+- **Contract** (`claude -p <prompt> --output-format json --model <m>
+  [--effort e] [--resume id] --append-system-prompt <packs> [--mcp-config
+  <tmp> --strict-mcp-config] --permission-mode acceptEdits --allowedTools …`;
+  stdin closed; exit 0 + empty stdout = failure; never `--bare`): skill packs
+  travel on the command line (nothing written into the worktree — no AGENTS.md
+  race for Claude workers), MCP via a per-dispatch temp file. Posture =
+  `acceptEdits` + an explicit tool allowlist (`DEFAULT_CLAUDE_ALLOWED_TOOLS`:
+  read/edit the workspace, run the repo's own scripts, inspect git —
+  LANDMINES: `--permission-mode auto` aborts headless); `browse` adds
+  WebFetch/WebSearch, `exec-privileged` (two keys) → `--dangerously-skip-permissions`,
+  `net` unenforceable → refused. Billing = the subscription OAuth of the
+  config dir; `buildWorkerEnv` strips every API-key/base-URL var.
+- **In-session stays available**: `dispatch_worker(in_session: true)` /
+  `heddle dispatch --in-session` returns the structured `claude-in-session`
+  instruction (run it as your own Agent-tool subagent: shared prompt cache,
+  same account) plus the account advice line.
+- **Route-away stays on**: at Claude 5h ≥ `route_away_at_pct` (90) a Claude
+  class runs its declared fallback (codex/…) instead — Maya's default (lower
+  the knob if Claude should hold).
+- **Live-verified 2026-08-15**: two haiku workers, `heddle dispatch --class
+  research-summarize` → ledger `account=acct1` (default, session persisted
+  under `~/.claude/projects/…`) and `--account acct2` → `account=acct2`
+  (session persisted under `~/.claude-acct2/projects/…`), both `OK`.
+- Codex workers record `account` = `basename(CODEX_HOME)` when the caller
+  selects one.
 
 ## Structural caps (BUILT — HED-2, 2026-08-15; Scape-derived, clean-room)
 

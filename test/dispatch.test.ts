@@ -71,7 +71,7 @@ describe('dispatch — class + explicit route, and in-session refusal', () => {
     const fake = fakeAdapter();
     const ledger = tempLedger();
     const outcome = await dispatch(
-      { taskClass: 'implementation', prompt: 'x', cwd: tempDir(), orchestrator: 'U', issue: 'HED-1' },
+      { taskClass: 'implementation', prompt: 'x', cwd: tempDir(), orchestrator: 'U', issue: 'HED-1', inSession: true },
       ledger, () => fake.adapter,
     );
     expect(outcome.ok).toBe(false);
@@ -90,7 +90,7 @@ describe('dispatch — class + explicit route, and in-session refusal', () => {
   it('returns a structured in-session refusal for a direct Claude route without invoking an adapter', async () => {
     const fake = fakeAdapter();
     const ledger = tempLedger();
-    const outcome = await dispatch({ provider: 'claude', model: 'opus', prompt: 'x', cwd: tempDir() }, ledger, () => fake.adapter);
+    const outcome = await dispatch({ provider: 'claude', model: 'opus', prompt: 'x', cwd: tempDir(), inSession: true }, ledger, () => fake.adapter);
     expect(outcome.refusal?.code).toBe('claude-in-session');
     expect(outcome.taskClass).toBe('direct:claude/opus');
     expect(fake.calls).toHaveLength(0);
@@ -100,7 +100,7 @@ describe('dispatch — class + explicit route, and in-session refusal', () => {
   it('returns an in-session refusal for a class policy paired with an explicit Claude route', async () => {
     const fake = fakeAdapter();
     const outcome = await dispatch(
-      { taskClass: 'bulk-mechanical', provider: 'claude', model: 'haiku', prompt: 'x', cwd: tempDir() },
+      { taskClass: 'bulk-mechanical', provider: 'claude', model: 'haiku', prompt: 'x', cwd: tempDir(), inSession: true },
       tempLedger(), () => fake.adapter,
     );
     expect(outcome.refusal?.code).toBe('claude-in-session');
@@ -118,7 +118,7 @@ describe('dispatch — class + explicit route, and in-session refusal', () => {
   });
 
   it('words a direct claude route\'s refusal as a direct route, not a task class', async () => {
-    const outcome = await dispatch({ provider: 'claude', model: 'opus', prompt: 'x', cwd: tempDir() }, tempLedger(), () => fakeAdapter().adapter);
+    const outcome = await dispatch({ provider: 'claude', model: 'opus', prompt: 'x', cwd: tempDir(), inSession: true }, tempLedger(), () => fakeAdapter().adapter);
     expect(outcome.refusal?.reason).toMatch(/^direct route claude\/opus names a provider that runs as an in-session subagent/);
     expect(outcome.refusal?.instruction).not.toContain('declared fallback');
   });

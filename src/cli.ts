@@ -35,6 +35,8 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
       --opt-in             required for task classes that gate on it (and for exec-privileged)
       --no-fallback        do not try the table's fallback on failure
       --capabilities a,b   GRANT worker capabilities: net | browse | exec-privileged (default: none)
+      --in-session         claude classes: return the in-session (Agent tool) instruction instead of a headless worker
+      --account <id>       claude classes: pin the registry account (default: most 5h headroom)
       --json               machine-readable result
 
   heddle classify-effort --class <c> --task "<prompt>" [--json]   difficulty → effort (cheap model)
@@ -108,6 +110,8 @@ try {
         optIn: has('--opt-in'),
         noFallback: has('--no-fallback'),
         capabilities: arg('--capabilities')?.split(',').map((s) => s.trim()).filter(Boolean),
+        inSession: has('--in-session'),
+        accountPin: arg('--account'),
       });
 
       const { raw, ...summary } = res;
@@ -137,6 +141,7 @@ try {
       const plan = planDispatch({
         taskClass, provider, model, prompt: '(dry run)', cwd: arg('--cwd') ?? process.cwd(),
         optIn: has('--opt-in'), env: Object.keys(env).length ? env : undefined,
+        inSession: has('--in-session'), accountPin: arg('--account'),
       });
       const summary = {
         task_class: plan.route.taskClass,
@@ -149,6 +154,7 @@ try {
         refusal: plan.decision.refusal ?? null,
         checks: plan.decision.checks,
         account: plan.account,
+        account_pick: plan.accountPick ? { id: plan.accountPick.account.id, used_pct: plan.accountPick.usedPct, reason: plan.accountPick.reason, config_dir: plan.accountPick.account.configDir } : null,
         account_advice: plan.accountAdvice?.line ?? null,
         skills: plan.skillsForRefusal,
       };
@@ -159,6 +165,7 @@ try {
             (summary.routed_away_for_cap ? '  (routed away for cap)' : '')) +
         `\n  reason: ${summary.route_reason}` +
         (summary.remaining_fallback ? `\n  fallback if it fails: ${summary.remaining_fallback}` : '') +
+        (summary.account_pick ? `\n  ${summary.account_pick.reason}` : '') +
         (summary.account_advice ? `\n  ${summary.account_advice}` : '') +
         `\n  checks:\n    - ${summary.checks.join('\n    - ')}`);
       break;
@@ -190,6 +197,7 @@ try {
         (r.fallback ? `  ↳ ${r.fallback}` : '') +
         (r.opt_in_required ? '  [opt-in required]' : '') +
         (r.execution === 'in-session-subagent' ? '  [in-session: use your Agent tool — heddle dispatch refuses it]' : '') +
+        (r.provider === 'claude' ? '  [claude: headless on the account with most headroom; --in-session keeps the subagent protocol]' : '') +
         (r.edits_code ? '  [edits code]' : '') +
         `\n${''.padEnd(23)}skills: ${r.skills.join(', ') || '(none)'}` +
         (r.mcp.length ? `  mcp: ${r.mcp.join(', ')}` : '') +
