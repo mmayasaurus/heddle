@@ -1,0 +1,73 @@
+# Workflow hygiene — actionlint + zizmor over .github/, only when a change
+# touches it (path-filtered at the trigger; the deterministic tier's other
+# scanners live in deterministic-review.yml). Part of HED-11.
+#
+#   actionlint — syntax / expression / shellcheck-style lint of workflow files.
+#                Findings fail the job (they are real errors: an invalid
+#                workflow file is a zero-job red ✗ on every future run).
+#   zizmor     — Actions-specific security audit (template injection, unpinned
+#                actions, excessive permissions, artipacked credentials …).
+#                Findings upload as SARIF to code scanning (free on public repos)
+#                and surface as the "Code scanning results / zizmor" check.
+#
+# Runs on the PR's own copy of the workflows, so a PR that edits CI audits
+# itself. Fork PRs are skipped for zizmor (SARIF upload needs a write token);
+# actionlint needs no token and runs for everyone.
+name: Workflow Hygiene
+
+on:
+  pull_request:
+    paths:
+      - ".github/**"
+  push:
+    branches: [main]
+    paths:
+      - ".github/**"
+
+permissions: {}
+
+concurrency:
+  group: actions-hygiene-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # rhysd/actionlint's documented Docker usage, version- AND digest-pinned
+      # (the docs' `:latest` is a moving target). Digest = the multi-arch
+      # manifest list for 1.7.12 on Docker Hub, resolved 2026-08-15.
+      - name: actionlint
+        uses: docker://rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
+        with:
+          args: -color
+
+  zizmor:
+    name: zizmor
+    if: >-
+      github.event_name == 'push' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      security-events: write  # SARIF upload to code scanning
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # zizmor's official action; defaults = persona regular, online audits on
+      # (uses the job token for read-only GitHub API lookups), SARIF upload on.
+      - name: zizmor
+        uses: zizmorcore/zizmor-action@3dc1ecc9bcb9e94e9b2c709687979e1298497054 # v0.6.2

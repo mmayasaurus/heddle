@@ -1,0 +1,86 @@
+# Gate — the required merge check for heddle (core).
+#
+# What it proves: the TypeScript compiles under `strict` (`npm run typecheck`),
+# `npm run build` emits dist/, and the emitted CLI actually starts and reads its
+# own routing table + skill packs (`classes` / `packs` are offline commands — no
+# provider CLI, no network, no ledger writes). "tsc passed" alone is not "it
+# runs"; the smoke step is the difference.
+#
+# What it does NOT prove: there is no lint and no test suite in this repo yet
+# (HED-15). Dispatch/adapters need real provider CLIs and are not exercised here.
+#
+# Runs on GitHub-hosted runners — the repo is public, so minutes are free. The
+# job NAME `gate` is the required-status-check context string for the "Protect
+# main" ruleset (HED-13); renaming it silently un-requires the gate.
+#
+# Hardening (zizmor-clean): every action hash-pinned (Dependabot bumps the pins,
+# see .github/dependabot.yml), workflow-level `permissions: {}`, checkout without
+# persisted credentials (nothing here pushes, so build steps never see a token).
+name: Gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  # Break-glass manual run, e.g. to re-check main after a runner-side outage.
+  workflow_dispatch: {}
+
+permissions: {}
+
+# A superseded run is dead weight: cancel it and let the newest commit's run
+# report. The gate is a per-commit required check, so a cancelled stale run
+# never reds the PR verdict — only the latest commit's run counts.
+concurrency:
+  group: gate-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    # Required-check context string — do not rename (see header).
+    name: gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          # Matches devDependencies (@types/node ^22) and the `node:sqlite`
+          # ledger (Node >= 22.5).
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+
+      # Behavioral smoke: the built CLI must start, parse routing/routing.yaml,
+      # and enumerate skills/. `--json` output is asserted non-empty so a silent
+      # empty table can't pass as green.
+      - name: Smoke the built CLI (offline commands)
+        run: |
+          set -euo pipefail
+          node dist/cli.js >/dev/null            # usage text, exit 0
+          # Each command's --json output must be a NON-EMPTY array.
+          check_nonempty_array() {
+            node -e '
+              let s = ""; process.stdin.on("data", d => s += d).on("end", () => {
+                const v = JSON.parse(s);
+                if (!Array.isArray(v) || v.length === 0) { console.error(process.argv[1] + ": empty result"); process.exit(1); }
+                console.log(process.argv[1] + ": " + v.length + " entries");
+              });' "$1"
+          }
+          node dist/cli.js classes --json | check_nonempty_array classes
+          node dist/cli.js packs   --json | check_nonempty_array packs

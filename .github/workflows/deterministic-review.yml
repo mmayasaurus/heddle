@@ -1,0 +1,126 @@
+# Deterministic Review — the NON-AI reviewer tier (ported from Spinventory's
+# deterministic-review.yml, Maya-approved there 2026-07-13; heddle port is HED-11).
+#
+# Zero-flake scanners that catch what a rule engine catches every single time,
+# complementing whatever AI reviewers Maya enables (HED-13):
+#   semgrep   — registry rulesets p/typescript + p/nodejs. DIFF-AWARE on PRs
+#               (--baseline-commit = the PR's base SHA: only findings this PR
+#               introduces), FULL on pushes to main (so the Security tab holds
+#               the whole picture, not just deltas).
+#   gitleaks  — secrets in the PR's commits (official gitleaks-action: scans
+#               base^..head, values are REDACTED, inline PR comments on hits,
+#               job goes red on a real hit — a secret in a public repo is a P1,
+#               and rotating it is the fix, not re-running CI).
+# Workflow hygiene (actionlint + zizmor) lives in actions-hygiene.yml, path-
+# filtered to .github/ changes.
+#
+# Where findings show up — DIFFERENT PLUMBING from Spinventory, SAME DISCIPLINE:
+# instead of a hand-rolled, sanitized PR-comment poster, semgrep results are
+# uploaded as SARIF to GitHub code scanning (free on public repos): they render
+# as the "Code scanning results / semgrep" check + inline annotations on the PR
+# and in the repo's Security tab. gitleaks posts its own inline review comments.
+# The PR sweep (see the review discipline doc, HED-16) must read code-scanning
+# alerts + the checks tab, not only comments/reviews/threads.
+#
+# Posture: semgrep is REPORT-ONLY (the job never reds on findings; code
+# scanning's own "check failure" threshold decides whether its check reds —
+# repo default: errors only). gitleaks is BLOCKING-red but NOT a required
+# check. Neither can post for FORK PRs (read-only token) — those jobs are
+# skipped via the same-repo guard until an outside-contributor path is designed.
+#
+# Hardening (zizmor-clean): every action hash-pinned + Dependabot-bumped,
+# workflow-level `permissions: {}`, checkout without persisted credentials,
+# no PR-controlled strings expanded into run: blocks.
+name: Deterministic Review
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+  push:
+    branches: [main]
+
+permissions: {}
+
+# Superseded runs are cancelled (hosted minutes are free but finite, and only
+# the latest commit's results matter — nothing here maintains a living comment).
+concurrency:
+  group: det-review-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  semgrep:
+    name: semgrep (diff-aware on PRs · full on main)
+    # Dependabot PRs get a read-only token that cannot upload SARIF (semgrep's
+    # own sample config skips them). Drafts + fork PRs skipped (see header).
+    if: >-
+      github.actor != 'dependabot[bot]' &&
+      (github.event_name == 'push' ||
+       (github.event.pull_request.draft == false &&
+        github.event.pull_request.head.repo.full_name == github.repository))
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write  # SARIF upload to code scanning
+    container:
+      # Semgrep's documented CI image (docs.semgrep.dev sample-ci-configs),
+      # version-pinned. Bump deliberately: newer rules = new findings.
+      image: semgrep/semgrep:1.173.0@sha256:67319956da3dcb58baf5b322899c15458e3963e7018a86aeeb5cd224e69cb77a
+    steps:
+      - name: Checkout (full history — the baseline commit must be present)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Scan
+        env:
+          # PR: base SHA of the PR (the merge commit's first parent) — semgrep
+          # reports only findings absent from it. Push: empty → full scan.
+          BASELINE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -u
+          ARGS=(scan --config p/typescript --config p/nodejs
+                --metrics=off --sarif-output=semgrep.sarif
+                --exclude node_modules --exclude dist)
+          if [ -n "$BASELINE" ]; then
+            echo "diff-aware scan: baseline $BASELINE"
+            ARGS+=(--baseline-commit="$BASELINE")
+          else
+            echo "full scan (push to main)"
+          fi
+          # No --error: report-only tier. A tool crash / unparseable output is
+          # still an honest red (the upload step needs the file).
+          semgrep "${ARGS[@]}"
+
+      - name: Upload SARIF to code scanning
+        uses: github/codeql-action/upload-sarif@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep
+
+  gitleaks:
+    name: gitleaks (secrets)
+    # Drafts ARE scanned (a leaked secret does not wait for ready_for_review);
+    # fork PRs skipped — the action needs pull-requests: write to comment.
+    if: >-
+      github.event_name == 'push' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write  # inline review comments on findings
+    steps:
+      - name: Checkout (full history — the action scans base^..head)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Free for personal-account repos (mmayasaurus is a User, verified
+      # 2026-08-15); GITLEAKS_LICENSE is only required for organizations.
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
