@@ -137,7 +137,8 @@ The `CommsLog` class (`src/comms/log.ts`) manages persistence and participant re
   refused. Sealed decisions are frozen (seal-then-mutate is impossible) and their `dispatchId` is
   authoritative (a contradicting caller value is refused). The decision's `code` / `reason` /
   `evidence` / `requestedTier` / `downgradedFrom` land in `meta` (`tierCode`, `tierReason`,
-  `lineage`, `requestedTier`, `downgradedFrom`). Also validated: `replyTo` positive AND existing,
+  `lineage`, `requestedTier`, `downgradedFrom` — these keys are broker-owned: whatever a caller
+  puts under them is dropped, `RESERVED_META_KEYS`). Also validated: `replyTo` positive AND existing,
   `dispatchId` positive integer, `issue` ≤ 64 chars, `thread` ≤ 128 chars. Defaults: `kind = chat`.
   Returns the written `MessageRecord`.
 - `get(id: number): MessageRecord | null`

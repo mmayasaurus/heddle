@@ -103,6 +103,14 @@ WHEN NEW.address <> OLD.address OR NEW.kind <> OLD.kind OR NEW.parent IS NOT OLD
 BEGIN SELECT RAISE(ABORT, 'participant lineage is immutable: only last_seen/label may change'); END;
 `;
 
+/**
+ * Meta keys the broker owns. They describe the tier decision and are written ONLY from a sealed
+ * decision — whatever a caller puts under these names is dropped, so a sender cannot plant a
+ * fake `downgradedFrom` / `tierCode` that would later render as broker-looking header text.
+ */
+export const RESERVED_META_KEYS: readonly string[] =
+  ['tierCode', 'tierReason', 'lineage', 'requestedTier', 'downgradedFrom'];
+
 export interface CommsLogOptions {
   /** Clock override for deterministic tests; must return ISO-8601. */
   now?: () => string;
@@ -192,7 +200,11 @@ export class CommsLog {
     let tier: Tier = 'agent-message';
     let verified = false;
     let dispatchId = msg.dispatchId ?? null;
-    const metaObj: Record<string, unknown> | null = msg.meta == null ? null : { ...msg.meta };
+    let metaObj: Record<string, unknown> | null = null;
+    if (msg.meta != null) {
+      if (typeof msg.meta !== 'object' || Array.isArray(msg.meta)) throw new Error('meta must be a plain object');
+      metaObj = Object.fromEntries(Object.entries(msg.meta).filter(([k]) => !RESERVED_META_KEYS.includes(k)));
+    }
     if (decision !== undefined) {
       if (!isSealed(decision)) {
         throw new Error('tier decisions must come from the broker (decideTier); this one is not sealed');
