@@ -178,3 +178,21 @@ describe('hookResponse', () => {
     expect(parsed.systemMessage).toContain('opt-in-required');
   });
 });
+
+describe('dispatchGuidance — review fixes', () => {
+  it('ignores prototype names as unknown task classes', () => {
+    expect(dispatchGuidance(table, { task_class: 'toString', skills: [] })).toEqual([]);
+    expect(dispatchGuidance(table, { task_class: 'constructor', skills: [] })).toEqual([]);
+  });
+
+  it('describes an explicit route when warning that an opt-in class will refuse', () => {
+    const [explicit] = dispatchGuidance(table, { task_class: 'gated', provider: 'codex', model: 'm1' });
+    expect(explicit.code).toBe('opt-in-required');
+    expect(explicit.message).toContain('explicit route codex/m1');
+    expect(explicit.message).toContain('cursor/k1 will not run');
+
+    const [defaultRoute] = dispatchGuidance(table, { task_class: 'gated' });
+    expect(defaultRoute.message).toContain('Routes to cursor/k1');
+    expect(defaultRoute.message).not.toContain('explicit route');
+  });
+});

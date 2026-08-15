@@ -30,6 +30,12 @@ export interface Route extends RouteTarget {
    * hook's no-task-fit-packs nudge. Strictly the boolean `true` — anything else reads as false.
    */
   editsCode: boolean;
+  /**
+   * False when the class is the orchestrator's OWN work and is never delegated (YAML
+   * `dispatchable: false`, today only `orchestration`): dispatching it is refused with an
+   * instruction to continue in-session, and no delegated-worker pack is suggested. Default true.
+   */
+  dispatchable: boolean;
 }
 
 export interface RoutingTable {
@@ -114,6 +120,7 @@ export function resolveRoute(table: RoutingTable, taskClass: string): Route {
     fallback,
     why: typeof node.why === 'string' ? node.why : undefined,
     editsCode: node.edits_code === true,
+    dispatchable: node.dispatchable !== false,
   };
 }
 
@@ -202,5 +209,5 @@ export function directRoute(
   }
   if (cfg.status === 'excluded') throw new Error(`provider "${provider}" is excluded from orchestration`);
   if (cfg.status === 'held') throw new Error(`provider "${provider}" is on hold and not routable yet`);
-  return { taskClass: `direct:${provider}/${model}`, provider, model, skills, mcp, editsCode: false };
+  return { taskClass: `direct:${provider}/${model}`, provider, model, skills, mcp, editsCode: false, dispatchable: true };
 }

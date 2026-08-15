@@ -98,6 +98,7 @@ task_classes:
     why: decompose, integrate, judge, land — the orchestrator's own in-session work; never dispatched to a subprocess
     skills: []
     edits_code: false
+    dispatchable: false     # the orchestrator's OWN class — a dispatch of it is refused ("continue in-session")
   deep-implementation:      # gnarly features, cross-cutting refactors, subtle bugs
     provider: claude
     model: opus

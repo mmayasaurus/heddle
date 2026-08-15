@@ -79,3 +79,65 @@ describe('Ledger.refuse + refusal-column migration', () => {
     }).not.toThrow();
   });
 });
+
+describe('Ledger — usage excludes refusals; migration tolerates a concurrent ALTER', () => {
+  const dirs: string[] = [];
+  const ledgers: Ledger[] = [];
+
+  afterEach(() => {
+    for (const ledger of ledgers) ledger.close();
+    for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
+    dirs.length = 0;
+    ledgers.length = 0;
+  });
+
+  function tempPath(): string {
+    const dir = mkdtempSync(join(tmpdir(), 'heddle-ledger-review-test-'));
+    dirs.push(dir);
+    return join(dir, 'ledger.db');
+  }
+
+  function record(provider: string) {
+    return { orchestrator: 'U', taskClass: 'implementation', provider, model: 'm1', skills: null, issue: null, pr: null, cwd: '/tmp/x', promptPreview: 'p', sessionId: null, fellBackFrom: null };
+  }
+
+  it('counts refusals separately from dispatched work in provider usage', () => {
+    const ledger = new Ledger(tempPath());
+    ledgers.push(ledger);
+    const id = ledger.start(record('codex'));
+    ledger.finish(id, { ok: true, inputTokens: 100 });
+    ledger.refuse(record('claude'), 'claude-in-session', 'why');
+    ledger.refuse(record('claude'), 'claude-in-session', 'why');
+    ledger.refuse(record('codex'), 'claude-in-session', 'why');
+
+    const [codex, claude] = ledger.usageByProvider();
+    expect(codex).toMatchObject({ provider: 'codex', dispatches: 1, succeeded: 1, refusals: 1, input_tokens: 100 });
+    expect(claude).toMatchObject({ provider: 'claude', dispatches: 0, succeeded: 0, refusals: 2, input_tokens: 0 });
+  });
+
+  it('opens an already-migrated old schema and documents SQLite duplicate-column behavior', () => {
+    const path = tempPath();
+    const old = new DatabaseSync(path);
+    old.exec(`
+      CREATE TABLE dispatches (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, orchestrator TEXT, task_class TEXT NOT NULL,
+        provider TEXT NOT NULL, model TEXT NOT NULL, skills TEXT, issue TEXT, pr INTEGER,
+        cwd TEXT NOT NULL, prompt_preview TEXT NOT NULL, session_id TEXT,
+        ok INTEGER NOT NULL DEFAULT 0, error TEXT, input_tokens INTEGER, cached_input_tokens INTEGER,
+        output_tokens INTEGER, reasoning_tokens INTEGER, duration_ms INTEGER, fell_back_from TEXT,
+        started_at TEXT NOT NULL, finished_at TEXT
+      );
+    `);
+    old.exec('ALTER TABLE dispatches ADD COLUMN refusal TEXT');
+    old.close();
+
+    expect(() => {
+      const ledger = new Ledger(path);
+      ledger.close();
+    }).not.toThrow();
+
+    const migrated = new DatabaseSync(path);
+    expect(() => migrated.exec('ALTER TABLE dispatches ADD COLUMN refusal TEXT')).toThrow(/duplicate column name/i);
+    migrated.close();
+  });
+});

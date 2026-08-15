@@ -43,7 +43,7 @@ server.tool(
   {
     prompt: z.string().describe('The sub-task instructions for the worker.'),
     task_class: z.string().optional().describe('Routing task class (see list_task_classes) — supplies policy. Alone: the table\'s route. With provider+model: the named route under this class\'s policy.'),
-    provider: z.string().optional().describe('Explicit route: codex | cursor | gemini. Requires model. Without task_class = direct path.'),
+    provider: z.string().optional().describe('Explicit route: codex | cursor | gemini (the agy CLI). Requires model (both or neither). Without task_class = direct path. "claude" is accepted but returns a structured claude-in-session refusal (Claude workers are your own Agent-tool subagents).'),
     model: z.string().optional().describe('Explicit route: model id for provider (e.g. cursor-grok-4.6-high).'),
     cwd: z.string().optional().describe('Working directory for the worker (default: server cwd).'),
     issue: z.string().optional().describe('Linear issue this sub-task serves, e.g. SPI-712.'),

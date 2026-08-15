@@ -3,7 +3,7 @@ import { CodexAdapter } from './adapters/codex.js';
 import { CursorAdapter } from './adapters/cursor.js';
 import { Ledger } from './ledger.js';
 import {
-  loadRouting, resolveRoute, directRoute, providerExecution, type Route, type RouteTarget,
+  loadRouting, resolveRoute, directRoute, providerExecution, type Route, type RouteTarget, type RoutingTable,
 } from './routing.js';
 import { materializeAgentsMd, withMandatoryPacks } from './skillpacks.js';
 import { materializeWorkerMcp, codexMcpFlags } from './mcp.js';
@@ -100,7 +100,7 @@ export function defaultAdapterFor(provider: string): WorkerAdapter {
 
 async function runTarget(
   target: RouteTarget, req: DispatchRequest, ledger: Ledger, route: Route,
-  fellBackFrom: string | null, adapterFor: AdapterFactory,
+  fellBackFrom: string | null, adapterFor: AdapterFactory, table: RoutingTable,
 ): Promise<DispatchOutcome> {
   // Caller's explicit list REPLACES the table default; the mandatory governance pack(s) are unioned
   // into whichever applies (see skillpacks.ts) — the ledger records the result, so it is auditable.
@@ -173,6 +173,7 @@ async function runTarget(
     skills,
     ledgerId,
     usedFallback: fellBackFrom !== null,
+    execution: providerExecution(table, target.provider),
   };
 }
 
@@ -190,13 +191,22 @@ export async function dispatch(
     } catch { /* fall through */ }
   }
 
+  // A route override is provider AND model, or neither — a lone half would silently run the class's
+  // default route (or the wrong one), so it is rejected outright.
+  if (Boolean(req.provider) !== Boolean(req.model)) {
+    throw new Error(
+      `dispatch: provider and model must be given together (got provider=${JSON.stringify(req.provider ?? null)}, ` +
+      `model=${JSON.stringify(req.model ?? null)})`,
+    );
+  }
+
   // Direct path, no class: orchestrator named the model. Full dynamic choice, still policy-fenced.
   if (!req.taskClass) {
     if (req.provider && req.model) {
       const route = directRoute(table, req.provider, req.model, req.skills, req.mcp);
       const execution = providerExecution(table, route.provider);
-      if (execution === 'in-session-subagent') return refuseInSession(route, req, ledger, execution);
-      return runTarget(route, req, ledger, route, null, adapterFor);
+      if (execution === 'in-session-subagent') return refuseInSession(route, req, ledger, execution, 'direct');
+      return runTarget(route, req, ledger, route, null, adapterFor, table);
     }
     throw new Error('dispatch requires either a task class or an explicit provider+model');
   }
@@ -215,11 +225,15 @@ export async function dispatch(
     const explicit = directRoute(table, req.provider, req.model, req.skills ?? route.skills, req.mcp ?? route.mcp);
     const execution = providerExecution(table, explicit.provider);
     if (execution === 'in-session-subagent') {
-      return refuseInSession({ ...explicit, taskClass: route.taskClass, mcp: explicit.mcp }, req, ledger, execution);
+      // Keep the class's declared fallback so the instruction can still name a subprocess route.
+      return refuseInSession(
+        { ...route, provider: explicit.provider, model: explicit.model, skills: explicit.skills, mcp: explicit.mcp },
+        req, ledger, execution, 'explicit',
+      );
     }
     // Effort is deliberately NOT inherited from the class (per-provider vocabulary) — pass it explicitly.
     const target: RouteTarget = { ...explicit, effort: req.effort };
-    return runTarget(target, req, ledger, route, null, adapterFor);
+    return runTarget(target, req, ledger, route, null, adapterFor, table);
   }
 
   // Claude-primary classes run as the orchestrator's OWN in-session subagents (shared prompt cache,
@@ -227,37 +241,59 @@ export async function dispatch(
   // structured, ledgered refusal instead of throwing (decided 2026-08-15, HED-18): the orchestrator
   // uses its Agent tool with the routed model, or names provider+model to run the class elsewhere.
   const execution = providerExecution(table, route.provider);
-  if (execution === 'in-session-subagent') return refuseInSession(route, req, ledger, execution);
+  if (execution === 'in-session-subagent') return refuseInSession(route, req, ledger, execution, 'class');
 
-  const primary = await runTarget(route, req, ledger, route, null, adapterFor);
+  const primary = await runTarget(route, req, ledger, route, null, adapterFor, table);
   if (primary.ok || req.noFallback || !route.fallback) return primary;
 
   // Primary failed and the table names a fallback — try it, recording the origin so the ledger
-  // shows which routes actually hold up in practice.
-  return runTarget(route.fallback, req, ledger, route, `${route.provider}/${route.model}`, adapterFor);
+  // shows which routes actually hold up in practice. A fallback that is itself in-session (custom
+  // tables) gets the same structured refusal instead of a throw.
+  const fbExecution = providerExecution(table, route.fallback.provider);
+  if (fbExecution === 'in-session-subagent') {
+    return refuseInSession(
+      { ...route, provider: route.fallback.provider, model: route.fallback.model,
+        skills: route.fallback.skills, mcp: route.fallback.mcp, fallback: undefined },
+      req, ledger, fbExecution, 'fallback', `${route.provider}/${route.model}`,
+    );
+  }
+  return runTarget(route.fallback, req, ledger, route, `${route.provider}/${route.model}`, adapterFor, table);
 }
 
-function refuseInSession(route: Route, req: DispatchRequest, ledger: Ledger, execution: string): DispatchOutcome {
-  const skills = withMandatoryPacks(req.skills ?? route.skills ?? []);
-  const alt = route.fallback ? ` To run it as a subprocess instead, name provider+model explicitly ` +
+/** How the in-session route was chosen — the refusal reason must not misstate the YAML policy. */
+type InSessionOrigin = 'direct' | 'class' | 'explicit' | 'fallback';
+
+function refuseInSession(
+  route: Route, req: DispatchRequest, ledger: Ledger, execution: string, origin: InSessionOrigin,
+  fellBackFrom: string | null = null,
+): DispatchOutcome {
+  // `orchestration` (dispatchable: false) is the orchestrator's OWN work — no worker pack applies.
+  const skills = route.dispatchable ? withMandatoryPacks(req.skills ?? route.skills ?? []) : (req.skills ?? route.skills ?? []);
+  const mcp = req.mcp ?? route.mcp ?? []; // the caller's override wins, exactly as it would on a run
+  const alt = route.fallback && route.dispatchable ? ` To run it as a subprocess instead, name provider+model explicitly ` +
     `(e.g. provider="${route.fallback.provider}", model="${route.fallback.model}" — the class's ` +
     `declared fallback) with the same task_class.` : '';
-  const reason = (route.taskClass.startsWith('direct:')
-      ? `direct route ${route.provider}/${route.model} names a provider that`
-      : `task class "${route.taskClass}" routes to ${route.provider}/${route.model}, which`) +
-    ` runs as an in-session subagent of the orchestrator, not a subprocess heddle can spawn.`;
-  const instruction =
-    `Use your own Agent tool with model "${route.model}" and skills [${skills.join(', ')}]` +
-    (route.mcp?.length ? ` and MCP [${route.mcp.join(', ')}]` : '') + `.` + alt;
+  const head = {
+    direct: `direct route ${route.provider}/${route.model} names a provider that`,
+    class: `task class "${route.taskClass}" routes to ${route.provider}/${route.model}, which`,
+    explicit: `task class "${route.taskClass}" was given the explicit route ${route.provider}/${route.model}, which`,
+    fallback: `task class "${route.taskClass}" fell back to ${route.provider}/${route.model} (its declared fallback), which`,
+  }[origin];
+  const reason = `${head} runs as an in-session subagent of the orchestrator, not a subprocess heddle can spawn.`;
+  const instruction = route.dispatchable
+    ? `Use your own Agent tool with model "${route.model}" and skills [${skills.join(', ')}]` +
+      (mcp.length ? ` and MCP [${mcp.join(', ')}]` : '') + `.` + alt
+    : `"${route.taskClass}" is the orchestrator's own in-session work (dispatchable: false) — ` +
+      `continue yourself; there is nothing to delegate.`;
   const ledgerId = ledger.refuse({
     orchestrator: req.orchestrator ?? null, taskClass: route.taskClass, provider: route.provider,
-    model: route.model, skills: skills.join(','), issue: req.issue ?? null, pr: null, cwd: req.cwd,
-    promptPreview: req.prompt, sessionId: null, fellBackFrom: null,
+    model: route.model, skills: skills.length ? skills.join(',') : null, issue: req.issue ?? null, pr: null,
+    cwd: req.cwd, promptPreview: req.prompt, sessionId: null, fellBackFrom,
   }, 'claude-in-session', reason);
   return {
     ok: false, output: '', exitCode: null, error: `${reason} ${instruction}`,
     taskClass: route.taskClass, provider: route.provider, model: route.model, skills, ledgerId,
-    usedFallback: false, execution,
+    usedFallback: fellBackFrom !== null, execution,
     refusal: { code: 'claude-in-session', reason, instruction },
   };
 }
