@@ -374,8 +374,10 @@ export async function dispatch(
   }
 
   // ---- Non-dispatchable class (`orchestration`) — refused on EVERY path ------------------------
-  // A named subprocess route does not turn the orchestrator's own work into a worker task.
-  if (!route.dispatchable) return refuseNotDispatchable(route, req, ctx);
+  // A named subprocess route does not turn the orchestrator's own work into a worker task. The
+  // structured fields + ledger row report the route the caller actually named (target), the class
+  // stays the ledger's task_class.
+  if (!route.dispatchable) return refuseNotDispatchable({ ...route, provider: target.provider, model: target.model }, req, ctx);
 
   // ---- Claude-primary → structured, ledgered in-session refusal (HED-18) ----------------------
   const execution = providerExecution(table, target.provider);
@@ -421,10 +423,10 @@ function refuseInSession(
   req: DispatchRequest, ctx: DispatchContext, execution: string, origin: InSessionOrigin,
   fellBackFrom: string | null = null,
 ): DispatchOutcome {
-  // `orchestration` (dispatchable: false) is the orchestrator's OWN work — no worker pack applies.
-  const skills = route.dispatchable ? withMandatoryPacks(req.skills ?? route.skills ?? []) : (req.skills ?? route.skills ?? []);
+  // (Non-dispatchable classes never reach here — refuseNotDispatchable handles them earlier.)
+  const skills = withMandatoryPacks(req.skills ?? route.skills ?? []);
   const mcp = req.mcp ?? route.mcp ?? []; // the caller's override wins, exactly as it would on a run
-  const alt = route.fallback && route.dispatchable ? ` To run it as a subprocess instead, name provider+model explicitly ` +
+  const alt = route.fallback ? ` To run it as a subprocess instead, name provider+model explicitly ` +
     `(e.g. provider="${route.fallback.provider}", model="${route.fallback.model}" — the class's ` +
     `declared fallback) with the same task_class.` : '';
   const head = {
@@ -434,11 +436,9 @@ function refuseInSession(
     fallback: `task class "${route.taskClass}" fell back to ${route.provider}/${route.model} (its declared fallback), which`,
   }[origin];
   const reason = `${head} runs as an in-session subagent of the orchestrator, not a subprocess heddle can spawn.`;
-  const instruction = route.dispatchable
-    ? `Use your own Agent tool with model "${route.model}" and skills [${skills.join(', ')}]` +
-      (mcp.length ? ` and MCP [${mcp.join(', ')}]` : '') + `.` + alt
-    : `"${route.taskClass}" is the orchestrator's own in-session work (dispatchable: false) — ` +
-      `continue yourself; there is nothing to delegate.`;
+  const instruction =
+    `Use your own Agent tool with model "${route.model}" and skills [${skills.join(', ')}]` +
+    (mcp.length ? ` and MCP [${mcp.join(', ')}]` : '') + `.` + alt;
   const id = ctx.ledger.refuse(
     baseRecord(ctx, req, route.taskClass, route, skills, fellBackFrom), 'claude-in-session', reason,
   );

@@ -189,7 +189,8 @@ choosing a worker instead:
   `orchestration` is `dispatchable: false` — it is the orchestrator's OWN work;
   a dispatch of it is refused on EVERY path (class, class + explicit route,
   whatever the named provider) with code `not-dispatchable`, "continue
-  yourself", no worker pack; `list_task_classes` exposes `dispatchable` and
+  yourself", and no mandatory worker pack is added (a caller-supplied `skills`
+  list is echoed as given); `list_task_classes` exposes `dispatchable` and
   lists no mandatory pack for it. Refusal rows are excluded from `heddle usage`
   dispatch/success counts (reported as a separate `refusals` column).
 - **Dispatch-guidance hook** (`dist/hook-dispatch-guidance.js`, a Claude Code
