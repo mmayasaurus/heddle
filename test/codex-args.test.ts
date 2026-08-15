@@ -2,10 +2,10 @@ import { describe, it, expect } from 'vitest';
 import { CodexAdapter } from '../src/adapters/codex.js';
 
 describe('CodexAdapter.buildArgs — invocation contract', () => {
-  it('builds the default-deny invocation exactly', () => {
+  it('builds the default-deny invocation exactly (web_search pinned to cached, never left to the CLI default)', () => {
     expect(new CodexAdapter().buildArgs('do it', { model: 'gpt-5.6-luna', cwd: '/tmp' })).toEqual([
       'exec', '--json', '--skip-git-repo-check', '--sandbox', 'workspace-write', '-c',
-      'approval_policy="never"', '--ignore-user-config', '-m', 'gpt-5.6-luna', 'do it',
+      'approval_policy="never"', '-c', 'web_search="cached"', '--ignore-user-config', '-m', 'gpt-5.6-luna', 'do it',
     ]);
   });
 
@@ -36,10 +36,16 @@ describe('CodexAdapter.buildArgs — invocation contract', () => {
     expect(custom).not.toContain('--ignore-user-config');
   });
 
-  it('does not include any capability-widening flags by default', () => {
+  it('does not include any capability-widening flags by default (web_search stays cached, even under exec-privileged)', () => {
     const args = new CodexAdapter().buildArgs('do it', { model: 'm', cwd: '/tmp' }).join(' ');
     expect(args).not.toContain('danger-full-access');
     expect(args).not.toContain('network_access');
-    expect(args).not.toContain('web_search');
+    expect(args).toContain('web_search="cached"');
+    expect(args).not.toContain('web_search="live"');
+    // exec-privileged flips codex's own web_search default to live — the explicit cached pin must hold
+    const privileged = new CodexAdapter().buildArgs('do it', { model: 'm', cwd: '/tmp', capabilities: ['exec-privileged'] }).join(' ');
+    expect(privileged).toContain('danger-full-access');
+    expect(privileged).toContain('web_search="cached"');
+    expect(privileged).not.toContain('web_search="live"');
   });
 });

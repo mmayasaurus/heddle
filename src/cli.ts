@@ -212,6 +212,10 @@ try {
 
     case 'workers': {
       const staleHours = arg('--stale');
+      if (staleHours !== undefined && !(Number.isFinite(Number(staleHours)) && Number(staleHours) > 0)) {
+        console.error('usage: heddle workers [--stale <hours>] — <hours> must be a positive number');
+        process.exit(2);
+      }
       const ledger = new Ledger();
       const rows = staleHours ? ledger.staleInFlight(Number(staleHours) * 3_600_000) : ledger.inFlight();
       out(json, rows, () => rows.length
