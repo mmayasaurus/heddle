@@ -123,6 +123,8 @@ export interface DispatchOutcome extends WorkerResult {
   routeReason?: string;
   /** Account the worker was billed to / advised (codex: CODEX_HOME basename; claude advisory: best acct id). */
   account?: string | null;
+  /** Set on capability-denied refusals: which check failed (`unenforceable` means a fallback may fit). */
+  capabilityRefusalKind?: 'unknown-token' | 'operator-gate' | 'opt-in' | 'unenforceable';
 }
 
 /** Resolves a provider name to its adapter. Injectable into dispatch() so tests can run the full
@@ -214,8 +216,10 @@ async function runTarget(
   if (caps.refusal) {
     return refusalOutcome(ctx, req, route.taskClass, target, skills, {
       code: caps.refusal.code, reason: caps.refusal.reason,
-      instruction: 'Drop the capability, or dispatch to a provider that can enforce it (see docs/MODELS.md "Capabilities").',
-    }, { usedFallback: fellBackFrom !== null }, undefined, fellBackFrom);
+      instruction: caps.refusal.kind === 'unenforceable'
+        ? 'Dispatch to a provider that can enforce it (class + explicit provider/model), or drop the capability (see docs/MODELS.md "Capabilities").'
+        : 'Drop the capability, or fix the call (see docs/MODELS.md "Capabilities").',
+    }, { usedFallback: fellBackFrom !== null, capabilityRefusalKind: caps.refusal.kind } as Partial<DispatchOutcome>, undefined, fellBackFrom);
   }
 
   // HED-19: fail fast, BEFORE a ledger row exists, on anything materialization would reject —
@@ -305,7 +309,9 @@ async function runTarget(
     // reported in the outcome error instead).
     for (const restore of [restoreMcp, restoreSkills]) {
       try { restore(); } catch (err) {
-        const note = `restore failed: ${err instanceof Error ? err.message : String(err)}`;
+        // Non-fatal by convention: `cleanup-warning:` on an ok=1 row means the WORK succeeded but a
+        // materialized file could not be restored — inspect the worktree; the result stands.
+        const note = `cleanup-warning: restore failed: ${err instanceof Error ? err.message : String(err)}`;
         result = result! ?? { ok: false, output: '', exitCode: null, error: note };
         result.error = result.error ? `${result.error}; ${note}` : note;
       }
@@ -357,34 +363,16 @@ export async function dispatch(
   }
   const ctx: DispatchContext = { table, ledger, adapterFor, identity, attribution, caps: structuralCaps(table) };
 
-  // Auto-effort (opt-in): classify the sub-task's difficulty and pin the effort, unless the caller
-  // already set one. Best-effort — a classifier failure falls through to the route/default effort.
-  // Skipped entirely inside a worker: depth-1 below refuses anyway, and the classifier is a spawn.
-  if (req.autoEffort && !req.effort && !identity.worker) {
-    const ctxLabel = req.taskClass ?? (req.provider && req.model ? `${req.provider}/${req.model}` : 'general');
-    try {
-      req = { ...req, effort: await classifyEffort(ctxLabel, req.prompt, req.cwd) };
-    } catch { /* fall through */ }
-  }
+  // ---- Structural cap: depth-1 — decided before ANY resolution can throw or spend anything ----
+  // A worker dispatching an opt-in class (or a malformed request) still gets a ledgered, attributed
+  // depth-1 refusal, never a bare throw, and never costs a classifier spawn.
+  if (identity.worker) return refuseDepth1(req, ctx, table);
 
   const plan = planDispatch(req, table);
   ctx.routeReason = plan.decision.routeReason;
   ctx.account = plan.account;
   ctx.claudeAccount = plan.accountPick;
   const { route, target, fallback, origin, skillsForRefusal } = plan;
-
-  // ---- Structural cap: depth-1 — a worker cannot dispatch workers -----------------------------
-  if (identity.worker) {
-    const w = identity.worker;
-    const reason =
-      `depth-1 cap: this process is a heddle WORKER (HEDDLE_WORKER=1` +
-      (w.dispatchId !== null ? `, dispatch #${w.dispatchId}` : '') +
-      (w.parent ? `, parent ${w.parent}` : '') + `) — workers cannot dispatch workers.`;
-    return refusalOutcome(ctx, req, route.taskClass, target, skillsForRefusal, {
-      code: 'depth-1', reason,
-      instruction: 'Finish your own task and report; ask your orchestrator to dispatch further work.',
-    });
-  }
 
   // ---- Non-dispatchable class (`orchestration`) — refused on EVERY path ------------------------
   // A named subprocess route does not turn the orchestrator's own work into a worker task.
@@ -409,8 +397,31 @@ export async function dispatch(
     );
   }
 
+  // Auto-effort (opt-in): classify the sub-task's difficulty and pin the effort, unless the caller
+  // already set one. Runs only after every plan-level refusal gate has passed — a refused dispatch
+  // never spends a classifier (a max-children refusal can still waste one: that count is
+  // transactional inside runTarget). Best-effort; failures are noted, not fatal.
+  if (req.autoEffort && !req.effort) {
+    try {
+      req = { ...req, effort: await classifyEffort(route.taskClass, req.prompt, req.cwd) };
+    } catch (err) {
+      process.stderr.write(`heddle: auto-effort classification failed (${err instanceof Error ? err.message : String(err)}) — using the route default\n`);
+    }
+  }
+
   // ---- Run (capabilities + max-children are decided per target inside runTarget) --------------
   const primary = await runTarget(target, req, ctx, route, plan.decision.routedAwayForCap ? `${route.provider}/${route.model}` : null);
+  // Capability-fit fallback: when the PRIMARY provider merely lacks the knob (`unenforceable`) and
+  // the class declares a fallback whose provider CAN enforce every requested capability, route there
+  // — that's fit-routing, same spirit as the model fallback. Caller/operator errors stay terminal.
+  if (primary.refusal?.code === 'capability-denied' && primary.capabilityRefusalKind === 'unenforceable'
+      && !req.noFallback && fallback) {
+    const fbCaps = decideCapabilities(fallback.provider, req.capabilities, req.optIn === true, capabilityPolicy(table));
+    if (!fbCaps.refusal && providerExecution(table, fallback.provider) !== 'in-session-subagent') {
+      ctx.routeReason = `${plan.decision.routeReason}; capability-fit fallback: ${target.provider} cannot enforce [${(req.capabilities ?? []).join(', ')}] → ${fallback.provider}/${fallback.model}`;
+      return runTarget(fallback, req, ctx, route, `${route.provider}/${route.model} (capability-unenforceable)`);
+    }
+  }
   if (primary.ok || primary.refusal || req.noFallback || !fallback) return primary;
 
   // Primary failed and the table names a fallback — try it, recording the origin so the ledger
@@ -545,6 +556,31 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
 
 /** How the in-session route was chosen — the refusal reason must not misstate the YAML policy. */
 type InSessionOrigin = 'direct' | 'class' | 'explicit' | 'fallback';
+
+/** depth-1 refusal for a WORKER — ledgered and attributed even when the request would not have
+ *  planned (opt-in gate, malformed request): the record is best-effort from the raw request. */
+function refuseDepth1(req: DispatchRequest, ctx: DispatchContext, table: RoutingTable): DispatchOutcome {
+  const w = ctx.identity.worker!;
+  const reason =
+    `depth-1 cap: this process is a heddle WORKER (HEDDLE_WORKER=1` +
+    (w.dispatchId !== null ? `, dispatch #${w.dispatchId}` : '') +
+    (w.parent ? `, parent ${w.parent}` : '') + `) — workers cannot dispatch workers.`;
+  let taskClass = req.taskClass ?? (req.provider && req.model ? `direct:${req.provider}/${req.model}` : 'unplanned');
+  let target: RouteTarget = { provider: req.provider ?? 'unknown', model: req.model ?? 'unknown', skills: req.skills, mcp: req.mcp };
+  let skills = req.skills ?? [];
+  try {
+    if (req.taskClass && Object.prototype.hasOwnProperty.call(table.taskClasses, req.taskClass)) {
+      const route = resolveRoute(table, req.taskClass);
+      taskClass = route.taskClass;
+      target = req.provider && req.model ? { ...route, provider: req.provider, model: req.model } : route;
+      skills = route.dispatchable ? withMandatoryPacks(req.skills ?? route.skills ?? []) : (req.skills ?? route.skills ?? []);
+    }
+  } catch { /* best-effort — the refusal stands regardless */ }
+  return refusalOutcome(ctx, req, taskClass, target, skills, {
+    code: 'depth-1', reason,
+    instruction: 'Finish your own task and report; ask your orchestrator to dispatch further work.',
+  });
+}
 
 function refuseNotDispatchable(route: Route, req: DispatchRequest, ctx: DispatchContext): DispatchOutcome {
   const skills = req.skills ?? route.skills ?? []; // never a worker → no mandatory pack

@@ -20,3 +20,24 @@ for (const k of ['HEDDLE_AGENT', 'FLEET_AGENT', 'HEDDLE_WORKER', 'HEDDLE_DISPATC
 const empty = mkdtempSync(join(tmpdir(), 'heddle-test-usage-'));
 process.env.HEDDLE_USAGE_DIR = empty;
 process.env.HEDDLE_ACCOUNTS = join(empty, 'accounts.json');
+
+// resolveIdentity() also walks up from cwd looking for a `.fleet-agent` file — env stripping cannot
+// neutralize that, so fail LOUDLY instead of letting the suite silently bind an identity when run
+// from a pinned worktree (tests must inject `identity` explicitly).
+import { existsSync } from 'node:fs';
+import { dirname, join as joinPath } from 'node:path';
+{
+  let dir = process.cwd();
+  for (;;) {
+    if (existsSync(joinPath(dir, '.fleet-agent'))) {
+      throw new Error(
+        `test/setup.ts: a .fleet-agent file exists at ${dir} — the suite would bind that identity via ` +
+        `resolveIdentity()'s file fallback and stop being hermetic. Run the tests from a checkout ` +
+        `without one (or remove it).`,
+      );
+    }
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+}

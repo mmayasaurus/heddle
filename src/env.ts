@@ -98,6 +98,7 @@ export function buildWorkerEnv(opts: WorkerEnvOptions = {}): {
           `Use an account selector (${[...ACCOUNT_SELECTOR_VARS].join(', ')}) instead.`,
       );
     }
+    if ((PARENT_IDENTITY_VARS as readonly string[]).includes(key)) continue; // overrides cannot re-inject the parent's identity
     env[key] = value;
   }
 
