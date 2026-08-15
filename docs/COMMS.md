@@ -5,9 +5,9 @@ provides a durable, append-only SQLite message log stored at `~/.heddle/comms.db
 Node 22's native `node:sqlite` in WAL mode following the style of the dispatch ledger
 (`src/ledger.ts`), alongside a participant registry.
 
-Built so far: the storage foundation (HED-4) and the trust-tiered envelope layer (HED-5, see
-Envelopes). No delivery or transport layer, no delivery discipline (HED-6), no SendMessage bridge
-(HED-7), no MCP tools, and no room UI exist yet. The log accepts a privileged tier only with the
+Built so far: the storage foundation (HED-4), the trust-tiered envelope layer (HED-5, see
+Envelopes) and the delivery-discipline broker (HED-6, see Delivery discipline). No concrete
+transport (the SendMessage bridge is HED-7), no MCP tools, and no room UI exist yet. The log accepts a privileged tier only with the
 broker verifier's sealed decision (an in-process trust-boundary check: the seal cannot cross a
 JSON/MCP/socket boundary; code that can import `seal.ts` is inside the boundary by definition).
 
@@ -309,6 +309,48 @@ it.
 - `Ledger.get(id)` (`src/ledger.ts`): Read-only lookup the verifier uses to
   corroborate lineage rows.
 
+## Delivery discipline — Broker (HED-6)
+
+`src/comms/broker.ts` sits between "an agent wants to say something" and "the transport injects
+it into a target". `Broker.post(req)` runs the rules below in order and returns a typed
+`PostResult`; every decision is also a `deliveries` row (SPEC §10: typed outcomes, never a
+boolean). The broker owns no transport specifics — `Transport.deliver(d)` is whatever the
+Anthropic SendMessage bridge (HED-7), the MCP long-poll, or a test double provides.
+
+| Rule | Behaviour | Refusal code |
+| --- | --- | --- |
+| Prefix addressing | resolved in order: `@orchestrator` (sugar for the sender's dispatching orchestrator — children only) → `#room` / `@all` / `operator` → an exactly registered participant → a **unique prefix** of registered participants (`codex` → `codex-B`; several matches are refused with `candidates`) → any other syntactically valid address (an agent that has not spoken yet, an unminted child — intent is recorded, the transport decides). Registered participants win over the bare grammar because most fleet ids are also valid address forms. The stored `meta.resolvedFrom` keeps the raw string when a prefix was expanded. | `unknown-target`, `ambiguous-target` (+ `candidates`), `no-orchestrator` |
+| Size cap | body > 8 KB (UTF-8 **bytes**, `DEFAULT_MAX_BODY_BYTES`) is refused before it reaches the log | `body-too-large` |
+| Rate limit | per `(from → to)` pair: ≤ 5 in any 10 s window AND ≤ 3 in any 1 s burst (`DEFAULT_RATE_LIMIT`); refused posts do not consume budget; the refusal carries `retryAfterMs` | `rate-limited` |
+| Envelope | `postEnveloped` decides the tier and appends; a message the log rejects (e.g. dangling `replyTo`) is a refusal | `invalid-message` |
+| Rooms | pull model — logged, never injected | outcome `logged` / `room-pull` |
+| `@all` | fan-out to every registered participant except the sender; `sent`, or `failed` (`partial`) / `held` (`partial-hold`) | — |
+| Hold at gate | if `TargetStateProvider.state(to) === 'permission-gate'` the message is logged but not injected (`held`); `pump()` releases it when the gate clears (`released`, `gate-cleared`) or fails it after `holdMaxMs` (`failed`, `hold-timeout`) — the recipient can still pull it from the log | — |
+| Serialization | one in-flight injection per target; later deliveries to the same target queue behind it; different targets proceed concurrently | — |
+| Transport | `{ ok, code, reason }` → `sent` / `failed`; a throwing transport is `failed` / `transport-error`; garbage codes are normalised | — |
+
+Refusals never create a message row; they are `deliveries` rows with `message_id NULL`, the
+sender/target, the code and the reason — so a rate-limited or oversized post is auditable without
+storing its body.
+
+**Target state.** `TargetStateProvider` is pluggable. The default `LedgerTargetState` answers
+`busy` (dispatch in flight) / `exited` (finished) / `unknown` from the dispatch ledger and never
+reports `permission-gate` — that state arrives with the terminal-activity tracker (HED-59); the
+hold/pump machinery is the seam waiting for it. `unknown` delivers.
+
+**Deliveries table** (`deliveries`, append-only like `messages`): `id, ts, message_id (NULL for
+refusals), sender, target, outcome ∈ sent | held | released | refused | failed | logged, code,
+reason, transport, attempt`. API: `log.recordDelivery(ev)`, `log.delivery(id)`,
+`log.deliveries({ messageId | target | sender, sinceId, limit })`.
+
+```typescript
+const broker = new Broker({ log, ledger, transport });
+const r = await broker.post({ from: 'K', to: 'K.1', body: 'Run the tests, then report.' });
+// r.outcome: 'sent' | 'held' | 'failed' | 'logged' | 'refused'
+if (r.outcome === 'refused' && r.code === 'rate-limited') setTimeout(retry, r.retryAfterMs);
+setInterval(() => broker.pump(), 1000); // release held messages when gates clear
+```
+
 ## Roadmap
 
 - **HED-4:** Comms log & address grammar — durable append-only storage and registry (built).
@@ -320,8 +362,8 @@ it.
   (built — see Envelopes).
 - **HED-6:** Delivery discipline — one in-flight injection per target, hold + retry while the
   target sits at a permission gate, per-pair rate limit (5 msgs / 10 s, burst 3), 8 KB body cap,
-  short-id prefix addressing + `reply_to_orchestrator`; refusals logged with a reason (NOT built
-  yet).
+  short-id prefix addressing + `@orchestrator`; refusals logged with a reason (built — see
+  Delivery discipline).
 - **HED-7:** Anthropic SendMessage bridge — the tactical Claude↔Claude nudge layer, every send /
   receive mirrored into this log so the room stays complete (NOT built yet).
 - Later: MCP tools (`post_message` / `read_transcript`), WebSocket push, room governance

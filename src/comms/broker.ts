@@ -162,8 +162,17 @@ export class Broker {
   // ------------------------------------------------------------------ addressing
 
   /**
-   * Resolve `to`: exact address → itself; `@orchestrator` → the sender's parent; otherwise a
-   * unique prefix of a known participant. Returns the address or a refusal.
+   * Resolve `to`, in this order:
+   *   1. `@orchestrator` → the sender's parent (children only);
+   *   2. a room / `@all` / `operator` → itself;
+   *   3. an exactly registered participant → itself;
+   *   4. a unique prefix of registered participants → that participant ("codex" → codex-B);
+   *      several matches → ambiguous (refused with the candidates);
+   *   5. any other syntactically valid address (an agent that has not spoken yet, an unminted
+   *      child) → itself — intent is recorded, the transport decides deliverability;
+   *   6. otherwise → unknown.
+   * Registered participants take precedence over the bare grammar because almost every fleet id
+   * is ALSO a valid address form — "codex" must mean codex-B when that is the only codex-*.
    */
   resolveTarget(from: string, to: string): { address: string } | Extract<PostResult, { outcome: 'refused' }> {
     if (to === ORCHESTRATOR_ALIAS) {
@@ -173,16 +182,19 @@ export class Broker {
       }
       return { address: me.parent };
     }
-    if (parseAddress(to)) return { address: to };
     if (typeof to !== 'string' || to.length === 0) {
-      return { outcome: 'refused', code: 'unknown-target', to, reason: 'empty target' };
+      return { outcome: 'refused', code: 'unknown-target', to: String(to ?? ''), reason: 'empty target' };
     }
+    const parsed = parseAddress(to);
+    if (parsed && (parsed.kind === 'room' || parsed.kind === 'broadcast' || parsed.kind === 'operator')) return { address: to };
+    if (this.log.participant(to)) return { address: to };
     const candidates = this.log.participants().map((p) => p.address).filter((a) => a.startsWith(to));
     if (candidates.length === 1) return { address: candidates[0] };
-    if (candidates.length === 0) {
-      return { outcome: 'refused', code: 'unknown-target', to, reason: `no participant address starts with ${JSON.stringify(to)}` };
+    if (candidates.length > 1) {
+      return { outcome: 'refused', code: 'ambiguous-target', to, candidates, reason: `${JSON.stringify(to)} matches ${candidates.length} participants: ${candidates.join(', ')}` };
     }
-    return { outcome: 'refused', code: 'ambiguous-target', to, candidates, reason: `${JSON.stringify(to)} matches ${candidates.length} participants: ${candidates.join(', ')}` };
+    if (parsed) return { address: to };
+    return { outcome: 'refused', code: 'unknown-target', to, reason: `${JSON.stringify(to)} is neither a valid address nor a prefix of a registered participant` };
   }
 
   // ------------------------------------------------------------------ rate limit
