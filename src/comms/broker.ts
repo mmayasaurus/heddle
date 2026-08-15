@@ -578,7 +578,8 @@ export class Broker {
       // Holds belong to the process that POSTED the message; a multi-broker deployment (one
       // heddle-comms per session, shared db) restores only its own, or two brokers would race.
       if (opts.sender && record.from !== opts.sender) continue;
-      this.held.push({ record, envelope: renderEnvelope(record), target: ev.to, heldAt: Date.parse(ev.ts), attempts: 1 });
+      const heldAt = Date.parse(ev.ts);
+      this.held.push({ record, envelope: renderEnvelope(record), target: ev.to, heldAt: Number.isFinite(heldAt) ? heldAt : this.now(), attempts: 1 });
       restored += 1;
     }
     return restored;
