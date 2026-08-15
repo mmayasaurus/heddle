@@ -198,35 +198,40 @@ function resolveRequest(req: DispatchRequest, table: RoutingTable): ResolvedRequ
       `model=${JSON.stringify(req.model ?? null)})`,
     );
   }
-  // Direct path, no class: orchestrator named the model. Full dynamic choice, still policy-fenced.
-  if (!req.taskClass) {
-    if (!(req.provider && req.model)) throw new Error('dispatch requires either a task class or an explicit provider+model');
-    const route = directRoute(table, req.provider, req.model, req.skills, req.mcp);
-    return { route, target: route, origin: 'direct', notDispatchable: false };
-  }
-  const route = resolveRoute(table, req.taskClass);
+  if (!req.taskClass) return resolveDirectOnly(req, table);
+  return resolveClassRequest(req, resolveRoute(table, req.taskClass), table);
+}
+
+/** Direct path, no class: orchestrator named the model. Full dynamic choice, still policy-fenced. */
+function resolveDirectOnly(req: DispatchRequest, table: RoutingTable): ResolvedRequest {
+  if (!(req.provider && req.model)) throw new Error('dispatch requires either a task class or an explicit provider+model');
+  const route = directRoute(table, req.provider, req.model, req.skills, req.mcp);
+  return { route, target: route, origin: 'direct', notDispatchable: false };
+}
+
+/** Class path: the class supplies policy; an explicit provider/model replaces its route (no fallback). */
+function resolveClassRequest(req: DispatchRequest, route: Route, table: RoutingTable): ResolvedRequest {
   if (route.requiresExplicitOptIn && !req.optIn) {
     throw new Error(
       `task class "${req.taskClass}" requires explicit opt-in` +
       (route.note ? ` — ${route.note}` : '') + '. Pass optIn/--opt-in to proceed.',
     );
   }
+  const explicit = Boolean(req.provider && req.model);
   // A non-dispatchable class (`orchestration`) is refused on EVERY path — a named subprocess route
   // does not turn the orchestrator's own work into a worker task. The named provider/model are set
   // directly (not via directRoute(), which throws for excluded/held/unknown providers — the class
   // must refuse, and be ledgered, whatever was named); the class stays the ledger's task_class.
   if (!route.dispatchable) {
-    const named = req.provider && req.model
-      ? { ...route, provider: req.provider, model: req.model, skills: req.skills ?? route.skills, mcp: req.mcp ?? route.mcp }
+    const named = explicit
+      ? { ...route, provider: req.provider!, model: req.model!, skills: req.skills ?? route.skills, mcp: req.mcp ?? route.mcp }
       : route;
-    return { route, target: named, origin: req.provider && req.model ? 'explicit' : 'class', notDispatchable: true };
+    return { route, target: named, origin: explicit ? 'explicit' : 'class', notDispatchable: true };
   }
-  // Class + explicit provider/model: the class supplies policy (default skills/mcp, opt-in gate,
-  // ledger task_class), the named route replaces the table's — no fallback, naming it is the choice.
-  // Effort is deliberately NOT inherited from the class (per-provider vocabulary).
-  if (req.provider && req.model) {
-    const explicit = directRoute(table, req.provider, req.model, req.skills ?? route.skills, req.mcp ?? route.mcp);
-    return { route, target: { ...explicit, effort: req.effort }, origin: 'explicit', notDispatchable: false };
+  if (explicit) {
+    // Effort is deliberately NOT inherited from the class (per-provider vocabulary).
+    const target = { ...directRoute(table, req.provider!, req.model!, req.skills ?? route.skills, req.mcp ?? route.mcp), effort: req.effort };
+    return { route, target, origin: 'explicit', notDispatchable: false };
   }
   return { route, target: route, fallback: route.fallback, origin: 'class', notDispatchable: false };
 }
