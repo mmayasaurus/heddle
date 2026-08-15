@@ -277,6 +277,8 @@ describe('Broker (temp db)', () => {
       expect(res).toMatchObject({ outcome: 'sent', code: 'broadcast' });
       expect(transport.calls.map((c) => c.target)).toEqual(['R']);
       expect(await post(newBroker(), 'K', 'pe')).toMatchObject({ outcome: 'sent', to: 'pe' }); // valid unregistered id, not a prefix hit on peer
+      // …and not addressable by its exact name either.
+      expect(await post(newBroker(), 'K', 'peer')).toMatchObject({ outcome: 'refused', code: 'unknown-target' });
     });
 
     it('logs a broadcast with no other recipients', async () => {

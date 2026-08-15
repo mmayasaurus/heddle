@@ -214,6 +214,9 @@ export class Broker {
     }
     const parsed = parseAddress(to);
     if (parsed && (parsed.kind === 'room' || parsed.kind === 'broadcast' || parsed.kind === 'operator')) return { address: to, kind: parsed.kind };
+    if (RESERVED_ADDRESSES.has(to)) {
+      return { outcome: 'refused', code: 'unknown-target', to, reason: `${JSON.stringify(to)} is a reserved bookkeeping address, never a recipient` };
+    }
     const registered = this.log.participant(to);
     if (registered) return { address: to, kind: registered.kind };
     const candidates = this.log.participantsWithPrefix(to).filter((p) => !RESERVED_ADDRESSES.has(p.address));

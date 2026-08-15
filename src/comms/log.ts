@@ -662,18 +662,34 @@ export class CommsLog {
   }
 
   /**
-   * Where a restarted channel pump should resume for `address`: just before the OLDEST channel
-   * write that failed and was never followed by a successful write of the same message, else the
-   * last successful write, else null (first run — start at the tail). Never skips a failed row.
+   * The OLDEST channel write for `address` that failed and was never followed by a successful
+   * write of the same message — the floor a pump must re-scan from so no failure is orphaned.
    */
-  channelResumeCursor(address: string): number | null {
+  oldestUnresolvedChannelFailure(address: string): number | null {
     const failed = this.db.prepare(`
       SELECT MIN(d.message_id) AS id FROM deliveries d
       WHERE d.target = ? AND d.transport = 'channel' AND d.outcome = 'failed'
         AND NOT EXISTS (SELECT 1 FROM deliveries e WHERE e.target = d.target AND e.message_id = d.message_id
                         AND e.transport = 'channel' AND e.outcome = 'sent' AND e.id > d.id)
     `).get(address) as { id: number | null };
-    if (failed.id != null) return Number(failed.id) - 1;
+    return failed.id == null ? null : Number(failed.id);
+  }
+
+  /** Message ids > sinceId that this identity's channel already wrote successfully — never re-emit these. */
+  channelWrittenIds(address: string, sinceId: number): Set<number> {
+    const rows = this.db.prepare(
+      "SELECT DISTINCT message_id AS id FROM deliveries WHERE target = ? AND transport = 'channel' AND outcome = 'sent' AND message_id > ?",
+    ).all(address, sinceId) as unknown as { id: number }[];
+    return new Set(rows.map((r) => Number(r.id)));
+  }
+
+  /**
+   * Where a restarted channel pump should resume for `address`: just before the oldest unresolved
+   * failure, else the last successful write, else null (first run — start at the tail).
+   */
+  channelResumeCursor(address: string): number | null {
+    const floor = this.oldestUnresolvedChannelFailure(address);
+    if (floor != null) return floor - 1;
     return this.lastChannelWrite(address);
   }
 

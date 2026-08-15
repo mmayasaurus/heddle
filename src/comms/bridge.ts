@@ -128,18 +128,25 @@ export class InboundPump {
   get position(): number { return this.cursor; }
 
   /**
-   * Deliver everything new since the cursor. Re-entrant calls (a timer firing while a slow emit is
-   * awaited) do nothing — the same row must never be emitted twice.
+   * Deliver everything new since the cursor, and RETRY any earlier emit that failed and was never
+   * resolved (each tick re-scans from the oldest unresolved failure). Rows the channel already
+   * wrote are skipped by a durable check, so a failing row never causes duplicate injections of
+   * its neighbours — at-least-once for failures, exactly-once for successes. Re-entrant calls (a
+   * timer firing while a slow emit is awaited) do nothing.
    */
   async tick(): Promise<{ emitted: number; failed: number }> {
     if (this.ticking) return { emitted: 0, failed: 0 };
     this.ticking = true;
     try {
+      const floor = this.log.oldestUnresolvedChannelFailure(this.me);
+      if (floor != null && floor - 1 < this.cursor) this.cursor = floor - 1; // rewind to retry the failure
+      const written = this.log.channelWrittenIds(this.me, this.cursor);
       const rows = this.log.transcript({ inbox: this.me }, { sinceId: this.cursor, limit: 100 });
       let emitted = 0, failed = 0;
       for (const r of rows) {
         this.cursor = Math.max(this.cursor, r.id);
         if (r.from === this.me && r.to === BROADCAST) continue; // my own broadcast is not news to me (a self-DM is)
+        if (written.has(r.id)) continue;                        // already in the session — never twice
         try {
           await this.emit(toChannelEvent(r), r);
           this.log.recordDelivery({ messageId: r.id, from: r.from, to: this.me, outcome: 'sent', code: 'channel-written', transport: 'channel' });
