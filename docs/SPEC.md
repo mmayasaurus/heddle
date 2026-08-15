@@ -479,6 +479,7 @@ savings analytics.
 - **Layer detail:** `docs/ARCHITECTURE.md`. **Phase-1 mechanics:** `docs/ORCHESTRATION.md`.
   **Dashboard UI vision:** `docs/DASHBOARD.md` (tmux parts superseded by §13 here).
 - **Routing policy:** `routing/routing.v0.yaml`. **Skill packs:** `skills/`.
+- **Comms broker (built so far):** `docs/COMMS.md` — log schema, address grammar, `CommsLog` API.
 - **Code:** `src/{adapters,dispatch,routing,ledger,skillpacks,mcp,env,cli,types}.ts`.
 - **Research detail & decision log (session-durable):** memory `project-agent-orchestration-lane`.
 - **Spinventory integration:** the L0 systems — `.claude/bin/lin.sh`, `pr-own.sh`, `pr-sweep.sh`,
