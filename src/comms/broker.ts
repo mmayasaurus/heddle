@@ -67,6 +67,8 @@ export const DEFAULT_RATE_LIMIT: RateLimit = { windowMs: 10_000, max: 5, burstWi
 export const DEFAULT_MAX_BODY_BYTES = 8 * 1024;
 export const DEFAULT_HOLD_MAX_MS = 10 * 60_000;
 export const ORCHESTRATOR_ALIAS = '@orchestrator';
+/** Registered for bookkeeping only (e.g. the neutral `peer` sender of mirrored inbound SendMessages) — never a recipient. */
+export const RESERVED_ADDRESSES: ReadonlySet<string> = new Set(['peer']);
 
 export interface BrokerOptions {
   log: CommsLog;
@@ -207,7 +209,7 @@ export class Broker {
     if (parsed && (parsed.kind === 'room' || parsed.kind === 'broadcast' || parsed.kind === 'operator')) return { address: to, kind: parsed.kind };
     const registered = this.log.participant(to);
     if (registered) return { address: to, kind: registered.kind };
-    const candidates = this.log.participantsWithPrefix(to);
+    const candidates = this.log.participantsWithPrefix(to).filter((p) => !RESERVED_ADDRESSES.has(p.address));
     if (candidates.length === 1) return { address: candidates[0].address, kind: candidates[0].kind };
     if (candidates.length > 1) {
       const names = candidates.map((c) => c.address);
@@ -313,7 +315,7 @@ export class Broker {
    * dispatchTo goes through that recipient's delivery chain); the result summarises the fan-out.
    */
   private async deliverBroadcast(record: MessageRecord, envelope: string, base: AcceptedBase): Promise<PostResult> {
-    const recipients = this.log.participants().map((p) => p.address).filter((a) => a !== record.from);
+    const recipients = this.log.participants().map((p) => p.address).filter((a) => a !== record.from && !RESERVED_ADDRESSES.has(a));
     if (recipients.length === 0) {
       this.log.recordDelivery({ messageId: record.id, from: record.from, to: record.to, outcome: 'logged', code: 'no-recipients', transport: this.transport.name });
       return { ...base, outcome: 'logged', code: 'no-recipients' };

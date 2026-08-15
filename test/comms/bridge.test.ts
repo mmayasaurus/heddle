@@ -57,6 +57,12 @@ describe('comms bridge (temp db)', () => {
     advance(DEFAULT_SESSION_STALE_MS + 1);
     expect(log.liveSession('Z')).toBeNull();
     expect(log.liveSessions()).toEqual([]);
+    // Ownership: a stale process cannot heartbeat/unregister a replacement's row.
+    log.registerSession({ address: 'A', sessionId: 'new-process' });
+    expect(log.heartbeatSession('A', 'old-process')).toBe(false);
+    expect(log.unregisterSession('A', 'old-process')).toBe(false);
+    expect(log.session('A')?.sessionId).toBe('new-process');
+    expect(log.heartbeatSession('A', 'new-process')).toBe(true);
     log.heartbeatSession('A');
     expect(log.liveSession('A')?.address).toBe('A');
     expect(log.liveSessions().map((s) => s.address)).toEqual(['A']);
@@ -150,6 +156,15 @@ describe('comms bridge (temp db)', () => {
     const resumed: number[] = [];
     await new InboundPump(log, 'K', (_e, r) => { resumed.push(r.id); }).tick();
     expect(resumed).toEqual([later.id]);
+    // A failed row followed by a successful one is NOT skipped on restart: resume just before the failure.
+    const failedRow = log.append({ from: 'R', to: 'K', body: 'will fail' });
+    const okRow = log.append({ from: 'R', to: 'K', body: 'will succeed' });
+    let blipOnce = true;
+    await new InboundPump(log, 'K', () => { if (blipOnce) { blipOnce = false; throw new Error('blip'); } }, { sinceId: failedRow.id - 1 }).tick();
+    expect(log.channelResumeCursor('K')).toBe(failedRow.id - 1);
+    const retried: number[] = [];
+    await new InboundPump(log, 'K', (_e, r) => { retried.push(r.id); }).tick();
+    expect(retried).toEqual([failedRow.id, okRow.id]);
     // Re-entrancy: a tick that fires while another is awaiting an emit does nothing.
     let release!: () => void;
     const slow = new InboundPump(log, 'R', () => new Promise<void>((res) => { release = res; }));

@@ -3,6 +3,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { existsSync, readFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { CommsLog, DEFAULT_COMMS_PATH } from './log.js';
 import { Ledger, DEFAULT_LEDGER_PATH } from '../ledger.js';
@@ -40,6 +41,7 @@ const me = resolveCommsIdentity();
 const isWorker = process.env.HEDDLE_WORKER === '1';
 const pushEnabled = process.env.HEDDLE_COMMS_PUSH === '1';
 const sessionName = process.env.HEDDLE_SESSION_NAME || me;
+const instanceId = process.env.CLAUDE_CODE_SESSION_ID || randomUUID(); // owns this process's presence row
 const warn = (msg: string) => process.stderr.write(`heddle-comms: ${msg}\n`);
 
 const mcp = new Server(
@@ -143,6 +145,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         const who = requireMe();
         const id = num(a.message_id);
         if (id === undefined || !Number.isInteger(id) || id < 1) return errorText('confirm_sent: message_id must be a positive integer');
+        if (a.ok !== undefined && typeof a.ok !== 'boolean') return errorText('confirm_sent: ok must be a boolean');
         confirmSent(log, id, { from: who, ok: a.ok !== false, reason: str(a.reason) });
         return text({ ok: true });
       }
@@ -195,7 +198,7 @@ let stopping = false;
 const bye = () => {
   if (stopping) return;
   stopping = true;
-  try { if (me && pushEnabled) log.unregisterSession(me); } catch (err) { warn(`unregister failed: ${errorMessage(err)}`); }
+  try { if (me && pushEnabled) log.unregisterSession(me, instanceId); } catch (err) { warn(`unregister failed: ${errorMessage(err)}`); }
   try { log.close(); } catch (err) { warn(`log close failed: ${errorMessage(err)}`); }
   try { ledger?.close(); } catch (err) { warn(`ledger close failed: ${errorMessage(err)}`); }
   process.exit(0);
@@ -208,7 +211,7 @@ if (me) {
   let inbound: InboundPump | null = null;
   if (pushEnabled) {
     log.registerSession({
-      address: me, sessionId: process.env.CLAUDE_CODE_SESSION_ID ?? null, sessionName,
+      address: me, sessionId: instanceId, sessionName,
       pid: process.env.CLAUDE_PID ? Number(process.env.CLAUDE_PID) : process.ppid, socket: process.env.CLAUDE_CODE_MESSAGING_SOCKET ?? null,
     });
     inbound = new InboundPump(log, me, (event) => mcp.notification({ method: 'notifications/claude/channel', params: { content: event.content, meta: event.meta } }));

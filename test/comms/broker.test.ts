@@ -269,6 +269,15 @@ describe('Broker (temp db)', () => {
       expect(await post(broker, 'K', '@all')).toMatchObject({ outcome: 'refused', code: 'rate-limited' });
     });
 
+    it('the reserved `peer` sender never receives fan-out and never resolves as a prefix', async () => {
+      log.register({ address: 'R' });
+      log.append({ from: 'peer', to: 'K', body: 'mirrored inbound' }); // registers `peer` as a participant
+      const res = await post(newBroker(), 'K', '@all');
+      expect(res).toMatchObject({ outcome: 'sent', code: 'broadcast' });
+      expect(transport.calls.map((c) => c.target)).toEqual(['R']);
+      expect(await post(newBroker(), 'K', 'pe')).toMatchObject({ outcome: 'sent', to: 'pe' }); // valid unregistered id, not a prefix hit on peer
+    });
+
     it('logs a broadcast with no other recipients', async () => {
       const result = await post(newBroker(), 'K', '@all');
       expect(result).toMatchObject({ outcome: 'logged', code: 'no-recipients' });

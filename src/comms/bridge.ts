@@ -116,10 +116,11 @@ export class InboundPump {
     private emit: (event: ChannelEvent, record: MessageRecord) => Promise<void> | void,
     opts: { sinceId?: number } = {},
   ) {
-    // Resume from durable state: the last row this identity's channel wrote — so a crash between
-    // "queued-for-channel" and the push is not a silent loss. First run ever: start at the tail
-    // (never replay history into a session).
-    this.cursor = opts.sinceId ?? log.lastChannelWrite(me) ?? log.latestId();
+    // Resume from durable state: just before the oldest failed channel write that never succeeded
+    // afterwards, else the last successful write — so a crash between "queued-for-channel" and the
+    // push, or a failed row followed by a successful one, is never a silent loss. First run ever:
+    // start at the tail (never replay history into a session).
+    this.cursor = opts.sinceId ?? log.channelResumeCursor(me) ?? log.latestId();
   }
 
   get position(): number { return this.cursor; }

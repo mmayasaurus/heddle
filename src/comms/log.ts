@@ -424,12 +424,20 @@ export class CommsLog {
     return this.session(input.address)!;
   }
 
-  heartbeatSession(address: string): void {
-    this.db.prepare('UPDATE sessions SET heartbeat_at = ? WHERE address = ?').run(this.now(), address);
+  /** Refresh presence. With `sessionId`, only the row owned by that session is touched (a replacement wins). */
+  heartbeatSession(address: string, sessionId?: string | null): boolean {
+    const info = sessionId
+      ? this.db.prepare('UPDATE sessions SET heartbeat_at = ? WHERE address = ? AND session_id = ?').run(this.now(), address, sessionId)
+      : this.db.prepare('UPDATE sessions SET heartbeat_at = ? WHERE address = ?').run(this.now(), address);
+    return Number(info.changes) > 0;
   }
 
-  unregisterSession(address: string): void {
-    this.db.prepare('DELETE FROM sessions WHERE address = ?').run(address);
+  /** Drop presence. With `sessionId`, an old process cannot remove a replacement's row. */
+  unregisterSession(address: string, sessionId?: string | null): boolean {
+    const info = sessionId
+      ? this.db.prepare('DELETE FROM sessions WHERE address = ? AND session_id = ?').run(address, sessionId)
+      : this.db.prepare('DELETE FROM sessions WHERE address = ?').run(address);
+    return Number(info.changes) > 0;
   }
 
   session(address: string): SessionRecord | null {
@@ -491,6 +499,22 @@ export class CommsLog {
       "SELECT MAX(message_id) AS id FROM deliveries WHERE target = ? AND transport = 'channel' AND outcome = 'sent'",
     ).get(address) as { id: number | null };
     return row.id == null ? null : Number(row.id);
+  }
+
+  /**
+   * Where a restarted channel pump should resume for `address`: just before the OLDEST channel
+   * write that failed and was never followed by a successful write of the same message, else the
+   * last successful write, else null (first run — start at the tail). Never skips a failed row.
+   */
+  channelResumeCursor(address: string): number | null {
+    const failed = this.db.prepare(`
+      SELECT MIN(d.message_id) AS id FROM deliveries d
+      WHERE d.target = ? AND d.transport = 'channel' AND d.outcome = 'failed'
+        AND NOT EXISTS (SELECT 1 FROM deliveries e WHERE e.target = d.target AND e.message_id = d.message_id
+                        AND e.transport = 'channel' AND e.outcome = 'sent' AND e.id > d.id)
+    `).get(address) as { id: number | null };
+    if (failed.id != null) return Number(failed.id) - 1;
+    return this.lastChannelWrite(address);
   }
 
   delivery(id: number): DeliveryEvent | null {
