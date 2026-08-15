@@ -7,7 +7,7 @@ import {
   type MessageKind, type MessageRecord, type NewMessage, type Participant, type ParticipantKind,
   type Tier, type TierDecision, type TranscriptQuery, type TranscriptScope,
 } from './types.js';
-import { BROADCAST, canSend, childAddress, parseAddress, requireAddress } from './address.js';
+import { BROADCAST, canSend, childAddress, parseAddress, requireAddress, type ParsedAddress } from './address.js';
 import { isSealed } from './seal.js';
 
 /**
@@ -174,74 +174,18 @@ export class CommsLog {
    * The DB CHECK (verified <=> privileged) backs all of this up against raw INSERTs.
    */
   append(msg: NewMessage, decision?: TierDecision): MessageRecord {
-    const from = requireAddress(msg.from, 'from');
-    if (!canSend(from)) {
-      throw new Error(`invalid from address ${JSON.stringify(msg.from)}: rooms and @all cannot send`);
-    }
-    requireAddress(msg.to, 'to');
-    if (typeof msg.body !== 'string' || msg.body.length === 0) {
-      throw new Error('message body must be a non-empty string');
-    }
+    const from = validateNewMessage(msg);
     const kind: MessageKind = msg.kind ?? 'chat';
-    if (!MESSAGE_KINDS.includes(kind)) throw new Error(`unknown message kind ${JSON.stringify(kind)}`);
-    if (msg.replyTo != null && (!Number.isInteger(msg.replyTo) || msg.replyTo < 1)) {
-      throw new Error('replyTo must be a positive message id');
+    const meta = scrubCallerMeta(msg.meta);
+    if (decision === undefined) {
+      return this.insert(msg, from, kind, 'agent-message', false, msg.dispatchId ?? null, meta);
     }
-    if (msg.dispatchId != null && (!Number.isInteger(msg.dispatchId) || msg.dispatchId < 1)) {
-      throw new Error('dispatchId must be a positive integer ledger row id');
-    }
-    if (msg.issue != null && (typeof msg.issue !== 'string' || msg.issue.length === 0 || msg.issue.length > 64)) {
-      throw new Error('issue must be a non-empty string (max 64 chars)');
-    }
-    if (msg.thread != null && (typeof msg.thread !== 'string' || msg.thread.length === 0 || msg.thread.length > 128)) {
-      throw new Error('thread must be a non-empty string (max 128 chars)');
-    }
-
-    let tier: Tier = 'agent-message';
-    let verified = false;
-    let dispatchId = msg.dispatchId ?? null;
-    let metaObj: Record<string, unknown> | null = null;
-    if (msg.meta != null) {
-      if (typeof msg.meta !== 'object' || Array.isArray(msg.meta)) throw new Error('meta must be a plain object');
-      metaObj = Object.fromEntries(Object.entries(msg.meta).filter(([k]) => !RESERVED_META_KEYS.includes(k)));
-    }
-    if (decision !== undefined) {
-      if (!isSealed(decision)) {
-        throw new Error('tier decisions must come from the broker (decideTier); this one is not sealed');
-      }
-      if (decision.from !== msg.from || decision.to !== msg.to) {
-        throw new Error(`tier decision is for ${decision.from}→${decision.to}, not ${msg.from}→${msg.to}`);
-      }
-      if (!TIERS.includes(decision.tier)) throw new Error(`unknown tier ${JSON.stringify(decision.tier)}`);
-      const privileged = PRIVILEGED_TIERS.includes(decision.tier);
-      if (privileged !== (decision.verified === true)) {
-        throw new Error(`inconsistent tier decision: ${decision.tier} with verified=${String(decision.verified)}`);
-      }
-      if (decision.tier === 'operator' && from.kind !== 'operator') {
-        throw new Error(`operator tier requires the operator sender address, not ${msg.from}`);
-      }
-      tier = decision.tier;
-      verified = decision.verified === true;
-      // The verifier's dispatch anchor is authoritative; a caller value may only agree with it.
-      if (decision.dispatchId != null) {
-        if (dispatchId != null && dispatchId !== decision.dispatchId) {
-          throw new Error(`dispatchId ${dispatchId} contradicts the verified lineage (#${decision.dispatchId})`);
-        }
-        dispatchId = decision.dispatchId;
-      }
-      const m = metaObj ?? {};
-      m.tierCode = decision.code;
-      m.tierReason = decision.reason;
-      if (decision.evidence) m.lineage = decision.evidence;
-      if (decision.requestedTier) m.requestedTier = decision.requestedTier;
-      if (decision.downgradedFrom) m.downgradedFrom = decision.downgradedFrom;
-      return this.insert(msg, from, kind, tier, verified, dispatchId, m);
-    }
-    return this.insert(msg, from, kind, tier, verified, dispatchId, metaObj);
+    const applied = applyDecision(msg, from, decision, meta);
+    return this.insert(msg, from, kind, applied.tier, applied.verified, applied.dispatchId, applied.meta);
   }
 
   private insert(
-    msg: NewMessage, from: ReturnType<typeof requireAddress>, kind: MessageKind, tier: Tier,
+    msg: NewMessage, from: ParsedAddress, kind: MessageKind, tier: Tier,
     verified: boolean, dispatchId: number | null, metaObj: Record<string, unknown> | null,
   ): MessageRecord {
     const meta = metaObj == null ? null : JSON.stringify(metaObj);
@@ -309,51 +253,11 @@ export class CommsLog {
   transcript(scope: TranscriptScope, q: TranscriptQuery = {}): MessageRecord[] {
     const where: string[] = [];
     const params: (string | number)[] = [];
-
-    if ('room' in scope) {
-      const room = requireAddress(scope.room, 'to');
-      if (room.kind !== 'room') throw new Error(`transcript scope.room must be a #room, got ${JSON.stringify(scope.room)}`);
-      where.push('target = ?');
-      params.push(scope.room);
-    } else if ('pair' in scope) {
-      const [a, b] = scope.pair;
-      if (!canSend(requireAddress(a, 'from')) || !canSend(requireAddress(b, 'to'))) {
-        throw new Error('transcript scope.pair must name two agent/child/operator addresses (a DM thread — rooms and @all are not peers)');
-      }
-      where.push('((sender = ? AND target = ?) OR (sender = ? AND target = ?))');
-      params.push(a, b, b, a);
-    } else if ('inbox' in scope) {
-      const me = requireAddress(scope.inbox, 'to');
-      if (!canSend(me)) throw new Error(`transcript scope.inbox must be an agent/child/operator address`);
-      where.push('(target = ? OR target = ?)');
-      params.push(scope.inbox, BROADCAST);
-    } else if (!('all' in scope) || scope.all !== true) {
-      throw new Error('transcript scope must be one of { room }, { pair }, { inbox }, { all: true }');
-    }
-
-    if (q.sinceId != null) {
-      if (!Number.isInteger(q.sinceId) || q.sinceId < 0) throw new Error('sinceId must be a non-negative integer');
-      where.push('id > ?');
-      params.push(q.sinceId);
-    }
-    if (q.sinceTs != null) {
-      if (typeof q.sinceTs !== 'string' || Number.isNaN(Date.parse(q.sinceTs))) {
-        throw new Error('sinceTs must be an ISO-8601 timestamp');
-      }
-      // Compare instants, not spellings: stored ts are canonical UTC "Z" strings, so canonicalise
-      // the cursor the same way (an offset form like +02:00 would otherwise sort lexically).
-      where.push('ts > ?');
-      params.push(new Date(q.sinceTs).toISOString());
-    }
-    if (q.thread != null) {
-      if (typeof q.thread !== 'string' || q.thread.length === 0) throw new Error('thread must be a non-empty string');
-      where.push('thread = ?');
-      params.push(q.thread);
-    }
+    scopeClause(scope, where, params);
+    cursorClauses(q, where, params);
     const limit = q.limit ?? 200;
     if (!Number.isInteger(limit) || limit <= 0) throw new Error('limit must be a positive integer');
     params.push(limit);
-
     const sql = `SELECT * FROM messages ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY id ASC LIMIT ?`;
     return (this.db.prepare(sql).all(...params) as unknown as Row[]).map(toRecord);
   }
@@ -453,6 +357,117 @@ export class CommsLog {
   private touch(address: string, ts: string): void {
     this.db.prepare('UPDATE participants SET last_seen = ? WHERE address = ?').run(ts, address);
   }
+}
+
+// ------------------------------------------------------------------ transcript helpers
+
+function scopeClause(scope: TranscriptScope, where: string[], params: (string | number)[]): void {
+  if ('room' in scope) {
+    const room = requireAddress(scope.room, 'to');
+    if (room.kind !== 'room') throw new Error(`transcript scope.room must be a #room, got ${JSON.stringify(scope.room)}`);
+    where.push('target = ?');
+    params.push(scope.room);
+  } else if ('pair' in scope) {
+    const [a, b] = scope.pair;
+    if (!canSend(requireAddress(a, 'from')) || !canSend(requireAddress(b, 'to'))) {
+      throw new Error('transcript scope.pair must name two agent/child/operator addresses (a DM thread — rooms and @all are not peers)');
+    }
+    where.push('((sender = ? AND target = ?) OR (sender = ? AND target = ?))');
+    params.push(a, b, b, a);
+  } else if ('inbox' in scope) {
+    if (!canSend(requireAddress(scope.inbox, 'to'))) throw new Error('transcript scope.inbox must be an agent/child/operator address');
+    where.push('(target = ? OR target = ?)');
+    params.push(scope.inbox, BROADCAST);
+  } else if (!('all' in scope) || scope.all !== true) {
+    throw new Error('transcript scope must be one of { room }, { pair }, { inbox }, { all: true }');
+  }
+}
+
+function cursorClauses(q: TranscriptQuery, where: string[], params: (string | number)[]): void {
+  if (q.sinceId != null) {
+    if (!Number.isInteger(q.sinceId) || q.sinceId < 0) throw new Error('sinceId must be a non-negative integer');
+    where.push('id > ?');
+    params.push(q.sinceId);
+  }
+  if (q.sinceTs != null) {
+    if (typeof q.sinceTs !== 'string' || Number.isNaN(Date.parse(q.sinceTs))) throw new Error('sinceTs must be an ISO-8601 timestamp');
+    // Compare instants, not spellings: stored ts are canonical UTC "Z" strings, so canonicalise
+    // the cursor the same way (an offset form like +02:00 would otherwise sort lexically).
+    where.push('ts > ?');
+    params.push(new Date(q.sinceTs).toISOString());
+  }
+  if (q.thread != null) {
+    if (typeof q.thread !== 'string' || q.thread.length === 0) throw new Error('thread must be a non-empty string');
+    where.push('thread = ?');
+    params.push(q.thread);
+  }
+}
+
+// ------------------------------------------------------------------ append helpers
+
+/** Shape/grammar checks for a new message; returns the parsed sender. Throws on the first problem. */
+function validateNewMessage(msg: NewMessage): ParsedAddress {
+  const from = requireAddress(msg.from, 'from');
+  if (!canSend(from)) throw new Error(`invalid from address ${JSON.stringify(msg.from)}: rooms and @all cannot send`);
+  requireAddress(msg.to, 'to');
+  if (typeof msg.body !== 'string' || msg.body.length === 0) throw new Error('message body must be a non-empty string');
+  const kind = msg.kind ?? 'chat';
+  if (!MESSAGE_KINDS.includes(kind)) throw new Error(`unknown message kind ${JSON.stringify(kind)}`);
+  requirePositiveInt(msg.replyTo, 'replyTo must be a positive message id');
+  requirePositiveInt(msg.dispatchId, 'dispatchId must be a positive integer ledger row id');
+  requireBoundedString(msg.issue, 64, 'issue');
+  requireBoundedString(msg.thread, 128, 'thread');
+  return from;
+}
+
+function requirePositiveInt(v: number | null | undefined, message: string): void {
+  if (v != null && (!Number.isInteger(v) || v < 1)) throw new Error(message);
+}
+
+function requireBoundedString(v: string | null | undefined, max: number, name: string): void {
+  if (v != null && (typeof v !== 'string' || v.length === 0 || v.length > max)) {
+    throw new Error(`${name} must be a non-empty string (max ${max} chars)`);
+  }
+}
+
+/** Caller meta minus the broker-owned keys (those are written only from a sealed decision). */
+function scrubCallerMeta(meta: Record<string, unknown> | null | undefined): Record<string, unknown> | null {
+  if (meta == null) return null;
+  if (typeof meta !== 'object' || Array.isArray(meta)) throw new Error('meta must be a plain object');
+  return Object.fromEntries(Object.entries(meta).filter(([k]) => !RESERVED_META_KEYS.includes(k)));
+}
+
+/**
+ * Check a sealed decision against the message and fold it in: tier/verified from the decision,
+ * the verifier's dispatch anchor authoritative, decision facts written into meta.
+ */
+function applyDecision(
+  msg: NewMessage, from: ParsedAddress, decision: TierDecision, meta: Record<string, unknown> | null,
+): { tier: Tier; verified: boolean; dispatchId: number | null; meta: Record<string, unknown> } {
+  if (!isSealed(decision)) throw new Error('tier decisions must come from the broker (decideTier); this one is not sealed');
+  if (decision.from !== msg.from || decision.to !== msg.to) {
+    throw new Error(`tier decision is for ${decision.from}→${decision.to}, not ${msg.from}→${msg.to}`);
+  }
+  if (!TIERS.includes(decision.tier)) throw new Error(`unknown tier ${JSON.stringify(decision.tier)}`);
+  const verified = decision.verified === true;
+  if (PRIVILEGED_TIERS.includes(decision.tier) !== verified) {
+    throw new Error(`inconsistent tier decision: ${decision.tier} with verified=${String(decision.verified)}`);
+  }
+  if (decision.tier === 'operator' && from.kind !== 'operator') {
+    throw new Error(`operator tier requires the operator sender address, not ${msg.from}`);
+  }
+  let dispatchId = msg.dispatchId ?? null;
+  if (decision.dispatchId != null) {
+    if (dispatchId != null && dispatchId !== decision.dispatchId) {
+      throw new Error(`dispatchId ${dispatchId} contradicts the verified lineage (#${decision.dispatchId})`);
+    }
+    dispatchId = decision.dispatchId;
+  }
+  const m: Record<string, unknown> = { ...(meta ?? {}), tierCode: decision.code, tierReason: decision.reason };
+  if (decision.evidence) m.lineage = decision.evidence;
+  if (decision.requestedTier) m.requestedTier = decision.requestedTier;
+  if (decision.downgradedFrom) m.downgradedFrom = decision.downgradedFrom;
+  return { tier: decision.tier, verified, dispatchId, meta: m };
 }
 
 // ------------------------------------------------------------------ row mapping
