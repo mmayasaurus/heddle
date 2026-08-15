@@ -220,7 +220,7 @@ export async function dispatch(
   }
   // A non-dispatchable class (`orchestration`) is refused on EVERY path — a named subprocess route
   // does not turn the orchestrator's own work into a worker task.
-  if (!route.dispatchable) return refuseNotDispatchable(route, req, ledger);
+  if (!route.dispatchable) return refuseNotDispatchable(route, req, ledger, table);
 
   // Class + explicit provider/model: the class supplies policy (default skills/mcp, opt-in gate,
   // ledger task_class), the named route replaces the table's — no fallback, naming it is the choice.
@@ -266,7 +266,7 @@ export async function dispatch(
 /** How the in-session route was chosen — the refusal reason must not misstate the YAML policy. */
 type InSessionOrigin = 'direct' | 'class' | 'explicit' | 'fallback';
 
-function refuseNotDispatchable(route: Route, req: DispatchRequest, ledger: Ledger): DispatchOutcome {
+function refuseNotDispatchable(route: Route, req: DispatchRequest, ledger: Ledger, table: RoutingTable): DispatchOutcome {
   const skills = req.skills ?? route.skills ?? [];
   const reason = `task class "${route.taskClass}" is not dispatchable (dispatchable: false) — it is the ` +
     `orchestrator's own in-session work` + (req.provider && req.model ? `; naming a route (${req.provider}/${req.model}) does not change that` : '') + '.';
@@ -279,7 +279,7 @@ function refuseNotDispatchable(route: Route, req: DispatchRequest, ledger: Ledge
   return {
     ok: false, output: '', exitCode: null, error: `${reason} ${instruction}`,
     taskClass: route.taskClass, provider: route.provider, model: route.model, skills, ledgerId,
-    usedFallback: false, execution: providerExecution(loadRouting(), route.provider),
+    usedFallback: false, execution: providerExecution(table, route.provider),
     refusal: { code: 'not-dispatchable', reason, instruction },
   };
 }
