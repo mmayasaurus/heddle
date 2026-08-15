@@ -250,17 +250,23 @@ jobs:
           # exit-2 hit before the checks below run. gitleaks logs to stderr;
           # captured to a file so the count/error checks can read it, then
           # echoed so the run log still shows everything (values redacted).
+          # --no-color so the log lines are exactly `<time> <LEVEL> <msg>`
+          # (zerolog console format); the checks below anchor on that LEVEL
+          # token, so a finding whose PATH happens to contain "ERR" or
+          # "fatal:" cannot trip them (gitar, r6). A git failure inside
+          # gitleaks is logged at ERR level ("ERR [git] fatal: …") and STILL
+          # exits 0 with "0 commits scanned" — measured on v8.30.1.
           rc=0
-          gitleaks git --log-opts="$BASE..$HEAD" --redact --no-banner \
+          gitleaks git --log-opts="$BASE..$HEAD" --redact --no-banner --no-color \
             --config="$S/gitleaks.toml" --gitleaks-ignore-path="$S/ignore" \
             --ignore-gitleaks-allow \
             --exit-code 2 --report-format sarif --report-path gitleaks.sarif . \
             2>"$S/gitleaks.log" || rc=$?
           cat "$S/gitleaks.log"
-          SCANNED=$(grep -oE '[0-9]+ commits? scanned' "$S/gitleaks.log" | grep -oE '^[0-9]+' | head -1)
-          if grep -qE '\bERR\b|\[git\]|fatal:' "$S/gitleaks.log" || [ -z "${SCANNED:-}" ] || [ "$SCANNED" -lt "$EXPECTED" ]; then
-            echo "::error::gitleaks did not cleanly scan the whole range (scanned=${SCANNED:-none}, expected at least $EXPECTED, or a git/tool error was logged) — NOT a clean pass"
-            echo "gitleaks: ❌ **scan incomplete** (scanned=${SCANNED:-none}, expected=$EXPECTED, or a git/tool error) — see the job log; NOT a clean pass" >> "$GITHUB_STEP_SUMMARY"
+          SCANNED=$(grep -E '^[^ ]+ INF [0-9]+ commits? scanned' "$S/gitleaks.log" | grep -oE '[0-9]+ commits? scanned' | grep -oE '^[0-9]+' | head -1)
+          if grep -qE '^[^ ]+ (ERR|FTL) ' "$S/gitleaks.log" || [ -z "${SCANNED:-}" ] || [ "$SCANNED" -lt "$EXPECTED" ]; then
+            echo "::error::gitleaks did not cleanly scan the whole range (gitleaks exit $rc; scanned=${SCANNED:-none}, expected at least $EXPECTED, or an ERR/FTL line was logged) — NOT a clean pass"
+            echo "gitleaks: ❌ **scan incomplete** (gitleaks exit $rc; scanned=${SCANNED:-none}, expected=$EXPECTED, or an ERR/FTL line) — see the job log; NOT a clean pass" >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
           # Three-dot: files changed BY THIS PR (merge-base..head), not base-vs-head.
