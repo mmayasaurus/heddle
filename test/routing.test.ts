@@ -178,7 +178,7 @@ task_classes:
 
   it('reports declared provider execution modes and leaves unknown providers undefined', () => {
     const table = loadRouting(TABLE_PATH);
-    expect(providerExecution(table, 'claude')).toBe('in-session-subagent');
+    expect(providerExecution(table, 'claude')).toBe('headless'); // HED-78: claude -p under the best account; in_session:true keeps the subagent protocol
     expect(providerExecution(table, 'codex')).toBe('headless');
     expect(providerExecution(table, 'no-such-provider')).toBeUndefined();
   });

@@ -51,6 +51,12 @@ const PARENT_IDENTITY_VARS = ['HEDDLE_AGENT', 'FLEET_AGENT'] as const;
 export interface WorkerEnvOptions {
   /** Explicit overrides — typically an account selector from the account registry. */
   overrides?: Record<string, string>;
+  /**
+   * Vars to REMOVE from the worker env even if the parent has them — e.g. CLAUDE_CONFIG_DIR when the
+   * chosen Claude account is the DEFAULT login (setting it explicitly to ~/.claude changes resolution
+   * and `claude auth status` reports logged-out; verified by Agent R 2026-08-15).
+   */
+  unset?: string[];
 }
 
 /**
@@ -72,6 +78,13 @@ export function buildWorkerEnv(opts: WorkerEnvOptions = {}): {
     }
   }
   for (const key of PARENT_IDENTITY_VARS) {
+    if (env[key] !== undefined) {
+      delete env[key];
+      stripped.push(key);
+    }
+  }
+
+  for (const key of opts.unset ?? []) {
     if (env[key] !== undefined) {
       delete env[key];
       stripped.push(key);

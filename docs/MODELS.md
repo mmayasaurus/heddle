@@ -109,6 +109,91 @@ get a temporary `AGENTS.md` block (restored after dispatch).
 
 Authoritative contracts: `docs/LANDMINES.md`. Authoritative map: the YAML.
 
+## Cap-aware routing (BUILT — HED-67, 2026-08-15)
+
+Ground truth that forced it: six Fable orchestrators burned a full Claude 5h
+window in ~50 min while codex sat at 8%/2% weekly and gemini at 6%. The router
+now consults live caps at every dispatch (`src/usage.ts` → `src/capaware.ts`)
+and records why it chose what it chose (`route_reason` in the ledger).
+
+- **Sources** (never a vendor call from heddle-core): `~/.heddle/usage/limits.json`
+  — the dashboard's mirror of its `heddle_provider_limits` result
+  (`{writtenAt, limits: ProviderLimit[]}`, contract in heddle-dashboard
+  `docs/USAGE_TAP.md`, pinned by its `limits.golden.json`; written every poll
+  while the app runs) — then the raw Claude statusline tap
+  `~/.heddle/usage/claude.json` + per-account `claude-<acctId>.json` (written on
+  every statusline render, app or no app) as the Claude fallback. **Stale is
+  unknown** (limits.json > 15 min old, tap > 10 min old, or a snapshot flagged
+  `stale` upstream): unknown never routes away and never refuses. A window whose
+  `resetsAt` has passed counts as 0 until the next capture.
+- **route-away** (`policy.cap_aware_routing.route_away_at_pct`, default 90):
+  if the primary provider's binding window (5h; 7d when there is no 5h; for
+  cursor, the pool its model draws from) is at/over the threshold and the class
+  declares a fallback whose own window is under it → the fallback runs, ledgered
+  with `fell_back_from` + `route_reason: cap:route-away …`. Both over → the
+  primary runs (soft cap, `cap:both-over`). No fallback → primary (`cap:over`).
+  Applies to Claude-primary classes too: `implementation` at Claude 5h ≥ 90 %
+  runs its declared `codex/gpt-5.6-terra` fallback as a subprocess instead of
+  returning the in-session refusal (below the threshold you still get the
+  refusal + account advice).
+- **Cursor pools** (Maya-corrected model, W's fields): `included-total` gates
+  Cursor's own models (`cursor-grok-*`, `composer-*`, `auto`) — soft
+  route-away; `included-api` gates NAMED third-party models (kimi-k3, …) — at
+  ≥ 100 % (or noteCode `cursor.includedApiExhausted`) they would bill
+  on-demand, so heddle **refuses** them (`metered-pool-exhausted`, ledgered);
+  `cursor.onDemandLimitReached` → everything on that Cursor account is refused.
+  The account heddle's dispatches bill is the `cursor-agent-keychain` row when
+  the dashboard reports it (the IDE row is informational).
+- **Explicit routes** (`provider`+`model` named by the caller) are never routed
+  away — naming it is the choice — but the metered-pool refusals still apply.
+- **Dry run:** `heddle route --class <c> [--provider p --model m] [--opt-in]` and
+  the `plan_dispatch` MCP tool print the decision, the checks, the remaining
+  fallback and the account advice — no ledger row, no worker.
+
+## Claude workers & automatic account switching (BUILT — HED-78, 2026-08-15)
+
+Maya: "Yes let's def build the auto account switching!" — so Claude classes now
+run as **out-of-process `claude -p` workers** on the registry account with the
+most 5h headroom (src/adapters/claude.ts + `pickClaudeAccount()` in
+src/capaware.ts), which ends the manual log-out/log-in juggling:
+
+- **Registry** `~/.heddle/accounts.json` (`claude[]: {id, configDir|null,
+  email, note}`; `configDir: null` = the default login — heddle UNSETS
+  `CLAUDE_CONFIG_DIR` for it: setting it explicitly to `~/.claude` changes
+  resolution and `claude auth status` reports logged-out, verified by R).
+  Per-account caps come from the tap's `~/.heddle/usage/claude-<acctId>.json`
+  (or the dashboard's `limits.json` account rows).
+- **Selection**: the account with the lowest 5h used% among those with a
+  FRESH capture; `account_pin` / `--account <id>` overrides; nothing fresh → the
+  default login. The ledger `account` column records the account actually
+  used and `route_reason` carries `account:<id> (5h x%, most headroom of N
+  fresh)` / `pinned` / `default (no fresh per-account caps)`.
+- **Contract** (`claude -p <prompt> --output-format json --model <m>
+  [--effort e] [--resume id] --append-system-prompt <packs> [--mcp-config
+  <tmp> --strict-mcp-config] --permission-mode acceptEdits --allowedTools …`;
+  stdin closed; exit 0 + empty stdout = failure; never `--bare`): skill packs
+  travel on the command line (nothing written into the worktree — no AGENTS.md
+  race for Claude workers), MCP via a per-dispatch temp file. Posture =
+  `acceptEdits` + an explicit tool allowlist (`DEFAULT_CLAUDE_ALLOWED_TOOLS`:
+  read/edit the workspace, run the repo's own scripts, inspect git —
+  LANDMINES: `--permission-mode auto` aborts headless); `browse` adds
+  WebFetch/WebSearch, `exec-privileged` (two keys) → `--dangerously-skip-permissions`,
+  `net` unenforceable → refused. Billing = the subscription OAuth of the
+  config dir; `buildWorkerEnv` strips every API-key/base-URL var.
+- **In-session stays available**: `dispatch_worker(in_session: true)` /
+  `heddle dispatch --in-session` returns the structured `claude-in-session`
+  instruction (run it as your own Agent-tool subagent: shared prompt cache,
+  same account) plus the account advice line.
+- **Route-away stays on**: at Claude 5h ≥ `route_away_at_pct` (90) a Claude
+  class runs its declared fallback (codex/…) instead — Maya's default (lower
+  the knob if Claude should hold).
+- **Live-verified 2026-08-15**: two haiku workers, `heddle dispatch --class
+  research-summarize` → ledger `account=acct1` (default, session persisted
+  under `~/.claude/projects/…`) and `--account acct2` → `account=acct2`
+  (session persisted under `~/.claude-acct2/projects/…`), both `OK`.
+- Codex workers record `account` = `basename(CODEX_HOME)` when the caller
+  selects one.
+
 ## Structural caps (BUILT — HED-2, 2026-08-15; Scape-derived, clean-room)
 
 Enforced in `src/dispatch.ts`, not in prompts. Every refusal is a **finished

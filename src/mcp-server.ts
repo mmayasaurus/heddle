@@ -2,7 +2,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
-import { dispatch } from './dispatch.js';
+import { dispatch, planDispatch } from './dispatch.js';
 import { Ledger } from './ledger.js';
 import { loadRouting, describeTaskClasses } from './routing.js';
 import { listPacks, withMandatoryPacks } from './skillpacks.js';
@@ -43,9 +43,10 @@ server.tool(
     'provider+model directly, OR both (class = policy, named model = route, no fallback). Workers ' +
     'run on subscription CLIs as subprocesses; this call blocks until the worker finishes (seconds ' +
     'to minutes). Returns {ok, output, provider, model, skills, sessionId (resume handle), usage, ' +
-    'ledgerId}. Claude-primary classes (execution in-session-subagent) are NOT spawned: you get ' +
-    '{ok:false, refusal:{code:"claude-in-session", instruction}} — run them with your own Agent ' +
-    'tool as instructed, or name a subprocess provider+model.',
+    'ledgerId, account, routeReason}. Claude classes run as a headless `claude -p` worker on the ' +
+    'registry account with the most 5h headroom (automatic account rotation); pass in_session:true to ' +
+    'get {ok:false, refusal:{code:"claude-in-session", instruction}} and run it as your own Agent-tool ' +
+    'subagent instead (shared prompt cache, same account).',
   {
     prompt: z.string().describe('The sub-task instructions for the worker.'),
     task_class: z.string().optional().describe('Routing task class (see list_task_classes) — supplies policy. Alone: the table\'s route. With provider+model: the named route under this class\'s policy.'),
@@ -64,6 +65,8 @@ server.tool(
     resume: z.string().optional().describe('Resume a prior worker session by its sessionId.'),
     codex_home: z.string().optional().describe('Account selection for codex workers (CODEX_HOME path).'),
     opt_in: z.boolean().optional().describe('Required for task classes gated behind explicit opt-in, and to grant the exec-privileged capability.'),
+    in_session: z.boolean().optional().describe('Claude classes: return the in-session (Agent tool) instruction instead of spawning a headless claude worker.'),
+    account_pin: z.string().optional().describe('Claude classes: pin a registry account id (~/.heddle/accounts.json); default = most 5h headroom.'),
     capabilities: z.array(z.string()).optional().describe(
       'Capabilities to GRANT the worker: net | browse | exec-privileged (default: none — default-deny). ' +
       'Grants are ledgered and passed only to a provider whose CLI can enforce them (codex); an ' +
@@ -93,12 +96,58 @@ server.tool(
         noFallback: a.no_fallback,
         timeoutMs: a.timeout_ms,
         capabilities: a.capabilities,
+        inSession: a.in_session,
+        accountPin: a.account_pin,
         identity: IDENTITY,
       });
       const { raw, ...summary } = res;
       return text(summary);
     } catch (err) {
       return errorText(`dispatch failed: ${(err as Error).message ?? String(err)}`);
+    }
+  },
+);
+
+server.tool(
+  'plan_dispatch',
+  'DRY RUN of dispatch_worker: where a task class (or explicit provider+model) would run RIGHT NOW ' +
+    'and why — live provider caps (route-away when the primary is near its cap, metered-pool ' +
+    'refusals), whether it is in-session, and which Claude account has the most headroom. No ledger ' +
+    'row, no worker. Use it to pick a class when caps are tight.',
+  {
+    task_class: z.string().optional(),
+    provider: z.string().optional(),
+    model: z.string().optional(),
+    opt_in: z.boolean().optional(),
+    codex_home: z.string().optional(),
+    in_session: z.boolean().optional(),
+    account_pin: z.string().optional(),
+  },
+  async (a) => {
+    try {
+      const env: Record<string, string> = {};
+      if (a.codex_home) env.CODEX_HOME = a.codex_home;
+      const plan = planDispatch({
+        taskClass: a.task_class, provider: a.provider, model: a.model, prompt: '(dry run)',
+        cwd: process.cwd(), optIn: a.opt_in, env: Object.keys(env).length ? env : undefined, identity: IDENTITY,
+        inSession: a.in_session, accountPin: a.account_pin,
+      });
+      return text({
+        task_class: plan.route.taskClass,
+        would_run: plan.decision.refusal ? null : `${plan.target.provider}/${plan.target.model}`,
+        execution: plan.execution ?? null,
+        routed_away_for_cap: plan.decision.routedAwayForCap,
+        remaining_fallback: plan.fallback ? `${plan.fallback.provider}/${plan.fallback.model}` : null,
+        route_reason: plan.decision.routeReason,
+        refusal: plan.decision.refusal ?? null,
+        checks: plan.decision.checks,
+        account: plan.account,
+        account_pick: plan.accountPick ? { id: plan.accountPick.account.id, used_pct: plan.accountPick.usedPct, reason: plan.accountPick.reason } : null,
+        account_advice: plan.accountAdvice?.line ?? null,
+        skills: plan.skillsForRefusal,
+      });
+    } catch (err) {
+      return errorText(`plan_dispatch failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   },
 );

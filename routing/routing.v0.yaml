@@ -14,6 +14,14 @@ policy:
     ollama_cloud: excluded            # reserved for PR reviewer bots (account-scoped limits)
   official_binaries_only: true        # each vendor's own CLI + own auth; never a third-party
                                       # client wearing another vendor's credentials (see README)
+  cap_aware_routing:                  # HED-67 — src/capaware.ts consults ~/.heddle/usage at dispatch
+    enabled: true
+    route_away_at_pct: 90             # primary's binding window (5h, else 7d; cursor: its pool) >= this
+                                      #   → run the class fallback instead (soft; both over → primary).
+                                      # Metered refusals are structural: cursor included-api >= 100% or
+                                      #   cursor.includedApiExhausted → named 3P models (kimi) REFUSED;
+                                      #   cursor.onDemandLimitReached → everything on cursor REFUSED.
+                                      # Unknown/stale caps never route away and never refuse.
   capabilities:                       # HED-2 — operator-owned switches for worker capability grants
     allow_exec_privileged: false      # exec-privileged (codex danger-full-access, no sandbox) stays REFUSED
                                       #   until the operator flips this; the call must ALSO pass opt_in.
@@ -33,9 +41,13 @@ policy:
 providers:
   claude:
     auth: anthropic-subscription
-    execution: in-session-subagent    # spawned via the orchestrator's Agent tool, not a subprocess
+    execution: headless               # HED-78: `claude -p --output-format json` under CLAUDE_CONFIG_DIR of the
+                                      #   registry account (~/.heddle/accounts.json) with the most 5h headroom —
+                                      #   automatic account rotation. dispatch_worker(in_session: true) keeps the
+                                      #   original protocol (the orchestrator's own Agent-tool subagent: shared
+                                      #   prompt cache, same account) as a structured claude-in-session instruction.
     models: [fable, opus, sonnet, haiku]
-    notes: shared prompt cache with orchestrator; per-agent skills/mcpServers/permissionMode native
+    notes: "headless posture = --permission-mode acceptEdits + an explicit tool allowlist (LANDMINES: auto aborts headless); packs via --append-system-prompt; never --bare"
   codex:
     auth: chatgpt-subscription
     execution: headless               # codex exec --json, stdin CLOSED (see docs/LANDMINES.md)
