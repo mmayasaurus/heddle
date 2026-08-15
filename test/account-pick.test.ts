@@ -40,3 +40,47 @@ describe('pickClaudeAccount', () => {
     expect(pickClaudeAccount(claudeCaps([{ id: 'acct1', used: 20 }, { id: 'acct2', used: 20 }]), registry)?.account.id).toBe('acct1');
   });
 });
+
+describe('pickClaudeAccount — logged-out accounts are not addressable', () => {
+  const registry = [
+    { id: 'acct1', configDir: '/x/.claude-acct1', loggedIn: false },
+    { id: 'acct2', configDir: null },
+    { id: 'acct3', configDir: '/x/.claude-acct3' },
+  ];
+  function capsWith(rows: { id: string; used: number | null; stale?: boolean }[]) {
+    return {
+      provider: 'claude', source: 'claude-tap' as const, stale: false, capturedAt: 1, fiveHour: { usedPercentage: null, resetsAt: null },
+      sevenDay: { usedPercentage: null, resetsAt: null }, windows: {}, noteCodes: [], activeAccount: null,
+      accounts: rows.map((r) => ({ id: r.id, fiveHour: { usedPercentage: r.used, resetsAt: null }, sevenDay: { usedPercentage: null, resetsAt: null }, windows: {}, noteCodes: [], limitReached: false, stale: r.stale ?? false })),
+    };
+  }
+
+  it('never selects a logged-out account even when it has the freshest, lowest capture (a keeper anchor for a replaced credential)', async () => {
+    const { pickClaudeAccount } = await import('../src/capaware.js');
+    const pick = pickClaudeAccount(capsWith([{ id: 'acct1', used: 0 }, { id: 'acct2', used: 68 }]), registry)!;
+    expect(pick.account.id).toBe('acct2');
+    expect(pick.envUnset).toEqual(['CLAUDE_CONFIG_DIR']);
+  });
+
+  it('refuses a pin to a logged-out account with the exact re-login command', async () => {
+    const { pickClaudeAccount } = await import('../src/capaware.js');
+    expect(() => pickClaudeAccount(capsWith([]), registry, { pin: 'acct1' }))
+      .toThrow(/NOT logged in.*CLAUDE_CONFIG_DIR=\/x\/\.claude-acct1 claude \/login/s);
+  });
+
+  it('falls back to the default among ADDRESSABLE accounts when nothing is fresh', async () => {
+    const { pickClaudeAccount } = await import('../src/capaware.js');
+    const pick = pickClaudeAccount(capsWith([]), registry)!;
+    expect(pick.account.id).toBe('acct2');
+    // and when the registry has no addressable default, the first addressable account wins
+    const noDefault = [{ id: 'acct1', configDir: '/x/.a1', loggedIn: false }, { id: 'acct3', configDir: '/x/.a3' }];
+    expect(pickClaudeAccount(capsWith([]), noDefault)!.account.id).toBe('acct3');
+  });
+
+  it('advice excludes logged-out accounts from the headroom ranking', async () => {
+    const { adviseClaudeAccount } = await import('../src/capaware.js');
+    const advice = adviseClaudeAccount(capsWith([{ id: 'acct1', used: 0 }, { id: 'acct2', used: 40 }, { id: 'acct3', used: 20 }]), registry);
+    expect(advice.best?.id).toBe('acct3');
+    expect(advice.line).toContain('acct3 has the most 5h headroom');
+  });
+});
