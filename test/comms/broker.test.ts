@@ -363,6 +363,30 @@ describe('Broker (temp db)', () => {
       expect(newBroker().restoreHeld()).toBe(0);
     });
 
+    it('restoreHeld() sees a hold whose last event was a transient transport failure, and ignores timed-out ones', async () => {
+      log.mintChild('K'); log.mintChild('K');
+      state.states.set('K.1', 'permission-gate'); state.states.set('K.2', 'permission-gate');
+      const before = newBroker({ holdMaxMs: 1000 });
+      const a = await post(before, 'K', 'K.1', 'transient');
+      const b = await post(before, 'K', 'K.2', 'expired');
+      state.states.set('K.1', 'idle');
+      transport.enqueue({ ok: false, code: 'no-session' }); // K.1's release blips → last event 'failed'/'no-session', STILL held
+      expect(await before.pump()).toEqual({ released: 0, failed: 0, stillHeld: 2 });
+      expect(log.openHolds().map((d) => d.messageId)).toEqual([accepted(a).messageId, accepted(b).messageId]);
+      expect(newBroker().restoreHeld()).toBe(2);              // a transient failure does not hide a hold from a restart
+      advance(1001);                                          // now both time out → last events 'failed'/'hold-timeout'
+      expect(await before.pump()).toEqual({ released: 0, failed: 2, stillHeld: 0 });
+      expect(log.openHolds()).toEqual([]);
+      expect(newBroker().restoreHeld()).toBe(0);
+    });
+
+    it('a throwing target-state provider is reported through onWarning', async () => {
+      const warnings: string[] = [];
+      const throwing: TargetStateProvider = { state: () => { throw new Error('tracker down'); } };
+      await post(newBroker({ targetState: throwing, onWarning: (m) => warnings.push(m) }), 'K', 'R');
+      expect(warnings).toEqual([expect.stringContaining('tracker down')]);
+    });
+
     it('a throwing target-state provider does not lose the message: it is treated as unknown and delivered', async () => {
       const throwing: TargetStateProvider = { state: () => { throw new Error('tracker down'); } };
       const result = await post(newBroker({ targetState: throwing }), 'K', 'R');
