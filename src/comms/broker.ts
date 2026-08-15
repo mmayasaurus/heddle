@@ -1,4 +1,4 @@
-import type { CommsLog } from './log.js';
+import type { CommsLog, RoomRecord, RoomMember, FloorRecord } from './log.js';
 import { postEnveloped, renderEnvelope, type LineageSource } from './envelope.js';
 import { canSend, parseAddress, type AddressKind } from './address.js';
 import type { DeliveryOutcome, MessageKind, MessageRecord, Tier } from './types.js';
@@ -91,6 +91,10 @@ export interface PostRequest {
   issue?: string | null;
   thread?: string | null;
   meta?: Record<string, unknown> | null;
+  /** Rooms only: take the floor before posting (refused if another holder's lease is live). */
+  holdFloor?: boolean;
+  /** Rooms only: release the floor after this post (end of a multi-part reply). */
+  releaseFloor?: boolean;
 }
 
 export type PostResult =
@@ -113,7 +117,8 @@ export type PostResult =
     };
 
 export type RefusalCode =
-  | 'unknown-target' | 'ambiguous-target' | 'no-orchestrator' | 'body-too-large' | 'rate-limited' | 'invalid-message';
+  | 'unknown-target' | 'ambiguous-target' | 'no-orchestrator' | 'body-too-large' | 'rate-limited' | 'invalid-message'
+  | 'no-such-room' | 'not-a-member' | 'floor-held' | 'room-governance';
 
 type AcceptedBase = { messageId: number; to: string; tier: Tier; envelope: string };
 
@@ -250,6 +255,85 @@ export class Broker {
     return null;
   }
 
+  // ------------------------------------------------------------------ rooms
+
+  /**
+   * May `from` post to `room` right now? Operator: always. Otherwise the room must exist and be
+   * open or list the sender as a member; and no other holder's floor lease may be live. With
+   * `holdFloor` the sender takes (or renews) the floor as part of the check.
+   */
+  private checkRoom(from: string, room: string, holdFloor: boolean): { code: RefusalCode; reason: string; retryAfterMs?: number } | null {
+    const r = this.log.room(room);
+    if (!r) return { code: 'no-such-room', reason: `${room} does not exist (rooms are created by the operator or an orchestrator)` };
+    if (from !== 'operator' && !r.open && !this.log.member(room, from)) {
+      return { code: 'not-a-member', reason: `${from} is not a member of ${room} (workers cannot self-join; ask your orchestrator or the operator)` };
+    }
+    const floor = this.log.floor(room);
+    if (floor && floor.holder !== from) {
+      const retryAfterMs = Math.max(0, Date.parse(floor.expiresAt) - this.now());
+      return { code: 'floor-held', reason: `${floor.holder} holds the floor of ${room} (lease ends ${floor.expiresAt}); no interleaved replies`, retryAfterMs };
+    }
+    if (holdFloor) this.log.acquireFloor(room, from);
+    else if (floor && floor.holder === from) this.log.acquireFloor(room, from); // a holder's post renews its lease
+    return null;
+  }
+
+  /** Who may govern rooms: the operator and fleet agents (orchestrators). Children never. */
+  private governs(actor: string): boolean {
+    const k = parseAddress(actor)?.kind;
+    return k === 'operator' || k === 'agent';
+  }
+
+  private governanceRefusal(actor: string, room: string, reason: string): PostResult {
+    return this.refuse(actor, room, 'room-governance', reason);
+  }
+
+  /** Create a room. Operator/orchestrators only; idempotent for an existing name. */
+  createRoom(actor: string, name: string, opts: { topic?: string | null; open?: boolean } = {}): { room: RoomRecord } | Extract<PostResult, { outcome: 'refused' }> {
+    if (!this.governs(actor)) return this.governanceRefusal(actor, name, `${actor} may not create rooms (operator/orchestrators only)`) as Extract<PostResult, { outcome: 'refused' }>;
+    if (parseAddress(name)?.kind !== 'room') return this.governanceRefusal(actor, name, `${JSON.stringify(name)} is not a #room name`) as Extract<PostResult, { outcome: 'refused' }>;
+    return { room: this.log.createRoom({ name, by: actor, topic: opts.topic ?? null, open: opts.open ?? false }) };
+  }
+
+  /**
+   * Add a member. Operator/orchestrators only — a worker asking to join itself is refused and
+   * ledgered; an orchestrator may add its own children (and peers), the operator anyone.
+   */
+  addMember(actor: string, room: string, address: string): { member: RoomMember } | Extract<PostResult, { outcome: 'refused' }> {
+    const refused = (reason: string) => this.governanceRefusal(actor, room, reason) as Extract<PostResult, { outcome: 'refused' }>;
+    if (!this.governs(actor)) return refused(`${actor} may not change room membership (workers cannot self-join)`);
+    if (!this.log.room(room)) return refused(`no such room ${room}`);
+    const target = parseAddress(address);
+    if (!target || !canSend(target)) return refused(`${JSON.stringify(address)} cannot be a member`);
+    if (target.kind === 'child' && actor !== 'operator' && target.parent !== actor) {
+      return refused(`${actor} may only add its own children (${address} belongs to ${target.parent})`);
+    }
+    return { member: this.log.addMember({ room, address, by: actor }) };
+  }
+
+  removeMember(actor: string, room: string, address: string): { removed: boolean } | Extract<PostResult, { outcome: 'refused' }> {
+    if (!this.governs(actor) && actor !== address) {
+      return this.governanceRefusal(actor, room, `${actor} may not remove ${address} from ${room}`) as Extract<PostResult, { outcome: 'refused' }>;
+    }
+    return { removed: this.log.removeMember(room, address) };
+  }
+
+  /** Take/renew the floor of a room the actor may post to. */
+  acquireFloor(actor: string, room: string, leaseMs?: number): { floor: FloorRecord } | Extract<PostResult, { outcome: 'refused' }> {
+    const gate = this.checkRoom(actor, room, false);
+    if (gate) return this.refuse(actor, room, gate.code, gate.reason, undefined, gate.retryAfterMs) as Extract<PostResult, { outcome: 'refused' }>;
+    const floor = this.log.acquireFloor(room, actor, leaseMs);
+    if (!floor) {
+      const held = this.log.floor(room)!;
+      return this.refuse(actor, room, 'floor-held', `${held.holder} holds the floor of ${room}`, undefined, Math.max(0, Date.parse(held.expiresAt) - this.now())) as Extract<PostResult, { outcome: 'refused' }>;
+    }
+    return { floor };
+  }
+
+  releaseFloor(actor: string, room: string): { released: boolean } {
+    return { released: this.log.releaseFloor(room, actor) };
+  }
+
   // ------------------------------------------------------------------ post
 
   async post(req: PostRequest): Promise<PostResult> {
@@ -267,6 +351,10 @@ export class Broker {
 
     const constraint = this.checkConstraints(req.from, to, req.body ?? '');
     if (constraint) return this.refuse(req.from, to, constraint.code, constraint.reason + via, undefined, constraint.retryAfterMs);
+    if (kind === 'room') {
+      const gate = this.checkRoom(req.from, to, req.holdFloor === true);
+      if (gate) return this.refuse(req.from, to, gate.code, gate.reason, undefined, gate.retryAfterMs);
+    }
     const pairKey = `${req.from}->${to}`;
 
     // `resolvedFrom` is broker-authored provenance: whatever the caller put there is dropped.
@@ -285,7 +373,11 @@ export class Broker {
     this.consume(pairKey);
     const { record, envelope } = enveloped;
     const base = { messageId: record.id, to, tier: record.tier, envelope };
-    if (kind === 'room') return this.deliverRoom(record, base);
+    if (kind === 'room') {
+      const out = this.deliverRoom(record, base);
+      if (req.releaseFloor) this.log.releaseFloor(to, req.from);
+      return out;
+    }
     if (kind === 'broadcast') return this.deliverBroadcast(record, envelope, base);
     const d = await this.dispatchTo(record, envelope, to, req.from);
     return { ...base, outcome: d.outcome, code: d.code, ...(d.reason ? { reason: d.reason } : {}) };
@@ -307,20 +399,24 @@ export class Broker {
       this.log.recordDelivery({ messageId: record.id, from: record.from, to: record.to, outcome: 'logged', code: 'no-recipients', transport: this.transport.name });
       return { ...base, outcome: 'logged', code: 'no-recipients' };
     }
-    const outcomes = await Promise.all(recipients.map((r) => this.dispatchTo(record, envelope, r, record.from)));
+    // Guaranteed delivery: push where the recipient has a live channel, inbox (pull) otherwise —
+    // "no live session" is not a failure for a broadcast, it is the pull path.
+    const outcomes = await Promise.all(recipients.map((r) => this.dispatchTo(record, envelope, r, record.from, { broadcast: true })));
     const failed = outcomes.filter((o) => o.outcome === 'failed').length;
     const heldN = outcomes.filter((o) => o.outcome === 'held').length;
+    const pushed = outcomes.filter((o) => o.outcome === 'sent').length;
+    const inbox = outcomes.filter((o) => o.outcome === 'logged').length;
     const n = recipients.length;
     if (failed && heldN) return { ...base, outcome: 'failed', code: 'partial-mixed', reason: `${failed}/${n} recipients failed, ${heldN}/${n} held at a permission gate` };
     if (failed) return { ...base, outcome: 'failed', code: 'partial', reason: `${failed}/${n} recipients failed` };
     if (heldN) return { ...base, outcome: 'held', code: 'partial-hold', reason: `${heldN}/${n} recipients held at a permission gate` };
-    return { ...base, outcome: 'sent', code: 'broadcast' };
+    return { ...base, outcome: 'sent', code: 'broadcast', reason: `${pushed}/${n} pushed, ${inbox}/${n} to inbox` };
   }
 
   /** Hold if the target is at a permission gate, else inject (serialized per target). */
   private async dispatchTo(
-    record: MessageRecord, envelope: string, target: string, from: string,
-  ): Promise<{ outcome: 'sent' | 'held' | 'failed'; code: string; reason?: string }> {
+    record: MessageRecord, envelope: string, target: string, from: string, opts: { broadcast?: boolean } = {},
+  ): Promise<{ outcome: 'sent' | 'held' | 'failed' | 'logged'; code: string; reason?: string }> {
     // Order is preserved per target: while older messages for this target are still held, a new
     // one queues behind them (released in order by pump()) instead of overtaking them.
     const queuedBehind = this.held.some((h) => h.target === target);
@@ -332,6 +428,10 @@ export class Broker {
       return { outcome: 'held', code };
     }
     const res = await this.deliverSerialized(target, { record, envelope, target, attempt: 1 });
+    if (!res.ok && opts.broadcast && res.code === 'no-live-session') {
+      this.log.recordDelivery({ messageId: record.id, from, to: target, outcome: 'logged', code: 'inbox', reason: res.reason ?? null, transport: this.transport.name, attempt: 1 });
+      return { outcome: 'logged', code: 'inbox', reason: res.reason };
+    }
     this.log.recordDelivery({ messageId: record.id, from, to: target, outcome: res.ok ? 'sent' : 'failed', code: res.code, reason: res.reason ?? null, transport: this.transport.name, attempt: 1 });
     return { outcome: res.ok ? 'sent' : 'failed', code: res.code, reason: res.reason };
   }

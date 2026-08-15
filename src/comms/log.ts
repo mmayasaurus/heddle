@@ -112,6 +112,31 @@ CREATE TABLE IF NOT EXISTS sessions (
   heartbeat_at TEXT NOT NULL
 );
 
+-- Rooms (SPEC §9): membership is owned by humans / orchestrator config, never self-joined by
+-- workers; open rooms (#fleet) accept posts from any registered participant. The floor is a
+-- short lease so a multi-part reply is not interleaved — and a crashed holder cannot lock a room.
+CREATE TABLE IF NOT EXISTS rooms (
+  name       TEXT PRIMARY KEY,
+  created_by TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  topic      TEXT,
+  open       INTEGER NOT NULL DEFAULT 0,
+  CHECK (open IN (0, 1))
+);
+CREATE TABLE IF NOT EXISTS room_members (
+  room     TEXT NOT NULL REFERENCES rooms(name),
+  address  TEXT NOT NULL,
+  added_by TEXT NOT NULL,
+  added_at TEXT NOT NULL,
+  PRIMARY KEY (room, address)
+);
+CREATE TABLE IF NOT EXISTS room_floor (
+  room       TEXT PRIMARY KEY REFERENCES rooms(name),
+  holder     TEXT NOT NULL,
+  since      TEXT NOT NULL,
+  expires_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS participants (
   address     TEXT PRIMARY KEY,
   kind        TEXT NOT NULL,
@@ -172,6 +197,32 @@ export interface SessionRecord {
   socket: string | null;
   startedAt: string;
   heartbeatAt: string;
+}
+
+export const DEFAULT_ROOM = '#fleet';
+export const DEFAULT_FLOOR_LEASE_MS = 60_000;
+
+export interface RoomRecord {
+  name: string;
+  createdBy: string;
+  createdAt: string;
+  topic: string | null;
+  /** Any registered participant may post (#fleet); closed rooms are members-only. */
+  open: boolean;
+}
+
+export interface RoomMember {
+  room: string;
+  address: string;
+  addedBy: string;
+  addedAt: string;
+}
+
+export interface FloorRecord {
+  room: string;
+  holder: string;
+  since: string;
+  expiresAt: string;
 }
 
 export interface CommsLogOptions {
@@ -405,6 +456,111 @@ export class CommsLog {
       ? this.db.prepare('SELECT * FROM participants WHERE parent = ? ORDER BY seq ASC').all(filter.parent)
       : this.db.prepare('SELECT * FROM participants ORDER BY first_seen ASC, address ASC').all();
     return (rows as unknown as PRow[]).map(toParticipant);
+  }
+
+  // ---------------------------------------------------------------- rooms
+
+  /** Create a room (idempotent for the same name — returns the existing one). Governance is the broker's job. */
+  createRoom(input: { name: string; by: string; topic?: string | null; open?: boolean }): RoomRecord {
+    const parsed = requireAddress(input.name, 'to');
+    if (parsed.kind !== 'room') throw new Error(`rooms are #names, got ${JSON.stringify(input.name)}`);
+    if (!canSend(requireAddress(input.by, 'from'))) throw new Error('a room is created by an agent or the operator');
+    const existing = this.room(input.name);
+    if (existing) return existing;
+    const ts = this.now();
+    this.db.prepare('INSERT INTO rooms (name, created_by, created_at, topic, open) VALUES (?, ?, ?, ?, ?)')
+      .run(input.name, input.by, ts, input.topic ?? null, input.open ? 1 : 0);
+    return this.room(input.name)!;
+  }
+
+  /** The default rooms every deployment has (#fleet, open). Safe to call at every startup. */
+  ensureDefaultRooms(by = 'operator'): RoomRecord[] {
+    return [this.createRoom({ name: DEFAULT_ROOM, by, topic: 'the whole fleet — announcements, open questions, cross-lane coordination', open: true })];
+  }
+
+  room(name: string): RoomRecord | null {
+    const row = this.db.prepare('SELECT * FROM rooms WHERE name = ?').get(name) as unknown as RRow | undefined;
+    return row ? toRoom(row) : null;
+  }
+
+  rooms(): RoomRecord[] {
+    return (this.db.prepare('SELECT * FROM rooms ORDER BY name').all() as unknown as RRow[]).map(toRoom);
+  }
+
+  addMember(input: { room: string; address: string; by: string }): RoomMember {
+    if (!this.room(input.room)) throw new Error(`no such room ${input.room}`);
+    if (!canSend(requireAddress(input.address, 'to'))) throw new Error('members are agents, children or the operator');
+    requireAddress(input.by, 'from');
+    const ts = this.now();
+    this.db.prepare(`
+      INSERT INTO room_members (room, address, added_by, added_at) VALUES (?, ?, ?, ?)
+      ON CONFLICT(room, address) DO NOTHING
+    `).run(input.room, input.address, input.by, ts);
+    return this.member(input.room, input.address)!;
+  }
+
+  removeMember(room: string, address: string): boolean {
+    const info = this.db.prepare('DELETE FROM room_members WHERE room = ? AND address = ?').run(room, address);
+    return Number(info.changes) > 0;
+  }
+
+  member(room: string, address: string): RoomMember | null {
+    const row = this.db.prepare('SELECT * FROM room_members WHERE room = ? AND address = ?').get(room, address) as unknown as MRow | undefined;
+    return row ? toMember(row) : null;
+  }
+
+  members(room: string): RoomMember[] {
+    return (this.db.prepare('SELECT * FROM room_members WHERE room = ? ORDER BY added_at, address').all(room) as unknown as MRow[]).map(toMember);
+  }
+
+  /** Rooms `address` may post to: open rooms plus the closed ones it is a member of (operator: all). */
+  roomsFor(address: string): RoomRecord[] {
+    if (address === 'operator') return this.rooms();
+    return (this.db.prepare(`
+      SELECT r.* FROM rooms r WHERE r.open = 1 OR EXISTS (SELECT 1 FROM room_members m WHERE m.room = r.name AND m.address = ?)
+      ORDER BY r.name
+    `).all(address) as unknown as RRow[]).map(toRoom);
+  }
+
+  /** Current floor holder of a room, if the lease has not expired. */
+  floor(room: string): FloorRecord | null {
+    const row = this.db.prepare('SELECT * FROM room_floor WHERE room = ?').get(room) as unknown as FRow | undefined;
+    if (!row) return null;
+    const f = toFloor(row);
+    return Date.parse(f.expiresAt) > Date.parse(this.now()) ? f : null;
+  }
+
+  /**
+   * Take (or renew) the floor of a room. Succeeds when the floor is free, expired, or already
+   * held by `holder`; returns null when another holder's lease is live (caller reads `floor()`).
+   */
+  acquireFloor(room: string, holder: string, leaseMs = DEFAULT_FLOOR_LEASE_MS): FloorRecord | null {
+    if (!Number.isFinite(leaseMs) || leaseMs <= 0) throw new Error('leaseMs must be a positive number');
+    if (!this.room(room)) throw new Error(`no such room ${room}`);
+    const now = this.now();
+    let out: FloorRecord | null = null;
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const current = this.floor(room);
+      if (current && current.holder !== holder) { this.db.exec('COMMIT'); return null; }
+      const expires = new Date(Date.parse(now) + leaseMs).toISOString();
+      this.db.prepare(`
+        INSERT INTO room_floor (room, holder, since, expires_at) VALUES (?, ?, ?, ?)
+        ON CONFLICT(room) DO UPDATE SET holder = excluded.holder, since = CASE WHEN room_floor.holder = excluded.holder THEN room_floor.since ELSE excluded.since END, expires_at = excluded.expires_at
+      `).run(room, holder, now, expires);
+      this.db.exec('COMMIT');
+      out = this.floor(room);
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
+    return out;
+  }
+
+  /** Release the floor if `holder` holds it. Returns whether anything was released. */
+  releaseFloor(room: string, holder: string): boolean {
+    const info = this.db.prepare('DELETE FROM room_floor WHERE room = ? AND holder = ?').run(room, holder);
+    return Number(info.changes) > 0;
   }
 
   // ---------------------------------------------------------------- sessions (presence)
@@ -666,6 +822,13 @@ interface Row {
   verified: number; body: string; reply_to: number | null; issue: string | null; thread: string | null;
   dispatch_id: number | null; meta: string | null;
 }
+
+interface RRow { name: string; created_by: string; created_at: string; topic: string | null; open: number }
+interface MRow { room: string; address: string; added_by: string; added_at: string }
+interface FRow { room: string; holder: string; since: string; expires_at: string }
+function toRoom(r: RRow): RoomRecord { return { name: r.name, createdBy: r.created_by, createdAt: r.created_at, topic: r.topic, open: r.open === 1 }; }
+function toMember(r: MRow): RoomMember { return { room: r.room, address: r.address, addedBy: r.added_by, addedAt: r.added_at }; }
+function toFloor(r: FRow): FloorRecord { return { room: r.room, holder: r.holder, since: r.since, expiresAt: r.expires_at }; }
 
 interface SRow {
   address: string; session_id: string | null; session_name: string | null; pid: number | null;
