@@ -492,6 +492,11 @@ a room when they want to; `@all` / `@agent` are the guaranteed-delivery exceptio
   `list_rooms` (rooms you may post to, with members + floor), `acquire_floor {room, lease_ms?}`,
   `release_floor {room}`; `post_message` routes `#room` / `@all` and accepts `hold_floor` /
   `release_floor`; `read_transcript { room, since_id }` reads a room.
+- **Read policy** (`read_transcript`): needs a bound identity; an agent reads rooms it may post to,
+  DM threads it is part of, and its own inbox (the default); `all` and other people's DMs are
+  operator-only — the db file is shared, but the tool surface is not a fleet-wide wiretap.
+- A broadcast recipient held at a permission gate is never "failed": at the hold deadline it is
+  left in its inbox (`logged` / `inbox`), which also resolves the hold for restarts.
 
 ## Non-Claude orchestrators (HED-72, comms half)
 

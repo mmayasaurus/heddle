@@ -173,6 +173,20 @@ describe('rooms (temp db)', () => {
     expect(await broker.post({ from: 'R', to: '#fleet', body: 'after expiry' })).toMatchObject({ outcome: 'logged' });
   });
 
+  it('a broadcast recipient held at a permission gate ends in its inbox at timeout, and the hold is resolved for restarts', async () => {
+    log.registerSession({ address: 'R' }); log.mintChild('K');
+    const state = { states: new Map<string, 'idle' | 'busy' | 'permission-gate' | 'exited' | 'unknown'>(), state(a: string) { return this.states.get(a) ?? 'unknown'; } };
+    state.states.set('K.1', 'permission-gate');
+    const broker = new Broker({ log, transport: channelTransport(log), targetState: state, now, holdMaxMs: 1000 });
+    const res = await broker.post({ from: 'K', to: '@all', body: 'fleet-wide' });
+    expect(res).toMatchObject({ outcome: 'held', code: 'partial-hold' });
+    advance(1001);
+    expect(await broker.pump()).toEqual({ released: 1, failed: 0, stillHeld: 0 }); // "released" = resolved into the inbox
+    const rows = log.deliveries({ target: 'K.1' });
+    expect(rows.at(-1)).toMatchObject({ outcome: 'logged', code: 'inbox' });
+    expect(log.openHolds()).toEqual([]);                                             // a restart will not replay it
+  });
+
   it('broadcasts to live sessions and durable inboxes with ChannelTransport', async () => {
     log.register({ address: 'R' });
     log.registerSession({ address: 'R', sessionId: 'r-live' });

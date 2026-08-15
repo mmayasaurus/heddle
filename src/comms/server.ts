@@ -272,13 +272,31 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
     };
   }
 
+  /**
+   * Read policy: reading needs a bound identity; the operator reads anything; an agent reads rooms
+   * it may post to, DM threads it is part of, and its own inbox — never the whole log or other
+   * people's DMs (the file is shared, but the tool surface is not a fleet-wide wiretap).
+   */
   function readTranscript(a: Record<string, unknown>) {
+    const who = requireMe();
     const q = { sinceId: num(a.since_id), sinceTs: str(a.since_ts), thread: str(a.thread), limit: num(a.limit) ?? 50 };
     let scope;
-    if (a.room) scope = { room: String(a.room) };
-    else if (Array.isArray(a.pair)) scope = { pair: [String(a.pair[0]), String(a.pair[1])] as [string, string] };
-    else if (a.inbox) scope = { inbox: requireMe() };
-    else scope = { all: true as const };
+    if (a.room) {
+      const room = String(a.room);
+      if (who !== 'operator' && !log.roomsFor(who).some((r) => r.name === room)) {
+        throw new Error(`${who} may not read ${room} (not open, and you are not a member)`);
+      }
+      scope = { room };
+    } else if (Array.isArray(a.pair)) {
+      const pair = [String(a.pair[0]), String(a.pair[1])] as [string, string];
+      if (who !== 'operator' && !pair.includes(who)) throw new Error('you may only read DM threads you are part of');
+      scope = { pair };
+    } else if (a.all) {
+      if (who !== 'operator') throw new Error('the whole log is operator-only; use room / pair / inbox');
+      scope = { all: true as const };
+    } else {
+      scope = { inbox: who };
+    }
     return log.transcript(scope, q).map(compact);
   }
 
@@ -358,7 +376,7 @@ export const TOOLS = [
   },
   {
     name: 'read_transcript',
-    description: 'Read the durable comms log: a room, a DM pair, your inbox (direct + @all), or everything; oldest first with exclusive cursors.',
+    description: 'Read the durable comms log: a room you may post to, a DM pair you are part of, or your inbox (direct + @all) — the operator may also read `all`; oldest first with exclusive cursors. Defaults to your inbox.',
     inputSchema: {
       type: 'object',
       properties: {

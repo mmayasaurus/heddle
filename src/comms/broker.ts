@@ -536,6 +536,12 @@ export class Broker {
       const age = this.now() - h.heldAt;
       if (age > this.holdMaxMs) {               // the contract is a MAX hold time — stale instructions are not injected late
         h.attempts += 1;
+        if (h.broadcast) {                      // a broadcast recipient is never "failed": it pulls from its inbox
+          this.log.recordDelivery({ messageId: h.record.id, from: h.record.from, to: h.target, outcome: 'logged', code: 'inbox',
+            reason: `held ${age}ms at a permission gate (max ${this.holdMaxMs}ms); left in the inbox`, transport: this.transport.name, attempt: h.attempts });
+          released += 1; done.push(h);
+          continue;
+        }
         this.recordHold(h, 'failed', 'hold-timeout', `held ${age}ms (max ${this.holdMaxMs}ms); recipient can still pull it`);
         failed += 1; done.push(h);
         continue;

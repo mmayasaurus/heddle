@@ -196,6 +196,28 @@ describe('heddle-comms server (in-process)', () => {
     expect(existsSync(tokenPath)).toBe(true); // and the only copy is the file
   });
 
+  it('read_transcript: needs an identity; agents read their rooms / own DMs / inbox; only the operator reads everything', async () => {
+    initToken();
+    const token = readFileSync(tokenPath, 'utf8').trim();
+    const op = await connect({ HEDDLE_COMMS_ROLE: 'operator', HEDDLE_COMMS_OPERATOR_TOKEN: token });
+    const k = await connect({ HEDDLE_AGENT: 'K' });
+    const unbound = await connect({});
+    await call(op.client, 'create_room', { name: '#private' });               // closed, K not a member
+    await call(op.client, 'post_message', { to: '#private', body: 'secret' });
+    await call(op.client, 'post_message', { to: 'R', body: 'dm to R' });        // a DM K is not part of
+    await call(op.client, 'post_message', { to: 'K', body: 'dm to K' });
+    await call(k.client, 'post_message', { to: '#fleet', body: 'hello fleet' });
+    expect((await call(unbound.client, 'read_transcript', { all: true })).text).toMatch(/no bound comms identity/);
+    expect((await call(k.client, 'read_transcript', { all: true })).text).toMatch(/operator-only/);
+    expect((await call(k.client, 'read_transcript', { room: '#private' })).text).toMatch(/may not read #private/);
+    expect((await call(k.client, 'read_transcript', { pair: ['operator', 'R'] })).text).toMatch(/only read DM threads you are part of/);
+    expect(((await call(k.client, 'read_transcript', { pair: ['operator', 'K'] })).parsed as { body: string }[]).map((m) => m.body)).toEqual(['dm to K']);
+    expect(((await call(k.client, 'read_transcript', { room: '#fleet' })).parsed as { body: string }[]).map((m) => m.body)).toEqual(['hello fleet']);
+    expect(((await call(k.client, 'read_transcript', {})).parsed as { body: string }[]).map((m) => m.body)).toEqual(['dm to K']); // default = own inbox
+    expect(((await call(op.client, 'read_transcript', { all: true })).parsed as unknown[]).length).toBe(4);
+    expect(((await call(op.client, 'read_transcript', { room: '#private' })).parsed as { body: string }[]).map((m) => m.body)).toEqual(['secret']);
+  });
+
   it('agent session: pull-only by default (no presence row), push mode registers presence + emits channel events', async () => {
     const pullOnly = await connect({ HEDDLE_AGENT: 'K' });
     expect(pullOnly.server.pushEnabled).toBe(false);
