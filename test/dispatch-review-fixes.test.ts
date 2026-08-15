@@ -75,6 +75,13 @@ describe('dispatch — review fixes', () => {
     expect(explicit).toMatchObject({ taskClass: 'orchestration', provider: 'codex', model: 'gpt-5.6-luna' });
     expect(ledger.recent(1)[0]).toMatchObject({ task_class: 'orchestration', provider: 'codex', model: 'gpt-5.6-luna', refusal: 'not-dispatchable' });
     expect(fake.calls).toHaveLength(0);
+    // even an excluded/unknown named provider yields the structured, ledgered refusal (no throw)
+    const excluded = await dispatch(
+      { taskClass: 'orchestration', provider: 'ollama-cloud', model: 'x', prompt: 'x', cwd: tempDir() }, ledger, () => fake.adapter,
+    );
+    expect(excluded.refusal?.code).toBe('not-dispatchable');
+    expect(excluded).toMatchObject({ provider: 'ollama-cloud', model: 'x' });
+    expect(ledger.recent(1)[0]).toMatchObject({ refusal: 'not-dispatchable', provider: 'ollama-cloud' });
   });
 
   it('records a failed primary before refusing an in-session fallback', async () => {

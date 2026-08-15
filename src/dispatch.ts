@@ -358,7 +358,7 @@ export async function dispatch(
 
   // ---- Non-dispatchable class (`orchestration`) — refused on EVERY path ------------------------
   // A named subprocess route does not turn the orchestrator's own work into a worker task.
-  if (!route.dispatchable) return refuseNotDispatchable({ ...route, provider: target.provider, model: target.model }, req, ctx);
+  if (plan.notDispatchable) return refuseNotDispatchable({ ...route, provider: target.provider, model: target.model }, req, ctx);
 
   // ---- Cap-aware refusal (metered pool exhausted / on-demand hard stop) ------------------------
   if (plan.decision.refusal) {
@@ -411,6 +411,8 @@ export interface DispatchPlan {
   /** Account the run bills to / is advised (see DispatchOutcome.account). */
   account: string | null;
   accountAdvice?: AccountAdvice;
+  /** True for a `dispatchable: false` class — dispatch() refuses before any route runs. */
+  notDispatchable: boolean;
 }
 
 /**
@@ -431,6 +433,7 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
   let target: RouteTarget;
   let fallback: RouteTarget | undefined;
   let origin: InSessionOrigin = 'class';
+  let notDispatchable = false;
   if (!req.taskClass) {
     // Direct path, no class: orchestrator named the model. Full dynamic choice, still policy-fenced.
     if (!(req.provider && req.model)) {
@@ -447,7 +450,17 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
         (route.note ? ` — ${route.note}` : '') + '. Pass optIn/--opt-in to proceed.',
       );
     }
-    if (req.provider && req.model) {
+    // A non-dispatchable class (`orchestration`) is refused on EVERY path — a named subprocess route
+    // does not turn the orchestrator's own work into a worker task. Decided here, before any route is
+    // resolved, so an excluded/unknown named provider still gets the structured, ledgered refusal.
+    if (!route.dispatchable) {
+      // depth-1 still wins for a worker (checked below via identity) — but the plan just marks it.
+      target = req.provider && req.model
+        ? { ...route, provider: req.provider, model: req.model, skills: req.skills ?? route.skills, mcp: req.mcp ?? route.mcp }
+        : route;
+      origin = req.provider && req.model ? 'explicit' : 'class';
+      notDispatchable = true;
+    } else if (req.provider && req.model) {
       // Class + explicit provider/model: the class supplies policy (default skills/mcp, opt-in
       // gate, ledger task_class), the named route replaces the table's — no fallback, naming it
       // is the choice. Effort is deliberately NOT inherited (per-provider vocabulary).
@@ -463,7 +476,10 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
   // Cap-aware routing (HED-67): may swap target→fallback, or refuse a metered pool. Explicit routes
   // are never routed away (naming it is the choice) but the refusals still apply.
   const caps = req.caps ?? readProviderCaps();
-  const decision = decideRoute(table, target, fallback, caps, { explicit: origin !== 'class' });
+  // A non-dispatchable class is refused regardless, so no cap decision is made for it.
+  const decision: RouteDecision = notDispatchable
+    ? { target, fallback, routedAwayForCap: false, routeReason: 'not-dispatchable', checks: ['class is dispatchable: false — refused before any route'] }
+    : decideRoute(table, target, fallback, caps, { explicit: origin !== 'class' });
   target = decision.target;
   fallback = decision.fallback;
 
@@ -478,7 +494,7 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
     accountAdvice = adviseClaudeAccount(caps.claude, req.accounts ?? readClaudeAccounts());
     account = accountAdvice.best?.id ?? null;
   }
-  return { route, target, fallback, origin, execution, decision, skillsForRefusal, account, accountAdvice };
+  return { route, target, fallback, origin, execution, decision, skillsForRefusal, account, accountAdvice, notDispatchable };
 }
 
 /** How the in-session route was chosen — the refusal reason must not misstate the YAML policy. */
