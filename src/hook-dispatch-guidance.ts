@@ -14,7 +14,7 @@ import { hookResponse } from './guidance.js';
  * in ~/.claude.json):
  *   "hooks": { "PreToolUse": [ { "matcher": "mcp__heddle__dispatch_worker",
  *     "hooks": [ { "type": "command", "timeout": 10,
- *       "command": "node --no-warnings=ExperimentalWarning <heddle>/dist/hook-dispatch-guidance.js" } ] } ] }
+ *       "command": "node --disable-warning=ExperimentalWarning <heddle>/dist/hook-dispatch-guidance.js" } ] } ] }
  * `HEDDLE_ROUTING` is honored (same loader as the server), so an experiment table is checked too.
  */
 /** Claude Code writes the payload and closes stdin; if a host ever left the pipe open, waiting for

@@ -165,6 +165,18 @@ task_classes: { synthetic: { provider: codex, model: m1, mcp: memtrace } }
     expect(() => resolveRoute(mcpTable, 'synthetic')).toThrow(/mcp must be a list of strings/);
   });
 
+  it('rejects a fallback node that lacks a provider or a model instead of routing to "undefined"', () => {
+    const table = syntheticTable(`
+providers: { codex: {} }
+task_classes:
+  synthetic:
+    provider: codex
+    model: m1
+    fallback: { provider: codex }
+`);
+    expect(() => resolveRoute(table, 'synthetic')).toThrow(/task class "synthetic": fallback is missing provider or model/);
+  });
+
   it('reports declared provider execution modes and leaves unknown providers undefined', () => {
     const table = loadRouting(TABLE_PATH);
     expect(providerExecution(table, 'claude')).toBe('in-session-subagent');

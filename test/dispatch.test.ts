@@ -144,6 +144,21 @@ describe('dispatch — class + explicit route, and in-session refusal', () => {
     expect(fake.calls).toHaveLength(0);
   });
 
+  it('rejects a request with neither a task class nor an explicit provider+model, before touching any adapter or the ledger', async () => {
+    const fake = fakeAdapter();
+    const ledger = tempLedger();
+    await expect(dispatch({ prompt: 'x', cwd: tempDir() }, ledger, () => fake.adapter))
+      .rejects.toThrow(/requires either a task class or an explicit provider\+model/);
+    expect(fake.calls).toHaveLength(0);
+    expect(ledger.recent(1)).toEqual([]);
+  });
+
+  it('words a direct claude route\'s refusal as a direct route, not a task class', async () => {
+    const outcome = await dispatch({ provider: 'claude', model: 'opus', prompt: 'x', cwd: tempDir() }, tempLedger(), () => fakeAdapter().adapter);
+    expect(outcome.refusal?.reason).toMatch(/^direct route claude\/opus names a provider that runs as an in-session subagent/);
+    expect(outcome.refusal?.instruction).not.toContain('declared fallback');
+  });
+
   it('runs a headless class primary without adding a refusal', async () => {
     const fake = fakeAdapter();
     const ledger = tempLedger();

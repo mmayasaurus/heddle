@@ -104,6 +104,14 @@ describe('dispatchGuidance', () => {
     expect(warnings.map((warning) => warning.task_class)).toEqual(['gated-edit', 'gated-edit']);
   });
 
+  it('applies the class policy unchanged when task_class is combined with an explicit provider/model route', () => {
+    const warnings = dispatchGuidance(table, { task_class: 'gated-edit', provider: 'codex', model: 'm1', skills: [] });
+    expect(warnings.map((w) => w.code)).toEqual(['code-editing-class-without-skills', 'opt-in-required']);
+    expect(warnings.map((w) => w.task_class)).toEqual(['gated-edit', 'gated-edit']);
+    // and a clean combined call stays silent
+    expect(dispatchGuidance(table, { task_class: 'edit-with-defaults', provider: 'codex', model: 'm1' })).toEqual([]);
+  });
+
   it('ignores an unknown task class because the dispatcher owns that validation error', () => {
     expect(dispatchGuidance(table, { task_class: 'no-such-class', skills: [] })).toEqual([]);
   });

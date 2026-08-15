@@ -104,6 +104,9 @@ export function resolveRoute(table: RoutingTable, taskClass: string): Route {
   // vocabulary is per provider (codex minimal…xhigh vs agy low|medium|high; cursor bakes it into
   // the model id), so a primary's effort would be wrong or rejected on another provider.
   const fb = toTarget(node.fallback, `task_classes.${taskClass}.fallback`);
+  if (fb && (!fb.provider || !fb.model)) {
+    throw new Error(`task class "${taskClass}": fallback is missing provider or model`);
+  }
   const fallback = fb ? { ...fb, skills: fb.skills ?? primary.skills, mcp: fb.mcp ?? primary.mcp } : undefined;
   return {
     taskClass,

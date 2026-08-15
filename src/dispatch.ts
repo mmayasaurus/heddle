@@ -242,9 +242,10 @@ function refuseInSession(route: Route, req: DispatchRequest, ledger: Ledger, exe
   const alt = route.fallback ? ` To run it as a subprocess instead, name provider+model explicitly ` +
     `(e.g. provider="${route.fallback.provider}", model="${route.fallback.model}" — the class's ` +
     `declared fallback) with the same task_class.` : '';
-  const reason =
-    `task class "${route.taskClass}" routes to ${route.provider}/${route.model}, which runs as an ` +
-    `in-session subagent of the orchestrator, not a subprocess heddle can spawn.`;
+  const reason = (route.taskClass.startsWith('direct:')
+      ? `direct route ${route.provider}/${route.model} names a provider that`
+      : `task class "${route.taskClass}" routes to ${route.provider}/${route.model}, which`) +
+    ` runs as an in-session subagent of the orchestrator, not a subprocess heddle can spawn.`;
   const instruction =
     `Use your own Agent tool with model "${route.model}" and skills [${skills.join(', ')}]` +
     (route.mcp?.length ? ` and MCP [${route.mcp.join(', ')}]` : '') + `.` + alt;

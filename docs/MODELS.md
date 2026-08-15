@@ -159,7 +159,7 @@ choosing a worker instead:
   ```json
   "PreToolUse": [{ "matcher": "mcp__heddle__dispatch_worker", "hooks": [{
     "type": "command", "timeout": 10,
-    "command": "node --no-warnings=ExperimentalWarning /Users/<you>/Developer/heddle/dist/hook-dispatch-guidance.js" }] }]
+    "command": "node --disable-warning=ExperimentalWarning /Users/<you>/Developer/heddle/dist/hook-dispatch-guidance.js" }] }]
   ```
   Point it at the SAME checkout's `dist/` that your `~/.claude.json` heddle
   MCP entry uses (the canonical clone, not a transient worktree); honors
