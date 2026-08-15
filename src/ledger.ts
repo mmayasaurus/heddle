@@ -48,9 +48,25 @@ export interface DispatchRecord {
    * in-flight, and they are queryable separately from worker failures.
    */
   refusal: string | null;
+  /** Capabilities GRANTED to the worker (comma-joined allowlist tokens), null = default-deny only. */
+  capabilities: string | null;
+  /** Why this route was taken when a cap/policy check chose it (HED-67), e.g. `cap:claude 5h 92%>=90`. */
+  routeReason: string | null;
+  /** Account selected for the worker (HED-68 / CODEX_HOME rotation), when heddle chose one. */
+  account: string | null;
+  /** How `orchestrator` was determined: `bound` (process identity) or `caller` (tool/CLI argument). */
+  identitySource: string | null;
   startedAt: string;
   finishedAt: string | null;
 }
+
+/** What a dispatch must supply to start (or refuse) a row; the trailing lineage/policy fields are
+ *  optional so older call sites keep compiling and simply record null. */
+export type DispatchStartRecord =
+  Omit<DispatchRecord, 'id' | 'ok' | 'error' | 'inputTokens' | 'cachedInputTokens' | 'outputTokens' |
+    'reasoningTokens' | 'durationMs' | 'finishedAt' | 'startedAt' | 'refusal' | 'capabilities' |
+    'routeReason' | 'account' | 'identitySource'> &
+  Partial<Pick<DispatchRecord, 'capabilities' | 'routeReason' | 'account' | 'identitySource'>>;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS dispatches (
@@ -74,6 +90,10 @@ CREATE TABLE IF NOT EXISTS dispatches (
   duration_ms INTEGER,
   fell_back_from TEXT,
   refusal TEXT,
+  capabilities TEXT,
+  route_reason TEXT,
+  account TEXT,
+  identity_source TEXT,
   started_at TEXT NOT NULL,
   finished_at TEXT
 );
@@ -89,7 +109,25 @@ CREATE INDEX IF NOT EXISTS idx_dispatches_started ON dispatches(started_at);
  */
 const MIGRATIONS: { column: string; ddl: string }[] = [
   { column: 'refusal', ddl: 'ALTER TABLE dispatches ADD COLUMN refusal TEXT' },
+  // HED-2 / HED-67 / HED-68 (one migration batch, 2026-08-15):
+  { column: 'capabilities', ddl: 'ALTER TABLE dispatches ADD COLUMN capabilities TEXT' },
+  { column: 'route_reason', ddl: 'ALTER TABLE dispatches ADD COLUMN route_reason TEXT' },
+  { column: 'account', ddl: 'ALTER TABLE dispatches ADD COLUMN account TEXT' },
+  { column: 'identity_source', ddl: 'ALTER TABLE dispatches ADD COLUMN identity_source TEXT' },
 ];
+
+/**
+ * Lineage guard (HED-65): a row's identity and id are facts about who dispatched what — nothing may
+ * rewrite them after the fact (finish()/refuse() never touch them). Enforced in the database so no
+ * caller, including a future one, can do it by accident.
+ */
+const LINEAGE_TRIGGER = `
+CREATE TRIGGER IF NOT EXISTS dispatches_lineage_immutable
+BEFORE UPDATE OF id, orchestrator ON dispatches
+BEGIN
+  SELECT RAISE(ABORT, 'dispatches.id/orchestrator are immutable (lineage)');
+END;
+`;
 
 export class Ledger {
   private db: DatabaseSync;
@@ -98,49 +136,99 @@ export class Ledger {
     mkdirSync(dirname(path), { recursive: true });
     this.db = new DatabaseSync(path);
     this.db.exec('PRAGMA journal_mode = WAL;');
+    // Several heddle processes (one MCP server per orchestrator session, CLIs, the dashboard) share
+    // this file; wait briefly for a writer instead of failing with SQLITE_BUSY.
+    this.db.exec('PRAGMA busy_timeout = 5000;');
     this.db.exec(SCHEMA);
     const have = new Set(
       (this.db.prepare('PRAGMA table_info(dispatches)').all() as { name: string }[]).map((c) => c.name),
     );
     for (const m of MIGRATIONS) if (!have.has(m.column)) this.db.exec(m.ddl);
+    this.db.exec(LINEAGE_TRIGGER);
   }
 
   /** Record a dispatch at start; returns the row id to finish() later. */
-  start(r: Omit<DispatchRecord, 'id' | 'ok' | 'error' | 'inputTokens' | 'cachedInputTokens' |
-    'outputTokens' | 'reasoningTokens' | 'durationMs' | 'finishedAt' | 'startedAt' | 'refusal'>): number {
-    const stmt = this.db.prepare(`
+  start(r: DispatchStartRecord): number {
+    return this.insertStart(r, new Date().toISOString());
+  }
+
+  private insertStart(r: DispatchStartRecord, now: string): number {
+    const info = this.db.prepare(`
       INSERT INTO dispatches
         (orchestrator, task_class, provider, model, skills, issue, pr, cwd, prompt_preview,
-         session_id, fell_back_from, started_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-    const info = stmt.run(
+         session_id, fell_back_from, capabilities, route_reason, account, identity_source, started_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
       r.orchestrator, r.taskClass, r.provider, r.model, r.skills, r.issue, r.pr, r.cwd,
-      r.promptPreview.slice(0, 500), r.sessionId, r.fellBackFrom, new Date().toISOString(),
+      r.promptPreview.slice(0, 500), r.sessionId, r.fellBackFrom, r.capabilities ?? null,
+      r.routeReason ?? null, r.account ?? null, r.identitySource ?? null, now,
     );
     return Number(info.lastInsertRowid);
+  }
+
+  private insertRefusal(r: DispatchStartRecord, refusal: string, reason: string, now: string): number {
+    const info = this.db.prepare(`
+      INSERT INTO dispatches
+        (orchestrator, task_class, provider, model, skills, issue, pr, cwd, prompt_preview,
+         session_id, fell_back_from, refusal, capabilities, route_reason, account, identity_source,
+         ok, error, started_at, finished_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+    `).run(
+      r.orchestrator, r.taskClass, r.provider, r.model, r.skills, r.issue, r.pr, r.cwd,
+      r.promptPreview.slice(0, 500), r.sessionId, r.fellBackFrom, refusal, r.capabilities ?? null,
+      r.routeReason ?? null, r.account ?? null, r.identitySource ?? null, reason, now, now,
+    );
+    return Number(info.lastInsertRowid);
+  }
+
+  /**
+   * In-flight dispatches attributed to one orchestrator (NULL = the anonymous bucket), ignoring
+   * rows older than `staleAfterMs` — an orphaned row (HED-19) must not hold a slot forever.
+   */
+  inFlightCount(orchestrator: string | null, staleAfterMs: number, now = Date.now()): number {
+    const cutoff = new Date(now - staleAfterMs).toISOString();
+    const row = this.db.prepare(
+      'SELECT COUNT(*) AS n FROM dispatches WHERE orchestrator IS ? AND finished_at IS NULL AND started_at >= ?',
+    ).get(orchestrator, cutoff) as { n: number };
+    return Number(row.n);
+  }
+
+  /**
+   * Start a row ONLY if the orchestrator is under its concurrency cap; otherwise record a
+   * `max-children` refusal instead. Count + insert run in one IMMEDIATE transaction so two
+   * concurrent dispatches (even from different heddle processes) cannot both squeeze under the cap.
+   */
+  startUnderCap(
+    r: DispatchStartRecord, cap: { max: number; staleAfterMs: number },
+  ): { id: number; refused: false } | { id: number; refused: true; inFlight: number; reason: string } {
+    const now = new Date().toISOString();
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const inFlight = this.inFlightCount(r.orchestrator, cap.staleAfterMs);
+      if (inFlight >= cap.max) {
+        const who = r.orchestrator ?? '(unbound/anonymous)';
+        const reason = `orchestrator ${who} already has ${inFlight} worker(s) in flight ` +
+          `(cap ${cap.max}, policy.structural_caps.max_children_per_orchestrator); wait for one to ` +
+          `finish, or close orphaned rows (heddle workers --stale / heddle ledger finish <id>).`;
+        const id = this.insertRefusal(r, 'max-children', reason, now);
+        this.db.exec('COMMIT');
+        return { id, refused: true, inFlight, reason };
+      }
+      const id = this.insertStart(r, now);
+      this.db.exec('COMMIT');
+      return { id, refused: false };
+    } catch (err) {
+      try { this.db.exec('ROLLBACK'); } catch { /* not in a transaction */ }
+      throw err;
+    }
   }
 
   /**
    * Record a dispatch heddle REFUSED to run (policy/structural cap): a finished row, ok=0, with the
    * refusal code and reason, so the decision is auditable and never shows as in-flight.
    */
-  refuse(
-    r: Omit<DispatchRecord, 'id' | 'ok' | 'error' | 'inputTokens' | 'cachedInputTokens' |
-      'outputTokens' | 'reasoningTokens' | 'durationMs' | 'finishedAt' | 'startedAt' | 'refusal'>,
-    refusal: string, reason: string,
-  ): number {
-    const now = new Date().toISOString();
-    const info = this.db.prepare(`
-      INSERT INTO dispatches
-        (orchestrator, task_class, provider, model, skills, issue, pr, cwd, prompt_preview,
-         session_id, fell_back_from, refusal, ok, error, started_at, finished_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
-    `).run(
-      r.orchestrator, r.taskClass, r.provider, r.model, r.skills, r.issue, r.pr, r.cwd,
-      r.promptPreview.slice(0, 500), r.sessionId, r.fellBackFrom, refusal, reason, now, now,
-    );
-    return Number(info.lastInsertRowid);
+  refuse(r: DispatchStartRecord, refusal: string, reason: string): number {
+    return this.insertRefusal(r, refusal, reason, new Date().toISOString());
   }
 
   finish(id: number, outcome: {
@@ -173,6 +261,14 @@ export class Ledger {
     return this.db.prepare(
       'SELECT * FROM dispatches WHERE finished_at IS NULL ORDER BY id DESC',
     ).all() as Record<string, unknown>[];
+  }
+
+  /** In-flight rows started more than `olderThanMs` ago — orphans to close (heddle workers --stale). */
+  staleInFlight(olderThanMs: number, now = Date.now()): Record<string, unknown>[] {
+    const cutoff = new Date(now - olderThanMs).toISOString();
+    return this.db.prepare(
+      'SELECT * FROM dispatches WHERE finished_at IS NULL AND started_at < ? ORDER BY id DESC',
+    ).all(cutoff) as Record<string, unknown>[];
   }
 
   /** Aggregate usage by provider — the raw material for the savings stat. */

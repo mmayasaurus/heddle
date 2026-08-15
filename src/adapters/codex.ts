@@ -33,8 +33,18 @@ export class CodexAdapter implements WorkerAdapter {
     // "user cancelled MCP tool call" because there is no TTY to approve them. `never` auto-proceeds
     // within the sandbox, which is the correct unattended-worker posture. `codex exec` takes this
     // via `-c` config override (there is no `--ask-for-approval` flag on the exec subcommand).
+    // Capability grants (src/capabilities.ts) → the only flags that widen the default-deny posture:
+    //  - exec-privileged: no sandbox at all (`danger-full-access`), operator-opted-in upstream;
+    //  - net: workspace-write keeps outbound network OFF by default (official sandbox docs) —
+    //    `sandbox_workspace_write.network_access=true` turns it on;
+    //  - browse: `web_search` defaults to "cached" (OpenAI index, no external access); "live" is
+    //    unrestricted retrieval.
+    const caps = new Set(opts.capabilities ?? []);
+    const sandbox = caps.has('exec-privileged') ? 'danger-full-access' : this.sandbox;
     const args = ['exec', '--json', '--skip-git-repo-check',
-      '--sandbox', this.sandbox, '-c', 'approval_policy="never"'];
+      '--sandbox', sandbox, '-c', 'approval_policy="never"'];
+    if (caps.has('net')) args.push('-c', 'sandbox_workspace_write.network_access=true');
+    if (caps.has('browse')) args.push('-c', 'web_search="live"');
     if (this.ignoreUserConfig) args.push('--ignore-user-config');
     if (opts.effort) args.push('-c', `model_reasoning_effort="${opts.effort}"`);
     if (opts.resume) args.push('resume', opts.resume);
