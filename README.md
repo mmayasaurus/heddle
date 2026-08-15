@@ -53,7 +53,7 @@ project-agnostic.
 
 ```
 docs/ARCHITECTURE.md   five-layer design: workers · routing · broker · ownership · dashboard
-docs/COMMS.md          comms broker: append-only message log, addresses, participant registry (HED-4)
+docs/COMMS.md          comms broker: append-only log · trust tiers · delivery discipline · heddle-comms channel server
 docs/LANDMINES.md      live-verified per-CLI gotchas (read before touching adapters)
 routing/routing.v0.yaml routing table draft: task-class → provider/model/effort/skills
 src/types.ts           WorkerAdapter contract (ports-and-adapters)
