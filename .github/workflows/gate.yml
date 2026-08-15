@@ -1,13 +1,15 @@
 # Gate — the required merge check for heddle (core).
 #
-# What it proves: the TypeScript compiles under `strict` (`npm run typecheck`),
-# `npm run build` emits dist/, and the emitted CLI actually starts and reads its
-# own routing table + skill packs (`classes` / `packs` are offline commands — no
-# provider CLI, no network, no ledger writes). "tsc passed" alone is not "it
-# runs"; the smoke step is the difference.
+# What it proves: the TypeScript compiles under `strict` (`npm run typecheck`,
+# src/ AND test/), the vitest suite passes (`npm test` — behavioural tests for
+# the ledger + routing table, HED-17), `npm run build` emits dist/, and the
+# emitted CLI actually starts and reads its own routing table + skill packs
+# (`classes` / `packs` are offline commands — no provider CLI, no network, no
+# ledger writes). "tsc passed" alone is not "it runs"; the smoke step is the
+# difference.
 #
-# What it does NOT prove: there is no lint and no test suite in this repo yet
-# (HED-15). Dispatch/adapters need real provider CLIs and are not exercised here.
+# What it does NOT prove: there is no lint yet (HED-15). Dispatch/adapters need
+# real provider CLIs and are not exercised here.
 #
 # Runs on GitHub-hosted runners — the repo is public, so minutes are free. The
 # job NAME `gate` is the required-status-check context string for the "Protect
@@ -54,16 +56,20 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          # Matches devDependencies (@types/node ^22) and the `node:sqlite`
-          # ledger (Node >= 22.5).
+          # Latest 22.x — package.json `engines` requires >=22.12 (node:sqlite,
+          # vitest 4's rolldown); `npm ci` fails fast on anything older.
           node-version: 22
           cache: npm
 
       - name: Install dependencies
         run: npm ci
 
-      - name: Type check
+      - name: Type check (src + test)
         run: npm run typecheck
+
+      # vitest — runs against src/ directly, no build needed (HED-17).
+      - name: Test
+        run: npm test
 
       - name: Build
         run: npm run build
