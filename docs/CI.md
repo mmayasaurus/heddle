@@ -54,13 +54,28 @@ exists because an unconfigured DeepSource opened ~118 non-defect threads on one 
 
 ## The review sweep (before anything is called clean)
 
-A PR is clean only after **every channel** — issue comments, review bodies, inline threads,
+Full procedure with the exact commands: [REVIEW-SWEEP.md](REVIEW-SWEEP.md). In short: a PR is clean only after **every channel** — issue comments, review bodies, inline threads,
 code-scanning alerts, and the checks tab — has been read against the **latest** commit and every
 item fixed or answered with rationale (dispute bots with evidence, never rubber-stamp). Some
 reviewers need a manual trigger (CodeRabbit on repos with <10 stars: comment `@coderabbitai
-review`). Spinventory's `pr-sweep.sh <n>` is repo-agnostic and runs from inside this repo; the
-heddle-specific sweep doc is HED-16. Two clean sweeps ≥15 minutes apart at HEAD are the bar
-(late-landing bots), and merges are merge commits — never squash, never force.
+review`). The commands for every channel are in [REVIEW-SWEEP.md](REVIEW-SWEEP.md); the maintainers'
+fleet automates the same sweep with a script kept outside this repo. Two clean sweeps ≥15 minutes
+apart against the SAME commit are the bar (late-landing bots), and merges are merge commits — never squash,
+never force.
+
+### Standing rules (Maya, 2026-08-15 — apply to everyone, orchestrator included)
+
+- **No direct commits to `main`.** Every change goes on a branch → PR → the full review sweep → merge.
+- **As many revision rounds as it takes.** Every reviewer bot on both repos is there on purpose; every
+  comment / review body / inline thread is addressed (fix, or reply+resolve with evidence) before merge.
+  "Green" is not "clean" — clean means zero unaddressed items against HEAD after the double sweep.
+- **Behavioral tests, not toggle tests.** A test that proves a switch flips is NOT a test that proves
+  the switch DOES the thing ("does turning it on actually turn the function on, not just the toggle").
+  Every PR's tests must assert the observable effect: state / persisted result / downstream behavior,
+  not the UI or flag alone. Reviewers grade tests on this bar; superficial tests are a review finding to fix.
+- **Two lessons already paid for:** a PR that has a merge conflict gets NO `pull_request` workflow runs
+  (GitHub skips them silently) — check `gh pr view <n> --json mergeable` before assuming CI is slow; and
+  a green scanner check is not proof a scan happened — assert the scanned volume (see the rules above).
 
 ## Deliberately NOT here
 
