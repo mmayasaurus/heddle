@@ -538,8 +538,10 @@ is a Claude Code channel — other CLIs read their inbox when they want to (`che
 is the room's pull model anyway. Verified from each CLI's own `--help` on 2026-08-15; the Codex
 path re-verified live on 2026-08-16 (receipt below).
 
-**Registration is a scoping decision, not just a command** — but the exposure differs per provider,
-so check the adapter before assuming a shared config reaches workers:
+### Registering the server
+
+Scoping is a decision, not just a command — but the exposure differs per provider, so check the
+adapter before assuming a shared config reaches workers:
 
 - **Codex CLI** — *session-scoped (recommended)*. `-c key=value` overrides config for one
   invocation only (dotted TOML paths, per `codex --help`):
@@ -585,7 +587,9 @@ so check the adapter before assuming a shared config reaches workers:
   list its MCP servers on 2026-08-16, agy answered "None" while that file held two. Treat agy as
   pull-model-capable only once someone confirms a mechanism against Antigravity's own docs.
 
-**Identity: the fleet launchers already work.** `resolveCommsIdentity` (`src/comms/server.ts`)
+### Identity binding
+
+The fleet launchers already work. `resolveCommsIdentity` (`src/comms/server.ts`)
 binds the first of `HEDDLE_AGENT`, `FLEET_AGENT`, `HEDDLE_COMMS_ADDRESS` (the worker address), then
 walks parent directories for a `.fleet-agent` file, then stays unbound. The operator identity is
 never bindable this way — it needs `HEDDLE_COMMS_ROLE=operator` plus the token.
@@ -596,7 +600,9 @@ change; `HEDDLE_AGENT` wins when both are set and disagree. Verified 2026-08-16 
 both → `codex-B`; neither → unbound). Do NOT add `HEDDLE_AGENT` to those launchers as duplicate
 config — two identity vars that can drift is worse than one fallback that works.
 
-**Live receipt (2026-08-16, Codex CLI 0.147.0 as orchestrator, live `~/.heddle/comms.db`).**
+### Live receipt
+
+2026-08-16, Codex CLI 0.147.0 as orchestrator, against the live `~/.heddle/comms.db`.
 `comms_whoami` bound `codex-B` from the server env; `post_message` → R landed
 `sent / queued-for-channel` then `sent / channel-written` (R's Claude session rendered the channel
 event); replies from R and V to `codex-B` recorded `failed / no-live-session` — correct, because a
