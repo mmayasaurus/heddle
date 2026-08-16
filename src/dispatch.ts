@@ -354,7 +354,7 @@ async function runTarget(
       extraFlags,
       timeoutMs: req.timeoutMs,
       resume: req.resume,
-      env: { ...(req.env ?? {}), ...(acct?.env ?? {}), ...stamps },
+      env: { ...req.env, ...acct?.env, ...stamps },
       envUnset: acct?.envUnset,
       capabilities: caps.granted,
       systemPromptAppend,
