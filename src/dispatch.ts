@@ -336,6 +336,7 @@ async function runTarget(
       systemPromptAppend,
       mcpConfigPath,
       readOnly: route.readOnly,
+      mcpServers: isClaude ? mcp : undefined,
     });
   } catch (err) {
     result = { ok: false, output: '', exitCode: null, error: err instanceof Error ? err.message : String(err) };
@@ -424,6 +425,14 @@ export async function dispatch(
   // A worker dispatching an opt-in class (or a malformed request) still gets a ledgered, attributed
   // depth-1 refusal, never a bare throw, and never costs a classifier spawn.
   if (identity.worker) return refuseDepth1(req, ctx, table);
+
+  // Resume affinity (HED-78): a claude session is persisted under ONE config dir — resuming it on a
+  // freshly-picked account would not find the session. Pin the pick to the account the session last
+  // ran under (explicit accountPin still wins; unknown session ids keep the normal pick).
+  if (req.resume && !req.accountPin) {
+    const prior = ledger.sessionAccount(req.resume);
+    if (prior) req = { ...req, accountPin: prior };
+  }
 
   const plan = planDispatch(req, table);
   ctx.routeReason = plan.decision.routeReason;
@@ -515,16 +524,33 @@ export async function dispatch(
   }
   // The never-on-demand HARD guard applies to the runtime fallback too: a below-threshold primary
   // failing over to cursor must not bypass an on-demand stop the plan never evaluated for it.
-  const fbHard = hardRefusal(fallback, req.caps ?? readProviderCaps());
+  const fbSnap = req.caps ?? readProviderCaps();
+  const fbHard = hardRefusal(fallback, fbSnap);
   if (fbHard) {
     return refusalOutcome(ctx, req, route.taskClass, fallback, skillsForRefusal, {
       code: 'metered-pool-exhausted', reason: `failure fallback blocked: ${fbHard}`,
       instruction: 'The primary failed and the class fallback would bill on-demand — pick another route (heddle route <class>).',
     }, { usedFallback: true });
   }
-  // Attribution follows the provider that actually runs (a codex fallback bills its CODEX_HOME; a
-  // non-codex fallback is not the plan's account).
-  ctx.account = fallback.provider === 'codex' && req.env?.CODEX_HOME ? basename(req.env.CODEX_HOME) : null;
+  // Attribution AND account selection follow the provider that actually runs: a codex fallback
+  // bills its CODEX_HOME; a CLAUDE fallback gets its own headroom-based account pick (the plan only
+  // picked for a claude PRIMARY — without this the subprocess would inherit the caller's
+  // CLAUDE_CONFIG_DIR and the ledger account would be wrong; PR #12, five reviewers).
+  if (fallback.provider === 'claude') {
+    try {
+      ctx.claudeAccount = pickClaudeAccount(fbSnap.claude, req.accounts ?? readClaudeAccounts(),
+        { pin: req.accountPin, routeAwayAtPct: capAwarePolicy(table).routeAwayAtPct }) ?? null;
+      ctx.account = ctx.claudeAccount?.account.id ?? null;
+    } catch (err) {
+      // A pinned-but-unaddressable account is a caller error, but the primary's outcome is already
+      // ledgered — report the blocked fallback on it instead of throwing away the whole dispatch.
+      primary.error = `${primary.error ?? 'primary failed'}; claude fallback blocked: ${err instanceof Error ? err.message : String(err)}`;
+      return primary;
+    }
+  } else {
+    ctx.claudeAccount = null;
+    ctx.account = fallback.provider === 'codex' && req.env?.CODEX_HOME ? basename(req.env.CODEX_HOME) : null;
+  }
   ctx.routeReason = `${plan.decision.routeReason}; ${target.provider}/${target.model} failed → class fallback`;
   return runTarget(fallback, req, ctx, route, `${route.provider}/${route.model}`);
 }

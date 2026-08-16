@@ -33,10 +33,12 @@ Race-and-merge (hard/high-value only): fan one task across **diverse families**
 
 ## Family strengths / weaknesses
 
-**Claude (Anthropic sub, in-session subagents).** Best judgment, native
-`skills`/`mcpServers`/`permissionMode`, thinking visible, shared cache with
-the orchestrator. Weakness: burning Opus/Sonnet on mechanical or prose work
-wastes the flat pool; workers are subagents, not `claude -p`.
+**Claude (Anthropic sub, headless `claude -p` workers by default — HED-78;
+in-session subagents on `in_session: true`).** Best judgment; headless workers
+rotate onto the registry account with the most 5h headroom; the in-session
+protocol keeps native `skills`/`mcpServers`/`permissionMode`, visible thinking
+and the orchestrator's shared cache. Weakness: burning Opus/Sonnet on
+mechanical or prose work wastes the flat pool.
 
 **Codex (ChatGPT sub, `codex exec`).** Effort knob (`minimal`…`xhigh`); Luna
 wins on volume; Sol/Terra are capable coding fallbacks. Lean by default
@@ -186,9 +188,9 @@ and records why it chose what it chose (`route_reason` in the ledger).
   with `fell_back_from` + `route_reason: cap:route-away …`. Both over → the
   primary runs (soft cap, `cap:both-over`). No fallback → primary (`cap:over`).
   Applies to Claude-primary classes too: `implementation` at Claude 5h ≥ 90 %
-  runs its declared `codex/gpt-5.6-terra` fallback as a subprocess instead of
-  returning the in-session refusal (below the threshold you still get the
-  refusal + account advice).
+  runs its declared `codex/gpt-5.6-terra` fallback as a subprocess instead of a
+  headless claude worker (below the threshold you get the claude worker on the
+  best account; with `in_session: true`, the structured refusal + advice).
 - **Cursor pools** (Maya-corrected model, W's fields): `included-total` gates
   Cursor's own models (`cursor-grok-*`, `composer-*`, `auto`) — soft
   route-away; `included-api` gates NAMED third-party models (kimi-k3, …) — at
@@ -275,7 +277,7 @@ Capability enforcement matrix (verified against each CLI's own docs/help,
 | codex | `-c sandbox_workspace_write.network_access=true` (workspace-write keeps network **off** by default) | `-c web_search="live"` (default `cached` = OpenAI index, no external access) | `--sandbox danger-full-access` |
 | cursor | — | — | — |
 | gemini (agy) | — | — | — |
-| claude | in-session (refused as `claude-in-session` first) | | |
+| claude | no knob (headless has no sandbox) → `net` is refused upstream | `--allowedTools` +WebFetch,WebSearch | `--dangerously-skip-permissions` |
 
 Cursor/agy have no per-capability flags heddle can pass, so a grant there is
 refused; note that their headless workers are also **not** network-fenced by
@@ -322,14 +324,15 @@ choosing a worker instead:
   `adversarial-review` class (HED-3, below) runs on "any provider except the
   author's". `provider` and `model` must be given together (a lone half is
   rejected).
-- **Claude-primary classes** (`execution: in-session-subagent` —
-  implementation, deep-implementation, research-summarize, orchestration) are
-  the orchestrator's own Agent-tool subagents, not subprocesses. Since HED-18
-  the dispatcher does not throw for them: it returns a structured refusal
-  `{ok:false, refusal:{code:"claude-in-session", reason, instruction}, execution}`
-  and ledgers it (`refusal` column), where `instruction` names the model, the
-  class packs/MCP to give your subagent, and the declared fallback you can name
-  as `provider`+`model` to run it as a subprocess instead. No auto-fallback.
+- **Claude-primary classes** (implementation, deep-implementation,
+  research-summarize) run as **headless `claude -p` workers by default**
+  (HED-78, `execution: headless`) on the best registry account. Passing
+  `in_session: true` opts into the HED-18 protocol instead: a structured
+  refusal `{ok:false, refusal:{code:"claude-in-session", reason, instruction},
+  execution: in-session-subagent}`, ledgered (`refusal` column), whose
+  `instruction` names the model, the class packs/MCP to give your own
+  Agent-tool subagent, and the declared fallback you can name as
+  `provider`+`model` to run it as a subprocess. No auto-fallback there.
   `orchestration` is `dispatchable: false` — it is the orchestrator's OWN work;
   a dispatch of it is refused on EVERY path (class, class + explicit route,
   whatever the named provider) with code `not-dispatchable`, "continue

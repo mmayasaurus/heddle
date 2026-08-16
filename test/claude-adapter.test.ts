@@ -22,6 +22,23 @@ describe('ClaudeAdapter invocation and result contracts', () => {
     expect(args).not.toContain('--resume');
     expect(args).not.toContain('--append-system-prompt');
     expect(args).not.toContain('--mcp-config');
+    // arbitrary-code launchers stay OUT of the default allowlist (PR #12: four reviewers) — repo
+    // workflows go through the npm/npx entries.
+    expect(DEFAULT_CLAUDE_ALLOWED_TOOLS).not.toContain('Bash(node:*)');
+  });
+
+  it('maps the codex-vocabulary minimal effort to low and passes claude-native efforts through', () => {
+    const minimal = new ClaudeAdapter().buildArgs('do it', { model: 'haiku', cwd: '/tmp', effort: 'minimal' });
+    expect(pair(minimal, '--effort', 'low')).toEqual(['--effort', 'low']);
+    expect(minimal).not.toContain('minimal');
+    expect(pair(new ClaudeAdapter().buildArgs('x', { model: 'haiku', cwd: '/tmp', effort: 'xhigh' }), '--effort', 'xhigh')).toEqual(['--effort', 'xhigh']);
+  });
+
+  it('allowlists each attached MCP server so headless workers can actually call its tools', () => {
+    const args = new ClaudeAdapter().buildArgs('do it', { model: 'haiku', cwd: '/tmp', mcpConfigPath: '/tmp/m.json', mcpServers: ['memtrace'] });
+    expect(args.slice(args.indexOf('--allowedTools') + 1)).toEqual([...DEFAULT_CLAUDE_ALLOWED_TOOLS, 'mcp__memtrace']);
+    const none = new ClaudeAdapter().buildArgs('do it', { model: 'haiku', cwd: '/tmp' });
+    expect(none.join(' ')).not.toContain('mcp__');
   });
 
   it('orders optional Claude flags before permission flags and keeps extra flags at the end', () => {
@@ -60,6 +77,10 @@ describe('ClaudeAdapter invocation and result contracts', () => {
     expect(parseClaudeResult(result({ subtype: 'error_max_turns' }), 0).ok).toBe(false);
     expect(parseClaudeResult(result(), 1).ok).toBe(false);
     expect(parseClaudeResult(result({ result: '' }), 0)).toMatchObject({ ok: false, error: expect.stringContaining('empty result') });
+    // A MISSING/null result field is empty output too — stringifying it would fabricate '""'/'null'
+    // and slip past the empty-result check (PR #12: codacy + copilot).
+    expect(parseClaudeResult(result({ result: undefined }), 0)).toMatchObject({ ok: false, output: '', error: expect.stringContaining('empty result') });
+    expect(parseClaudeResult(result({ result: null }), 0)).toMatchObject({ ok: false, output: '' });
   });
 
   it('finds a result JSON line after noise and serializes non-string result content', () => {

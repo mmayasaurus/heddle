@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import { buildWorkerEnv } from '../env.js';
+import { lastResultJson } from './parse.js';
 import type { DispatchOptions, WorkerAdapter, WorkerResult, TokenUsage } from '../types.js';
 
 /**
@@ -38,13 +39,19 @@ export const CLAUDE_WORKER_PROTOCOL_VERSION = 1;
 export type ClaudeWorkerModel = 'fable' | 'opus' | 'sonnet' | 'haiku';
 
 /**
- * Default headless tool allowlist — the codex-workspace-write analog: read/edit the workspace, run the
- * repo's own scripts and inspect git; no network tools, no arbitrary shell. Tunable via the routing
- * YAML (`providers.claude.headless.allowed_tools`); `browse` appends WebFetch/WebSearch.
+ * Default headless tool allowlist — the codex-workspace-write analog: read/edit the workspace, run
+ * the repo's own scripts and inspect git. This is a guardrail against ACCIDENTAL damage and drift,
+ * NOT a security boundary: an edit-capable worker can stage code that runs under `npm run`/`npx`,
+ * so network side effects cannot be truly fenced here (`net` is refused upstream because Claude has
+ * no sandbox knob — see src/capabilities.ts; several PR-#12 reviewers flagged this, and the honest
+ * answer is that the enforceable posture is the read-only reviewer one: `--tools Read Grep Glob`).
+ * Raw `Bash(node:*)` is deliberately NOT granted — repo workflows go through npm/npx entries.
+ * Tunable via the routing YAML (`providers.claude.headless.allowed_tools`); `browse` appends
+ * WebFetch/WebSearch; attached MCP servers get their `mcp__<name>` tools appended per dispatch.
  */
 export const DEFAULT_CLAUDE_ALLOWED_TOOLS = [
   'Read', 'Edit', 'MultiEdit', 'Write', 'Glob', 'Grep', 'NotebookEdit', 'TodoWrite',
-  'Bash(npm test:*)', 'Bash(npm run:*)', 'Bash(npx vitest:*)', 'Bash(npx tsc:*)', 'Bash(node:*)',
+  'Bash(npm test:*)', 'Bash(npm run:*)', 'Bash(npx vitest:*)', 'Bash(npx tsc:*)',
   'Bash(git status:*)', 'Bash(git diff:*)', 'Bash(git log:*)', 'Bash(git show:*)', 'Bash(git blame:*)',
   'Bash(ls:*)', 'Bash(cat:*)', 'Bash(head:*)', 'Bash(tail:*)', 'Bash(wc:*)', 'Bash(rg:*)', 'Bash(grep:*)',
   'Bash(find:*)', 'Bash(pwd)', 'Bash(sed -n:*)',
@@ -61,15 +68,7 @@ export function parseClaudeResult(stdout: string, exitCode: number | null): Work
   if (stdout.trim().length === 0) {
     return { ok: false, output: '', exitCode, error: `claude produced no stdout (exit ${exitCode})` };
   }
-  let result: any;
-  for (const line of stdout.split('\n').reverse()) {
-    const trimmed = line.trim();
-    if (!trimmed.startsWith('{')) continue;
-    try {
-      const parsed = JSON.parse(trimmed);
-      if (parsed && parsed.type === 'result') { result = parsed; break; }
-    } catch { /* keep scanning */ }
-  }
+  const result: any = lastResultJson(stdout);
   if (!result) {
     return { ok: false, output: '', exitCode, error: `no result JSON from claude (exit ${exitCode}); stdout tail: ${stdout.slice(-400)}` };
   }
@@ -82,7 +81,11 @@ export function parseClaudeResult(stdout: string, exitCode: number | null): Work
         reasoningOutputTokens: u.output_tokens_details?.thinking_tokens,
       }
     : undefined;
-  const output = typeof result.result === 'string' ? result.result : JSON.stringify(result.result ?? '');
+  // A missing/null result field is EMPTY output (ok=false below) — stringifying it would fabricate
+  // a non-empty '""'/'null' that slips past the empty-result failure check.
+  const output = typeof result.result === 'string' ? result.result
+    : result.result == null ? ''
+    : JSON.stringify(result.result);
   const ok = exitCode === 0 && result.is_error !== true && result.subtype === 'success' && output.length > 0;
   return {
     ok,
@@ -113,7 +116,9 @@ export class ClaudeAdapter implements WorkerAdapter {
   buildArgs(prompt: string, opts: DispatchOptions): string[] {
     const caps = new Set(opts.capabilities ?? []);
     const args = ['-p', prompt, '--output-format', 'json', '--model', opts.model];
-    if (opts.effort) args.push('--effort', opts.effort);
+    // classify_effort can emit 'minimal' (codex vocabulary); claude accepts low|medium|high|xhigh|max.
+    const effort = opts.effort === 'minimal' ? 'low' : opts.effort;
+    if (effort) args.push('--effort', effort);
     if (opts.resume) args.push('--resume', opts.resume);
     if (opts.systemPromptAppend) args.push('--append-system-prompt', opts.systemPromptAppend);
     // ALWAYS strict: a worker sees only the MCP servers heddle attached (the dispatcher writes an
@@ -128,7 +133,13 @@ export class ClaudeAdapter implements WorkerAdapter {
     } else if (caps.has('exec-privileged')) {
       args.push('--dangerously-skip-permissions');
     } else {
-      const tools = [...this.allowedTools, ...(caps.has('browse') ? ['WebFetch', 'WebSearch'] : [])];
+      // Attached MCP servers must ALSO be allowlisted (mcp__<server> = every tool it serves) —
+      // --strict-mcp-config makes them available, but headless has no prompt to approve them.
+      const tools = [
+        ...this.allowedTools,
+        ...(caps.has('browse') ? ['WebFetch', 'WebSearch'] : []),
+        ...(opts.mcpServers ?? []).map((s) => `mcp__${s}`),
+      ];
       args.push('--permission-mode', 'acceptEdits', '--allowedTools', ...tools);
     }
     args.push(...(opts.extraFlags ?? []));
@@ -156,13 +167,18 @@ function run(bin: string, args: string[], cwd: string, timeoutMs: number,
     const child = spawn(bin, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
+    // 'error' and 'close' can BOTH fire (e.g. spawn failure then close) — settle exactly once.
+    let settled = false;
+    const settle = (v: { stdout: string; stderr: string; exitCode: number | null }) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(v);
+    };
     const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
     child.stdout.on('data', (d) => { stdout += d; });
     child.stderr.on('data', (d) => { stderr += d; });
-    child.on('close', (code) => { clearTimeout(timer); resolve({ stdout, stderr, exitCode: code }); });
-    child.on('error', (err) => {
-      clearTimeout(timer);
-      resolve({ stdout, stderr: `${stderr}\nspawn error: ${String(err)}`, exitCode: null });
-    });
+    child.on('close', (code) => settle({ stdout, stderr, exitCode: code }));
+    child.on('error', (err) => settle({ stdout, stderr: `${stderr}\nspawn error: ${String(err)}`, exitCode: null }));
   });
 }

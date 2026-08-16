@@ -313,6 +313,15 @@ export class Ledger {
    * manual close never races a completing worker into two writers. Returns false when nothing was
    * closed (no such row, or already finished).
    */
+  /** The account a session last ran under — resume affinity: a claude session lives inside ONE
+   *  config dir, so resuming it must reuse that account, not a fresh headroom pick (PR #12). */
+  sessionAccount(sessionId: string): string | null {
+    const row = this.db.prepare(
+      'SELECT account FROM dispatches WHERE session_id = ? ORDER BY id DESC LIMIT 1',
+    ).get(sessionId) as { account: string | null } | undefined;
+    return row?.account ?? null;
+  }
+
   closeIfInFlight(id: number, error: string): boolean {
     const info = this.db.prepare(`
       UPDATE dispatches SET ok = 0, error = ?, finished_at = ?
