@@ -1,11 +1,11 @@
-#!/usr/bin/env -S node --no-warnings=ExperimentalWarning
+#!/usr/bin/env -S node --disable-warning=ExperimentalWarning
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { dispatch } from './dispatch.js';
 import { Ledger } from './ledger.js';
-import { loadRouting, listTaskClasses, resolveRoute } from './routing.js';
-import { listPacks } from './skillpacks.js';
+import { loadRouting, describeTaskClasses } from './routing.js';
+import { listPacks, withMandatoryPacks } from './skillpacks.js';
 import { classifyEffort, assessResult } from './classify.js';
 
 /**
@@ -33,18 +33,25 @@ function errorText(msg: string) {
 server.tool(
   'dispatch_worker',
   'Dispatch one sub-task to a best-fit worker model and return its result. Use a task class ' +
-    '(preferred — it carries the routing policy) OR name provider+model directly. Workers run on ' +
-    'subscription CLIs as subprocesses; this call blocks until the worker finishes (seconds to ' +
-    'minutes). Returns {ok, output, provider, model, sessionId (resume handle), usage, ledgerId}.',
+    '(preferred — it carries the routing policy: default skills/mcp, opt-in gate), OR name ' +
+    'provider+model directly, OR both (class = policy, named model = route, no fallback). Workers ' +
+    'run on subscription CLIs as subprocesses; this call blocks until the worker finishes (seconds ' +
+    'to minutes). Returns {ok, output, provider, model, skills, sessionId (resume handle), usage, ' +
+    'ledgerId}. Claude-primary classes (execution in-session-subagent) are NOT spawned: you get ' +
+    '{ok:false, refusal:{code:"claude-in-session", instruction}} — run them with your own Agent ' +
+    'tool as instructed, or name a subprocess provider+model.',
   {
     prompt: z.string().describe('The sub-task instructions for the worker.'),
-    task_class: z.string().optional().describe('Routing task class (see list_task_classes). Use this OR provider+model.'),
-    provider: z.string().optional().describe('Direct override: codex | cursor | gemini. Requires model.'),
-    model: z.string().optional().describe('Direct override: model id for provider (e.g. cursor-grok-4.5-high).'),
+    task_class: z.string().optional().describe('Routing task class (see list_task_classes) — supplies policy. Alone: the table\'s route. With provider+model: the named route under this class\'s policy.'),
+    provider: z.string().optional().describe('Explicit route: codex | cursor | gemini (the agy CLI). Requires model (both or neither). Without task_class = direct path. "claude" is accepted but returns a structured claude-in-session refusal (Claude workers are your own Agent-tool subagents).'),
+    model: z.string().optional().describe('Explicit route: model id for provider (e.g. cursor-grok-4.6-high).'),
     cwd: z.string().optional().describe('Working directory for the worker (default: server cwd).'),
     issue: z.string().optional().describe('Linear issue this sub-task serves, e.g. SPI-712.'),
     agent: z.string().optional().describe("Dispatching orchestrator's fleet identity, e.g. K."),
-    skills: z.array(z.string()).optional().describe('Skill packs to load (see list_skill_packs).'),
+    skills: z.array(z.string()).optional().describe(
+      'Skill packs to load (see list_skill_packs). Omit to get the task class\'s default packs ' +
+      '(the `skills` column of list_task_classes); an explicit list REPLACES that default. ' +
+      '`worker-role` is always included either way.'),
     mcp: z.array(z.string()).optional().describe('Code-discovery MCP servers to attach, e.g. ["memtrace"].'),
     effort: z.string().optional().describe('Reasoning effort: codex minimal|low|medium|high|xhigh; agy low|medium|high.'),
     auto_effort: z.boolean().optional().describe('Classify the sub-task difficulty (cheap model) and pin effort automatically, if effort not set.'),
@@ -118,20 +125,15 @@ server.tool(
 
 server.tool(
   'list_task_classes',
-  'List routing task classes and where each routes (provider/model, fallback, opt-in). Consult ' +
-    'this to pick the right class before dispatching.',
+  'List routing task classes with dispatch-time guidance: where each routes (provider/model, ' +
+    'execution, effort, fallback, opt-in), WHY to pick it, the default skill packs a dispatch gets ' +
+    'when you omit `skills`, its default MCP servers, and whether its workers edit code. Consult ' +
+    'this to pick the right class — fit and cost, not a favorite model — before dispatching. ' +
+    '`execution: in-session-subagent` means use your own Agent tool with the routed model.',
   {},
   async () => {
     try {
-      const table = loadRouting();
-      const rows = listTaskClasses(table).map((c) => {
-        const r = resolveRoute(table, c);
-        return {
-          task_class: c, provider: r.provider, model: r.model,
-          fallback: r.fallback ? `${r.fallback.provider}/${r.fallback.model}` : null,
-          opt_in_required: r.requiresExplicitOptIn ?? false, note: r.note ?? null,
-        };
-      });
+      const rows = describeTaskClasses(loadRouting(), withMandatoryPacks);
       return text(rows);
     } catch (err) {
       return errorText(`could not load routing table: ${(err as Error).message ?? String(err)}`);

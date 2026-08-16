@@ -1,7 +1,9 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { loadRouting, listTaskClasses, resolveRoute, directRoute } from '../src/routing.js';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { loadRouting, listTaskClasses, resolveRoute, directRoute, providerExecution } from '../src/routing.js';
 
 /**
  * Behavioral checks on the SHIPPED routing table (routing/routing.v0.yaml) — the file Maya tunes by
@@ -96,5 +98,110 @@ describe('resolveRoute / directRoute — policy fences', () => {
     expect(r.skills).toEqual(['worker-role']);
     expect(r.mcp).toEqual(['memtrace']);
     expect(r.fallback).toBeUndefined();
+  });
+});
+
+describe('resolveRoute — fallback inherits class policy', () => {
+  const dirs: string[] = [];
+
+  afterEach(() => {
+    for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
+    dirs.length = 0;
+  });
+
+  function syntheticTable(yaml: string) {
+    const dir = mkdtempSync(join(tmpdir(), 'heddle-routing-test-'));
+    dirs.push(dir);
+    const path = join(dir, 'routing.yaml');
+    writeFileSync(path, yaml);
+    return loadRouting(path);
+  }
+
+  it('inherits deep-implementation skills and mcp into its fallback without inheriting effort', () => {
+    const fallback = resolveRoute(loadRouting(TABLE_PATH), 'deep-implementation').fallback;
+    expect(fallback).toMatchObject({
+      provider: 'codex', model: 'gpt-5.6-sol',
+      skills: ['worker-role', 'code-discovery', 'quality-gate'], mcp: ['memtrace'],
+    });
+    expect(fallback?.effort).toBeUndefined();
+  });
+
+  it('keeps bulk-mechanical primary effort out of its fallback while carrying class skills', () => {
+    const route = resolveRoute(loadRouting(TABLE_PATH), 'bulk-mechanical');
+    expect(route.effort).toBe('low');
+    expect(route.fallback?.effort).toBeUndefined();
+    expect(route.fallback?.skills).toEqual(['worker-role', 'quality-gate']);
+  });
+
+  it('uses a fallback node’s own skills instead of the class skills when the fallback defines them', () => {
+    const table = syntheticTable(`
+providers: { codex: {} }
+task_classes:
+  synthetic:
+    provider: codex
+    model: m1
+    skills: [a, b]
+    fallback: { provider: codex, model: m2, skills: [only-this] }
+`);
+    const fallback = resolveRoute(table, 'synthetic').fallback;
+    expect(fallback?.skills).toEqual(['only-this']);
+    expect(fallback?.mcp).toBeUndefined();
+  });
+
+  it('defers rejecting bare skills and mcp values until resolveRoute validates each target', () => {
+    const skillsYaml = `
+providers: { codex: {} }
+task_classes: { synthetic: { provider: codex, model: m1, skills: quality-gate } }
+`;
+    const mcpYaml = `
+providers: { codex: {} }
+task_classes: { synthetic: { provider: codex, model: m1, mcp: memtrace } }
+`;
+    // loadRouting itself must accept these files — the assignments below fail the test if it throws.
+    const skillsTable = syntheticTable(skillsYaml);
+    const mcpTable = syntheticTable(mcpYaml);
+    expect(() => resolveRoute(skillsTable, 'synthetic')).toThrow(/skills must be a list of strings/);
+    expect(() => resolveRoute(mcpTable, 'synthetic')).toThrow(/mcp must be a list of strings/);
+  });
+
+  it('rejects a fallback node that lacks a provider or a model instead of routing to "undefined"', () => {
+    const table = syntheticTable(`
+providers: { codex: {} }
+task_classes:
+  synthetic:
+    provider: codex
+    model: m1
+    fallback: { provider: codex }
+`);
+    expect(() => resolveRoute(table, 'synthetic')).toThrow(/task class "synthetic": fallback is missing provider or model/);
+  });
+
+  it('reports declared provider execution modes and leaves unknown providers undefined', () => {
+    const table = loadRouting(TABLE_PATH);
+    expect(providerExecution(table, 'claude')).toBe('in-session-subagent');
+    expect(providerExecution(table, 'codex')).toBe('headless');
+    expect(providerExecution(table, 'no-such-provider')).toBeUndefined();
+  });
+});
+
+describe('resolveRoute — fallback provider policy checks', () => {
+  const dirs: string[] = [];
+  afterEach(() => { for (const d of dirs) rmSync(d, { recursive: true, force: true }); dirs.length = 0; });
+  function table(yaml: string) {
+    const dir = mkdtempSync(join(tmpdir(), 'heddle-routing-fbpolicy-'));
+    dirs.push(dir);
+    const path = join(dir, 'routing.yaml');
+    writeFileSync(path, yaml);
+    return loadRouting(path);
+  }
+
+  it('rejects a fallback that names a provider the table does not declare', () => {
+    const t = table('providers: { codex: {} }\ntask_classes:\n  synth: { provider: codex, model: m1, fallback: { provider: nope, model: x } }\n');
+    expect(() => resolveRoute(t, 'synth')).toThrow(/fallback names unknown provider "nope"/);
+  });
+
+  it('rejects a fallback into an excluded provider at resolve time, not after the primary fails', () => {
+    const t = table('providers: { codex: {}, ollama-cloud: { status: excluded } }\ntask_classes:\n  synth: { provider: codex, model: m1, fallback: { provider: ollama-cloud, model: x } }\n');
+    expect(() => resolveRoute(t, 'synth')).toThrow(/fallback routes to excluded provider "ollama-cloud"/);
   });
 });

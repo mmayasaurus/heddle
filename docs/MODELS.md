@@ -54,9 +54,11 @@ model-echo). Do not treat as trusted until piloting lifts.
 
 ## Skill packs × worker type
 
-Packs are lean-by-default. Attach only what the task needs. `worker-role` is
-the exception: **every** delegated worker gets it (blocks Linear/PR ownership
-and scope creep).
+Packs are lean-by-default. Attach only what the task needs — each class's
+default list lives in the routing YAML (`skills:`; see "Dispatch-time
+surfacing" below for the omit/replace/union rules). `worker-role` is the
+exception: **every** delegated worker gets it (blocks Linear/PR ownership and
+scope creep) — the dispatcher unions it in unconditionally.
 
 | Pack | Pair with | Why |
 |---|---|---|
@@ -107,14 +109,75 @@ get a temporary `AGENTS.md` block (restored after dispatch).
 
 Authoritative contracts: `docs/LANDMINES.md`. Authoritative map: the YAML.
 
-## Dispatch-time surfacing (approved, to build)
+## Dispatch-time surfacing (BUILT — HED-1, 2026-08-15)
 
-Keep the tiny SessionStart primer; extend `list_task_classes` to return each
-class's one-line **why** + **recommended skill packs** (from `why:`/`skills:`
-fields to be added to the routing YAML — this doc stays the narrative). A
-PreToolUse hook on `dispatch_worker` warns on empty skills for code-editing
-classes and on `second-opinion-hard` without opt-in, so fit+cost surface at
-the moment of choosing a worker.
+The tiny SessionStart primer stays tiny; the guidance lives at the moment of
+choosing a worker instead:
+
+- **`list_task_classes` / `heddle classes`** return, per class: `why` (one
+  line), `skills` (the packs a dispatch gets when you omit `skills`), `mcp`,
+  `effort`, `execution` (`in-session-subagent` = use your own Agent tool),
+  `edits_code`, fallback and opt-in. Source: `why:` / `skills:` / `edits_code:`
+  fields on each class in `routing/routing.v0.yaml`; this doc stays the
+  narrative.
+- **Skill-pack semantics (decided 2026-08-15, Maya via Agent R):** the YAML
+  `skills:` list **is the dispatch default** — omit `skills` and you get it. A
+  caller's explicit list **replaces** those task-fit defaults (it does not
+  merge with them). Separately, `worker-role` is **mandatory**: the dispatcher
+  unions it into whichever list applies (`withMandatoryPacks`, task-class and
+  direct paths alike), so an explicit list can add packs but can never drop
+  worker-role. A class's fallback route inherits the class `skills`/`mcp`
+  unless the fallback node sets its own (effort is per-provider, not
+  inherited). The ledger's `skills` column records what was actually
+  materialized, so it is auditable.
+- **Class + explicit route:** `dispatch_worker` accepts `task_class` **and**
+  `provider`+`model` together — the class supplies the policy (default packs,
+  MCP, opt-in gate, ledger `task_class`), the named provider/model replaces the
+  route, no fallback (naming it is the choice). This is how a review class
+  can run on "any provider except the author's" (e.g. the planned
+  `adversarial-review` class, HED-3 — not in the table yet). `provider` and
+  `model` must be given together (a lone half is rejected).
+- **Claude-primary classes** (`execution: in-session-subagent` —
+  implementation, deep-implementation, research-summarize, orchestration) are
+  the orchestrator's own Agent-tool subagents, not subprocesses. Since HED-18
+  the dispatcher does not throw for them: it returns a structured refusal
+  `{ok:false, refusal:{code:"claude-in-session", reason, instruction}, execution}`
+  and ledgers it (`refusal` column), where `instruction` names the model, the
+  class packs/MCP to give your subagent, and the declared fallback you can name
+  as `provider`+`model` to run it as a subprocess instead. No auto-fallback.
+  `orchestration` is `dispatchable: false` — it is the orchestrator's OWN work;
+  a dispatch of it is refused on EVERY path (class, class + explicit route,
+  whatever the named provider) with code `not-dispatchable`, "continue
+  yourself", and no mandatory worker pack is added (a caller-supplied `skills`
+  list is echoed as given); `list_task_classes` exposes `dispatchable` and
+  lists no mandatory pack for it. Refusal rows are excluded from `heddle usage`
+  dispatch/success counts (reported as a separate `refusals` column).
+- **Dispatch-guidance hook** (`dist/hook-dispatch-guidance.js`, a Claude Code
+  PreToolUse hook on `mcp__heddle__dispatch_worker`): warns — never blocks —
+  when (1) a code-editing class (`edits_code: true`) is dispatched with no
+  task-fit packs beyond the mandatory `worker-role` (explicit `skills: []`, or
+  the class lists no defaults), naming the recommended packs; (2) a
+  `requires_explicit_opt_in` class (today `second-opinion-hard`) is called
+  without `opt_in: true` — the dispatcher will refuse it; the hook explains the
+  cost first. Output goes to the orchestrator's context
+  (`additionalContext`) plus a one-line `systemMessage`; it sets no
+  `permissionDecision`, so the normal permission flow is untouched. Fails open
+  (any error → exit 0, no output). Register in `~/.claude/settings.json`
+  (user scope — orchestrators run in many repos):
+
+  ```json
+  { "hooks": { "PreToolUse": [ { "matcher": "mcp__heddle__dispatch_worker", "hooks": [ {
+      "type": "command", "timeout": 10,
+      "command": "node --disable-warning=ExperimentalWarning /Users/<you>/Developer/heddle/dist/hook-dispatch-guidance.js"
+  } ] } ] } }
+  ```
+  (merge into your existing `hooks` object — `PreToolUse` must be nested under `"hooks"`, not at the
+  settings root).
+  Point it at the SAME checkout's `dist/` that your `~/.claude.json` heddle
+  MCP entry uses (the canonical clone, not a transient worktree); honors
+  `HEDDLE_ROUTING` like the server. Not registered by heddle itself — the
+  operator (or a future plugin install) wires it. Verified end-to-end on
+  Claude Code 2.1.232 (`additionalContext` reached the model verbatim).
 
 ## Known routing pitfalls (2026-08-15)
 
