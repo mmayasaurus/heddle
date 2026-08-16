@@ -462,6 +462,37 @@ a room when they want to; `@all` / `@agent` are the guaranteed-delivery exceptio
 - **`@all` = guaranteed delivery**: one `deliveries` row per recipient — `sent` /
   `queued-for-channel` where the recipient has a live channel session, `logged` / `inbox` where it
   must pull; the result reason reads `N/M pushed, K/M to inbox`.
+
+### Mentions (HED-94)
+
+Room posts may explicitly ping members via `post_message { mentions: [...] }` — an EXPLICIT field,
+never parsed from the body (no false positives, no spoofed pings); the post itself stays pull-model
+room chatter for everyone else; each mentioned address additionally gets the same targeted
+guaranteed delivery as `@all` (push where a live channel session exists, `logged`/`inbox`
+otherwise, the broadcast hold contract at a permission gate), one typed `deliveries` row per
+mention; the result reason reads `mentions: N/M pushed, K/M to inbox`.
+
+- Room posts only (`mention-outside-room`).
+- At most 16, deduplicated, sender never pings itself.
+- Every mention must be a registered participant (`unknown-mention`; reserved addresses refused).
+- Closed rooms require the mentioned address to be a member (`mention-not-member` — add them
+  first).
+- The operator is always mentionable.
+- Each mention is preflighted against — and charges — the `(from → mentioned)` pair rate-limit
+  budget (`rate-limited` with `retryAfterMs` when a mentioned pair is exhausted: drop the mention
+  or wait); a `hold_floor` post refused over its mentions releases the floor it just took.
+
+Mentioned room posts appear in the mentioned member's INBOX (`check_inbox`, the `{inbox}`
+transcript scope, and therefore the channel pump) — the channel event carries `room` meta and an
+EXPLICIT per-recipient `mention="1"` flag (set iff the recipient is in the post's mentions, never
+inferred); mention order is insertion order (pinned in SQL). The `message_mentions` table
+(append-only, `(message_id, address)` PK, indexed by address) is the queryable surface for
+dashboards. A held mention keeps the guaranteed-delivery contract across broker restarts (inbox
+at deadline, never failed), and a recipient with an OPEN HOLD receives nothing from its channel
+pump until the hold resolves — the permission-gate contract binds the recipient's own pump too.
+Schema note: mentions are schema **v2** — a v1 database migrates in place on open; older binaries
+refuse a v2 file loudly instead of silently missing targeted posts.
+
 - **Operator send**: the `operator` identity binds ONLY through a configuration-level credential
   — `heddle-comms --init-operator-token` writes `~/.heddle/operator.token` (0600, once; the value
   is never printed); the operator session's `.mcp.json` sets `HEDDLE_COMMS_ROLE=operator` and
@@ -490,8 +521,8 @@ a room when they want to; `@all` / `@agent` are the guaranteed-delivery exceptio
   5. To revoke: `--rotate`, then update step 2.
 - **MCP tools**: `create_room {name, topic?, open?}`, `join_room {room, address?}`, `leave_room`,
   `list_rooms` (rooms you may post to, with members + floor), `acquire_floor {room, lease_ms?}`,
-  `release_floor {room}`; `post_message` routes `#room` / `@all` and accepts `hold_floor` /
-  `release_floor`; `read_transcript { room, since_id }` reads a room.
+  `release_floor {room}`; `post_message` routes `#room` / `@all` and accepts `mentions`,
+  `hold_floor` / `release_floor`; `read_transcript { room, since_id }` reads a room.
 - **Read policy** (`read_transcript`): needs a bound identity; an agent reads rooms it may post to,
   DM threads it is part of, and its own inbox (the default); `all` and other people's DMs are
   operator-only — the db file is shared, but the tool surface is not a fleet-wide wiretap.

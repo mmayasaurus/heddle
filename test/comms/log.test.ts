@@ -326,14 +326,33 @@ describe('CommsLog (temp db)', () => {
     const raw = new DatabaseSync(path);
     raw.exec('PRAGMA user_version = 99');
     raw.close();
-    expect(() => new CommsLog(path)).toThrow(/schema v99; this heddle understands v1 — upgrade heddle/);
+    expect(() => new CommsLog(path)).toThrow(/schema v99; this heddle understands v2 — upgrade heddle/);
     const again = new DatabaseSync(path);
     try {
       expect((again.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(99);
-      again.exec('PRAGMA user_version = 1'); // restore so afterEach can close cleanly via a fresh handle
+      again.exec('PRAGMA user_version = 2'); // restore so afterEach can close cleanly via a fresh handle
     } finally { again.close(); }
     log = new CommsLog(path);
     expect(log.count()).toBe(1);
+  });
+
+  it('migrates a v1 database to v2 in place: message_mentions appears, the stamp moves, rows survive', () => {
+    log.append({ from: 'K', to: 'R', body: 'v1-era row' });
+    log.close();
+    // Rewind the file to v1 shape: drop the v2 table, stamp v1.
+    const raw = new DatabaseSync(path);
+    raw.exec('DROP TABLE message_mentions');
+    raw.exec('PRAGMA user_version = 1');
+    raw.close();
+    log = new CommsLog(path, { now: clock });
+    expect(log.get(1)?.body).toBe('v1-era row');
+    expect(log.get(1)?.mentions).toEqual([]);
+    log.append({ from: 'K', to: 'R', body: 'post-migration', mentions: undefined });
+    const check = new DatabaseSync(path);
+    try {
+      expect((check.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(COMMS_SCHEMA_VERSION);
+      expect(check.prepare("SELECT name FROM sqlite_master WHERE name = 'message_mentions'").get()).toBeTruthy();
+    } finally { check.close(); }
   });
 
   it('persists across close/reopen and stamps the schema version; close() is idempotent', () => {
