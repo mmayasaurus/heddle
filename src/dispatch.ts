@@ -698,7 +698,7 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
   // A non-dispatchable class is refused regardless, so no cap decision is made for it.
   const decision: RouteDecision = notDispatchable
     ? { target, fallback, routedAwayForCap: false, routeReason: 'not-dispatchable', checks: ['class is dispatchable: false — refused before any route'] }
-    : decideRoute(table, target, fallback, caps, { explicit: origin !== 'class' });
+    : decideRoute(table, target, fallback, caps, { explicit: origin !== 'class', claudeAccounts: req.accounts ?? readClaudeAccounts() });
   target = decision.target;
   fallback = decision.fallback;
   if (reviewerPick) decision.routeReason = `${decision.routeReason}; reviewer ${reviewerPick.reason}`;
@@ -742,7 +742,7 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
     const accounts = req.accounts ?? readClaudeAccounts();
     accountAdvice = adviseClaudeAccount(caps.claude, accounts);
     if (!req.inSession && !notDispatchable) {
-      accountPick = pickClaudeAccount(caps.claude, accounts, { pin: req.accountPin, routeAwayAtPct: capAwarePolicy(table).routeAwayAtPct });
+      accountPick = pickClaudeAccount(caps.claude, accounts, { pin: req.accountPin, routeAwayAtPct: capAwarePolicy(table).routeAwayAtPct, forFable: target.model === 'fable' });
       account = accountPick?.account.id ?? null;
       if (accountPick) decision.routeReason = `${decision.routeReason}; ${accountPick.reason}`;
     } else {
