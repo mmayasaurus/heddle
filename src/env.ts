@@ -24,7 +24,10 @@ const BILLING_SWITCH_VARS = [
 
 /**
  * Credential-selection vars that are legitimate subscription-identity switches (account
- * rotation), NOT billing switches. These pass through when a caller sets them explicitly.
+ * rotation), NOT billing switches. These pass through when a caller sets them explicitly —
+ * but CLAUDE_CODE_OAUTH_TOKEN is stripped when merely INHERITED (see INHERITED_CREDENTIAL_VARS):
+ * a token in the parent's shell outranks the config-dir OAuth inside `claude`, so leaving it
+ * would silently pin every worker to the token's account and defeat rotation.
  * - CODEX_HOME: selects which ChatGPT account's auth.json a Codex worker uses.
  * - CLAUDE_CONFIG_DIR: selects which Anthropic account's config/session tree.
  * - CLAUDE_CODE_OAUTH_TOKEN: subscription-backed long-lived token (`claude setup-token`) —
@@ -47,6 +50,14 @@ const ACCOUNT_SELECTOR_VARS = new Set([
  * (HEDDLE_WORKER / HEDDLE_DISPATCH_ID / HEDDLE_PARENT) via overrides instead.
  */
 const PARENT_IDENTITY_VARS = ['HEDDLE_AGENT', 'FLEET_AGENT'] as const;
+
+/**
+ * Stripped from the INHERITED env but allowed as an explicit override: a credential that overrides
+ * the account selection heddle just made. CLAUDE_CODE_OAUTH_TOKEN beats CLAUDE_CONFIG_DIR's OAuth
+ * inside Claude Code, so a stray export would run every worker as the token's account no matter
+ * which config dir the picker chose (PR #12 review, codex-connector P1).
+ */
+const INHERITED_CREDENTIAL_VARS = ['CLAUDE_CODE_OAUTH_TOKEN'] as const;
 
 export interface WorkerEnvOptions {
   /** Explicit overrides — typically an account selector from the account registry. */
@@ -83,8 +94,7 @@ export function buildWorkerEnv(opts: WorkerEnvOptions = {}): {
       stripped.push(key);
     }
   }
-
-  for (const key of opts.unset ?? []) {
+  for (const key of INHERITED_CREDENTIAL_VARS) {
     if (env[key] !== undefined) {
       delete env[key];
       stripped.push(key);
@@ -100,6 +110,15 @@ export function buildWorkerEnv(opts: WorkerEnvOptions = {}): {
     }
     if ((PARENT_IDENTITY_VARS as readonly string[]).includes(key)) continue; // overrides cannot re-inject the parent's identity
     env[key] = value;
+  }
+
+  // unset is applied LAST so it always wins — an override must not be able to re-introduce a var
+  // the caller asked to remove (e.g. CLAUDE_CONFIG_DIR for the default login; PR #12, copilot).
+  for (const key of opts.unset ?? []) {
+    if (env[key] !== undefined) {
+      delete env[key];
+      stripped.push(key);
+    }
   }
 
   return { env, stripped };

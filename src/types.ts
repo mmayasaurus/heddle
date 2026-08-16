@@ -41,6 +41,8 @@ export interface DispatchOptions {
   systemPromptAppend?: string;
   /** Path to a per-dispatch MCP config file for CLIs that read one (claude --mcp-config). */
   mcpConfigPath?: string;
+  /** Names of the MCP servers in mcpConfigPath — claude allowlists them as `mcp__<name>`. */
+  mcpServers?: string[];
 }
 
 export interface TokenUsage {
