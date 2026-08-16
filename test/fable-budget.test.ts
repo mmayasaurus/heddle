@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { adviseClaudeAccount, bestFableWeekly, decideRoute, pickClaudeAccount, type ClaudeAccount } from '../src/capaware.js';
 import { dispatch } from '../src/dispatch.js';
 import { loadRouting, resolveRoute } from '../src/routing.js';
-import { readLimitsMirror, type CapsByProvider, type ProviderCaps } from '../src/usage.js';
+import { readLimitsMirror, type ProviderCaps } from '../src/usage.js';
 import { fakeAdapter, IDENTITIES, useTempResources } from './helpers.js';
 
 const registry: ClaudeAccount[] = [{ id: 'acct1', configDir: null }, { id: 'acct2', configDir: '/x/.a2' }];
