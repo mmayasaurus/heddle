@@ -77,10 +77,12 @@ const json = has('--json');
 
 /**
  * Orphan hygiene at CLI start (HED-90): close provably-dead in-flight rows so every read below sees
- * an honest ledger. Skipped for `ledger sweep` itself (its --dry-run must observe, not mutate) and
- * best-effort — a hygiene failure must never break the command the operator actually ran.
+ * an honest ledger. Skipped for `ledger sweep` (its --dry-run must observe, not mutate) AND for
+ * `ledger finish` (the operator's manual close of a real orphan must win, with THEIR reason — the
+ * auto-sweep pre-empting it would discard the diagnostic and fail the command). Best-effort — a
+ * hygiene failure must never break the command the operator actually ran.
  */
-if (!(cmd === 'ledger' && process.argv[3] === 'sweep')) {
+if (!(cmd === 'ledger' && (process.argv[3] === 'sweep' || process.argv[3] === 'finish'))) {
   try {
     const { closed } = new Ledger().sweepOrphans();
     if (closed > 0) console.error(`heddle: closed ${closed} orphaned in-flight dispatch row${closed === 1 ? '' : 's'} (heddle ledger --json shows outcome='orphaned')`);
@@ -231,7 +233,10 @@ try {
     case 'ledger': {
       if (process.argv[3] === 'sweep') {
         const maxAgeH = arg('--max-age-h');
-        if (maxAgeH !== undefined && !(Number.isFinite(Number(maxAgeH)) && Number(maxAgeH) > 0)) {
+        // `has()` distinguishes "--max-age-h given without a value" (an error a hurried operator
+        // must see — silently sweeping at the 24h default would look like the custom sweep ran)
+        // from "flag absent" (the default is intended).
+        if (has('--max-age-h') && !(Number.isFinite(Number(maxAgeH)) && Number(maxAgeH) > 0)) {
           console.error('usage: heddle ledger sweep [--dry-run] [--max-age-h N] — N must be a positive number');
           process.exit(2);
         }

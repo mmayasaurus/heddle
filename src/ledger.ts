@@ -64,9 +64,12 @@ export interface DispatchRecord {
   /** pid of the process that recorded this dispatch. start() and finish() always run in the same
    *  process, so this pid being provably gone means finish() can never arrive (HED-90). */
   ownerPid: number | null;
-  /** Executable basename of that process (node/bun) — the ps-comm half of the pid-reuse-safe
-   *  liveness check (HED-87 pattern). */
+  /** Executable basename of that process (node/bun) — informational, and the liveness fallback
+   *  when a process start time is unavailable (HED-87's ps-comm pattern). */
   ownerComm: string | null;
+  /** Epoch ms the owner process started (now − process.uptime()). The primary pid-reuse-safe
+   *  identity: a pid recycled to a NEW process cannot have this start time. */
+  ownerStartedAt: number | null;
   /** null for normal rows; 'orphaned' when the hygiene sweep closed the row (HED-90). */
   outcome: string | null;
 }
@@ -79,7 +82,7 @@ export type DispatchStartRecord =
     'routeReason' | 'account' | 'identitySource' |
     // Derived/sweep-owned, never caller-provided: the owner identity is stamped by insertStart
     // itself; `outcome` is written only by the orphan sweep (HED-90).
-    'ownerPid' | 'ownerComm' | 'outcome'> &
+    'ownerPid' | 'ownerComm' | 'ownerStartedAt' | 'outcome'> &
   Partial<Pick<DispatchRecord, 'capabilities' | 'routeReason' | 'account' | 'identitySource'>>;
 
 const SCHEMA = `
@@ -114,6 +117,7 @@ CREATE TABLE IF NOT EXISTS dispatches (
 CREATE INDEX IF NOT EXISTS idx_dispatches_issue ON dispatches(issue);
 CREATE INDEX IF NOT EXISTS idx_dispatches_orch ON dispatches(orchestrator);
 CREATE INDEX IF NOT EXISTS idx_dispatches_started ON dispatches(started_at);
+CREATE INDEX IF NOT EXISTS idx_dispatches_finished ON dispatches(finished_at);
 `;
 
 /**
@@ -153,6 +157,7 @@ const MIGRATIONS: { column: string; ddl: string }[] = [
   // HED-90 (orphan hygiene, 2026-08-16):
   { column: 'owner_pid', ddl: 'ALTER TABLE dispatches ADD COLUMN owner_pid INTEGER' },
   { column: 'owner_comm', ddl: 'ALTER TABLE dispatches ADD COLUMN owner_comm TEXT' },
+  { column: 'owner_started_at', ddl: 'ALTER TABLE dispatches ADD COLUMN owner_started_at INTEGER' },
   { column: 'outcome', ddl: 'ALTER TABLE dispatches ADD COLUMN outcome TEXT' },
 ];
 
@@ -182,45 +187,91 @@ export interface OrphanCandidate {
 /** Nothing heddle dispatches legitimately runs this long (worker budgets are minutes). */
 export const DEFAULT_ORPHAN_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
-/**
- * Parse `ps -p <pids> -o pid=,comm=` output into per-pid liveness: a pid is alive only if it is
- * listed AND its executable basename matches the comm recorded at dispatch time — a reused pid
- * running something else is NOT the owner (HED-87's pattern). Rows recorded without a comm accept
- * any listed executable. Exported for tests.
- */
-export function parsePsLiveness(output: string, pid: number, expectedComm: string | null): boolean {
-  for (const line of output.split('\n')) {
-    const trimmed = line.trim();
-    if (trimmed === '') continue;
-    const space = trimmed.search(/\s/);
-    const pidField = space === -1 ? trimmed : trimmed.slice(0, space);
-    if (Number(pidField) !== pid) continue;
-    if (expectedComm === null) return true;
-    const comm = space === -1 ? '' : trimmed.slice(space).trim();
-    return basename(comm) === expectedComm;
-  }
-  return false;
+/** What ps reports for one live pid: its start time (when parseable) and executable. */
+export interface PsEntry {
+  startedAtMs: number | null;
+  comm: string;
 }
 
 /**
- * One ps call for all candidate pids → a probe closure. ps failing entirely (not installed,
- * sandbox) yields UNKNOWN (`null`) for every pid, so the sweep never closes a row on a hunch.
- * An empty result for a listed pid IS a verdict: that pid does not exist.
+ * Parse `ps -p <pids> -o pid=,lstart=,comm=` (LANG=C) output ONCE into a pid table. lstart is the
+ * 5-token ctime form ("Thu Aug 15 19:59:47 2026" — V8's Date.parse accepts it); whatever follows
+ * is the executable (may contain spaces). Exported for tests.
  */
-function makePsProbe(rows: Record<string, unknown>[]): (pid: number, comm: string | null) => boolean | null {
+export function parsePsTable(output: string): Map<number, PsEntry> {
+  const table = new Map<number, PsEntry>();
+  for (const line of output.split('\n')) {
+    const tokens = line.trim().split(/\s+/);
+    if (tokens.length < 2) continue;
+    const pid = Number(tokens[0]);
+    if (!Number.isInteger(pid) || pid <= 0) continue;
+    const lstart = tokens.slice(1, 6).join(' ');
+    const startedAt = Date.parse(lstart);
+    table.set(pid, {
+      startedAtMs: Number.isFinite(startedAt) ? startedAt : null,
+      comm: tokens.slice(6).join(' '),
+    });
+  }
+  return table;
+}
+
+/** ps reports whole seconds and our own clock reading is not simultaneous with ps's. */
+const OWNER_START_SLOP_MS = 15_000;
+/** Linux /proc/<pid>/comm truncates to 15 chars (TASK_COMM_LEN−1); compare accordingly. */
+const COMM_MAX = 15;
+
+/**
+ * Is the process at `pid` the SAME process instance that recorded the row? Pid-reuse-safe:
+ *   - pid not listed by ps → gone (false);
+ *   - both start times known → same instance iff they agree within slop (a recycled pid belongs to
+ *     a NEWER process, so its start time cannot match) — executable naming quirks are irrelevant;
+ *   - start time unavailable on either side → fall back to the executable name, tolerating the
+ *     kernel's 15-char comm truncation and thread-name reporting differences by comparing prefixes;
+ *   - nothing recorded to compare against → the listed pid is accepted as the owner.
+ * Exported for tests.
+ */
+export function ownerVerdict(
+  entry: PsEntry | undefined,
+  recordedComm: string | null,
+  recordedStartMs: number | null,
+): boolean {
+  if (entry === undefined) return false;
+  if (recordedStartMs != null && entry.startedAtMs != null) {
+    return Math.abs(entry.startedAtMs - recordedStartMs) <= OWNER_START_SLOP_MS;
+  }
+  if (recordedComm === null) return true;
+  const reported = basename(entry.comm).slice(0, COMM_MAX);
+  const expected = basename(recordedComm).slice(0, COMM_MAX);
+  return reported === expected || reported.startsWith(expected) || expected.startsWith(reported);
+}
+
+/**
+ * One ps call for all candidate pids → a probe closure. Verdict semantics:
+ *   - ps succeeded, or exited 1 (its documented "some pids not found" status): the output is an
+ *     authoritative table — a missing pid IS gone;
+ *   - any other failure (unsupported flags, restricted /proc, sandbox): UNKNOWN (`null`) for every
+ *     pid — the sweep never closes a row on a hunch.
+ */
+function makePsProbe(rows: Record<string, unknown>[]): OwnerProbe {
   const pids = [...new Set(rows.map((r) => Number(r.owner_pid)).filter((p) => Number.isFinite(p) && p > 0))];
   if (pids.length === 0) return () => null;
   let output: string | null;
   try {
-    output = execFileSync('ps', ['-p', pids.join(','), '-o', 'pid=,comm='], { encoding: 'utf8' });
+    output = execFileSync('ps', ['-p', pids.join(','), '-o', 'pid=,lstart=,comm='], {
+      encoding: 'utf8',
+      env: { ...process.env, LANG: 'C', LC_ALL: 'C' },
+    });
   } catch (err) {
-    // ps exits non-zero when NONE of the pids exist — that is an answer, not a failure. The
-    // captured stdout (possibly empty) still tells us which pids were found.
-    output = (err as { stdout?: string }).stdout ?? null;
+    const e = err as { status?: number | null; stdout?: string };
+    output = e.status === 1 ? (e.stdout ?? '') : null;
   }
-  const seen = output;
-  return (pid, comm) => (seen === null ? null : parsePsLiveness(seen, pid, comm));
+  if (output === null) return () => null;
+  const table = parsePsTable(output);
+  return (pid, comm, startedAtMs) => ownerVerdict(table.get(pid), comm, startedAtMs);
 }
+
+/** Injectable owner-liveness check: true = same process instance, false = gone, null = unknown. */
+export type OwnerProbe = (pid: number, comm: string | null, startedAtMs: number | null) => boolean | null;
 
 export class Ledger {
   private db: DatabaseSync;
@@ -266,13 +317,13 @@ export class Ledger {
       INSERT INTO dispatches
         (orchestrator, task_class, provider, model, skills, issue, pr, cwd, prompt_preview,
          session_id, fell_back_from, capabilities, route_reason, account, identity_source,
-         started_at, owner_pid, owner_comm)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         started_at, owner_pid, owner_comm, owner_started_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       r.orchestrator, r.taskClass, r.provider, r.model, r.skills, r.issue, r.pr, r.cwd,
       r.promptPreview.slice(0, 500), r.sessionId, r.fellBackFrom, r.capabilities ?? null,
       r.routeReason ?? null, r.account ?? null, r.identitySource ?? null, now,
-      process.pid, basename(process.execPath),
+      process.pid, basename(process.execPath), Math.round(Date.now() - process.uptime() * 1000),
     );
     return Number(info.lastInsertRowid);
   }
@@ -351,7 +402,7 @@ export class Ledger {
     this.db.prepare(`
       UPDATE dispatches SET ok = ?, error = ?, session_id = COALESCE(?, session_id),
         duration_ms = ?, input_tokens = ?, cached_input_tokens = ?, output_tokens = ?,
-        reasoning_tokens = ?, finished_at = ?
+        reasoning_tokens = ?, finished_at = ?, outcome = NULL
       WHERE id = ?
     `).run(
       outcome.ok ? 1 : 0, outcome.error ?? null, outcome.sessionId ?? null,
@@ -407,12 +458,13 @@ export class Ledger {
     maxAgeMs?: number;
     dryRun?: boolean;
     now?: Date;
-    isOwnerAlive?: (pid: number, comm: string | null) => boolean | null;
+    isOwnerAlive?: OwnerProbe;
   } = {}): { candidates: OrphanCandidate[]; closed: number } {
     const maxAgeMs = opts.maxAgeMs ?? DEFAULT_ORPHAN_MAX_AGE_MS;
     const now = opts.now ?? new Date();
     const rows = this.inFlight();
     const probe = opts.isOwnerAlive ?? makePsProbe(rows);
+    const hours = (ms: number) => (Math.floor(ms / 360_000) / 10).toFixed(1);
     const candidates: OrphanCandidate[] = [];
     for (const row of rows) {
       const id = Number(row.id);
@@ -420,11 +472,17 @@ export class Ledger {
       const ageMs = now.getTime() - Date.parse(startedAt);
       const ownerPid = row.owner_pid == null ? null : Number(row.owner_pid);
       const ownerComm = row.owner_comm == null ? null : String(row.owner_comm);
+      const ownerStartedAt = row.owner_started_at == null ? null : Number(row.owner_started_at);
+      // true = same process instance still running · false = provably gone · null = unknown
+      const alive = ownerPid == null ? null : probe(ownerPid, ownerComm, ownerStartedAt);
       let reason: string | null = null;
-      if (Number.isFinite(ageMs) && ageMs > maxAgeMs) {
-        reason = `in-flight for ${Math.round(ageMs / 3_600_000)}h (limit ${Math.round(maxAgeMs / 3_600_000)}h)`;
-      } else if (ownerPid != null && probe(ownerPid, ownerComm) === false) {
+      if (alive === false) {
         reason = `owner process ${ownerPid} (${ownerComm ?? '?'}) is gone`;
+      } else if (alive !== true && Number.isFinite(ageMs) && ageMs > maxAgeMs) {
+        // Age alone never overrides a POSITIVE liveness verdict — a legitimately long-running
+        // dispatch (large timeoutMs) whose owner is demonstrably alive is not an orphan.
+        reason = `in-flight for ${hours(ageMs)}h (limit ${hours(maxAgeMs)}h) and owner ${
+          ownerPid == null ? 'unrecorded' : 'liveness unknown'}`;
       }
       if (reason !== null) candidates.push({ id, startedAt, reason });
     }
@@ -436,6 +494,7 @@ export class Ledger {
     }
     return { candidates, closed };
   }
+
 
   /** In-flight rows started more than `olderThanMs` ago — orphans to close (heddle workers --stale). */
   staleInFlight(olderThanMs: number, now = Date.now()): Record<string, unknown>[] {
