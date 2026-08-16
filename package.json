@@ -25,6 +25,7 @@
   },
   "bin": {
     "heddle": "dist/cli.js",
-    "heddle-mcp": "dist/mcp-server.js"
+    "heddle-mcp": "dist/mcp-server.js",
+    "heddle-hook-dispatch-guidance": "dist/hook-dispatch-guidance.js"
   }
 }

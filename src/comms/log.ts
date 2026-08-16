@@ -3,9 +3,10 @@ import { mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import {
-  MESSAGE_KINDS, PRIVILEGED_TIERS, TIERS,
-  type MessageKind, type MessageRecord, type NewMessage, type Participant, type ParticipantKind,
-  type Tier, type TierDecision, type TranscriptQuery, type TranscriptScope,
+  DELIVERY_OUTCOMES, MESSAGE_KINDS, PARTICIPANT_KINDS, PRIVILEGED_TIERS, TIERS,
+  type DeliveryEvent, type DeliveryOutcome, type MessageKind, type MessageRecord, type NewDeliveryEvent,
+  type NewMessage, type Participant, type ParticipantKind, type Tier, type TierDecision,
+  type TranscriptQuery, type TranscriptScope,
 } from './types.js';
 import { BROADCAST, canSend, childAddress, parseAddress, requireAddress, type ParsedAddress } from './address.js';
 import { isSealed } from './seal.js';
@@ -35,6 +36,9 @@ export const DEFAULT_COMMS_PATH = join(homedir(), '.heddle', 'comms.db');
 /** Bump when the schema changes shape; recorded as PRAGMA user_version. */
 export const COMMS_SCHEMA_VERSION = 1;
 
+const sqlList = (xs: readonly string[]) => xs.map((x) => `'${x.replace(/'/g, "''")}'`).join(', ');
+
+// The SQL enums are generated from the TypeScript lists so the two cannot drift.
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS messages (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -50,7 +54,7 @@ CREATE TABLE IF NOT EXISTS messages (
   thread      TEXT,
   dispatch_id INTEGER,
   meta        TEXT,
-  CHECK (tier IN ('operator', 'orchestrator-directive', 'agent-message')),
+  CHECK (tier IN (${sqlList(TIERS)})),
   CHECK (verified IN (0, 1)),
   -- verified <=> privileged tier: an unverified operator/directive row cannot exist even via a
   -- raw INSERT, and an agent-message never claims verification.
@@ -72,6 +76,29 @@ CREATE TRIGGER IF NOT EXISTS messages_sender_registered BEFORE INSERT ON message
 WHEN NOT EXISTS (SELECT 1 FROM participants WHERE address = NEW.sender)
 BEGIN SELECT RAISE(ABORT, 'sender is not a registered participant'); END;
 
+-- Typed delivery outcomes (SPEC §10: never a boolean). One row per attempt/decision; refusals
+-- that never became a message have message_id NULL. Append-only like messages.
+CREATE TABLE IF NOT EXISTS deliveries (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts         TEXT    NOT NULL,
+  message_id INTEGER,
+  sender     TEXT    NOT NULL,
+  target     TEXT    NOT NULL,
+  outcome    TEXT    NOT NULL,
+  code       TEXT    NOT NULL,
+  reason     TEXT,
+  transport  TEXT,
+  attempt    INTEGER NOT NULL DEFAULT 1,
+  CHECK (outcome IN (${sqlList(DELIVERY_OUTCOMES)}))
+);
+CREATE INDEX IF NOT EXISTS idx_deliveries_message ON deliveries(message_id, id);
+CREATE INDEX IF NOT EXISTS idx_deliveries_target  ON deliveries(target, id);
+CREATE INDEX IF NOT EXISTS idx_deliveries_sender  ON deliveries(sender, id);
+CREATE TRIGGER IF NOT EXISTS deliveries_append_only_update BEFORE UPDATE ON deliveries
+BEGIN SELECT RAISE(ABORT, 'delivery log is append-only: UPDATE refused'); END;
+CREATE TRIGGER IF NOT EXISTS deliveries_append_only_delete BEFORE DELETE ON deliveries
+BEGIN SELECT RAISE(ABORT, 'delivery log is append-only: DELETE refused'); END;
+
 CREATE TABLE IF NOT EXISTS participants (
   address     TEXT PRIMARY KEY,
   kind        TEXT NOT NULL,
@@ -81,7 +108,7 @@ CREATE TABLE IF NOT EXISTS participants (
   label       TEXT,
   first_seen  TEXT NOT NULL,
   last_seen   TEXT NOT NULL,
-  CHECK (kind IN ('agent', 'child', 'operator')),
+  CHECK (kind IN (${sqlList(PARTICIPANT_KINDS)})),
   -- A child's address IS its lineage (parent.seq); agents/operator carry no lineage columns.
   CHECK ((kind = 'child' AND parent IS NOT NULL AND seq IS NOT NULL AND address = parent || '.' || seq)
       OR (kind <> 'child' AND parent IS NULL AND seq IS NULL AND dispatch_id IS NULL)),
@@ -327,12 +354,75 @@ export class CommsLog {
     return row ? toParticipant(row) : null;
   }
 
+  /** Participants whose address starts with `prefix`, sorted — the resolver's lookup (no full scan). */
+  participantsWithPrefix(prefix: string): Participant[] {
+    if (typeof prefix !== 'string' || prefix.length === 0) return [];
+    // Range seek on the primary key (prefix ≤ address < prefix + max char) — indexed, no scan.
+    const rows = this.db.prepare('SELECT * FROM participants WHERE address >= ? AND address < ? ORDER BY address')
+      .all(prefix, prefix + '\uffff');
+    return (rows as unknown as PRow[]).map(toParticipant);
+  }
+
   /** All participants, optionally only the children of one parent. */
   participants(filter: { parent?: string } = {}): Participant[] {
     const rows = filter.parent != null
       ? this.db.prepare('SELECT * FROM participants WHERE parent = ? ORDER BY seq ASC').all(filter.parent)
       : this.db.prepare('SELECT * FROM participants ORDER BY first_seen ASC, address ASC').all();
     return (rows as unknown as PRow[]).map(toParticipant);
+  }
+
+  // ---------------------------------------------------------------- deliveries
+
+  /** Record one typed delivery outcome (sent / held / released / refused / failed / logged). */
+  recordDelivery(ev: NewDeliveryEvent): DeliveryEvent {
+    const attempt = validateDeliveryEvent(ev);
+    if (ev.messageId != null && !this.db.prepare('SELECT 1 FROM messages WHERE id = ?').get(ev.messageId)) {
+      throw new Error(`delivery for message ${ev.messageId}, which does not exist`);
+    }
+    const info = this.db.prepare(`
+      INSERT INTO deliveries (ts, message_id, sender, target, outcome, code, reason, transport, attempt)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(this.now(), ev.messageId ?? null, ev.from, ev.to, ev.outcome, ev.code, ev.reason ?? null, ev.transport ?? null, attempt);
+    return this.delivery(Number(info.lastInsertRowid))!;
+  }
+
+  /**
+   * Holds still owed a release or a timeout: `held` events with no later resolving event for the
+   * same (message, target) — resolving = `released`, `sent`, `logged` (broadcast → inbox), or
+   * `failed`/`hold-timeout`. (A later `failed` with another code is a transient transport failure:
+   * the entry is still held.)
+   */
+  openHolds(): DeliveryEvent[] {
+    const rows = this.db.prepare(`
+      SELECT d.* FROM deliveries d
+      WHERE d.outcome = 'held' AND NOT EXISTS (
+        SELECT 1 FROM deliveries e
+        WHERE e.message_id = d.message_id AND e.target = d.target AND e.id > d.id
+          AND (e.outcome IN ('released', 'sent', 'logged') OR (e.outcome = 'failed' AND e.code = 'hold-timeout'))
+      )
+      ORDER BY d.id ASC
+    `).all();
+    return (rows as unknown as DRow[]).map(toDelivery);
+  }
+
+  delivery(id: number): DeliveryEvent | null {
+    const row = this.db.prepare('SELECT * FROM deliveries WHERE id = ?').get(id) as unknown as DRow | undefined;
+    return row ? toDelivery(row) : null;
+  }
+
+  /** Delivery events, oldest first; filter by message, target or sender; `sinceId` exclusive. */
+  deliveries(filter: { messageId?: number; target?: string; sender?: string; sinceId?: number; limit?: number } = {}): DeliveryEvent[] {
+    const where: string[] = [];
+    const params: (string | number)[] = [];
+    if (filter.messageId != null) { where.push('message_id = ?'); params.push(filter.messageId); }
+    if (filter.target != null) { where.push('target = ?'); params.push(filter.target); }
+    if (filter.sender != null) { where.push('sender = ?'); params.push(filter.sender); }
+    if (filter.sinceId != null) { where.push('id > ?'); params.push(filter.sinceId); }
+    const limit = filter.limit ?? 200;
+    if (!Number.isInteger(limit) || limit <= 0) throw new Error('limit must be a positive integer');
+    params.push(limit);
+    const sql = `SELECT * FROM deliveries ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY id ASC LIMIT ?`;
+    return (this.db.prepare(sql).all(...params) as unknown as DRow[]).map(toDelivery);
   }
 
   /** Idempotent: closing twice is a no-op, so teardown paths can call it defensively. */
@@ -357,6 +447,22 @@ export class CommsLog {
   private touch(address: string, ts: string): void {
     this.db.prepare('UPDATE participants SET last_seen = ? WHERE address = ?').run(ts, address);
   }
+}
+
+// ------------------------------------------------------------------ delivery helpers
+
+/** Shape + invariant checks for a delivery event; returns the attempt number to store. */
+function validateDeliveryEvent(ev: NewDeliveryEvent): number {
+  if (!DELIVERY_OUTCOMES.includes(ev.outcome)) throw new Error(`unknown delivery outcome ${JSON.stringify(ev.outcome)}`);
+  if (typeof ev.code !== 'string' || !/^[a-z0-9-]{1,64}$/.test(ev.code)) throw new Error('delivery code must be a short kebab-case token');
+  if (ev.messageId != null && (!Number.isInteger(ev.messageId) || ev.messageId < 1)) throw new Error('messageId must be a positive id');
+  const attempt = ev.attempt ?? 1;
+  if (!Number.isInteger(attempt) || attempt < 1) throw new Error('attempt must be a positive integer');
+  // Invariants: a refusal never has a message row (nothing was accepted); every other outcome is
+  // ABOUT an existing message.
+  if (ev.outcome === 'refused' && ev.messageId != null) throw new Error('a refused delivery cannot reference a message (nothing was accepted)');
+  if (ev.outcome !== 'refused' && ev.messageId == null) throw new Error(`a ${ev.outcome} delivery must reference the message it is about`);
+  return attempt;
 }
 
 // ------------------------------------------------------------------ transcript helpers
@@ -476,6 +582,19 @@ interface Row {
   id: number; ts: string; sender: string; target: string; kind: string; tier: string;
   verified: number; body: string; reply_to: number | null; issue: string | null; thread: string | null;
   dispatch_id: number | null; meta: string | null;
+}
+
+interface DRow {
+  id: number; ts: string; message_id: number | null; sender: string; target: string; outcome: string;
+  code: string; reason: string | null; transport: string | null; attempt: number;
+}
+
+function toDelivery(r: DRow): DeliveryEvent {
+  return {
+    id: Number(r.id), ts: r.ts, messageId: r.message_id == null ? null : Number(r.message_id),
+    from: r.sender, to: r.target, outcome: r.outcome as DeliveryOutcome, code: r.code, reason: r.reason,
+    transport: r.transport, attempt: Number(r.attempt),
+  };
 }
 
 interface PRow {
