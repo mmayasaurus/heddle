@@ -538,10 +538,8 @@ is a Claude Code channel — other CLIs read their inbox when they want to (`che
 is the room's pull model anyway. Verified from each CLI's own `--help` on 2026-08-15; the Codex
 path re-verified live on 2026-08-16 (receipt below).
 
-**Registration is a scoping decision, not just a command.** Most CLIs read one shared config that
-EVERY invocation of that CLI loads — including the workers heddle dispatches. Registering
-`heddle-comms` there hands comms identity and `post_message` to every worker, not just the
-orchestrator you meant to equip. Prefer a session-scoped registration wherever the CLI has one.
+**Registration is a scoping decision, not just a command** — but the exposure differs per provider,
+so check the adapter before assuming a shared config reaches workers:
 
 - **Codex CLI** — *session-scoped (recommended)*. `-c key=value` overrides config for one
   invocation only (dotted TOML paths, per `codex --help`):
@@ -549,17 +547,37 @@ orchestrator you meant to equip. Prefer a session-scoped registration wherever t
   ```sh
   codex exec \
     -c 'mcp_servers.heddle-comms.command="node"' \
-    -c 'mcp_servers.heddle-comms.args=["/Users/…/heddle/dist/comms/channel-server.js"]' \
-    -c 'mcp_servers.heddle-comms.env={HEDDLE_AGENT="codex-B"}'
+    -c 'mcp_servers.heddle-comms.args=["/path/to/heddle/dist/comms/channel-server.js"]' \
+    -c 'mcp_servers.heddle-comms.env={HEDDLE_AGENT="codex-B"}' \
+    -c 'mcp_servers.heddle-comms.default_tools_approval_mode="approve"'
   ```
 
-  `codex mcp add heddle-comms --env HEDDLE_AGENT=codex-B -- heddle-comms` also works but WRITES
-  `~/.codex/config.toml`, which every codex worker reads — use it only when you intend workers to
-  have comms too.
-- **cursor-agent** — declare the server in `.cursor/mcp.json` (project-scoped, preferred) or
-  `~/.cursor/mcp.json` (global, reaches workers)
+  Keep the approval line. `codexMcpFlags` (`src/mcp.ts`) sets it for every worker server because
+  headless codex otherwise cancels each tool call with "user cancelled MCP tool call" (no TTY) —
+  see `docs/SPEC.md`. The 2026-08-16 live run below happened to succeed without it on a host whose
+  `~/.codex/config.toml` marks its projects `trust_level = "trusted"`; do not rely on that.
+
+  `heddle-comms` is a package bin (`package.json` → `dist/comms/channel-server.js`), so
+  `command="heddle-comms"` works wherever the package is installed on `PATH`; the explicit path is
+  the portable form when it is not (a plain checkout does not put it on `PATH`).
+
+  `codex mcp add heddle-comms --env HEDDLE_AGENT=codex-B -- heddle-comms` also works and WRITES
+  `~/.codex/config.toml`. That does **not** reach heddle-dispatched codex workers: `CodexAdapter`
+  passes `--ignore-user-config` (`ignoreUserConfig` defaults to true, `src/adapters/codex.ts`), so
+  those workers never read the user config. It does affect every *manual* `codex` invocation, and
+  any adapter constructed with `ignoreUserConfig=false`.
+- **cursor-agent** — declare the server in `.cursor/mcp.json` (project) or `~/.cursor/mcp.json`
+  (global)
   (`{ "mcpServers": { "heddle-comms": { "command": "heddle-comms", "env": { "HEDDLE_AGENT": "…" } } } }`),
   then `agent mcp enable heddle-comms` (approved list); `agent mcp list` / `list-tools heddle-comms`.
+
+  **Neither location isolates comms from cursor workers, and the project file is the worse of the
+  two.** `materializeWorkerMcp` writes worker MCP config to exactly `<cwd>/.cursor/mcp.json`
+  (`src/mcp.ts`) and `CursorAdapter` runs each worker with the target project as its cwd
+  (`src/adapters/cursor.ts`), so a cursor worker dispatched into that worktree can inherit the
+  orchestrator's registration — including its fixed `HEDDLE_AGENT` — and workers run with
+  `--approve-mcps --force` when their route requests MCP servers (`src/dispatch.ts`). Register
+  comms for cursor only where you accept that workers in that project may reach it.
 - **agy (Antigravity)** — still NOT documented, and now with evidence rather than absence of it:
   `agy --help` exposes no MCP or per-invocation config flag (only `--add-dir`, `--agent`,
   `--project`, …), so any registration would be global and would reach every agy worker. The
@@ -567,8 +585,11 @@ orchestrator you meant to equip. Prefer a session-scoped registration wherever t
   list its MCP servers on 2026-08-16, agy answered "None" while that file held two. Treat agy as
   pull-model-capable only once someone confirms a mechanism against Antigravity's own docs.
 
-**Identity: the fleet launchers already work.** The comms server resolves identity from
-`HEDDLE_AGENT`, else `FLEET_AGENT`, else `.fleet-agent`. `~/.local/bin/codex-a…e` export
+**Identity: the fleet launchers already work.** `resolveCommsIdentity` (`src/comms/server.ts`)
+binds the first of `HEDDLE_AGENT`, `FLEET_AGENT`, `HEDDLE_COMMS_ADDRESS` (the worker address), then
+walks parent directories for a `.fleet-agent` file, then stays unbound. The operator identity is
+never bindable this way — it needs `HEDDLE_COMMS_ROLE=operator` plus the token.
+`~/.local/bin/codex-a…e` export
 `FLEET_AGENT=codex-A…E`, so a Codex orchestrator launched that way binds as `codex-A` with no
 change; `HEDDLE_AGENT` wins when both are set and disagree. Verified 2026-08-16 against
 `createCommsServer` for all four combinations (FLEET only → `codex-A`; HEDDLE only → `codex-B`;
