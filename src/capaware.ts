@@ -37,7 +37,8 @@ export function capAwarePolicy(table: RoutingTable): CapAwarePolicy {
   const pct = Number(node.route_away_at_pct);
   return {
     enabled: node.enabled !== false,
-    routeAwayAtPct: Number.isFinite(pct) && pct > 0 ? pct : DEFAULT_CAP_AWARE_POLICY.routeAwayAtPct,
+    // 0 is valid ("always route away"); >100 is valid ("never"); negatives/NaN fall to the default.
+    routeAwayAtPct: Number.isFinite(pct) && pct >= 0 ? pct : DEFAULT_CAP_AWARE_POLICY.routeAwayAtPct,
   };
 }
 
@@ -62,10 +63,23 @@ export function isCursorNativeModel(model: string): boolean {
 
 /** The Cursor account heddle's dispatches bill: the cursor-agent login row when W reports it. */
 function cursorAccountRow(caps: ProviderCaps): { windows: Record<string, { usedPercentage: number | null }>; noteCodes: string[]; who: string } {
-  const row = caps.accounts.find((a) => a.id === (caps.activeAccount ?? 'cursor-agent-keychain'))
-    ?? caps.accounts.find((a) => a.id === 'cursor-agent-keychain');
-  if (row && !row.stale) return { windows: row.windows, noteCodes: row.noteCodes, who: `account ${row.id}` };
+  // heddle's dispatches bill the cursor-agent login — prefer its row whenever present and fresh,
+  // even if activeAccount points at the (informational) IDE row.
+  const row = caps.accounts.find((a) => a.id === 'cursor-agent-keychain' && !a.stale)
+    ?? caps.accounts.find((a) => a.id === caps.activeAccount && !a.stale);
+  if (row) return { windows: row.windows, noteCodes: row.noteCodes, who: `account ${row.id}` };
   return { windows: caps.windows, noteCodes: caps.noteCodes, who: 'binding view' };
+}
+
+/**
+ * The STRUCTURAL never-on-demand checks for a target, independent of the soft route-away policy —
+ * also re-applied by dispatch() before any runtime failure-fallback runs (a below-threshold primary
+ * failing over to cursor must not bypass an on-demand hard stop).
+ */
+export function hardRefusal(target: RouteTarget, caps: CapsByProvider): string | null {
+  const tcaps = caps[target.provider];
+  if (target.provider === 'cursor' && tcaps) return cursorRefusal(target.model, tcaps);
+  return null;
 }
 
 /** Cursor-specific hard checks; null when nothing blocks. */
@@ -104,20 +118,20 @@ export function decideRoute(
 ): RouteDecision {
   const policy = capAwarePolicy(table);
   const checks: string[] = [];
-  const src = (p: string) => caps[p]?.source === 'none' ? 'no snapshot' : `${caps[p]?.source}${caps[p]?.stale ? ', stale' : ''}`;
+  const src = (p: string) => !caps[p] || caps[p].source === 'none' ? 'no snapshot' : `${caps[p].source}${caps[p].stale ? ', stale' : ''}`;
 
-  if (!policy.enabled) {
-    return { target, fallback, routedAwayForCap: false, routeReason: 'cap-aware routing disabled (policy)', checks: ['policy.cap_aware_routing.enabled = false'] };
+  // Hard refusals (never-on-demand billing) are STRUCTURAL — they apply to every route, explicit or
+  // not, and are NOT disabled by policy.cap_aware_routing.enabled (that switch governs the soft
+  // route-away only).
+  const tcaps = caps[target.provider];
+  const why = hardRefusal(target, caps);
+  if (why) {
+    checks.push(`REFUSE: ${why}`);
+    return { target, fallback, routedAwayForCap: false, routeReason: `cap:refuse ${why}`, refusal: { code: 'metered-pool-exhausted', reason: why }, checks };
   }
 
-  // Hard refusals apply to every route, explicit or not.
-  const tcaps = caps[target.provider];
-  if (target.provider === 'cursor' && tcaps) {
-    const why = cursorRefusal(target.model, tcaps);
-    if (why) {
-      checks.push(`REFUSE: ${why}`);
-      return { target, fallback, routedAwayForCap: false, routeReason: `cap:refuse ${why}`, refusal: { code: 'metered-pool-exhausted', reason: why }, checks };
-    }
+  if (!policy.enabled) {
+    return { target, fallback, routedAwayForCap: false, routeReason: 'cap-aware routing disabled (policy)', checks: [...checks, 'policy.cap_aware_routing.enabled = false (soft route-away off; hard billing guards stay)'] };
   }
 
   if (opts.explicit) {
@@ -147,8 +161,8 @@ export function decideRoute(
     return { target, fallback: undefined, routedAwayForCap: false, routeReason: `cap:over ${target.provider} ${primary.label}, fallback refused (${fbRefusal}) → ran primary`, checks };
   }
   if (fb && fb.used >= policy.routeAwayAtPct) {
-    checks.push(`fallback ${fallback.provider} ${fb.label} also over — running the primary`);
-    return { target, fallback: undefined, routedAwayForCap: false, routeReason: `cap:both-over ${target.provider} ${primary.label}, ${fallback.provider} ${fb.label} → ran primary`, checks };
+    checks.push(`fallback ${fallback.provider} ${fb.label} also over — running the primary (fallback kept for failure retry: the cap is soft)`);
+    return { target, fallback, routedAwayForCap: false, routeReason: `cap:both-over ${target.provider} ${primary.label}, ${fallback.provider} ${fb.label} → ran primary`, checks };
   }
   checks.push(`ROUTE AWAY → ${fallback.provider}/${fallback.model}` + (fb ? ` (${fallback.provider} ${fb.label})` : ` (${fallback.provider} caps unknown, ${src(fallback.provider)})`));
   return {
@@ -217,7 +231,9 @@ export interface AccountAdvice {
 }
 
 export function adviseClaudeAccount(caps: ProviderCaps | undefined, accounts: ClaudeAccount[], env: NodeJS.ProcessEnv = process.env): AccountAdvice {
-  const rows = (caps?.accounts ?? []).map((a) => ({ id: a.id, usedPct: a.stale ? null : a.fiveHour.usedPercentage, stale: a.stale }));
+  // A snapshot that is stale/absent at the PROVIDER level is unusable regardless of per-row flags.
+  const usable = caps !== undefined && !caps.stale && caps.source !== 'none';
+  const rows = (usable ? caps.accounts : []).map((a) => ({ id: a.id, usedPct: a.stale ? null : a.fiveHour.usedPercentage, stale: a.stale }));
   const known = accounts.map((a) => rows.find((r) => r.id === a.id) ?? { id: a.id, usedPct: null, stale: true });
   const loggedOut = new Set(accounts.filter((a) => a.loggedIn === false).map((a) => a.id));
   const fresh = known.filter((r): r is { id: string; usedPct: number; stale: boolean } => r.usedPct !== null && !loggedOut.has(r.id));
@@ -225,7 +241,9 @@ export function adviseClaudeAccount(caps: ProviderCaps | undefined, accounts: Cl
   const best = bestRow ? { id: bestRow.id, usedPct: bestRow.usedPct, configDir: accounts.find((a) => a.id === bestRow.id)?.configDir ?? null } : null;
   const cur = currentClaudeAccount(accounts, env);
   const current = cur ? { id: cur.id, usedPct: known.find((r) => r.id === cur.id)?.usedPct ?? null } : null;
-  const line = best
+  const line = best && current && best.id === current.id
+    ? `Claude accounts: this session is already on the account with the most 5h headroom (${best.id}, ${best.usedPct.toFixed(0)}% used).`
+    : best
     ? `Claude accounts: ${best.id} has the most 5h headroom (${best.usedPct.toFixed(0)}% used)` +
       (current ? `; this session is on ${current.id}${current.usedPct !== null ? ` (${current.usedPct.toFixed(0)}%)` : ' (no fresh capture)'}` : '') +
       (best.configDir ? ` — CLAUDE_CONFIG_DIR=${best.configDir}` : ' — the default login (leave CLAUDE_CONFIG_DIR unset)') + '.'

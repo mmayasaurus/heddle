@@ -3,7 +3,7 @@
 // pollute stdout parsing for agents, so it is suppressed at the entry point only —
 // `--disable-warning=<type>` silences just that category (`--no-warnings` would hide every
 // process warning; its `=…` suffix is ignored — verified Node 22.23, 2026-08-15).
-import { dispatch, planDispatch } from './dispatch.js';
+import { dispatch, planDispatch, summarizePlan } from './dispatch.js';
 import { Ledger } from './ledger.js';
 import { loadRouting, describeTaskClasses } from './routing.js';
 import { listPacks, withMandatoryPacks } from './skillpacks.js';
@@ -143,21 +143,7 @@ try {
         optIn: has('--opt-in'), env: Object.keys(env).length ? env : undefined,
         inSession: has('--in-session'), accountPin: arg('--account'),
       });
-      const summary = {
-        task_class: plan.route.taskClass,
-        would_run: plan.decision.refusal ? null : `${plan.target.provider}/${plan.target.model}`,
-        execution: plan.execution ?? null,
-        in_session: plan.execution === 'in-session-subagent',
-        routed_away_for_cap: plan.decision.routedAwayForCap,
-        remaining_fallback: plan.fallback ? `${plan.fallback.provider}/${plan.fallback.model}` : null,
-        route_reason: plan.decision.routeReason,
-        refusal: plan.decision.refusal ?? null,
-        checks: plan.decision.checks,
-        account: plan.account,
-        account_pick: plan.accountPick ? { id: plan.accountPick.account.id, used_pct: plan.accountPick.usedPct, reason: plan.accountPick.reason, config_dir: plan.accountPick.account.configDir } : null,
-        account_advice: plan.accountAdvice?.line ?? null,
-        skills: plan.skillsForRefusal,
-      };
+      const summary = summarizePlan(plan) as any;
       out(json, summary, () =>
         `${plan.route.taskClass}` +
         (summary.refusal ? `\n  ✗ WOULD REFUSE (${summary.refusal.code}): ${summary.refusal.reason}`
