@@ -321,8 +321,19 @@ jobs:
               echo "::error::git merge-tree --write-tree failed (rc=$MT_RC) on merge $m — NOT a clean pass"; exit 1
             fi
             AUTO_TREE=$(printf '%s\n' "$AUTO_OUT" | head -n 1)
-            DELTA=$(git diff-tree -r --name-only "$AUTO_TREE" "$m^{tree}") \
+            DELTA_ONLY=$(git diff-tree -r --name-only "$AUTO_TREE" "$m^{tree}") \
               || { echo "::error::git diff-tree (automerge vs committed merge) failed on $m — NOT a clean pass"; exit 1; }
+            # ...plus the combined diff: files whose merged content differs from
+            # ALL parents. That is where the AUTOMERGE ITSELF can synthesize a
+            # match neither parent contains — e.g. one parent adds a private
+            # key's header, the other its body, and the stitched file matches a
+            # multiline rule that no single commit diff ever showed (codex P1).
+            # `gitleaks git` skips merges, so without this those bytes are
+            # unscanned even when the merge was committed verbatim.
+            CC_ALL=$(git diff-tree --cc --name-only -r "$m") \
+              || { echo "::error::git diff-tree --cc failed on merge $m — NOT a clean pass"; exit 1; }
+            CC=$(printf '%s\n' "$CC_ALL" | tail -n +2)
+            DELTA=$(printf '%s\n%s\n' "$DELTA_ONLY" "$CC" | grep -v '^$' | sort -u)
             [ -z "$DELTA" ] && continue
             # Fail CLOSED on names the extractor below would mangle: git
             # quotes non-ASCII paths (leading `"`), and the for-loop splits
@@ -419,32 +430,46 @@ jobs:
           # across runs despite the mktemp prefix, so the reviewed-on-main
           # suppression route works here too (codex P2: the earlier version
           # omitted --gitleaks-ignore-path and could never be unblocked).
+          drc=0
           if [ "$DELTA_COUNT" -gt 0 ]; then
-            drc=0
+            # SARIF too (amazon-q, codex P2): without its own report the
+            # merge-only findings would block the PR but never reach code
+            # scanning, exactly for this new path. Written to the workspace so
+            # the upload step can find it. Its `uri`s are delta-tree paths
+            # (`<merge-sha>/<repo-path>`), so GitHub shows these alerts without
+            # inline annotation — the job log and summary stay authoritative.
             ( cd "$DELTA_DIR" && gitleaks dir . --redact --no-banner --no-color \
                 --config="$S/gitleaks.toml" --gitleaks-ignore-path="$S/ignore" \
-                --ignore-gitleaks-allow --exit-code 2 ) 2>"$S/gitleaks-dir.log" || drc=$?
+                --ignore-gitleaks-allow --exit-code 2 \
+                --report-format sarif --report-path "$GITHUB_WORKSPACE/gitleaks-delta.sarif" \
+            ) 2>"$S/gitleaks-dir.log" || drc=$?
             cat "$S/gitleaks-dir.log"
             if grep -qE '^[^ ]+ (ERR|FTL) ' "$S/gitleaks-dir.log"; then
               echo "::error::gitleaks dir (merge-delta scan) logged ERR/FTL — NOT a clean pass"
               echo "gitleaks: ❌ merge-delta scan errored — see the job log; NOT a clean pass" >> "$GITHUB_STEP_SUMMARY"
               exit 1
             fi
-            case "$drc" in
-              0) echo "gitleaks: merge-delta clean — $DELTA_COUNT blob(s) of merge-only content (conflict resolutions) scanned directly (HED-109)" >> "$GITHUB_STEP_SUMMARY" ;;
-              2) echo "::error::possible secret(s) in merge-resolution content — see the job log (values redacted)"
-                 echo "gitleaks: 🔑 **possible secret(s) in merge-resolution content** ($DELTA_COUNT blob(s) scanned) — see the job log (values redacted); rotate anything real." >> "$GITHUB_STEP_SUMMARY"
-                 exit 2 ;;
-              *) echo "::error::gitleaks dir (merge-delta scan) tool error (exit $drc) — NOT a clean pass"
-                 echo "gitleaks: merge-delta scan tool error (exit $drc) — NOT a clean pass" >> "$GITHUB_STEP_SUMMARY"
-                 exit 1 ;;
-            esac
           fi
+          # Both summaries are written BEFORE any exit (codacy): when the
+          # history scan AND the merge-delta scan both hit, the report has to
+          # show both, not just whichever exits first.
           case "$rc" in
             0) echo "gitleaks: no secrets found in $BASE..$HEAD ($SCANNED non-merge commit(s) scanned; base-branch suppressions, inline allows ignored)" >> "$GITHUB_STEP_SUMMARY" ;;
             2) echo "gitleaks: 🔑 **possible secret(s) found** in this PR's commits ($SCANNED scanned) — see the job log (values redacted); rotate anything real." >> "$GITHUB_STEP_SUMMARY" ;;
             *) echo "gitleaks: tool error (exit $rc) — NOT a clean pass" >> "$GITHUB_STEP_SUMMARY" ;;
           esac
+          if [ "$DELTA_COUNT" -gt 0 ]; then
+            case "$drc" in
+              0) echo "gitleaks: merge-delta clean — $DELTA_COUNT blob(s) of merge-only content (conflict resolutions + automerge-synthesized content) scanned directly (HED-109)" >> "$GITHUB_STEP_SUMMARY" ;;
+              2) echo "::error::possible secret(s) in merge-only content — see the job log (values redacted)"
+                 echo "gitleaks: 🔑 **possible secret(s) in merge-only content** ($DELTA_COUNT blob(s) scanned) — see the job log (values redacted); rotate anything real." >> "$GITHUB_STEP_SUMMARY" ;;
+              *) echo "::error::gitleaks dir (merge-delta scan) tool error (exit $drc) — NOT a clean pass"
+                 echo "gitleaks: merge-delta scan tool error (exit $drc) — NOT a clean pass" >> "$GITHUB_STEP_SUMMARY"
+                 exit 1 ;;
+            esac
+          fi
+          # Secrets in EITHER scan → exit 2 (the job's leak verdict).
+          [ "$drc" -eq 2 ] && exit 2
           exit "$rc"
 
       - name: Upload SARIF to code scanning
@@ -458,3 +483,16 @@ jobs:
         with:
           sarif_file: gitleaks.sarif
           category: gitleaks
+
+      - name: Upload merge-delta SARIF to code scanning
+        # Separate category: these findings live in merge-only content
+        # (conflict resolutions / automerge-synthesized bytes), which the
+        # history scan structurally cannot report (HED-109).
+        if: >-
+          always() &&
+          github.event.pull_request.head.repo.full_name == github.repository &&
+          hashFiles('gitleaks-delta.sarif') != ''
+        uses: github/codeql-action/upload-sarif@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
+        with:
+          sarif_file: gitleaks-delta.sarif
+          category: gitleaks-merge-delta
