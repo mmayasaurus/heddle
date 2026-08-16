@@ -255,10 +255,20 @@ jobs:
           # topologies via parent rewriting — measured. Every git call fails
           # CLOSED. No skip path: an all-empty range yields LOWERBOUND=0 and
           # gitleaks itself logs "0 commits scanned", which passes 0<0 honestly.
-          # Separately, EVIL MERGES (content differing from ALL parents, i.e.
-          # conflict-resolution blobs) are invisible to `git log -p` scanning —
-          # detected via the combined diff (`diff-tree --cc`, empty for
-          # routine merges — measured) and hard-red for hand review.
+          #
+          # MERGE COMMITS (HED-109; replaces HED-88's shape check, which
+          # false-red every legitimate conflict resolution — found by W on
+          # heddle#20): a merge's only NOVEL content is where its committed
+          # tree differs from the RECOMPUTED automerge of its parents
+          # (`git merge-tree --write-tree`, git ≥2.38 — alpine 3.22 image
+          # ships 2.4x). Parent-side hunks were scanned as ordinary commits
+          # (this range or their own PRs); the automerge adds nothing new; so
+          # the HUMAN DELTA (conflict resolutions and any hand edits — which
+          # `git log -p` scanning never sees) is extracted blob-by-blob and
+          # scanned DIRECTLY with `gitleaks dir` below. Red only on leaks or
+          # tool failure — never on merge shape. Octopus merges and paths the
+          # extractor can't safely handle (quoted/whitespace names) hard-red
+          # for hand review instead of silently skipping (fail-closed).
           TOTAL_ALL=$(git rev-list --count "$BASE..$HEAD") \
             || { echo "::error::git rev-list failed for $BASE..$HEAD — NOT a clean pass"; exit 1; }
           if [ -z "$TOTAL_ALL" ] || [ "$TOTAL_ALL" -lt 1 ]; then
@@ -276,17 +286,55 @@ jobs:
           done
           MERGES=$(git rev-list --merges "$BASE..$HEAD") \
             || { echo "::error::git rev-list (--merges) failed — NOT a clean pass"; exit 1; }
+          DELTA_DIR="${RUNNER_TEMP:-/tmp}/gitleaks-merge-delta"
+          mkdir -p "$DELTA_DIR"
+          DELTA_COUNT=0
           for m in $MERGES; do
-            CC_ALL=$(git diff-tree --cc --name-only -r "$m") \
-              || { echo "::error::git diff-tree --cc failed on merge $m — NOT a clean pass"; exit 1; }
-            CC=$(printf '%s\n' "$CC_ALL" | tail -n +2)
-            if [ -n "$CC" ]; then
-              echo "::error::merge $m introduces content differing from ALL its parents (conflict-resolution blobs: $(printf '%s' "$CC" | tr '\n' ' ' | cut -c1-160)) — gitleaks cannot scan merge diffs; review by hand. NOT a clean pass."
-              echo "gitleaks: ❌ evil-merge content in range (merge $m) — unscannable by gitleaks; review by hand" >> "$GITHUB_STEP_SUMMARY"
+            PARENTLINE=$(git rev-list --parents -n 1 "$m") \
+              || { echo "::error::git rev-list --parents failed on $m — NOT a clean pass"; exit 1; }
+            set -- $PARENTLINE; shift
+            if [ "$#" -ne 2 ]; then
+              echo "::error::merge $m has $# parents — the merge-delta guard supports 2-parent merges only; review by hand. NOT a clean pass."
               exit 1
             fi
+            MT_RC=0
+            AUTO_OUT=$(git merge-tree --write-tree "$1" "$2") || MT_RC=$?
+            # rc 0 = clean automerge, 1 = conflicts (tree still written with
+            # conflict markers), anything else = tool failure.
+            if [ "$MT_RC" -gt 1 ]; then
+              echo "::error::git merge-tree --write-tree failed (rc=$MT_RC) on merge $m — NOT a clean pass"; exit 1
+            fi
+            AUTO_TREE=$(printf '%s\n' "$AUTO_OUT" | head -n 1)
+            DELTA=$(git diff-tree -r --name-only "$AUTO_TREE" "$m^{tree}") \
+              || { echo "::error::git diff-tree (automerge vs committed merge) failed on $m — NOT a clean pass"; exit 1; }
+            [ -z "$DELTA" ] && continue
+            # Fail CLOSED on names the extractor below would mangle: git
+            # quotes non-ASCII paths (leading `"`), and the for-loop splits
+            # on whitespace — either would SKIP content instead of scanning it.
+            # [[:blank:]] (space+tab) — NOT `[ \t]`: POSIX ERE has no \t escape;
+            # BSD/busybox grep read it as a literal `t` (caught by fixture F1).
+            if printf '%s\n' "$DELTA" | grep -qE '^"|[[:blank:]]'; then
+              echo "::error::merge $m delta contains quoted/whitespace path names the extractor cannot safely handle — review by hand. NOT a clean pass."
+              exit 1
+            fi
+            for p in $DELTA; do
+              git cat-file -e "$m:$p" 2>/dev/null || continue  # deleted-vs-automerge: no blob to scan
+              OUT="$DELTA_DIR/$m/$p"
+              case "$p" in
+                .gitleaksignore|.gitleaks.toml|*/.gitleaksignore|*/.gitleaks.toml)
+                  # gitleaks merges <source>/.gitleaksignore and reads
+                  # .gitleaks.toml from the scan dir (cmd/root.go) — a merge
+                  # resolution could smuggle suppressions in. Rename so the
+                  # CONTENT is scanned but never honored as config.
+                  OUT="$DELTA_DIR/$m/pr-copy-$(printf '%s' "$p" | tr '/' '_')" ;;
+              esac
+              mkdir -p "$(dirname "$OUT")"
+              git show "$m:$p" > "$OUT" \
+                || { echo "::error::failed extracting $m:$p for the merge-delta scan — NOT a clean pass"; exit 1; }
+              DELTA_COUNT=$((DELTA_COUNT+1))
+            done
           done
-          echo "commits in range: $TOTAL_ALL (scanned-volume lower bound: $LOWERBOUND)"
+          echo "commits in range: $TOTAL_ALL (scanned-volume lower bound: $LOWERBOUND; merge-delta blobs: $DELTA_COUNT)"
           S="${RUNNER_TEMP:-/tmp}/gitleaks-base"; mkdir -p "$S/ignore"
           if git cat-file -e "$BASE:.gitleaks.toml" 2>/dev/null; then
             git show "$BASE:.gitleaks.toml" > "$S/gitleaks.toml"
@@ -333,6 +381,34 @@ jobs:
           if git diff --name-only "$BASE...$HEAD" -- .gitleaks.toml .gitleaksignore | grep -q .; then
             echo "⚠️ this PR modifies a gitleaks suppression file (.gitleaks.toml / .gitleaksignore). The scan above used the BASE branch's copy, so this verdict is unaffected — but review the suppression change itself by hand." >> "$GITHUB_STEP_SUMMARY"
             echo "::warning::this PR modifies a gitleaks suppression file — the scan used the base branch's copy; review the change by hand."
+          fi
+          # Merge-delta scan (HED-109): the blobs extracted above are the only
+          # content `gitleaks git` never sees (merge-only content — conflict
+          # resolutions and hand edits). Scanned directly, same base-branch
+          # config, inline allows ignored. .gitleaksignore fingerprints are
+          # commit-scoped and cannot match a dir scan, so base suppressions
+          # don't carry over here — a false positive needs a dir-format
+          # fingerprint added on main first (same reviewed-on-main rule).
+          if [ "$DELTA_COUNT" -gt 0 ]; then
+            drc=0
+            gitleaks dir "$DELTA_DIR" --redact --no-banner --no-color \
+              --config="$S/gitleaks.toml" --ignore-gitleaks-allow \
+              --exit-code 2 2>"$S/gitleaks-dir.log" || drc=$?
+            cat "$S/gitleaks-dir.log"
+            if grep -qE '^[^ ]+ (ERR|FTL) ' "$S/gitleaks-dir.log"; then
+              echo "::error::gitleaks dir (merge-delta scan) logged ERR/FTL — NOT a clean pass"
+              echo "gitleaks: ❌ merge-delta scan errored — see the job log; NOT a clean pass" >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+            fi
+            case "$drc" in
+              0) echo "gitleaks: merge-delta clean — $DELTA_COUNT blob(s) of merge-only content (conflict resolutions) scanned directly (HED-109)" >> "$GITHUB_STEP_SUMMARY" ;;
+              2) echo "::error::possible secret(s) in merge-resolution content — see the job log (values redacted)"
+                 echo "gitleaks: 🔑 **possible secret(s) in merge-resolution content** ($DELTA_COUNT blob(s) scanned) — see the job log (values redacted); rotate anything real." >> "$GITHUB_STEP_SUMMARY"
+                 exit 2 ;;
+              *) echo "::error::gitleaks dir (merge-delta scan) tool error (exit $drc) — NOT a clean pass"
+                 echo "gitleaks: merge-delta scan tool error (exit $drc) — NOT a clean pass" >> "$GITHUB_STEP_SUMMARY"
+                 exit 1 ;;
+            esac
           fi
           case "$rc" in
             0) echo "gitleaks: no secrets found in $BASE..$HEAD ($SCANNED non-merge commit(s) scanned; base-branch suppressions, inline allows ignored)" >> "$GITHUB_STEP_SUMMARY" ;;
