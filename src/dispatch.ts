@@ -11,6 +11,7 @@ import { materializeAgentsMd, readPack, withMandatoryPacks, composePacks } from 
 import { materializeWorkerMcp, validateWorkerMcp, codexMcpFlags, claudeMcpConfigFile } from './mcp.js';
 import { classifyEffort, assessResult, type ResultAssessment } from './classify.js';
 import { pickReviewer, snapshotWorktree, sameSnapshot, diffInstruction, embeddedDiff, normalizeProvider, type ReviewerPick } from './review.js';
+import { parentCheckoutOf, checkoutFingerprint, escapedPaths } from './worktree.js';
 import { decideCapabilities, capabilityPolicy } from './capabilities.js';
 import { resolveIdentity, attributeDispatch, WORKER_ENV, type BoundIdentity } from './identity.js';
 import { readProviderCaps, type CapsByProvider } from './usage.js';
@@ -317,6 +318,12 @@ async function runTarget(
   let restoreMcp: () => void = () => {};
   let before: ReturnType<typeof snapshotWorktree> | null = null;
   let after: ReturnType<typeof snapshotWorktree> | null = null;
+  // HED-98: workers dispatched into <repo>/.worktrees/<agent> can resolve "the project root" by
+  // walking up (a linked worktree's .git is a FILE pointing at the parent) and write into the
+  // CANONICAL checkout. No provider offers a verified write-confinement flag, so heddle DETECTS:
+  // fingerprint the parent checkout around the run and name whatever changed.
+  const parentRoot = parentCheckoutOf(req.cwd);
+  const parentBefore = parentRoot ? checkoutFingerprint(parentRoot) : null;
   let result: WorkerResult;
   try {
     let systemPromptAppend: string | undefined;
@@ -348,9 +355,17 @@ async function runTarget(
     before = route.readOnly ? snapshotWorktree(req.cwd) : null;
     // diff_base delivery is PER TARGET: a claude read-only reviewer has no Bash (its --tools set),
     // so it gets the diff embedded; every other reviewer is told to run git itself.
-    const prompt = req.diffBase
+    const basePrompt = req.diffBase
       ? (isClaude && route.readOnly ? embeddedDiff(req.cwd, req.diffBase) : diffInstruction(req.diffBase)) + req.prompt
       : req.prompt;
+    // Best-effort PREVENTION to pair with the detection above: state the boundary explicitly, since
+    // a worker that walks up to find "the project root" lands in the parent checkout and has no
+    // other way to know it is inside a linked worktree.
+    const prompt = parentRoot
+      ? `Your working directory ${req.cwd} is a git WORKTREE inside ${parentRoot}. Treat it as your ` +
+        `project root: create and edit files ONLY under it. Do not walk up to ${parentRoot} — that is ` +
+        `a different checkout shared with other agents, and writing there corrupts their work.\n\n${basePrompt}`
+      : basePrompt;
     result = await adapter.dispatch(prompt, {
       model: target.model,
       cwd: req.cwd,
@@ -380,6 +395,25 @@ async function runTarget(
         result = result! ?? { ok: false, output: '', exitCode: null, error: note };
         result.error = result.error ? `${result.error}; ${note}` : note;
       }
+    }
+  }
+
+  // HED-98 worktree confinement: did anything change in the PARENT checkout while this worker ran?
+  // Reported as a WARNING, not a failure: the work product may be perfectly good and destroying it
+  // would be its own harm — but the side effects are dangerous and must never be silent. Nothing is
+  // reverted (the operator decides, same discipline as the read-only mandate). heddle cannot ATTRIBUTE
+  // the change — another agent legitimately editing the canonical checkout looks identical — so the
+  // wording says what was observed, not who did it.
+  if (parentRoot) {
+    const escaped = escapedPaths(parentBefore, checkoutFingerprint(parentRoot));
+    if (escaped === null) {
+      process.stderr.write(`heddle: could not read ${parentRoot} to check worktree confinement — no claim made\n`);
+    } else if (escaped.length) {
+      const note = `escape-warning: the parent checkout ${parentRoot} changed while this worker ran in the ` +
+        `worktree ${req.cwd} — ${escaped.length} path(s): ${escaped.slice(0, 10).join(', ')}` +
+        (escaped.length > 10 ? `, +${escaped.length - 10} more` : '') +
+        ` (heddle cannot attribute the change; if it was this worker it escaped its sandbox — HED-98)`;
+      result.error = result.error ? `${result.error}; ${note}` : note;
     }
   }
 

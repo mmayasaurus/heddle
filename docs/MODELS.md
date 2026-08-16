@@ -403,6 +403,14 @@ choosing a worker instead:
 Learned from Agent V's HED-4/5 dispatches (ledger #35–41); policy until the linked tickets
 land.
 
+- **Workers dispatched into an in-repo worktree can escape to the parent checkout** (HED-98,
+  observed live): `<repo>/.worktrees/<agent>` is a LINKED worktree whose `.git` is a file pointing
+  at the parent, so a worker that walks up to find "the project root" writes into the canonical
+  checkout and dirties shared `main`. heddle now names the worktree as the project root in the
+  worker's prompt AND fingerprints the parent around every dispatch — a change there surfaces as
+  `escape-warning:` on the outcome and the ledger row (a warning, not a failure: the output may be
+  good, nothing is reverted, and heddle cannot attribute the change). No provider offers a verified
+  write fence; see docs/LANDMINES.md before assuming any `--sandbox` flag confines writes.
 - **No `mcp` on gemini-routed classes** (`documentation`, `gemini-analysis`, and the
   `second-opinion` fallback): worker MCP attachment for agy/gemini is not implemented, and the
   throw happens after `ledger.start()` outside the try/finally — the ledger row is orphaned

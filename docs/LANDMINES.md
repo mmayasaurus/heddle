@@ -204,6 +204,29 @@ flags churn monthly.
   headless workers are NOT network-fenced by heddle today. Verifying what those `--sandbox` flags
   actually restrict is a follow-up before default-enabling them.
 
+## Worker cwd confinement — in-repo worktrees (HED-98, observed live 2026-08-16)
+
+- **The hazard:** Maya's layout puts agent worktrees INSIDE the repo (`<repo>/.worktrees/<agent>`),
+  and a linked worktree's `.git` is a FILE pointing at the parent. A worker that resolves "the
+  project root" by walking up therefore lands in the CANONICAL checkout. Observed: an agy docs
+  worker dispatched with `--cwd <repo>/.worktrees/agentv` wrote its edit into `<repo>/docs/COMMS.md`,
+  leaving shared `main` dirty for every other agent.
+- **No provider gives a verified write fence.** codex's `--sandbox workspace-write` is the closest;
+  agy's `--sandbox` documents only "terminal restrictions" and heddle has NOT tested whether it
+  confines file writes, so heddle does not pass it and does not claim it. cursor/claude have no
+  equivalent knob.
+- **So heddle DETECTS instead** (`src/worktree.ts`), which needs no provider cooperation and is
+  exact: a linked worktree has `git rev-parse --git-dir` != `--git-common-dir`, and the canonical
+  checkout is `dirname(common-dir)` (verified 2026-08-16). One `git status --porcelain` on the
+  parent before and after the run; any change is surfaced as `escape-warning:` on the outcome and
+  the ledger row, naming the paths.
+- **Warning, not failure, deliberately:** the work product may be fine and destroying it would be
+  its own harm; nothing is reverted (the operator decides, as with the read-only mandate). heddle
+  also cannot ATTRIBUTE the change — another agent legitimately editing the canonical checkout looks
+  identical — so the wording states what was observed, never who did it.
+- **Prevention is best-effort:** the worker's prompt names its worktree as the project root and says
+  not to walk up. That is a nudge, not a fence — the detection is the guarantee.
+
 ## Worker MCP attachment (memtrace) — worktrees
 
 - **memtrace indexes the canonical checkout, not your worktree.** A worker dispatched into a git
