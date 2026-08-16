@@ -142,8 +142,13 @@ function hashFileBatch(cwd: string, rels: string[]): string[] {
       cwd, encoding: 'utf8', input: safe.join('\n') + '\n',
       stdio: ['pipe', 'pipe', 'ignore'], timeout: 120_000, maxBuffer: 16 * 1024 * 1024,
     });
-    const lines = out.trim().split('\n');
-    safe.forEach((r, i) => oidBySafe.set(r, lines[i] ?? '<no-oid>'));
+    const lines = out.split('\n').filter(Boolean);
+    if (lines.length !== safe.length) {
+      // One oid per input path is the contract; anything else means the mapping would be wrong —
+      // fail the snapshot (callers treat that as error/violation) rather than mis-pair oids.
+      throw new Error(`git hash-object returned ${lines.length} oids for ${safe.length} paths`);
+    }
+    safe.forEach((r, i) => oidBySafe.set(r, lines[i]));
   }
   return rels.map((r) => oidBySafe.get(r)
     ?? createHash('sha256').update(readFileSync(join(cwd, r))).digest('hex'));
