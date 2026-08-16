@@ -4,8 +4,9 @@
 # Zero-flake scanners that catch what a rule engine catches every single time,
 # complementing whatever AI reviewers Maya enables (HED-13):
 #   semgrep   — registry rulesets p/typescript + p/nodejs. DIFF-AWARE on PRs
-#               (--baseline-commit = the PR's base SHA: only findings this PR
-#               introduces), FULL on pushes to main (so the Security tab holds
+#               (--baseline-commit = the merge ref's first parent, i.e. the
+#               base tip actually merged: only findings this PR introduces —
+#               HED-80), FULL on pushes to main (so the Security tab holds
 #               the whole picture, not just deltas). PR-controlled
 #               suppressions (.semgrepignore, inline nosemgrep) are
 #               neutralised — see the Scan step.
@@ -100,9 +101,16 @@ jobs:
 
       - name: Scan
         env:
-          # PR: base SHA of the PR (the merge commit's first parent) — semgrep
-          # reports only findings absent from it. Push: empty → full scan.
-          BASELINE: ${{ github.event.pull_request.base.sha }}
+          # PR: diff-aware; the baseline is resolved in the script below from
+          # the checked-out merge commit's FIRST PARENT (the exact base tip
+          # GitHub merged), NOT from pull_request.base.sha — that value is
+          # recorded on the PR object and does not refresh when main moves, so
+          # a scan against it attributes main's newer findings to the PR
+          # (heddle-dashboard#13 → HED-80). Push: empty → full scan.
+          IS_PR: ${{ github.event_name == 'pull_request' && 'yes' || '' }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          BASE_SHA_FALLBACK: ${{ github.event.pull_request.base.sha }}
         # POSIX sh on purpose: inside a `container:` the runner defaults to
         # `sh -e`, not bash (first run of this workflow proved it — a bash
         # array here failed with "syntax error: unexpected (").
@@ -121,8 +129,27 @@ jobs:
           # safe.directory entry to a TEMPORARY HOME — so without this line
           # every git call below dies with "dubious ownership" (round-4 run).
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          BASELINE=""
+          if [ -n "$IS_PR" ]; then
+            # actions/checkout checks out refs/pull/N/merge — GitHub's synthetic
+            # merge commit: first parent = the base branch tip actually merged,
+            # second parent = the PR head. Both facts are CHECKED (qodo, HED-80
+            # r1): HEAD^2 must be the PR head, otherwise this is some other
+            # merge commit (ref: override) and HEAD^1 would be an unrelated
+            # baseline. Fallback = merge-base of the CURRENT base tip and HEAD
+            # (fetch-depth 0 has origin/<base>), never the stale base.sha
+            # unless even that is unavailable.
+            if [ "$(git rev-parse -q --verify HEAD^2 2>/dev/null)" = "$PR_HEAD_SHA" ]; then
+              BASELINE=$(git rev-parse HEAD^1)
+            elif BASELINE=$(git merge-base "origin/$PR_BASE_REF" HEAD 2>/dev/null) && [ -n "$BASELINE" ]; then
+              echo "::warning::HEAD is not GitHub's synthetic merge of this PR — baseline = merge-base(origin/$PR_BASE_REF, HEAD)"
+            else
+              BASELINE="$BASE_SHA_FALLBACK"
+              echo "::warning::could not resolve the current base tip — falling back to pull_request.base.sha as the baseline (may lag main)"
+            fi
+          fi
           if [ -n "$BASELINE" ]; then
-            git ls-files -- '.semgrepignore' '*/.semgrepignore' | while IFS= read -r f; do
+            git ls-files | grep -E '(^|/)\.semgrepignore$' | while IFS= read -r f; do
               git rm -q -- "$f"
             done
             git ls-tree -r --name-only "$BASELINE" | grep -E '(^|/)\.semgrepignore$' | while IFS= read -r f; do
@@ -148,7 +175,7 @@ jobs:
           # One-line receipt in the job summary. python3 is guaranteed in the
           # image (the semgrep CLI is a Python package); jq is not (qodo, r3).
           N=$(python3 -c 'import json; print(len(json.load(open("semgrep.sarif"))["runs"][0]["results"]))')
-          echo "semgrep: **$N** finding(s) (${BASELINE:+new vs base}${BASELINE:-full scan})" >> "$GITHUB_STEP_SUMMARY"
+          echo "semgrep: **$N** finding(s) (${BASELINE:+new vs base }${BASELINE:-full scan})" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload SARIF to code scanning
         # Needs a write token — same-repo PRs and main pushes only; fork PRs

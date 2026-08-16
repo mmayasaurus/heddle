@@ -6,3 +6,9 @@ dist/
 # Machine-local tool state (memtrace daemon, serena project cache)
 .memdb/
 .serena/
+
+# Agent worktrees live INSIDE the repo (Maya 2026-08-15) — never tracked
+.worktrees/
+
+# Claude project settings are tracked; per-machine local state is not
+.claude/settings.local.json

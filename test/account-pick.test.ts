@@ -73,6 +73,10 @@ describe('pickClaudeAccount — logged-out accounts are not addressable', () => 
     const pick = pickClaudeAccount(capsWith([]), registry)!;
     expect(pick.account.id).toBe('acct2');
     // and when the registry has no addressable default, the first addressable account wins
+    // and when EVERY registered account is logged out, the picker returns null (no pick) — the
+    // worker inherits the caller's own login instead of a credential known to 401
+    const allOut = [{ id: 'a', configDir: '/x/.a', loggedIn: false }, { id: 'b', configDir: null, loggedIn: false }];
+    expect(pickClaudeAccount(undefined, allOut)).toBeNull();
     const noDefault = [{ id: 'acct1', configDir: '/x/.a1', loggedIn: false }, { id: 'acct3', configDir: '/x/.a3' }];
     expect(pickClaudeAccount(capsWith([]), noDefault)!.account.id).toBe('acct3');
   });

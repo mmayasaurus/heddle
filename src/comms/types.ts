@@ -118,6 +118,7 @@ export interface TierDecision {
 
 /** Who can send/receive. Fleet agents and the operator register themselves; children are minted. */
 export type ParticipantKind = 'agent' | 'child' | 'operator';
+export const PARTICIPANT_KINDS: readonly ParticipantKind[] = ['agent', 'child', 'operator'];
 
 export interface Participant {
   address: string;
@@ -153,4 +154,40 @@ export interface TranscriptQuery {
   limit?: number;
   /** Narrow any scope to one conversation thread (see NewMessage.thread). */
   thread?: string;
+}
+
+/**
+ * Typed delivery outcome (SPEC §10: log a TYPED outcome, never a boolean — a boolean is how an
+ * outage stays invisible).
+ *   sent      the transport accepted the injection
+ *   held      accepted into the log but not injected yet (target at a permission gate)
+ *   released  a held message was injected after the gate cleared
+ *   refused   the broker refused to accept it (size cap, rate limit, bad target) — no message row
+ *   failed    the transport could not deliver (recipient can still pull it from the log)
+ *   logged    no injection was attempted by design (room posts are pull-model)
+ */
+export type DeliveryOutcome = 'sent' | 'held' | 'released' | 'refused' | 'failed' | 'logged';
+export const DELIVERY_OUTCOMES: readonly DeliveryOutcome[] = ['sent', 'held', 'released', 'refused', 'failed', 'logged'];
+
+export interface NewDeliveryEvent {
+  /** Null for refusals that never became a message. */
+  messageId?: number | null;
+  from: string;
+  to: string;
+  outcome: DeliveryOutcome;
+  /** Short kebab-case token, e.g. "body-too-large", "rate-limited", "permission-gate". */
+  code: string;
+  reason?: string | null;
+  /** Transport name that handled (or refused) it. */
+  transport?: string | null;
+  attempt?: number;
+}
+
+export interface DeliveryEvent extends Required<Omit<NewDeliveryEvent, 'messageId' | 'reason' | 'transport' | 'attempt'>> {
+  id: number;
+  ts: string;
+  messageId: number | null;
+  reason: string | null;
+  transport: string | null;
+  attempt: number;
 }

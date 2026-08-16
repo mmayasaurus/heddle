@@ -3,9 +3,10 @@ import { mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import {
-  MESSAGE_KINDS, PRIVILEGED_TIERS, TIERS,
-  type MessageKind, type MessageRecord, type NewMessage, type Participant, type ParticipantKind,
-  type Tier, type TierDecision, type TranscriptQuery, type TranscriptScope,
+  DELIVERY_OUTCOMES, MESSAGE_KINDS, PARTICIPANT_KINDS, PRIVILEGED_TIERS, TIERS,
+  type DeliveryEvent, type DeliveryOutcome, type MessageKind, type MessageRecord, type NewDeliveryEvent,
+  type NewMessage, type Participant, type ParticipantKind, type Tier, type TierDecision,
+  type TranscriptQuery, type TranscriptScope,
 } from './types.js';
 import { BROADCAST, canSend, childAddress, parseAddress, requireAddress, type ParsedAddress } from './address.js';
 import { isSealed } from './seal.js';
@@ -35,6 +36,9 @@ export const DEFAULT_COMMS_PATH = join(homedir(), '.heddle', 'comms.db');
 /** Bump when the schema changes shape; recorded as PRAGMA user_version. */
 export const COMMS_SCHEMA_VERSION = 1;
 
+const sqlList = (xs: readonly string[]) => xs.map((x) => `'${x.replace(/'/g, "''")}'`).join(', ');
+
+// The SQL enums are generated from the TypeScript lists so the two cannot drift.
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS messages (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -50,7 +54,7 @@ CREATE TABLE IF NOT EXISTS messages (
   thread      TEXT,
   dispatch_id INTEGER,
   meta        TEXT,
-  CHECK (tier IN ('operator', 'orchestrator-directive', 'agent-message')),
+  CHECK (tier IN (${sqlList(TIERS)})),
   CHECK (verified IN (0, 1)),
   -- verified <=> privileged tier: an unverified operator/directive row cannot exist even via a
   -- raw INSERT, and an agent-message never claims verification.
@@ -72,6 +76,67 @@ CREATE TRIGGER IF NOT EXISTS messages_sender_registered BEFORE INSERT ON message
 WHEN NOT EXISTS (SELECT 1 FROM participants WHERE address = NEW.sender)
 BEGIN SELECT RAISE(ABORT, 'sender is not a registered participant'); END;
 
+-- Typed delivery outcomes (SPEC §10: never a boolean). One row per attempt/decision; refusals
+-- that never became a message have message_id NULL. Append-only like messages.
+CREATE TABLE IF NOT EXISTS deliveries (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts         TEXT    NOT NULL,
+  message_id INTEGER,
+  sender     TEXT    NOT NULL,
+  target     TEXT    NOT NULL,
+  outcome    TEXT    NOT NULL,
+  code       TEXT    NOT NULL,
+  reason     TEXT,
+  transport  TEXT,
+  attempt    INTEGER NOT NULL DEFAULT 1,
+  CHECK (outcome IN (${sqlList(DELIVERY_OUTCOMES)}))
+);
+CREATE INDEX IF NOT EXISTS idx_deliveries_message ON deliveries(message_id, id);
+CREATE INDEX IF NOT EXISTS idx_deliveries_target  ON deliveries(target, id);
+CREATE INDEX IF NOT EXISTS idx_deliveries_sender  ON deliveries(sender, id);
+CREATE TRIGGER IF NOT EXISTS deliveries_append_only_update BEFORE UPDATE ON deliveries
+BEGIN SELECT RAISE(ABORT, 'delivery log is append-only: UPDATE refused'); END;
+CREATE TRIGGER IF NOT EXISTS deliveries_append_only_delete BEFORE DELETE ON deliveries
+BEGIN SELECT RAISE(ABORT, 'delivery log is append-only: DELETE refused'); END;
+
+-- Live comms sessions: which participant addresses currently have a channel server attached
+-- (presence, mutable — heartbeat). The bridge consults this to decide "queued for the recipient's
+-- channel" vs "no live session; the recipient must pull". One live session per address.
+CREATE TABLE IF NOT EXISTS sessions (
+  address      TEXT PRIMARY KEY,
+  session_id   TEXT,
+  session_name TEXT,
+  pid          INTEGER,
+  socket       TEXT,
+  started_at   TEXT NOT NULL,
+  heartbeat_at TEXT NOT NULL
+);
+
+-- Rooms (SPEC §9): membership is owned by humans / orchestrator config, never self-joined by
+-- workers; open rooms (#fleet) accept posts from any registered participant. The floor is a
+-- short lease so a multi-part reply is not interleaved — and a crashed holder cannot lock a room.
+CREATE TABLE IF NOT EXISTS rooms (
+  name       TEXT PRIMARY KEY,
+  created_by TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  topic      TEXT,
+  open       INTEGER NOT NULL DEFAULT 0,
+  CHECK (open IN (0, 1))
+);
+CREATE TABLE IF NOT EXISTS room_members (
+  room     TEXT NOT NULL REFERENCES rooms(name),
+  address  TEXT NOT NULL,
+  added_by TEXT NOT NULL,
+  added_at TEXT NOT NULL,
+  PRIMARY KEY (room, address)
+);
+CREATE TABLE IF NOT EXISTS room_floor (
+  room       TEXT PRIMARY KEY REFERENCES rooms(name),
+  holder     TEXT NOT NULL,
+  since      TEXT NOT NULL,
+  expires_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS participants (
   address     TEXT PRIMARY KEY,
   kind        TEXT NOT NULL,
@@ -81,7 +146,7 @@ CREATE TABLE IF NOT EXISTS participants (
   label       TEXT,
   first_seen  TEXT NOT NULL,
   last_seen   TEXT NOT NULL,
-  CHECK (kind IN ('agent', 'child', 'operator')),
+  CHECK (kind IN (${sqlList(PARTICIPANT_KINDS)})),
   -- A child's address IS its lineage (parent.seq); agents/operator carry no lineage columns.
   CHECK ((kind = 'child' AND parent IS NOT NULL AND seq IS NOT NULL AND address = parent || '.' || seq)
       OR (kind <> 'child' AND parent IS NULL AND seq IS NULL AND dispatch_id IS NULL)),
@@ -110,6 +175,57 @@ BEGIN SELECT RAISE(ABORT, 'participant lineage is immutable: only last_seen/labe
  */
 export const RESERVED_META_KEYS: readonly string[] =
   ['tierCode', 'tierReason', 'lineage', 'requestedTier', 'downgradedFrom'];
+
+/** A session whose heartbeat is older than this is treated as gone. */
+export const DEFAULT_SESSION_STALE_MS = 90_000;
+
+export interface SessionInput {
+  address: string;
+  sessionId?: string | null;
+  /** The name SendMessage/ListAgents know the session by (fleet convention: the fleet id). */
+  sessionName?: string | null;
+  pid?: number | null;
+  /** The session's inbox socket path (uds:…), when Claude Code exported one. */
+  socket?: string | null;
+}
+
+export interface SessionRecord {
+  address: string;
+  sessionId: string | null;
+  sessionName: string | null;
+  pid: number | null;
+  socket: string | null;
+  startedAt: string;
+  heartbeatAt: string;
+}
+
+export const DEFAULT_ROOM = '#fleet';
+export const DEFAULT_FLOOR_LEASE_MS = 60_000;
+/** Nobody can lock a room for longer than this in one lease (renewals extend from `now`). */
+export const MAX_FLOOR_LEASE_MS = 10 * 60_000;
+
+export interface RoomRecord {
+  name: string;
+  createdBy: string;
+  createdAt: string;
+  topic: string | null;
+  /** Any registered participant may post (#fleet); closed rooms are members-only. */
+  open: boolean;
+}
+
+export interface RoomMember {
+  room: string;
+  address: string;
+  addedBy: string;
+  addedAt: string;
+}
+
+export interface FloorRecord {
+  room: string;
+  holder: string;
+  since: string;
+  expiresAt: string;
+}
 
 export interface CommsLogOptions {
   /** Clock override for deterministic tests; must return ISO-8601. */
@@ -327,12 +443,281 @@ export class CommsLog {
     return row ? toParticipant(row) : null;
   }
 
+  /** Participants whose address starts with `prefix`, sorted — the resolver's lookup (no full scan). */
+  participantsWithPrefix(prefix: string): Participant[] {
+    if (typeof prefix !== 'string' || prefix.length === 0) return [];
+    // Range seek on the primary key (prefix ≤ address < prefix + max char) — indexed, no scan.
+    const rows = this.db.prepare('SELECT * FROM participants WHERE address >= ? AND address < ? ORDER BY address')
+      .all(prefix, prefix + '\uffff');
+    return (rows as unknown as PRow[]).map(toParticipant);
+  }
+
   /** All participants, optionally only the children of one parent. */
   participants(filter: { parent?: string } = {}): Participant[] {
     const rows = filter.parent != null
       ? this.db.prepare('SELECT * FROM participants WHERE parent = ? ORDER BY seq ASC').all(filter.parent)
       : this.db.prepare('SELECT * FROM participants ORDER BY first_seen ASC, address ASC').all();
     return (rows as unknown as PRow[]).map(toParticipant);
+  }
+
+  // ---------------------------------------------------------------- rooms
+
+  /** Create a room (idempotent for the same name — returns the existing one). Governance is the broker's job. */
+  createRoom(input: { name: string; by: string; topic?: string | null; open?: boolean }): RoomRecord {
+    const parsed = requireAddress(input.name, 'to');
+    if (parsed.kind !== 'room') throw new Error(`rooms are #names, got ${JSON.stringify(input.name)}`);
+    if (!canSend(requireAddress(input.by, 'from'))) throw new Error('a room is created by an agent or the operator');
+    const ts = this.now();
+    // Concurrency-safe idempotency: two servers starting on a fresh shared db both "create" #fleet.
+    this.db.prepare('INSERT INTO rooms (name, created_by, created_at, topic, open) VALUES (?, ?, ?, ?, ?) ON CONFLICT(name) DO NOTHING')
+      .run(input.name, input.by, ts, input.topic ?? null, input.open ? 1 : 0);
+    return this.room(input.name)!;
+  }
+
+  /** The default rooms every deployment has (#fleet, open). Safe to call at every startup. */
+  ensureDefaultRooms(by = 'operator'): RoomRecord[] {
+    return [this.createRoom({ name: DEFAULT_ROOM, by, topic: 'the whole fleet — announcements, open questions, cross-lane coordination', open: true })];
+  }
+
+  room(name: string): RoomRecord | null {
+    const row = this.db.prepare('SELECT * FROM rooms WHERE name = ?').get(name) as unknown as RRow | undefined;
+    return row ? toRoom(row) : null;
+  }
+
+  rooms(): RoomRecord[] {
+    return (this.db.prepare('SELECT * FROM rooms ORDER BY name').all() as unknown as RRow[]).map(toRoom);
+  }
+
+  addMember(input: { room: string; address: string; by: string }): RoomMember {
+    if (!this.room(input.room)) throw new Error(`no such room ${input.room}`);
+    if (!canSend(requireAddress(input.address, 'to'))) throw new Error('members are agents, children or the operator');
+    requireAddress(input.by, 'from');
+    const ts = this.now();
+    this.db.prepare(`
+      INSERT INTO room_members (room, address, added_by, added_at) VALUES (?, ?, ?, ?)
+      ON CONFLICT(room, address) DO NOTHING
+    `).run(input.room, input.address, input.by, ts);
+    return this.member(input.room, input.address)!;
+  }
+
+  removeMember(room: string, address: string): boolean {
+    const info = this.db.prepare('DELETE FROM room_members WHERE room = ? AND address = ?').run(room, address);
+    return Number(info.changes) > 0;
+  }
+
+  member(room: string, address: string): RoomMember | null {
+    const row = this.db.prepare('SELECT * FROM room_members WHERE room = ? AND address = ?').get(room, address) as unknown as MRow | undefined;
+    return row ? toMember(row) : null;
+  }
+
+  members(room: string): RoomMember[] {
+    return (this.db.prepare('SELECT * FROM room_members WHERE room = ? ORDER BY added_at, address').all(room) as unknown as MRow[]).map(toMember);
+  }
+
+  /** Rooms `address` may post to: open rooms plus the closed ones it is a member of (operator: all). */
+  roomsFor(address: string): RoomRecord[] {
+    if (address === 'operator') return this.rooms();
+    return (this.db.prepare(`
+      SELECT r.* FROM rooms r WHERE r.open = 1 OR EXISTS (SELECT 1 FROM room_members m WHERE m.room = r.name AND m.address = ?)
+      ORDER BY r.name
+    `).all(address) as unknown as RRow[]).map(toRoom);
+  }
+
+  /** Current floor holder of a room, if the lease has not expired. */
+  floor(room: string): FloorRecord | null {
+    const row = this.db.prepare('SELECT * FROM room_floor WHERE room = ?').get(room) as unknown as FRow | undefined;
+    if (!row) return null;
+    const f = toFloor(row);
+    return Date.parse(f.expiresAt) > Date.parse(this.now()) ? f : null;
+  }
+
+  /**
+   * Take (or renew) the floor of a room. Succeeds when the floor is free, expired, or already
+   * held by `holder`; returns null when another holder's lease is live (caller reads `floor()`).
+   */
+  acquireFloor(room: string, holder: string, leaseMs = DEFAULT_FLOOR_LEASE_MS): FloorRecord | null {
+    if (!Number.isFinite(leaseMs) || leaseMs <= 0) throw new Error('leaseMs must be a positive number');
+    if (leaseMs > MAX_FLOOR_LEASE_MS) throw new Error(`leaseMs must be at most ${MAX_FLOOR_LEASE_MS} ms`);
+    if (!this.room(room)) throw new Error(`no such room ${room}`);
+    const now = this.now();
+    let out: FloorRecord | null = null;
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const current = this.floor(room);
+      if (current && current.holder !== holder) { this.db.exec('COMMIT'); return null; }
+      // A renewal never shortens a longer lease the holder already has.
+      const proposed = Date.parse(now) + leaseMs;
+      const expires = new Date(current && current.holder === holder ? Math.max(proposed, Date.parse(current.expiresAt)) : proposed).toISOString();
+      this.db.prepare(`
+        INSERT INTO room_floor (room, holder, since, expires_at) VALUES (?, ?, ?, ?)
+        ON CONFLICT(room) DO UPDATE SET holder = excluded.holder, since = CASE WHEN room_floor.holder = excluded.holder THEN room_floor.since ELSE excluded.since END, expires_at = excluded.expires_at
+      `).run(room, holder, now, expires);
+      this.db.exec('COMMIT');
+      out = this.floor(room);
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
+    return out;
+  }
+
+  /** Release the floor if `holder` holds it. Returns whether anything was released. */
+  releaseFloor(room: string, holder: string): boolean {
+    const info = this.db.prepare('DELETE FROM room_floor WHERE room = ? AND holder = ?').run(room, holder);
+    return Number(info.changes) > 0;
+  }
+
+  // ---------------------------------------------------------------- sessions (presence)
+
+  /** Announce that a channel server is attached for `address` (upsert; refreshes the heartbeat). */
+  registerSession(input: SessionInput): SessionRecord {
+    const parsed = requireAddress(input.address, 'from');
+    if (!canSend(parsed)) throw new Error(`sessions are for agent/child/operator addresses, got ${JSON.stringify(input.address)}`);
+    const ts = this.now();
+    this.db.prepare(`
+      INSERT INTO sessions (address, session_id, session_name, pid, socket, started_at, heartbeat_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(address) DO UPDATE SET
+        session_id = excluded.session_id, session_name = excluded.session_name, pid = excluded.pid,
+        socket = excluded.socket, started_at = excluded.started_at, heartbeat_at = excluded.heartbeat_at
+    `).run(input.address, input.sessionId ?? null, input.sessionName ?? null, input.pid ?? null, input.socket ?? null, ts, ts);
+    return this.session(input.address)!;
+  }
+
+  /** Refresh presence. With `sessionId`, only the row owned by that session is touched (a replacement wins). */
+  heartbeatSession(address: string, sessionId?: string | null): boolean {
+    const info = sessionId
+      ? this.db.prepare('UPDATE sessions SET heartbeat_at = ? WHERE address = ? AND session_id = ?').run(this.now(), address, sessionId)
+      : this.db.prepare('UPDATE sessions SET heartbeat_at = ? WHERE address = ?').run(this.now(), address);
+    return Number(info.changes) > 0;
+  }
+
+  /** Drop presence. With `sessionId`, an old process cannot remove a replacement's row. */
+  unregisterSession(address: string, sessionId?: string | null): boolean {
+    const info = sessionId
+      ? this.db.prepare('DELETE FROM sessions WHERE address = ? AND session_id = ?').run(address, sessionId)
+      : this.db.prepare('DELETE FROM sessions WHERE address = ?').run(address);
+    return Number(info.changes) > 0;
+  }
+
+  session(address: string): SessionRecord | null {
+    const row = this.db.prepare('SELECT * FROM sessions WHERE address = ?').get(address) as unknown as SRow | undefined;
+    return row ? toSession(row) : null;
+  }
+
+  /** The session for `address` if its heartbeat is fresher than `staleMs`, else null. */
+  liveSession(address: string, staleMs = DEFAULT_SESSION_STALE_MS): SessionRecord | null {
+    requireStaleMs(staleMs);
+    const s = this.session(address);
+    if (!s) return null;
+    return Date.parse(this.now()) - Date.parse(s.heartbeatAt) <= staleMs ? s : null;
+  }
+
+  liveSessions(staleMs = DEFAULT_SESSION_STALE_MS): SessionRecord[] {
+    requireStaleMs(staleMs);
+    const cutoff = new Date(Date.parse(this.now()) - staleMs).toISOString();
+    return (this.db.prepare('SELECT * FROM sessions WHERE heartbeat_at >= ? ORDER BY address').all(cutoff) as unknown as SRow[]).map(toSession);
+  }
+
+  // ---------------------------------------------------------------- deliveries
+
+  /** Record one typed delivery outcome (sent / held / released / refused / failed / logged). */
+  recordDelivery(ev: NewDeliveryEvent): DeliveryEvent {
+    const attempt = validateDeliveryEvent(ev);
+    if (ev.messageId != null && !this.db.prepare('SELECT 1 FROM messages WHERE id = ?').get(ev.messageId)) {
+      throw new Error(`delivery for message ${ev.messageId}, which does not exist`);
+    }
+    const info = this.db.prepare(`
+      INSERT INTO deliveries (ts, message_id, sender, target, outcome, code, reason, transport, attempt)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(this.now(), ev.messageId ?? null, ev.from, ev.to, ev.outcome, ev.code, ev.reason ?? null, ev.transport ?? null, attempt);
+    return this.delivery(Number(info.lastInsertRowid))!;
+  }
+
+  /**
+   * Holds still owed a release or a timeout: `held` events with no later resolving event for the
+   * same (message, target) — resolving = `released`, `sent`, `logged`/`inbox` (a broadcast
+   * recipient left to pull), or `failed`/`hold-timeout`. Deliberately code-scoped: a future
+   * `logged` event with any other code must not silently resolve a hold, and a later `failed`
+   * with another code is a transient transport failure — the entry is still held.
+   */
+  openHolds(): DeliveryEvent[] {
+    const rows = this.db.prepare(`
+      SELECT d.* FROM deliveries d
+      WHERE d.outcome = 'held' AND NOT EXISTS (
+        SELECT 1 FROM deliveries e
+        WHERE e.message_id = d.message_id AND e.target = d.target AND e.id > d.id
+          AND (e.outcome IN ('released', 'sent') OR (e.outcome = 'logged' AND e.code = 'inbox')
+               OR (e.outcome = 'failed' AND e.code = 'hold-timeout'))
+      )
+      ORDER BY d.id ASC
+    `).all();
+    return (rows as unknown as DRow[]).map(toDelivery);
+  }
+
+  /**
+   * The highest message id this identity's channel has written (`sent`/`channel-written`), or
+   * null. Filtered by the pump's own code — the SENDER side also records transport 'channel'
+   * rows (`queued-for-channel`, `no-live-session`) for the same target, and those say nothing
+   * about what reached the session.
+   */
+  lastChannelWrite(address: string): number | null {
+    const row = this.db.prepare(
+      "SELECT MAX(message_id) AS id FROM deliveries WHERE target = ? AND transport = 'channel' AND outcome = 'sent' AND code = 'channel-written'",
+    ).get(address) as { id: number | null };
+    return row.id == null ? null : Number(row.id);
+  }
+
+  /**
+   * The OLDEST channel write for `address` that failed and was never followed by a successful
+   * write of the same message — the floor a pump must re-scan from so no failure is orphaned.
+   */
+  oldestUnresolvedChannelFailure(address: string): number | null {
+    const failed = this.db.prepare(`
+      SELECT MIN(d.message_id) AS id FROM deliveries d
+      WHERE d.target = ? AND d.transport = 'channel' AND d.outcome = 'failed' AND d.code = 'channel-error'
+        AND NOT EXISTS (SELECT 1 FROM deliveries e WHERE e.target = d.target AND e.message_id = d.message_id
+                        AND e.transport = 'channel' AND e.outcome = 'sent' AND e.code = 'channel-written' AND e.id > d.id)
+    `).get(address) as { id: number | null };
+    return failed.id == null ? null : Number(failed.id);
+  }
+
+  /** Message ids > sinceId that this identity's channel already wrote successfully — never re-emit these. */
+  channelWrittenIds(address: string, sinceId: number): Set<number> {
+    const rows = this.db.prepare(
+      "SELECT DISTINCT message_id AS id FROM deliveries WHERE target = ? AND transport = 'channel' AND outcome = 'sent' AND code = 'channel-written' AND message_id > ?",
+    ).all(address, sinceId) as unknown as { id: number }[];
+    return new Set(rows.map((r) => Number(r.id)));
+  }
+
+  /**
+   * Where a restarted channel pump should resume for `address`: just before the oldest unresolved
+   * failure, else the last successful write, else null (first run — start at the tail).
+   */
+  channelResumeCursor(address: string): number | null {
+    const floor = this.oldestUnresolvedChannelFailure(address);
+    if (floor != null) return floor - 1;
+    return this.lastChannelWrite(address);
+  }
+
+  delivery(id: number): DeliveryEvent | null {
+    const row = this.db.prepare('SELECT * FROM deliveries WHERE id = ?').get(id) as unknown as DRow | undefined;
+    return row ? toDelivery(row) : null;
+  }
+
+  /** Delivery events, oldest first; filter by message, target or sender; `sinceId` exclusive. */
+  deliveries(filter: { messageId?: number; target?: string; sender?: string; sinceId?: number; limit?: number } = {}): DeliveryEvent[] {
+    const where: string[] = [];
+    const params: (string | number)[] = [];
+    if (filter.messageId != null) { where.push('message_id = ?'); params.push(filter.messageId); }
+    if (filter.target != null) { where.push('target = ?'); params.push(filter.target); }
+    if (filter.sender != null) { where.push('sender = ?'); params.push(filter.sender); }
+    if (filter.sinceId != null) { where.push('id > ?'); params.push(filter.sinceId); }
+    const limit = filter.limit ?? 200;
+    if (!Number.isInteger(limit) || limit <= 0) throw new Error('limit must be a positive integer');
+    params.push(limit);
+    const sql = `SELECT * FROM deliveries ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY id ASC LIMIT ?`;
+    return (this.db.prepare(sql).all(...params) as unknown as DRow[]).map(toDelivery);
   }
 
   /** Idempotent: closing twice is a no-op, so teardown paths can call it defensively. */
@@ -357,6 +742,26 @@ export class CommsLog {
   private touch(address: string, ts: string): void {
     this.db.prepare('UPDATE participants SET last_seen = ? WHERE address = ?').run(ts, address);
   }
+}
+
+function requireStaleMs(v: number): void {
+  if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) throw new Error('staleMs must be a finite, non-negative number of milliseconds');
+}
+
+// ------------------------------------------------------------------ delivery helpers
+
+/** Shape + invariant checks for a delivery event; returns the attempt number to store. */
+function validateDeliveryEvent(ev: NewDeliveryEvent): number {
+  if (!DELIVERY_OUTCOMES.includes(ev.outcome)) throw new Error(`unknown delivery outcome ${JSON.stringify(ev.outcome)}`);
+  if (typeof ev.code !== 'string' || !/^[a-z0-9-]{1,64}$/.test(ev.code)) throw new Error('delivery code must be a short kebab-case token');
+  if (ev.messageId != null && (!Number.isInteger(ev.messageId) || ev.messageId < 1)) throw new Error('messageId must be a positive id');
+  const attempt = ev.attempt ?? 1;
+  if (!Number.isInteger(attempt) || attempt < 1) throw new Error('attempt must be a positive integer');
+  // Invariants: a refusal never has a message row (nothing was accepted); every other outcome is
+  // ABOUT an existing message.
+  if (ev.outcome === 'refused' && ev.messageId != null) throw new Error('a refused delivery cannot reference a message (nothing was accepted)');
+  if (ev.outcome !== 'refused' && ev.messageId == null) throw new Error(`a ${ev.outcome} delivery must reference the message it is about`);
+  return attempt;
 }
 
 // ------------------------------------------------------------------ transcript helpers
@@ -476,6 +881,38 @@ interface Row {
   id: number; ts: string; sender: string; target: string; kind: string; tier: string;
   verified: number; body: string; reply_to: number | null; issue: string | null; thread: string | null;
   dispatch_id: number | null; meta: string | null;
+}
+
+interface RRow { name: string; created_by: string; created_at: string; topic: string | null; open: number }
+interface MRow { room: string; address: string; added_by: string; added_at: string }
+interface FRow { room: string; holder: string; since: string; expires_at: string }
+function toRoom(r: RRow): RoomRecord { return { name: r.name, createdBy: r.created_by, createdAt: r.created_at, topic: r.topic, open: r.open === 1 }; }
+function toMember(r: MRow): RoomMember { return { room: r.room, address: r.address, addedBy: r.added_by, addedAt: r.added_at }; }
+function toFloor(r: FRow): FloorRecord { return { room: r.room, holder: r.holder, since: r.since, expiresAt: r.expires_at }; }
+
+interface SRow {
+  address: string; session_id: string | null; session_name: string | null; pid: number | null;
+  socket: string | null; started_at: string; heartbeat_at: string;
+}
+
+function toSession(r: SRow): SessionRecord {
+  return {
+    address: r.address, sessionId: r.session_id, sessionName: r.session_name,
+    pid: r.pid == null ? null : Number(r.pid), socket: r.socket, startedAt: r.started_at, heartbeatAt: r.heartbeat_at,
+  };
+}
+
+interface DRow {
+  id: number; ts: string; message_id: number | null; sender: string; target: string; outcome: string;
+  code: string; reason: string | null; transport: string | null; attempt: number;
+}
+
+function toDelivery(r: DRow): DeliveryEvent {
+  return {
+    id: Number(r.id), ts: r.ts, messageId: r.message_id == null ? null : Number(r.message_id),
+    from: r.sender, to: r.target, outcome: r.outcome as DeliveryOutcome, code: r.code, reason: r.reason,
+    transport: r.transport, attempt: Number(r.attempt),
+  };
 }
 
 interface PRow {

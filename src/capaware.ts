@@ -313,6 +313,9 @@ export function pickClaudeAccount(
     const note = best.used >= threshold ? ` — every fresh account is at/over ${threshold}%` : '';
     return { account: best.a, usedPct: best.used, reason: `account:${best.a.id} (5h ${best.used.toFixed(0)}%, most headroom of ${fresh.length} fresh)${note}`, ...envFor(best.a) };
   }
-  const dflt = addressable.find((a) => a.configDir === null) ?? addressable[0] ?? accounts[0];
+  // Every registered account logged out → NO pick: inheriting the caller's own login beats
+  // selecting a credential we KNOW 401s (the old `?? accounts[0]` escape hatch did exactly that).
+  const dflt = addressable.find((a) => a.configDir === null) ?? addressable[0];
+  if (!dflt) return null;
   return { account: dflt, usedPct: null, reason: `account:${dflt.id} default (no fresh per-account caps)`, ...envFor(dflt) };
 }
