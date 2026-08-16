@@ -1,3 +1,5 @@
+# Heddle Gate
+
 Run this repo's quality gate locally (mirrors `.github/workflows/gate.yml` — see docs/CI.md).
 
 Execute from the repo root (or the active worktree):

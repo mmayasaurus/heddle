@@ -16,13 +16,13 @@ The memtrace-first hook gates raw file discovery only; approved memtrace and Ser
 
 Every **new** worktree must be registered **immediately**:
 
-```
+```text
 watch_directory(path="<worktree path>", repo_id="heddle")
 ```
 
 Immediately after `git worktree remove <dir>`:
 
-```
+```text
 unwatch_directory(path="<worktree path>")
 ```
 

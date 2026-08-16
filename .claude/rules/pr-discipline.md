@@ -19,7 +19,7 @@ Mechanical gates:
 
 After merge:
 
-```
+```sh
 SYNC_REPO_DIR=/Users/mayatobi/Developer/heddle \
   /Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/bin/pr-linear-sync.sh
 lin.sh resolve HED-n "<summary + PR #>"
