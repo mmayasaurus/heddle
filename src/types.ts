@@ -41,6 +41,8 @@ export interface DispatchOptions {
   systemPromptAppend?: string;
   /** Path to a per-dispatch MCP config file for CLIs that read one (claude --mcp-config). */
   mcpConfigPath?: string;
+  /** HED-3: the worker must not change the worktree — adapters pass a read-only sandbox where the CLI has one. */
+  readOnly?: boolean;
   /** Names of the MCP servers in mcpConfigPath — claude allowlists them as `mcp__<name>`. */
   mcpServers?: string[];
 }

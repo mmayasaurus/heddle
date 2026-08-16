@@ -36,6 +36,12 @@ export interface Route extends RouteTarget {
    * instruction to continue in-session, and no delegated-worker pack is suggested. Default true.
    */
   dispatchable: boolean;
+  /** HED-3: the worker must not change the worktree (read-only sandbox where possible + git snapshot check). */
+  readOnly: boolean;
+  /** HED-3: run assess_result on the worker's output and attach the assessment. */
+  autoAssess: boolean;
+  /** HED-3: ordered alternatives when the caller's `author_provider` matches the route (a reviewer must differ). */
+  reviewerPool?: { provider: string; model: string }[];
 }
 
 export interface RoutingTable {
@@ -130,6 +136,12 @@ export function resolveRoute(table: RoutingTable, taskClass: string): Route {
     why: typeof node.why === 'string' ? node.why : undefined,
     editsCode: node.edits_code === true,
     dispatchable: node.dispatchable !== false,
+    readOnly: node.read_only === true,
+    autoAssess: node.auto_assess === true,
+    reviewerPool: Array.isArray(node.reviewer_pool)
+      ? (node.reviewer_pool as any[]).filter((e) => e && typeof e.provider === 'string' && typeof e.model === 'string')
+          .map((e) => ({ provider: e.provider as string, model: e.model as string }))
+      : undefined,
   };
 }
 
@@ -193,6 +205,10 @@ export interface TaskClassDescription {
   edits_code: boolean;
   /** False for the orchestrator's own class (`orchestration`): every dispatch of it is refused. */
   dispatchable: boolean;
+  /** HED-3 review classes: worker may not change the worktree; assessment attached; alternatives when the author's provider matches. */
+  read_only: boolean;
+  auto_assess: boolean;
+  reviewer_pool: string[];
 }
 
 /**
@@ -222,6 +238,9 @@ export function describeTaskClasses(
       mcp: r.mcp ?? [],
       edits_code: r.editsCode,
       dispatchable: r.dispatchable,
+      read_only: r.readOnly,
+      auto_assess: r.autoAssess,
+      reviewer_pool: (r.reviewerPool ?? []).map((e) => `${e.provider}/${e.model}`),
     };
   });
 }
@@ -242,5 +261,5 @@ export function directRoute(
   }
   if (cfg.status === 'excluded') throw new Error(`provider "${provider}" is excluded from orchestration`);
   if (cfg.status === 'held') throw new Error(`provider "${provider}" is on hold and not routable yet`);
-  return { taskClass: `direct:${provider}/${model}`, provider, model, skills, mcp, editsCode: false, dispatchable: true };
+  return { taskClass: `direct:${provider}/${model}`, provider, model, skills, mcp, editsCode: false, dispatchable: true, readOnly: false, autoAssess: false };
 }

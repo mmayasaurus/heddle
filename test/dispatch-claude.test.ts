@@ -20,7 +20,8 @@ describe('dispatch — headless Claude workers', () => {
     const outcome = await dispatch({ taskClass: 'research-summarize', prompt: 'x', cwd, identity: unbound, accounts, caps: { claude: claudeCaps([{ id: 'acct1', used: 68 }, { id: 'acct2', used: 1 }]) } }, ledger, () => adapter);
     expect(fake.calls).toHaveLength(1); expect(absentDuringCall).toBe(true); expect(existsSync(join(cwd, 'AGENTS.md'))).toBe(false);
     expect(fake.calls[0].opts).toMatchObject({ model: 'haiku', env: { CLAUDE_CONFIG_DIR: '/x/.claude-acct2' }, envUnset: [] });
-    expect(fake.calls[0].opts.systemPromptAppend).toContain('### worker-role'); expect(fake.calls[0].opts.mcpConfigPath).toBeUndefined();
+    expect(fake.calls[0].opts.systemPromptAppend).toContain('### worker-role'); // no MCP requested → still a per-dispatch config file (EMPTY servers) so --strict-mcp-config hides the operator's global servers
+    expect(fake.calls[0].opts.mcpConfigPath).toMatch(/mcp\.json$/);
     expect(outcome).toMatchObject({ account: 'acct2' }); expect(outcome.routeReason).toContain('account:acct2');
     expect(ledger.recent(1)[0]).toMatchObject({ account: 'acct2', provider: 'claude', model: 'haiku', ok: 1 });
   });

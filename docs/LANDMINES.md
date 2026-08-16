@@ -66,6 +66,15 @@ flags churn monthly.
 - **CLAUDE_CONFIG_DIR gotcha (R, 2026-08-15):** for the DEFAULT account leave it UNSET — setting it
   explicitly to `~/.claude` changes resolution and `claude auth status` reports loggedIn=false. heddle
   unsets it (buildWorkerEnv `unset`) for the default registry account and sets it for the others.
+- **The permission layer is NOT a worker boundary — only `--tools` is** (live probe, 2026-08-15,
+  PR #15 sweep): a worker launched with `--tools Read Grep Glob Bash` + a git-only `--allowedTools`
+  list ("Bash(git status:*)" …) still appended to a tracked file and created a new one via plain
+  Bash redirection — the OPERATOR's global settings.json permission allow-rules apply inside `-p`
+  workers, the same leak class as global MCP servers before `--strict-mcp-config` (and there is no
+  settings analog of that flag). Enforcement is therefore tool-SET restriction (`--tools`, verified
+  to hold: Write reported disabled, no file created) or an OS sandbox (codex); `--allowedTools` is
+  pre-approval convenience, never a fence. Claude read-only reviewers run `--tools Read Grep Glob`
+  and get their diff EMBEDDED in the prompt (`embeddedDiff`, size-capped) since they cannot run git.
 - Transcript JSONL under `~/.claude/projects` is explicitly format-unstable — consume
   `--output-format stream-json` and hooks, never parse transcripts. (docs)
 - Billing: subscription flat pool covers Claude Code usage; "usage credits" are optional opt-in

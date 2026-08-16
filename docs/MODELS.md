@@ -25,6 +25,7 @@ bots — do not dispatch workers there.
 | `quick-alt-take` | cursor **grok-4.6-medium** | — | Cheap second draft to compare against a primary. Same family as second-opinion, lower effort. |
 | `research-summarize` | claude **haiku** | luna | Doc reading, log triage, summarization. Haiku is the cheap Claude; do not use Sonnet/Opus to read logs. |
 | `documentation` | gemini **3.6-flash-low** | luna | READMEs, comments, changelogs, docstrings. Flash: cheap, fast (~3s), fine for prose over known facts. Not for designing architecture. (3.7-flash verified 8-14 — in catalog; class default pending a quota check.) |
+| `adversarial-review` | cursor **grok-4.6-high** (or the first `reviewer_pool` entry that is not the author's provider) | gemini **3.1-pro-high** | Pre-PR review by a DIFFERENT model family, read-only + find-only, test-quality lens; `author_provider` required; the ledger scores each author→reviewer pair (HED-3, section below). |
 | `gemini-analysis` | gemini **3.1-pro-high** | composer-2.5 | Long-context reading, doc/log analysis, cross-checking, and **web-grounded research** (agy has Google Search). Gemini is still **piloting** (adapter timeouts + model-echo checks). |
 
 Race-and-merge (hard/high-value only): fan one task across **diverse families**
@@ -110,6 +111,58 @@ get a temporary `AGENTS.md` block (restored after dispatch).
    LANDMINES gotcha.
 
 Authoritative contracts: `docs/LANDMINES.md`. Authoritative map: the YAML.
+
+## Adversarial review (BUILT — HED-3, 2026-08-15; Maya: "super important")
+
+Pre-PR, before the human looks: a **different model family** is dropped into the
+author's worktree **read-only** with a **find-only** mandate; the author fixes;
+the ledger scores each author→reviewer pair by accepted-finding rate.
+
+- **Class** `adversarial-review` (routing YAML): primary `cursor/cursor-grok-4.6-high`,
+  fallback `gemini/gemini-3.1-pro-high`, `reviewer_pool` `[cursor/grok, gemini/pro,
+  codex/sol, claude/opus]`, packs `[worker-role, adversarial-review]`, `read_only:
+  true`, `auto_assess: true`. Call it with `author_provider` (**required** — the
+  provider that wrote the change; an orchestrator reviewing its own edits passes
+  `claude`), optional `author_model` / `author_dispatch_id` (lineage) and
+  `diff_base` (a git ref — heddle prepends "review `git diff <ref>...HEAD`").
+- **Different family, enforced on the effective route:** if the class primary is
+  the author's provider, the first differing `reviewer_pool` entry is used
+  (`route_reason: … reviewer pool:2 (author is cursor)`); a fallback in the
+  author's family is dropped; naming the author's own provider explicitly, or a
+  cap-aware route-away landing there, is refused (`same-provider-review`,
+  ledgered). Provider names are normalized (`Cursor ` = cursor).
+- **Read-only, enforced where the CLI has a knob and PROVEN everywhere:** codex
+  `--sandbox read-only`; claude `--tools Read Grep Glob` (verified live: Write
+  reported disabled, no file created) — and every claude worker now runs
+  `--strict-mcp-config` with a per-dispatch (possibly empty) MCP file, because a
+  live check showed the operator's global MCP servers (Serena can edit code;
+  Linear/Supabase act on live systems) leaking into a "read-only" reviewer;
+  cursor/agy have no knob. Structurally, heddle hashes the worktree **contents**
+  before and after (HEAD + every tracked/untracked non-ignored file + the stash
+  list): a changed digest — or an after-snapshot that fails in a repo that worked
+  before — is a **MANDATE VIOLATION**: `ok=false`, `review.mandateOk=false`,
+  `mandate_ok=0` on the review row, findings still returned, nothing reverted.
+  Ignored paths (`.gitignore`) are outside the boundary by design.
+- **The mandate pack** (`skills/adversarial-review.md`): find only, never fix;
+  adversarial not agreeable; five lenses — correctness, security, **test quality
+  (Maya's bar: a test that proves a switch toggles is not a test that proves the
+  switch DOES the thing — name every test that would still pass if the feature
+  were silently broken)**, docs/messages, unverifiable PR claims; a fixed report
+  format ending in `VERDICT: N findings`.
+- **Ledger:** `reviews` table (dispatch_id → author_provider/model/dispatch,
+  reviewer_provider/model, mandate_ok, findings_total/accepted, notes); the
+  reviewer's output also runs through `assess_result` (`assessment` on the
+  outcome). **Follow-up:** after triage the author records
+  `record_review_outcome(dispatch_id, findings_total, findings_accepted, notes)`
+  (MCP) / `heddle review-outcome <id> --total N --accepted M`; `review_stats` /
+  `heddle reviews` show per-pair reviews, scored, findings, accepted,
+  acceptance rate, mandate violations — the scoreboard that picks the reviewer
+  family for a given author family.
+- **First live review (2026-08-15, ledger #67):** this very diff, author claude →
+  reviewer cursor/grok-4.6-high, 429 s, mandate held, `assessment:
+  needs-rework`, 6 findings (3 high, 3 med) + the test-quality lens — all six
+  accepted (6/6 recorded via `heddle review-outcome`), each changed code or docs
+  before this PR opened. The `claude→cursor` pair now scores 1.0.
 
 ## Cap-aware routing (BUILT — HED-67, 2026-08-15)
 
@@ -267,10 +320,10 @@ choosing a worker instead:
 - **Class + explicit route:** `dispatch_worker` accepts `task_class` **and**
   `provider`+`model` together — the class supplies the policy (default packs,
   MCP, opt-in gate, ledger `task_class`), the named provider/model replaces the
-  route, no fallback (naming it is the choice). This is how a review class
-  can run on "any provider except the author's" (e.g. the planned
-  `adversarial-review` class, HED-3 — not in the table yet). `provider` and
-  `model` must be given together (a lone half is rejected).
+  route, no fallback (naming it is the choice). This is how the
+  `adversarial-review` class (HED-3, below) runs on "any provider except the
+  author's". `provider` and `model` must be given together (a lone half is
+  rejected).
 - **Claude-primary classes** (implementation, deep-implementation,
   research-summarize) run as **headless `claude -p` workers by default**
   (HED-78, `execution: headless`) on the best registry account. Passing
