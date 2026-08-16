@@ -86,6 +86,16 @@
             "timeout": 5
           }
         ]
+      },
+      {
+        "matcher": "mcp__serena__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ ! -f /Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-memtrace-first.py ] || python3 /Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-memtrace-first.py record",
+            "timeout": 5
+          }
+        ]
       }
     ],
     "Stop": [
