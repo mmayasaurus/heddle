@@ -32,8 +32,8 @@ When all six conditions in `/Users/mayatobi/Developer/Spinventory-Rebuild-App/.c
 1. Two `pr-sweep.sh` exits 0, ≥15 min apart at HEAD (docs-only main drift exception per that file).
 2. Every non-empty review body addressed (fix or reply+resolve with rationale).
 3. All required checks green at HEAD.
-4. Merge commit only (`gh pr merge <n> --merge`) — never squash, never force-push.
-5. PR body has `Fixes HED-n`; branch rebased on current `main`.
+4. Merge commit only, pinned to the swept commit (`gh pr merge <n> --merge --match-head-commit <swept-sha>`) — never squash, never force-push.
+5. PR body has `Fixes HED-n`; branch up to date with current `main` (merge `origin/main` in — never rebase a published branch).
 6. Stacked PRs merge bottom-up (base first, retarget children, re-sweep).
 
 Still waits for Maya: security-semantics changes, user-visible feature removal, or touching another agent's files — see the full rule.

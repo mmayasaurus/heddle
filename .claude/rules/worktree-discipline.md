@@ -10,7 +10,8 @@ Maya's standing policy (2026-08-15). Fleet history/rationale:
   (`git worktree move <old> .worktrees/<name>` — lossless; then re-register the memtrace
   watch at the new path: `unwatch_directory(old)` + `watch_directory(new, repo_id="heddle")`).
 - `.worktrees/` is gitignored and memtrace-ignored; tooling excludes are wired in this repo's
-  configs — do not lint/scan/test into it.
+  configs so commands run at the REPO ROOT never recurse into sibling worktrees. Inside your OWN
+  worktree, run everything normally (lint, tests, scans — that's what it is for).
 
 ## Recycle, don't mint
 

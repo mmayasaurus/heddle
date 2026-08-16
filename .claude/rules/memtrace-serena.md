@@ -26,7 +26,9 @@ Immediately after `git worktree remove <dir>`:
 unwatch_directory(path="<worktree path>")
 ```
 
-The canonical graph is indexed once from `main`; each worktree is a diff-only overlay. Query your scope with `find_code(..., worktree="<id>")`.
+The canonical graph is indexed once from `main`; each worktree is a diff-only overlay.
+Exception: TRANSIENT race-and-merge worktrees (docs/SPEC.md's race path) are short-lived
+throwaways — never register overlays for them; only agent working worktrees get watches. Query your scope with `find_code(..., worktree="<id>")`.
 
 ## Serena (symbol-precise edits)
 
