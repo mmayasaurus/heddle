@@ -135,11 +135,16 @@ export function readLimitsMirror(usageDir: string, nowS: number): CapsByProvider
           stale: a.stale === true,
         }))
       : [];
+    // Per-provider freshness: the contract carries capturedAt + staleAfterSecs per provider — a
+    // provider row can be past ITS OWN freshness window while the mirror file as a whole is fresh.
+    const capturedAt = num(L.capturedAt);
+    const staleAfter = num(L.staleAfterSecs);
+    const pastOwnWindow = capturedAt !== null && staleAfter !== null && nowS - capturedAt > staleAfter;
     out[L.provider] = {
       provider: L.provider,
       source: 'limits.json',
-      stale: L.stale === true,
-      capturedAt: num(L.capturedAt),
+      stale: L.stale === true || pastOwnWindow,
+      capturedAt,
       fiveHour: normalizeWindow(L.fiveHour, nowS),
       sevenDay: normalizeWindow(L.sevenDay, nowS),
       windows: windowsById(L.windows, nowS),
@@ -227,8 +232,17 @@ export function readProviderCaps(opts: { usageDir?: string; nowS?: number } = {}
     const m = out.claude;
     if (!m || m.stale) {
       out.claude = { ...tap, accounts: tap.accounts.length ? tap.accounts : (m?.accounts ?? []) };
-    } else if (tap.accounts.length && m.accounts.length === 0) {
-      out.claude = { ...m, accounts: tap.accounts };
+    } else if (tap.accounts.length) {
+      // Merge per-account rows by id: a FRESH tap row beats a stale/absent mirror row (the tap
+      // updates on every statusline render; the mirror only while the app polls), and tap-only
+      // accounts are appended — otherwise the registry account with the most headroom can vanish
+      // from the advice whenever the mirror has any account list at all.
+      const byId = new Map(m.accounts.map((a) => [a.id, a]));
+      for (const t of tap.accounts) {
+        const existing = byId.get(t.id);
+        if (!existing || (existing.stale && !t.stale)) byId.set(t.id, t);
+      }
+      out.claude = { ...m, accounts: [...byId.values()] };
     }
   }
   for (const p of ['claude', 'codex', 'cursor', 'gemini']) if (!out[p]) out[p] = unknownCaps(p);

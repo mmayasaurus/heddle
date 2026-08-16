@@ -32,7 +32,8 @@ describe('cap-aware routing', () => {
 
   it('runs the primary when both route candidates are over cap or no fallback exists', () => {
     const both = decision('bulk-mechanical', { ...caps({ codex: 95 }), ...cursorCaps({ total: 95, api: 20 }) });
-    expect(both).toMatchObject({ target: { provider: 'codex' }, fallback: undefined, routedAwayForCap: false }); expect(both.routeReason).toMatch(/^cap:both-over/);
+    // both soft-over → primary runs but the fallback STAYS available for a failure retry (the cap is soft)
+    expect(both).toMatchObject({ target: { provider: 'codex' }, fallback: { provider: 'cursor' }, routedAwayForCap: false }); expect(both.routeReason).toMatch(/^cap:both-over/);
     const r = route('bulk-mechanical'); const noFallback = decideRoute(table, r, undefined, caps({ codex: 95 }), { explicit: false });
     expect(noFallback.routeReason).toMatch(/^cap:over .*no fallback/);
   });
@@ -92,7 +93,11 @@ describe('cap-aware routing', () => {
     ];
     const advice = adviseClaudeAccount(claude, accounts, {}); expect(advice).toMatchObject({ best: { id: 'acct2', usedPct: 20, configDir: '/x/.claude-acct2' }, current: { id: 'acct1', usedPct: 70 } }); expect(advice.line).toContain('acct2 has the most 5h headroom (20% used)'); expect(advice.line).toContain('this session is on acct1 (70%)'); expect(advice.line).toContain('CLAUDE_CONFIG_DIR=/x/.claude-acct2');
     expect(adviseClaudeAccount(claude, accounts, { CLAUDE_CONFIG_DIR: '/x/.claude-acct3' }).line).toContain('no fresh capture'); expect(currentClaudeAccount(accounts, { CLAUDE_CONFIG_DIR: '/other/.claude-acct2' })?.id).toBe('acct2');
-    claude.accounts[0].fiveHour.usedPercentage = 10; expect(adviseClaudeAccount(claude, accounts, {}).line).toContain('leave CLAUDE_CONFIG_DIR unset'); expect(adviseClaudeAccount(claude, [], {}).line).toContain('none registered'); expect(adviseClaudeAccount(fresh('claude', 1), accounts, {}).line).toContain('cannot advise');
+    claude.accounts[0].fiveHour.usedPercentage = 10;
+    // best === current → say so instead of recommending a switch to the account already in use
+    expect(adviseClaudeAccount(claude, accounts, {}).line).toContain('already on the account with the most 5h headroom (acct1');
+    // best is the DEFAULT account but the session is elsewhere → the unset instruction appears
+    expect(adviseClaudeAccount(claude, accounts, { CLAUDE_CONFIG_DIR: '/x/.claude-acct2' }).line).toContain('leave CLAUDE_CONFIG_DIR unset'); expect(adviseClaudeAccount(claude, [], {}).line).toContain('none registered'); expect(adviseClaudeAccount(fresh('claude', 1), accounts, {}).line).toContain('cannot advise');
   });
 
   it('reads valid Claude account registry rows and ignores missing or malformed registries', () => {

@@ -15,7 +15,7 @@ import { decideCapabilities, capabilityPolicy } from './capabilities.js';
 import { resolveIdentity, attributeDispatch, WORKER_ENV, type BoundIdentity } from './identity.js';
 import { readProviderCaps, type CapsByProvider } from './usage.js';
 import {
-  decideRoute, readClaudeAccounts, adviseClaudeAccount, pickClaudeAccount, capAwarePolicy,
+  decideRoute, readClaudeAccounts, adviseClaudeAccount, pickClaudeAccount, capAwarePolicy, hardRefusal,
   type RouteDecision, type ClaudeAccount, type AccountAdvice, type AccountPick,
 } from './capaware.js';
 import { basename } from 'node:path';
@@ -513,7 +513,19 @@ export async function dispatch(
       req, ctx, fbExecution, 'fallback', `${route.provider}/${route.model}`, plan.accountAdvice?.line,
     );
   }
-  ctx.routeReason = `${plan.decision.routeReason}; primary failed → fallback`;
+  // The never-on-demand HARD guard applies to the runtime fallback too: a below-threshold primary
+  // failing over to cursor must not bypass an on-demand stop the plan never evaluated for it.
+  const fbHard = hardRefusal(fallback, req.caps ?? readProviderCaps());
+  if (fbHard) {
+    return refusalOutcome(ctx, req, route.taskClass, fallback, skillsForRefusal, {
+      code: 'metered-pool-exhausted', reason: `failure fallback blocked: ${fbHard}`,
+      instruction: 'The primary failed and the class fallback would bill on-demand — pick another route (heddle route <class>).',
+    }, { usedFallback: true });
+  }
+  // Attribution follows the provider that actually runs (a codex fallback bills its CODEX_HOME; a
+  // non-codex fallback is not the plan's account).
+  ctx.account = fallback.provider === 'codex' && req.env?.CODEX_HOME ? basename(req.env.CODEX_HOME) : null;
+  ctx.routeReason = `${plan.decision.routeReason}; ${target.provider}/${target.model} failed → class fallback`;
   return runTarget(fallback, req, ctx, route, `${route.provider}/${route.model}`);
 }
 
@@ -664,6 +676,30 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
     }
   }
   return { route, target, fallback, origin, execution, decision, skillsForRefusal, account, accountAdvice, accountPick, notDispatchable, reviewerPick, sameProviderReview };
+}
+
+/** One shared dry-run summary for `heddle route` and the `plan_dispatch` MCP tool (identical fields). */
+export function summarizePlan(plan: DispatchPlan): Record<string, unknown> {
+  const notDispatchable = plan.notDispatchable;
+  return {
+    task_class: plan.route.taskClass,
+    would_run: notDispatchable || plan.decision.refusal ? null : `${plan.target.provider}/${plan.target.model}`,
+    execution: plan.execution ?? null,
+    in_session: plan.execution === 'in-session-subagent',
+    routed_away_for_cap: plan.decision.routedAwayForCap,
+    remaining_fallback: plan.fallback ? `${plan.fallback.provider}/${plan.fallback.model}` : null,
+    route_reason: plan.decision.routeReason,
+    refusal: notDispatchable
+      ? { code: 'not-dispatchable', reason: `task class "${plan.route.taskClass}" is not dispatchable (dispatchable: false) — the orchestrator's own in-session work` }
+      : plan.decision.refusal ?? null,
+    checks: plan.decision.checks,
+    account: plan.account,
+    account_pick: plan.accountPick ? { id: plan.accountPick.account.id, used_pct: plan.accountPick.usedPct, reason: plan.accountPick.reason, config_dir: plan.accountPick.account.configDir } : null,
+    account_advice: plan.accountAdvice?.line ?? null,
+    reviewer_pick: plan.reviewerPick?.reason ?? null,
+    would_refuse_same_provider: plan.sameProviderReview ?? null,
+    skills: plan.skillsForRefusal,
+  };
 }
 
 /** How the in-session route was chosen — the refusal reason must not misstate the YAML policy. */
