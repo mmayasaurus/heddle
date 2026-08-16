@@ -244,16 +244,49 @@ jobs:
           # (ours AND gitleaks' own) fails with "dubious ownership".
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           echo "scanning $BASE..$HEAD"
-          # gitleaks scans NON-merge commits (`git log -p` shows no diff for a
-          # merge; measured on v8.30.1: 1 merge in range → rev-list 4,
-          # --no-merges 3, gitleaks "3 commits scanned"). The guard below is
-          # `<` not `!=`, so a future gitleaks that counts merges cannot
-          # false-fail it, while an empty/short scan still does (gitar, r6).
-          EXPECTED=$(git rev-list --count --no-merges "$BASE..$HEAD")
-          echo "non-merge commits in range: $EXPECTED"
-          if [ "$EXPECTED" -lt 1 ]; then
+          # Scanned-volume guard, empirically calibrated on gitleaks v8.30.1
+          # (HED-88): gitleaks "commits scanned" counts non-merge commits with
+          # ADDED or MODIFIED content — it skips merges, --allow-empty commits,
+          # deletion-only commits, and pure renames (measured: A/M/M-dellines
+          # scanned; empty/rename-only/delete-only skipped → 3 of 6). So the
+          # guard's LOWERBOUND = per-commit `diff-tree -M --diff-filter=AM`
+          # (exact same 3). A per-commit loop ON PURPOSE: pathspec rev-list
+          # (with or without --full-history) mis-attributes in merge
+          # topologies via parent rewriting — measured. Every git call fails
+          # CLOSED. No skip path: an all-empty range yields LOWERBOUND=0 and
+          # gitleaks itself logs "0 commits scanned", which passes 0<0 honestly.
+          # Separately, EVIL MERGES (content differing from ALL parents, i.e.
+          # conflict-resolution blobs) are invisible to `git log -p` scanning —
+          # detected via the combined diff (`diff-tree --cc`, empty for
+          # routine merges — measured) and hard-red for hand review.
+          TOTAL_ALL=$(git rev-list --count "$BASE..$HEAD") \
+            || { echo "::error::git rev-list failed for $BASE..$HEAD — NOT a clean pass"; exit 1; }
+          if [ -z "$TOTAL_ALL" ] || [ "$TOTAL_ALL" -lt 1 ]; then
             echo "::error::empty commit range $BASE..$HEAD — nothing to scan; NOT a clean pass"; exit 1
           fi
+          NONMERGES=$(git rev-list --no-merges "$BASE..$HEAD") \
+            || { echo "::error::git rev-list (--no-merges) failed — NOT a clean pass"; exit 1; }
+          LOWERBOUND=0
+          for c in $NONMERGES; do
+            NAMES=$(git diff-tree -M --no-commit-id --name-only -r --diff-filter=AM "$c") \
+              || { echo "::error::git diff-tree failed on $c — NOT a clean pass"; exit 1; }
+            if [ -n "$NAMES" ]; then
+              LOWERBOUND=$((LOWERBOUND+1))
+            fi
+          done
+          MERGES=$(git rev-list --merges "$BASE..$HEAD") \
+            || { echo "::error::git rev-list (--merges) failed — NOT a clean pass"; exit 1; }
+          for m in $MERGES; do
+            CC_ALL=$(git diff-tree --cc --name-only -r "$m") \
+              || { echo "::error::git diff-tree --cc failed on merge $m — NOT a clean pass"; exit 1; }
+            CC=$(printf '%s\n' "$CC_ALL" | tail -n +2)
+            if [ -n "$CC" ]; then
+              echo "::error::merge $m introduces content differing from ALL its parents (conflict-resolution blobs: $(printf '%s' "$CC" | tr '\n' ' ' | cut -c1-160)) — gitleaks cannot scan merge diffs; review by hand. NOT a clean pass."
+              echo "gitleaks: ❌ evil-merge content in range (merge $m) — unscannable by gitleaks; review by hand" >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+            fi
+          done
+          echo "commits in range: $TOTAL_ALL (scanned-volume lower bound: $LOWERBOUND)"
           S="${RUNNER_TEMP:-/tmp}/gitleaks-base"; mkdir -p "$S/ignore"
           if git cat-file -e "$BASE:.gitleaks.toml" 2>/dev/null; then
             git show "$BASE:.gitleaks.toml" > "$S/gitleaks.toml"
@@ -291,9 +324,9 @@ jobs:
             2>"$S/gitleaks.log" || rc=$?
           cat "$S/gitleaks.log"
           SCANNED=$(grep -E '^[^ ]+ INF [0-9]+ commits? scanned' "$S/gitleaks.log" | grep -oE '[0-9]+ commits? scanned' | grep -oE '^[0-9]+' | head -1)
-          if grep -qE '^[^ ]+ (ERR|FTL) ' "$S/gitleaks.log" || [ -z "${SCANNED:-}" ] || [ "$SCANNED" -lt "$EXPECTED" ]; then
-            echo "::error::gitleaks did not cleanly scan the whole range (gitleaks exit $rc; scanned=${SCANNED:-none}, expected at least $EXPECTED, or an ERR/FTL line was logged) — NOT a clean pass"
-            echo "gitleaks: ❌ **scan incomplete** (gitleaks exit $rc; scanned=${SCANNED:-none}, expected=$EXPECTED, or an ERR/FTL line) — see the job log; NOT a clean pass" >> "$GITHUB_STEP_SUMMARY"
+          if grep -qE '^[^ ]+ (ERR|FTL) ' "$S/gitleaks.log" || [ -z "${SCANNED:-}" ] || [ "$SCANNED" -lt "$LOWERBOUND" ]; then
+            echo "::error::gitleaks did not cleanly scan the whole range (gitleaks exit $rc; scanned=${SCANNED:-none}, lower bound $LOWERBOUND, or an ERR/FTL line was logged) — NOT a clean pass"
+            echo "gitleaks: ❌ **scan incomplete** (gitleaks exit $rc; scanned=${SCANNED:-none}, lowerbound=$LOWERBOUND, or an ERR/FTL line) — see the job log; NOT a clean pass" >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
           # Three-dot: files changed BY THIS PR (merge-base..head), not base-vs-head.

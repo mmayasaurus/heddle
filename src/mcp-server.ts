@@ -50,13 +50,14 @@ server.tool(
     'provider+model directly, OR both (class = policy, named model = route, no fallback). Workers ' +
     'run on subscription CLIs as subprocesses; this call blocks until the worker finishes (seconds ' +
     'to minutes). Returns {ok, output, provider, model, skills, sessionId (resume handle), usage, ' +
-    'ledgerId}. Claude-primary classes (execution in-session-subagent) are NOT spawned: you get ' +
-    '{ok:false, refusal:{code:"claude-in-session", instruction}} — run them with your own Agent ' +
-    'tool as instructed, or name a subprocess provider+model.',
+    'ledgerId, account, routeReason}. Claude classes run as a headless `claude -p` worker on the ' +
+    'registry account with the most 5h headroom (automatic account rotation); pass in_session:true to ' +
+    'get {ok:false, refusal:{code:"claude-in-session", instruction}} and run it as your own Agent-tool ' +
+    'subagent instead (shared prompt cache, same account).',
   {
     prompt: z.string().describe('The sub-task instructions for the worker.'),
     task_class: z.string().optional().describe('Routing task class (see list_task_classes) — supplies policy. Alone: the table\'s route. With provider+model: the named route under this class\'s policy.'),
-    provider: z.string().optional().describe('Explicit route: codex | cursor | gemini (the agy CLI). Requires model (both or neither). Without task_class = direct path. "claude" is accepted but returns a structured claude-in-session refusal (Claude workers are your own Agent-tool subagents).'),
+    provider: z.string().optional().describe('Explicit route: claude | codex | cursor | gemini (the agy CLI). Requires model (both or neither). Without task_class = direct path. "claude" runs a headless claude -p worker on the best registry account (in_session:true instead returns the structured claude-in-session refusal to run it as your own Agent-tool subagent).'),
     model: z.string().optional().describe('Explicit route: model id for provider (e.g. cursor-grok-4.6-high).'),
     cwd: z.string().optional().describe('Working directory for the worker (default: server cwd).'),
     issue: z.string().optional().describe('Linear issue this sub-task serves, e.g. SPI-712.'),
@@ -71,6 +72,12 @@ server.tool(
     resume: z.string().optional().describe('Resume a prior worker session by its sessionId.'),
     codex_home: z.string().optional().describe('Account selection for codex workers (CODEX_HOME path).'),
     opt_in: z.boolean().optional().describe('Required for task classes gated behind explicit opt-in, and to grant the exec-privileged capability.'),
+    author_provider: z.string().optional().describe('adversarial-review: the provider that AUTHORED the change (claude | codex | cursor | gemini). The reviewer will be a DIFFERENT provider (reviewer_pool); recorded on the review row for pair scoring.'),
+    author_model: z.string().optional().describe('adversarial-review: the model that authored the change, if known (recorded for pair scoring).'),
+    author_dispatch_id: z.number().optional().describe('adversarial-review: ledger id of the dispatch that produced the change, if any (lineage).'),
+    diff_base: z.string().optional().describe('adversarial-review: a git ref; heddle prepends "review `git diff <ref>...HEAD`" to your prompt.'),
+    in_session: z.boolean().optional().describe('Claude classes: return the in-session (Agent tool) instruction instead of spawning a headless claude worker.'),
+    account_pin: z.string().optional().describe('Claude classes: pin a registry account id (~/.heddle/accounts.json); default = most 5h headroom.'),
     capabilities: z.array(z.string()).optional().describe(
       'Capabilities to GRANT the worker: net | browse | exec-privileged (default: none — default-deny). ' +
       'Grants are ledgered and passed only to a provider whose CLI can enforce them (codex); an ' +
@@ -100,6 +107,12 @@ server.tool(
         noFallback: a.no_fallback,
         timeoutMs: a.timeout_ms,
         capabilities: a.capabilities,
+        inSession: a.in_session,
+        accountPin: a.account_pin,
+        authorProvider: a.author_provider,
+        authorModel: a.author_model,
+        authorDispatchId: a.author_dispatch_id,
+        diffBase: a.diff_base,
         identity: IDENTITY,
       });
       const { raw, ...summary } = res;
@@ -122,6 +135,9 @@ server.tool(
     model: z.string().optional(),
     opt_in: z.boolean().optional(),
     codex_home: z.string().optional(),
+    in_session: z.boolean().optional(),
+    account_pin: z.string().optional(),
+    author_provider: z.string().optional(),
   },
   async (a) => {
     try {
@@ -130,6 +146,7 @@ server.tool(
       const plan = planDispatch({
         taskClass: a.task_class, provider: a.provider, model: a.model, prompt: '(dry run)',
         cwd: process.cwd(), optIn: a.opt_in, env: Object.keys(env).length ? env : undefined, identity: IDENTITY,
+        inSession: a.in_session, accountPin: a.account_pin, authorProvider: a.author_provider,
       });
       return text(summarizePlan(plan));
     } catch (err) {
@@ -167,6 +184,39 @@ server.tool(
   async (a) => {
     try { return text(await assessResult(a.task, a.output, a.worker_ok ?? true, a.cwd)); }
     catch (err) { return errorText(`assess_result failed: ${(err as Error).message ?? String(err)}`); }
+  },
+);
+
+server.tool(
+  'record_review_outcome',
+  'adversarial-review follow-up: after you (the author) triaged a reviewer\'s findings, record how many ' +
+    'there were and how many you accepted. This is the score that tunes reviewer pairs ' +
+    '(review_stats). Call it once per review dispatch (ledgerId of the dispatch_worker result).',
+  {
+    dispatch_id: z.number().describe('The review dispatch\'s ledgerId.'),
+    findings_total: z.number().describe('How many findings the reviewer reported (from its VERDICT line).'),
+    findings_accepted: z.number().describe('How many you accepted as real (fixed or agreed).'),
+    notes: z.string().optional().describe('Optional: which were false positives and why.'),
+  },
+  async (a) => {
+    try {
+      const ok = ledger().recordReviewOutcome(a.dispatch_id, { findingsTotal: a.findings_total, findingsAccepted: a.findings_accepted, notes: a.notes });
+      if (!ok) return errorText(`no review row for dispatch #${a.dispatch_id} — was it dispatched with the adversarial-review class?`);
+      return text({ recorded: true, review: ledger().getReview(a.dispatch_id) });
+    } catch (err) { return errorText(`record_review_outcome failed: ${err instanceof Error ? err.message : String(err)}`); }
+  },
+);
+
+server.tool(
+  'review_stats',
+  'Adversarial-review scoreboard: per author→reviewer provider pair — reviews, scored reviews, findings, ' +
+    'accepted findings, acceptance rate, mandate violations — plus the most recent reviews. Use it to pick ' +
+    'the reviewer family that finds real problems for a given author family.',
+  { limit: z.number().int().min(1).max(100).optional().describe('Recent reviews to include (default 10, max 100).') },
+  async (a) => {
+    try {
+      return text({ pairs: ledger().reviewPairStats(), recent: ledger().recentReviews(a.limit ?? 10) });
+    } catch (err) { return errorText(`review_stats failed: ${err instanceof Error ? err.message : String(err)}`); }
   },
 );
 

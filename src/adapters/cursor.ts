@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { buildWorkerEnv } from '../env.js';
 import type { DispatchOptions, WorkerAdapter, WorkerResult, TokenUsage } from '../types.js';
+import { lastResultJson } from './parse.js';
 
 /**
  * Model families Cursor carries that Maya holds a DIRECT subscription for. Routing these through
@@ -44,15 +45,7 @@ export class CursorAdapter implements WorkerAdapter {
     const durationMs = Date.now() - started;
 
     // The result object is the last JSON line on stdout (progress noise may precede it).
-    let result: any;
-    for (const line of stdout.split('\n').reverse()) {
-      const trimmed = line.trim();
-      if (!trimmed.startsWith('{')) continue;
-      try {
-        const parsed = JSON.parse(trimmed);
-        if (parsed && parsed.type === 'result') { result = parsed; break; }
-      } catch { /* keep scanning */ }
-    }
+    const result: any = lastResultJson(stdout);
 
     if (!result) {
       return {

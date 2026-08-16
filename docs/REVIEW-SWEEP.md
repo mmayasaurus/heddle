@@ -130,7 +130,7 @@ The authoritative wording lives in [CI.md](CI.md#standing-rules-maya-2026-08-15-
 
 - Merge commits only, pinned to the commit you swept: `gh pr merge $N --merge --match-head-commit <swept-sha>` (a push landing between sweep #2 and the merge must not slip through unswept).
 - Never squash, never force-push.
-- Ensure the branch is up to date with the base repository's `main` (merge it into the branch if behind — from a fork that means the base repo's remote, not the fork's `origin/main`).
+- Ensure the branch is up to date with the base repository's `main` (merge it into the branch if behind — from a fork that means the base repo's remote, not the fork's `origin/main`). Exception for config-text-only PRs: see `.claude/rules/pr-discipline.md` (a non-overlapping `main` advance does not force a re-merge).
 - PR description body carries `Fixes <ticket>`.
 - Keep the branch after merging (branches are history).
 - Who may merge is a maintainer policy outside this document.

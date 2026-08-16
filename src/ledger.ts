@@ -117,6 +117,21 @@ CREATE TABLE IF NOT EXISTS dispatches (
   started_at TEXT NOT NULL,
   finished_at TEXT
 );
+CREATE TABLE IF NOT EXISTS reviews (
+  dispatch_id INTEGER PRIMARY KEY REFERENCES dispatches(id),
+  author_provider TEXT,
+  author_model TEXT,
+  author_dispatch_id INTEGER,
+  reviewer_provider TEXT NOT NULL,
+  reviewer_model TEXT NOT NULL,
+  mandate_ok INTEGER,
+  findings_total INTEGER,
+  findings_accepted INTEGER,
+  notes TEXT,
+  created_at TEXT NOT NULL,
+  outcome_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_reviews_pair ON reviews(author_provider, reviewer_provider);
 CREATE INDEX IF NOT EXISTS idx_dispatches_issue ON dispatches(issue);
 CREATE INDEX IF NOT EXISTS idx_dispatches_orch ON dispatches(orchestrator);
 CREATE INDEX IF NOT EXISTS idx_dispatches_started ON dispatches(started_at);
@@ -233,6 +248,7 @@ export class Ledger {
     // covers the WAL switch and the migration window below (check, then ALTER).
     this.db.exec('PRAGMA busy_timeout = 5000;');
     this.db.exec('PRAGMA journal_mode = WAL;');
+    this.db.exec('PRAGMA foreign_keys = ON;'); // reviews.dispatch_id must be a real dispatch
     // One IMMEDIATE transaction around schema + migrations + trigger: concurrent openers of a
     // pre-migration db serialize here instead of interleaving ALTERs (busy_timeout covers the wait;
     // duplicate-column tolerance in applyLedgerMigrations covers a winner that got there first).
@@ -367,6 +383,15 @@ export class Ledger {
    * manual close never races a completing worker into two writers. Returns false when nothing was
    * closed (no such row, or already finished).
    */
+  /** The account a session last ran under — resume affinity: a claude session lives inside ONE
+   *  config dir, so resuming it must reuse that account, not a fresh headroom pick (PR #12). */
+  sessionAccount(sessionId: string): string | null {
+    const row = this.db.prepare(
+      'SELECT account FROM dispatches WHERE session_id = ? ORDER BY id DESC LIMIT 1',
+    ).get(sessionId) as { account: string | null } | undefined;
+    return row?.account ?? null;
+  }
+
   closeIfInFlight(id: number, error: string, opts: { outcome?: string; now?: Date } = {}): boolean {
     const info = this.db.prepare(`
       UPDATE dispatches SET ok = 0, error = ?, outcome = COALESCE(?, outcome), finished_at = ?
@@ -381,6 +406,83 @@ export class Ledger {
       : 'SELECT * FROM dispatches ORDER BY id DESC LIMIT ?';
     const stmt = this.db.prepare(sql);
     return (issue ? stmt.all(issue, limit) : stmt.all(limit)) as Record<string, unknown>[];
+  }
+
+  // ---- Adversarial reviews (HED-3) ------------------------------------------------------------
+
+  /** Record that a dispatch is an adversarial review: who wrote the code, who reviewed it. */
+  recordReview(r: {
+    dispatchId: number; authorProvider: string | null; authorModel: string | null; authorDispatchId: number | null;
+    reviewerProvider: string; reviewerModel: string;
+  }): void {
+    if (r.authorDispatchId !== null && (!Number.isInteger(r.authorDispatchId) || r.authorDispatchId <= 0)) {
+      throw new Error(`review for #${r.dispatchId}: author_dispatch_id must be a positive integer (got ${r.authorDispatchId})`);
+    }
+    // Upsert that never wipes mandate_ok / findings / notes / outcome_at (INSERT OR REPLACE would).
+    this.db.prepare(`
+      INSERT INTO reviews
+        (dispatch_id, author_provider, author_model, author_dispatch_id, reviewer_provider, reviewer_model, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(dispatch_id) DO UPDATE SET
+        author_provider = excluded.author_provider, author_model = excluded.author_model,
+        author_dispatch_id = excluded.author_dispatch_id, reviewer_provider = excluded.reviewer_provider,
+        reviewer_model = excluded.reviewer_model
+    `).run(r.dispatchId, r.authorProvider, r.authorModel, r.authorDispatchId, r.reviewerProvider, r.reviewerModel, new Date().toISOString());
+  }
+
+  /** The read-only mandate check result (null = could not judge, e.g. not a git repo). */
+  setReviewMandate(dispatchId: number, mandateOk: boolean | null): void {
+    this.db.prepare('UPDATE reviews SET mandate_ok = ? WHERE dispatch_id = ?')
+      .run(mandateOk === null ? null : mandateOk ? 1 : 0, dispatchId);
+  }
+
+  /** The follow-up: how many of the reviewer's findings the author accepted (the score that tunes reviewer pairs). */
+  recordReviewOutcome(dispatchId: number, o: { findingsTotal: number; findingsAccepted: number; notes?: string }): boolean {
+    if (!Number.isInteger(o.findingsTotal) || !Number.isInteger(o.findingsAccepted) || o.findingsTotal < 0 ||
+        o.findingsAccepted < 0 || o.findingsAccepted > o.findingsTotal) {
+      throw new Error(`review outcome for #${dispatchId}: findings_accepted (${o.findingsAccepted}) must be 0..findings_total (${o.findingsTotal})`);
+    }
+    // Scoring an IN-FLIGHT review is always a mistake (the findings don't exist yet); re-scoring a
+    // finished one is a legitimate correction and stays allowed.
+    const dispatchRow = this.db.prepare('SELECT finished_at FROM dispatches WHERE id = ?').get(dispatchId) as { finished_at: string | null } | undefined;
+    if (dispatchRow && dispatchRow.finished_at === null) {
+      throw new Error(`review outcome for #${dispatchId}: the review dispatch is still in flight — score it after it finishes`);
+    }
+    const info = this.db.prepare(
+      'UPDATE reviews SET findings_total = ?, findings_accepted = ?, notes = ?, outcome_at = ? WHERE dispatch_id = ?',
+    ).run(o.findingsTotal, o.findingsAccepted, o.notes ?? null, new Date().toISOString(), dispatchId);
+    return Number(info.changes) > 0;
+  }
+
+  getReview(dispatchId: number): Record<string, unknown> | null {
+    return (this.db.prepare('SELECT * FROM reviews WHERE dispatch_id = ?').get(dispatchId) as Record<string, unknown> | undefined) ?? null;
+  }
+
+  /** Per author→reviewer provider pair: reviews, scored reviews, findings, accepted, acceptance rate, mandate violations. */
+  reviewPairStats(): Record<string, unknown>[] {
+    return this.db.prepare(`
+      SELECT author_provider, reviewer_provider,
+             COUNT(*) AS reviews,
+             SUM(CASE WHEN outcome_at IS NOT NULL THEN 1 ELSE 0 END) AS scored,
+             SUM(COALESCE(findings_total, 0)) AS findings_total,
+             SUM(COALESCE(findings_accepted, 0)) AS findings_accepted,
+             CASE WHEN SUM(COALESCE(findings_total, 0)) > 0
+                  THEN ROUND(1.0 * SUM(COALESCE(findings_accepted, 0)) / SUM(COALESCE(findings_total, 0)), 3)
+                  ELSE NULL END AS acceptance_rate,
+             SUM(CASE WHEN mandate_ok = 0 THEN 1 ELSE 0 END) AS mandate_violations
+      FROM reviews
+      GROUP BY author_provider, reviewer_provider
+      ORDER BY reviews DESC, acceptance_rate DESC
+    `).all() as Record<string, unknown>[];
+  }
+
+  /** Recent reviews joined with their dispatch rows (newest first). */
+  recentReviews(limit = 20): Record<string, unknown>[] {
+    return this.db.prepare(`
+      SELECT r.*, d.model AS reviewer_model_run, d.ok, d.issue, d.started_at, d.duration_ms
+      FROM reviews r JOIN dispatches d ON d.id = r.dispatch_id
+      ORDER BY r.dispatch_id DESC LIMIT ?
+    `).all(limit) as Record<string, unknown>[];
   }
 
   /** In-flight = started, never finished. The roster's "what's running" source. */

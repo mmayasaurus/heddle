@@ -18,7 +18,9 @@
  *   cursor  no per-capability flags in headless mode (`--sandbox enabled|disabled` exists but its
  *           network/fs semantics are undocumented) → cannot enforce any grant → refused.
  *   gemini  agy has `--sandbox` (terminal restrictions) only, no network/browse knobs → refused.
- *   claude  workers are in-session subagents (refused earlier as claude-in-session).
+ *   claude  headless `claude -p` (HED-78): browse → WebFetch/WebSearch added to --allowedTools;
+ *           exec-privileged → --dangerously-skip-permissions; net → no sandbox, no knob → refused.
+ *           (`in_session: true` keeps the subagent protocol, which never reaches an adapter.)
  * Default-deny is only as real as the CLI's sandbox: codex workspace-write denies network by default;
  * cursor/agy headless workers are NOT network-fenced by heddle today (documented gap, LANDMINES).
  */
@@ -31,7 +33,9 @@ export const ENFORCEABLE: Record<string, readonly Capability[]> = {
   codex: ['net', 'browse', 'exec-privileged'],
   cursor: [],
   gemini: [],
-  claude: [],
+  // Headless claude (HED-78): browse → WebFetch/WebSearch on the tool allowlist; exec-privileged →
+  // --dangerously-skip-permissions; net has no knob (no sandbox — the Bash allowlist is the fence).
+  claude: ['browse', 'exec-privileged'],
 };
 
 export interface CapabilityDecision {

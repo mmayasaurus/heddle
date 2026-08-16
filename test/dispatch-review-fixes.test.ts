@@ -22,31 +22,31 @@ describe('dispatch — review fixes', () => {
 
   it('words in-session refusals according to how the route originated', async () => {
     const classOutcome = await dispatch(
-      { taskClass: 'implementation', prompt: 'x', cwd: tempDir() }, tempLedger(), () => fakeAdapter().adapter,
+      { taskClass: 'implementation', prompt: 'x', cwd: tempDir(), inSession: true }, tempLedger(), () => fakeAdapter().adapter,
     );
     expect(classOutcome.refusal?.reason).toMatch(/^task class "implementation" routes to claude\/sonnet, which/);
 
     const explicitOutcome = await dispatch(
-      { taskClass: 'bulk-mechanical', provider: 'claude', model: 'haiku', prompt: 'x', cwd: tempDir() },
+      { taskClass: 'bulk-mechanical', provider: 'claude', model: 'haiku', prompt: 'x', cwd: tempDir(), inSession: true },
       tempLedger(), () => fakeAdapter().adapter,
     );
     expect(explicitOutcome.refusal?.reason).toMatch(/^task class "bulk-mechanical" was given the explicit route claude\/haiku, which/);
     expect(explicitOutcome.refusal?.instruction).toContain('provider="cursor", model="composer-2.5-fast"');
 
     const directOutcome = await dispatch(
-      { provider: 'claude', model: 'opus', prompt: 'x', cwd: tempDir() }, tempLedger(), () => fakeAdapter().adapter,
+      { provider: 'claude', model: 'opus', prompt: 'x', cwd: tempDir(), inSession: true }, tempLedger(), () => fakeAdapter().adapter,
     );
     expect(directOutcome.refusal?.reason).toMatch(/^direct route claude\/opus names a provider that/);
   });
 
   it('honors an MCP override in the in-session instruction', async () => {
     const noMcp = await dispatch(
-      { taskClass: 'implementation', prompt: 'x', cwd: tempDir(), mcp: [] }, tempLedger(), () => fakeAdapter().adapter,
+      { taskClass: 'implementation', prompt: 'x', cwd: tempDir(), mcp: [], inSession: true }, tempLedger(), () => fakeAdapter().adapter,
     );
     expect(noMcp.refusal?.instruction).not.toContain('memtrace');
 
     const overridden = await dispatch(
-      { taskClass: 'implementation', prompt: 'x', cwd: tempDir(), mcp: ['serena'] }, tempLedger(), () => fakeAdapter().adapter,
+      { taskClass: 'implementation', prompt: 'x', cwd: tempDir(), mcp: ['serena'], inSession: true }, tempLedger(), () => fakeAdapter().adapter,
     );
     expect(overridden.refusal?.instruction).toContain('MCP [serena]');
     expect(overridden.refusal?.instruction).not.toContain('memtrace');
@@ -93,7 +93,7 @@ describe('dispatch — review fixes', () => {
 
     try {
       process.env.HEDDLE_ROUTING = routingPath;
-      const outcome = await dispatch({ taskClass: 'synth', prompt: 'x', cwd: tempDir() }, ledger, () => fake.adapter);
+      const outcome = await dispatch({ taskClass: 'synth', prompt: 'x', cwd: tempDir(), inSession: true }, ledger, () => fake.adapter);
       expect(outcome.refusal?.code).toBe('claude-in-session');
       expect(outcome.usedFallback).toBe(true);
       expect(outcome.refusal?.reason).toContain('fell back to claude/sonnet (its declared fallback)');
