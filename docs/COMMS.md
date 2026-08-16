@@ -535,19 +535,57 @@ refuse a v2 file loudly instead of silently missing targeted posts.
 tools (`post_message`, `check_inbox`, `read_transcript`, rooms, …) with the same identity rules
 (`HEDDLE_AGENT` in the server's env). What they cannot get is **push**: `notifications/claude/channel`
 is a Claude Code channel — other CLIs read their inbox when they want to (`check_inbox`), which
-is the room's pull model anyway. Verified from each CLI's own `--help` on 2026-08-15:
+is the room's pull model anyway. Verified from each CLI's own `--help` on 2026-08-15; the Codex
+path re-verified live on 2026-08-16 (receipt below).
 
-- **Codex CLI**: `codex mcp add heddle-comms --env HEDDLE_AGENT=codex-B -- heddle-comms`
-  (stdio; `--env` sets the server's environment; `codex mcp list` / `remove`).
-- **cursor-agent**: declare the server in `.cursor/mcp.json` (project) or `~/.cursor/mcp.json`
+**Registration is a scoping decision, not just a command.** Most CLIs read one shared config that
+EVERY invocation of that CLI loads — including the workers heddle dispatches. Registering
+`heddle-comms` there hands comms identity and `post_message` to every worker, not just the
+orchestrator you meant to equip. Prefer a session-scoped registration wherever the CLI has one.
+
+- **Codex CLI** — *session-scoped (recommended)*. `-c key=value` overrides config for one
+  invocation only (dotted TOML paths, per `codex --help`):
+
+  ```sh
+  codex exec \
+    -c 'mcp_servers.heddle-comms.command="node"' \
+    -c 'mcp_servers.heddle-comms.args=["/Users/…/heddle/dist/comms/channel-server.js"]' \
+    -c 'mcp_servers.heddle-comms.env={HEDDLE_AGENT="codex-B"}'
+  ```
+
+  `codex mcp add heddle-comms --env HEDDLE_AGENT=codex-B -- heddle-comms` also works but WRITES
+  `~/.codex/config.toml`, which every codex worker reads — use it only when you intend workers to
+  have comms too.
+- **cursor-agent** — declare the server in `.cursor/mcp.json` (project-scoped, preferred) or
+  `~/.cursor/mcp.json` (global, reaches workers)
   (`{ "mcpServers": { "heddle-comms": { "command": "heddle-comms", "env": { "HEDDLE_AGENT": "…" } } } }`),
   then `agent mcp enable heddle-comms` (approved list); `agent mcp list` / `list-tools heddle-comms`.
-- **agy (Antigravity)**: no MCP flag in `agy --help`; heddle's own worker MCP attachment for agy
-  is unimplemented for the same reason (`.agents/mcp_config.json` schema unverified against the
-  Antigravity docs) — not documented here until verified.
+- **agy (Antigravity)** — still NOT documented, and now with evidence rather than absence of it:
+  `agy --help` exposes no MCP or per-invocation config flag (only `--add-dir`, `--agent`,
+  `--project`, …), so any registration would be global and would reach every agy worker. The
+  `mcpServers` map in `~/.gemini/settings.json` belongs to the **Gemini CLI**, not to agy: asked to
+  list its MCP servers on 2026-08-16, agy answered "None" while that file held two. Treat agy as
+  pull-model-capable only once someone confirms a mechanism against Antigravity's own docs.
 
-Live verification with a Codex session as orchestrator is pending (HED-72). Identity/env for
-dispatched workers (`HEDDLE_COMMS_ADDRESS`, `HEDDLE_WORKER`) is U's HED-2.
+**Identity: the fleet launchers already work.** The comms server resolves identity from
+`HEDDLE_AGENT`, else `FLEET_AGENT`, else `.fleet-agent`. `~/.local/bin/codex-a…e` export
+`FLEET_AGENT=codex-A…E`, so a Codex orchestrator launched that way binds as `codex-A` with no
+change; `HEDDLE_AGENT` wins when both are set and disagree. Verified 2026-08-16 against
+`createCommsServer` for all four combinations (FLEET only → `codex-A`; HEDDLE only → `codex-B`;
+both → `codex-B`; neither → unbound). Do NOT add `HEDDLE_AGENT` to those launchers as duplicate
+config — two identity vars that can drift is worse than one fallback that works.
+
+**Live receipt (2026-08-16, Codex CLI 0.147.0 as orchestrator, live `~/.heddle/comms.db`).**
+`comms_whoami` bound `codex-B` from the server env; `post_message` → R landed
+`sent / queued-for-channel` then `sent / channel-written` (R's Claude session rendered the channel
+event); replies from R and V to `codex-B` recorded `failed / no-live-session` — correct, because a
+`codex exec` run holds no live session — and `check_inbox` on the next run pulled both. `codex-B`
+auto-registered as `participants(kind=agent)`; every message carried `tier=agent-message`
+(`codex-B` is nobody's child), which is the tier logic being provider-blind. So: push stays
+Claude-only, the ledger says `no-live-session` honestly instead of pretending, and the pull path
+delivers.
+
+Identity/env for dispatched workers (`HEDDLE_COMMS_ADDRESS`, `HEDDLE_WORKER`) is U's HED-2.
 
 ## Roadmap
 
