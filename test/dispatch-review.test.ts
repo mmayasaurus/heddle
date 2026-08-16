@@ -5,7 +5,6 @@ import { describe, expect, it } from 'vitest';
 import { dispatch } from '../src/dispatch.js';
 import { CodexAdapter } from '../src/adapters/codex.js';
 import { ClaudeAdapter } from '../src/adapters/claude.js';
-import { Ledger } from '../src/ledger.js';
 import type { CapsByProvider } from '../src/usage.js';
 import type { WorkerAdapter } from '../src/types.js';
 import { fakeAdapter, IDENTITIES, useTempResources } from './helpers.js';

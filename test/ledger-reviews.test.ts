@@ -1,4 +1,3 @@
-import { DatabaseSync } from 'node:sqlite';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { Ledger } from '../src/ledger.js';
