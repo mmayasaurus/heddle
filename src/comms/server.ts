@@ -263,6 +263,7 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
       from: who, to: requireStr(a.to, 'to'), body: requireStr(a.body, 'body'), kind: str(a.kind) as MessageKind | undefined,
       requestedTier: (str(a.requested_tier) as Tier | undefined) ?? null, replyTo: num(a.reply_to) ?? null,
       issue: str(a.issue) ?? null, thread: str(a.thread) ?? null, meta: { transport: 'heddle-comms' },
+      mentions: Array.isArray(a.mentions) ? a.mentions.map(String) : null,
       holdFloor: a.hold_floor === true, releaseFloor: a.release_floor === true,
     });
     if (res.outcome === 'refused') return res;
@@ -374,6 +375,7 @@ export const TOOLS = [
         reply_to: { type: 'number' },
         issue: { type: 'string' },
         thread: { type: 'string' },
+        mentions: { type: 'array', items: { type: 'string' }, maxItems: 16, description: 'Rooms: addresses to explicitly ping — each gets a targeted push-or-inbox delivery (never parsed from the body).' },
         hold_floor: { type: 'boolean', description: 'Rooms: take the floor before posting (multi-part reply).' },
         release_floor: { type: 'boolean', description: 'Rooms: release the floor after this post.' },
       },
@@ -394,7 +396,7 @@ export const TOOLS = [
   },
   {
     name: 'check_inbox',
-    description: 'New messages addressed to you (direct + @all) since a message id. Pull model — call it when you want to know.',
+    description: 'New messages addressed to you (direct + @all + room posts that mention you) since a message id. Pull model — call it when you want to know.',
     inputSchema: { type: 'object', properties: { since_id: { type: 'number' }, limit: { type: 'number' } } },
   },
   {

@@ -96,6 +96,8 @@ export interface PostRequest {
   issue?: string | null;
   thread?: string | null;
   meta?: Record<string, unknown> | null;
+  /** Rooms only: addresses to explicitly ping — each gets a targeted push-or-inbox delivery. */
+  mentions?: string[] | null;
   /** Rooms only: take the floor before posting (refused if another holder's lease is live). */
   holdFloor?: boolean;
   /** Rooms only: release the floor after this post (end of a multi-part reply). */
@@ -123,9 +125,16 @@ export type PostResult =
 
 export type RefusalCode =
   | 'unknown-target' | 'ambiguous-target' | 'no-orchestrator' | 'body-too-large' | 'rate-limited' | 'invalid-message'
-  | 'no-such-room' | 'not-a-member' | 'floor-held' | 'room-governance';
+  | 'no-such-room' | 'not-a-member' | 'floor-held' | 'room-governance'
+  | 'mention-outside-room' | 'unknown-mention' | 'mention-not-member';
 
 type AcceptedBase = { messageId: number; to: string; tier: Tier; envelope: string };
+
+/** Order-preserving dedupe; the sender never pings itself (like @all excluding its sender). */
+function dedupeMentions(mentions: string[] | null | undefined, from: string): string[] {
+  if (!mentions?.length) return [];
+  return [...new Set(mentions)].filter((m) => m !== from);
+}
 type Refusal = Extract<PostResult, { outcome: 'refused' }>;
 type Resolved = { address: string; kind: AddressKind };
 type Constraint = { code: RefusalCode; reason: string; retryAfterMs?: number };
@@ -387,9 +396,15 @@ export class Broker {
     const constraint = this.checkConstraints(req.from, to, req.body ?? '');
     if (constraint) return this.refuse(req.from, to, constraint.code, constraint.reason + via, undefined, constraint.retryAfterMs);
     let floorTakenHere = false;
+    const mentions = dedupeMentions(req.mentions, req.from);
+    if (mentions.length && kind !== 'room') {
+      return this.refuse(req.from, to, 'mention-outside-room', 'mentions only make sense on room posts — DM the address directly instead');
+    }
     if (kind === 'room') {
       const gate = this.checkRoom(req.from, to, req.holdFloor === true);
       if ('code' in gate) return this.refuse(req.from, to, gate.code, gate.reason, undefined, gate.retryAfterMs);
+      const bad = this.checkMentions(to, mentions);
+      if (bad) return this.refuse(req.from, to, bad.code, bad.reason);
       floorTakenHere = gate.acquired;
     }
     const pairKey = `${req.from}->${to}`;
@@ -401,7 +416,7 @@ export class Broker {
     try {
       enveloped = postEnveloped(this.log, this.ledger, {
         from: req.from, to, body: req.body, kind: req.kind, requestedTier: req.requestedTier,
-        replyTo: req.replyTo, issue: req.issue, thread: req.thread,
+        replyTo: req.replyTo, issue: req.issue, thread: req.thread, mentions,
         meta: { ...callerMeta, ...(to !== req.to ? { resolvedFrom: req.to } : {}) },
       });
     } catch (err) {
@@ -414,11 +429,51 @@ export class Broker {
     if (kind === 'room') {
       const out = this.deliverRoom(record, base);
       if (req.releaseFloor) this.log.releaseFloor(to, req.from);
+      if (mentions.length) return this.deliverMentions(record, envelope, mentions, out);
       return out;
     }
     if (kind === 'broadcast') return this.deliverBroadcast(record, envelope, base);
     const d = await this.dispatchTo(record, envelope, to, req.from);
     return { ...base, outcome: d.outcome, code: d.code, ...(d.reason ? { reason: d.reason } : {}) };
+  }
+
+  /**
+   * Mention policy (grammar was checked by the log): every mentioned address must be a REGISTERED
+   * participant (you cannot ping an address that has never spoken), never a reserved bookkeeping
+   * address, and — for a closed room — a member (pinging someone into a room they cannot read is
+   * broken; add them first). The operator may always be mentioned.
+   */
+  private checkMentions(room: string, mentions: string[]): { code: RefusalCode; reason: string } | null {
+    if (!mentions.length) return null;
+    const r = this.log.room(room)!; // the room gate ran first
+    for (const m of mentions) {
+      if (RESERVED_ADDRESSES.has(m)) return { code: 'unknown-mention', reason: `${JSON.stringify(m)} is a reserved bookkeeping address` };
+      if (m === 'operator') continue;
+      if (!this.log.participant(m)) return { code: 'unknown-mention', reason: `mention ${JSON.stringify(m)} is not a registered participant` };
+      if (!r.open && !this.log.member(room, m)) {
+        return { code: 'mention-not-member', reason: `${m} is not a member of ${room} — add them (join_room) before pinging them into it` };
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Targeted fan-out for a room post's mentions: same guaranteed-delivery semantics as @all —
+   * push where the member has a live channel, inbox otherwise, one typed row per mention; a
+   * mentioned member at a permission gate is held with the broadcast contract (inbox at deadline,
+   * never failed). Each mention charges the (from → mentioned) pair budget.
+   */
+  private async deliverMentions(record: MessageRecord, envelope: string, mentions: string[], roomOutcome: PostResult): Promise<PostResult> {
+    for (const m of mentions) this.consume(`${record.from}->${m}`);
+    const outcomes = await Promise.all(mentions.map((m) => this.dispatchTo(record, envelope, m, record.from, { broadcast: true })));
+    const pushed = outcomes.filter((o) => o.outcome === 'sent').length;
+    const held = outcomes.filter((o) => o.outcome === 'held').length;
+    const inbox = outcomes.filter((o) => o.outcome === 'logged').length;
+    const failed = outcomes.filter((o) => o.outcome === 'failed').length;
+    const n = mentions.length;
+    const summary = `mentions: ${pushed}/${n} pushed, ${inbox}/${n} to inbox${held ? `, ${held}/${n} held` : ''}${failed ? `, ${failed}/${n} failed` : ''}`;
+    if (roomOutcome.outcome === 'refused') return roomOutcome; // unreachable; type safety
+    return { ...roomOutcome, reason: roomOutcome.reason ? `${roomOutcome.reason}; ${summary}` : summary };
   }
 
   /** Pull model: rooms are read when an agent wants to know; nothing is injected. */

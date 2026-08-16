@@ -67,6 +67,7 @@ export function toChannelEvent(record: MessageRecord): ChannelEvent {
     ts: record.ts,
   };
   if (record.replyTo != null) meta.reply_to = String(record.replyTo);
+  if (record.to.startsWith('#')) { meta.room = record.to.slice(1); meta.mention = '1'; } // a room post reached this inbox ⇒ the recipient was pinged
   if (record.thread) meta.thread = record.thread;
   if (record.issue) meta.issue = record.issue;
   const code = record.meta?.tierCode;
