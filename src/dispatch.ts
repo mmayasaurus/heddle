@@ -351,12 +351,8 @@ async function runTarget(
       extraFlags,
       timeoutMs: req.timeoutMs,
       resume: req.resume,
-<<<<<<< HEAD
-      env: { ...(req.env ?? {}), ...(acct?.env ?? {}), ...stamps },
+      env: { ...req.env, ...acct?.env, ...stamps },
       envUnset: acct?.envUnset,
-=======
-      env: { ...req.env, ...stamps },
->>>>>>> agentu/hed-67-core-cap-aware-routing-consult-live-provider-caps-at-dispatch
       capabilities: caps.granted,
       systemPromptAppend,
       mcpConfigPath,
