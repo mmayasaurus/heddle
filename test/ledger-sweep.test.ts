@@ -204,12 +204,12 @@ describe('Ledger.sweepOrphans round-2 semantics (temp db)', () => {
     expect(r.output_tokens).toBe(3);
   });
 
-  it('the probe receives the recorded owner identity (pid, comm, start time)', () => {
+  it('the probe receives the recorded owner identity (pid, start time)', () => {
     const id = startRow(ledger);
     ageRow(ledger, id, { hoursAgo: 1, ownerPid: 777, ownerComm: 'node', ownerStartedAt: 123_456 });
     const seen: unknown[] = [];
-    ledger.sweepOrphans({ isOwnerAlive: (pid, comm, startedAt) => { seen.push([pid, comm, startedAt]); return true; } });
-    expect(seen).toEqual([[777, 'node', 123_456]]);
+    ledger.sweepOrphans({ isOwnerAlive: (pid, startedAt) => { seen.push([pid, startedAt]); return true; } });
+    expect(seen).toEqual([[777, 123_456]]);
   });
 });
 
@@ -217,25 +217,25 @@ describe('ownerVerdict + parsePsTable (pid-reuse-safe owner identity)', () => {
   const PS = ' 4242 Thu Aug 15 19:59:47 2026 /usr/local/bin/node\n  977 Mon Jan  5 08:00:00 2026 /sbin/launchd\n';
   const T4242 = Date.parse('Thu Aug 15 19:59:47 2026');
 
-  it('a listed pid with a MATCHING start time is the owner — regardless of how ps names the executable', () => {
+  it('start times decide: matching = the owner, differing = a recycled pid', () => {
     const table = parsePsTable(PS);
-    expect(ownerVerdict(table.get(4242), 'node', T4242)).toBe(true);
-    expect(ownerVerdict(table.get(4242), 'node', T4242 + 10_000)).toBe(true); // within slop
+    expect(ownerVerdict(table.get(4242), T4242)).toBe(true);
+    expect(ownerVerdict(table.get(4242), T4242 + 10_000)).toBe(true); // within slop
     // Same pid, DIFFERENT start time = a recycled pid (a new process cannot share the old start).
-    expect(ownerVerdict(table.get(4242), 'node', T4242 - 3_600_000)).toBe(false);
-    // Comm representation quirks (MainThread, truncation) don't matter when start times decide.
-    expect(ownerVerdict({ startedAtMs: T4242, comm: 'MainThread' }, 'node', T4242)).toBe(true);
+    expect(ownerVerdict(table.get(4242), T4242 - 3_600_000)).toBe(false);
+    // How ps names the executable (node, MainThread, truncations) never matters here.
+    expect(ownerVerdict({ startedAtMs: T4242, comm: 'MainThread' }, T4242)).toBe(true);
   });
 
-  it('falls back to executable-name comparison when a start time is missing, tolerating 15-char truncation', () => {
-    expect(ownerVerdict({ startedAtMs: null, comm: '/usr/local/bin/node' }, 'node', null)).toBe(true);
-    expect(ownerVerdict({ startedAtMs: null, comm: 'bun' }, 'node', null)).toBe(false); // reused by something else
-    // Linux comm truncates to 15 chars: 'my-single-file-heddle' reports as 'my-single-file-'.
-    expect(ownerVerdict({ startedAtMs: null, comm: 'my-single-file-' }, 'my-single-file-heddle', null)).toBe(true);
-    // No comm recorded (pre-migration): any listed executable is accepted.
-    expect(ownerVerdict({ startedAtMs: null, comm: 'whatever' }, null, null)).toBe(true);
-    // Not listed at all = gone.
-    expect(ownerVerdict(undefined, 'node', T4242)).toBe(false);
+  it('without a start-time comparison the verdict is UNKNOWN — comm can neither prove nor disprove', () => {
+    // A reused pid can run another same-named node; a live owner can be reported as MainThread —
+    // so a listed pid with no start times is unknown, and the AGE rule (not the pid rule) decides.
+    expect(ownerVerdict({ startedAtMs: null, comm: '/usr/local/bin/node' }, null)).toBeNull();
+    expect(ownerVerdict({ startedAtMs: null, comm: 'bun' }, 123)).toBeNull();
+    expect(ownerVerdict({ startedAtMs: 123, comm: 'node' }, null)).toBeNull();
+    // Absence from a trusted table IS a verdict: gone.
+    expect(ownerVerdict(undefined, T4242)).toBe(false);
+    expect(ownerVerdict(undefined, null)).toBe(false);
   });
 
   it('parsePsTable reads pid, ctime start and space-containing executables; garbage lines are skipped', () => {
@@ -244,5 +244,12 @@ describe('ownerVerdict + parsePsTable (pid-reuse-safe owner identity)', () => {
     expect(table.get(977)?.startedAtMs).toBe(Date.parse('Mon Jan  5 08:00:00 2026'.replace(/\s+/g, ' ')));
     expect(table.get(12)?.startedAtMs).toBeNull();
     expect(table.has(4242)).toBe(true);
+  });
+
+  it('a stale comm-matched recycled pid cannot veto the age rule (it is unknown, so age closes it)', () => {
+    // End-to-end shape of gitar's scenario: old row, owner pid reused by a same-named process,
+    // no start times available → verdict null → the 24h age rule reclaims the ghost.
+    const verdict = ownerVerdict({ startedAtMs: null, comm: 'node' }, null);
+    expect(verdict).toBeNull();
   });
 });

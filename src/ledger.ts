@@ -217,32 +217,26 @@ export function parsePsTable(output: string): Map<number, PsEntry> {
 
 /** ps reports whole seconds and our own clock reading is not simultaneous with ps's. */
 const OWNER_START_SLOP_MS = 15_000;
-/** Linux /proc/<pid>/comm truncates to 15 chars (TASK_COMM_LEN−1); compare accordingly. */
-const COMM_MAX = 15;
 
 /**
- * Is the process at `pid` the SAME process instance that recorded the row? Pid-reuse-safe:
- *   - pid not listed by ps → gone (false);
- *   - both start times known → same instance iff they agree within slop (a recycled pid belongs to
- *     a NEWER process, so its start time cannot match) — executable naming quirks are irrelevant;
- *   - start time unavailable on either side → fall back to the executable name, tolerating the
- *     kernel's 15-char comm truncation and thread-name reporting differences by comparing prefixes;
- *   - nothing recorded to compare against → the listed pid is accepted as the owner.
+ * Is the process at `pid` the SAME process instance that recorded the row?
+ *   - pid absent from a TRUSTED ps table → gone (`false`);
+ *   - both start times known → same instance iff they agree within slop (`true`/`false`) — a
+ *     recycled pid belongs to a NEWER process, so its start time cannot match;
+ *   - otherwise → UNKNOWN (`null`): executable names can neither prove identity (a reused pid may
+ *     run another `node`) nor safely disprove it (kernels report thread names and truncate to 15
+ *     chars), so comm is recorded for humans but never decides — such rows close via the age rule.
  * Exported for tests.
  */
 export function ownerVerdict(
   entry: PsEntry | undefined,
-  recordedComm: string | null,
   recordedStartMs: number | null,
-): boolean {
+): boolean | null {
   if (entry === undefined) return false;
   if (recordedStartMs != null && entry.startedAtMs != null) {
     return Math.abs(entry.startedAtMs - recordedStartMs) <= OWNER_START_SLOP_MS;
   }
-  if (recordedComm === null) return true;
-  const reported = basename(entry.comm).slice(0, COMM_MAX);
-  const expected = basename(recordedComm).slice(0, COMM_MAX);
-  return reported === expected || reported.startsWith(expected) || expected.startsWith(reported);
+  return null;
 }
 
 /**
@@ -257,9 +251,13 @@ function makePsProbe(rows: Record<string, unknown>[]): OwnerProbe {
   if (process.platform === 'win32') return () => null;
   const pids = [...new Set(rows.map((r) => Number(r.owner_pid)).filter((p) => Number.isFinite(p) && p > 0))];
   if (pids.length === 0) return () => null;
+  // The sweeping process itself rides along as a SENTINEL: it is definitionally alive, so a parsed
+  // table that lacks it means the ps output is untrustworthy (busybox/alpine ps also exits 1 for
+  // unsupported flags, with empty stdout) — UNKNOWN for every pid, never "everything is gone".
+  const sentinel = process.pid;
   let output: string | null;
   try {
-    output = execFileSync('ps', ['-p', pids.join(','), '-o', 'pid=,lstart=,comm='], {
+    output = execFileSync('ps', ['-p', [...new Set([sentinel, ...pids])].join(','), '-o', 'pid=,lstart=,comm='], {
       encoding: 'utf8',
       env: { ...process.env, LANG: 'C', LC_ALL: 'C' },
     });
@@ -269,11 +267,12 @@ function makePsProbe(rows: Record<string, unknown>[]): OwnerProbe {
   }
   if (output === null) return () => null;
   const table = parsePsTable(output);
-  return (pid, comm, startedAtMs) => ownerVerdict(table.get(pid), comm, startedAtMs);
+  if (!table.has(sentinel)) return () => null;
+  return (pid, startedAtMs) => ownerVerdict(table.get(pid), startedAtMs);
 }
 
 /** Injectable owner-liveness check: true = same process instance, false = gone, null = unknown. */
-export type OwnerProbe = (pid: number, comm: string | null, startedAtMs: number | null) => boolean | null;
+export type OwnerProbe = (pid: number, startedAtMs: number | null) => boolean | null;
 
 export class Ledger {
   private db: DatabaseSync;
@@ -476,7 +475,7 @@ export class Ledger {
       const ownerComm = row.owner_comm == null ? null : String(row.owner_comm);
       const ownerStartedAt = row.owner_started_at == null ? null : Number(row.owner_started_at);
       // true = same process instance still running · false = provably gone · null = unknown
-      const alive = ownerPid == null ? null : probe(ownerPid, ownerComm, ownerStartedAt);
+      const alive = ownerPid == null ? null : probe(ownerPid, ownerStartedAt);
       let reason: string | null = null;
       if (alive === false) {
         reason = `owner process ${ownerPid} (${ownerComm ?? '?'}) is gone`;
