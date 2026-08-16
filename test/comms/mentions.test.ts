@@ -185,4 +185,97 @@ describe('mentions (temp db)', () => {
     expect(Object.keys(events[0].event.meta).every((key) => /^[a-z0-9_]+$/.test(key))).toBe(true);
     expect(log.deliveries({ messageId: mentioned.messageId }).at(-1)).toMatchObject({ to: 'R', outcome: 'sent', code: 'channel-written' });
   });
+
+  // ---- review-round additions (PR #21, round 1) ----
+
+  it('preserves NON-alphabetical mention insertion order (group_concat pinned by rowid, not the PK index)', async () => {
+    log.ensureDefaultRooms();
+    log.register({ address: 'S' }); log.register({ address: 'R' }); log.register({ address: 'B' });
+    const res = accepted(await newBroker().post({ from: 'K', to: '#fleet', body: 'x', mentions: ['S', 'R', 'B'] }));
+    expect(log.get(res.messageId)?.mentions).toEqual(['S', 'R', 'B']);
+    expect(log.transcript({ room: '#fleet' }).at(-1)?.mentions).toEqual(['S', 'R', 'B']);
+  });
+
+  it('drops the sender and dedupes in a MIXED mention list, delivering exactly once', async () => {
+    log.ensureDefaultRooms();
+    log.register({ address: 'R' });
+    const res = accepted(await newBroker().post({ from: 'K', to: '#fleet', body: 'x', mentions: ['K', 'R', 'K'] }));
+    expect(log.get(res.messageId)?.mentions).toEqual(['R']);
+    const rows = log.deliveries({ messageId: res.messageId });
+    expect(rows.filter((d) => d.to === 'R')).toHaveLength(1);
+    expect(rows.filter((d) => d.to === 'K')).toHaveLength(0);
+  });
+
+  it('pins the full mentions summary string including held and failed clauses', async () => {
+    log.ensureDefaultRooms();
+    log.register({ address: 'R' }); log.register({ address: 'S' }); log.register({ address: 'B' });
+    log.registerSession({ address: 'S' }); // S looks live → transport is consulted → we fail it
+    state.states.set('B', 'permission-gate');
+    const failing: Transport = { name: 'fake', deliver: async (d) => d.target === 'S' ? { ok: false, code: 'no-session' } : { ok: true, code: 'injected' } };
+    const res = accepted(await newBroker({ transport: failing }).post({ from: 'K', to: '#fleet', body: 'x', mentions: ['R', 'S', 'B'] }));
+    expect(res.reason).toBe('mentions: 1/3 pushed, 0/3 to inbox, 1/3 held, 1/3 failed'); // R pushed (fake transport accepts), S failed, B held
+  });
+
+  it('preflights each mention against the (from → mentioned) budget and refuses rate-limited', async () => {
+    log.ensureDefaultRooms();
+    log.register({ address: 'R' });
+    const broker = newBroker({ rateLimit: { max: 1, burst: 1 } });
+    expect(await broker.post({ from: 'K', to: 'R', body: 'dm exhausts the pair' })).toMatchObject({ outcome: 'sent' });
+    const refused = await broker.post({ from: 'K', to: '#fleet', body: 'x', mentions: ['R'] });
+    expect(refused).toMatchObject({ outcome: 'refused', code: 'rate-limited' });
+    if (refused.outcome === 'refused') expect(refused.retryAfterMs).toBeGreaterThan(0);
+    expect(log.deliveries().at(-1)).toMatchObject({ messageId: null, outcome: 'refused', code: 'rate-limited' });
+    expect(await broker.post({ from: 'K', to: '#fleet', body: 'no mention rides fine' })).toMatchObject({ outcome: 'logged' });
+  });
+
+  it('releases a freshly-taken floor when mention validation refuses the post', async () => {
+    log.ensureDefaultRooms();
+    const broker = newBroker();
+    const refused = await broker.post({ from: 'K', to: '#fleet', body: 'x', holdFloor: true, mentions: ['ghost'] });
+    expect(refused).toMatchObject({ outcome: 'refused', code: 'unknown-mention' });
+    expect(log.floor('#fleet')).toBeNull(); // no message → no lease left behind
+    expect(await broker.post({ from: 'R', to: '#fleet', body: 'floor is free' })).toMatchObject({ outcome: 'logged' });
+  });
+
+  it('a held room-mention restored after a broker restart keeps the inbox-not-failed contract', async () => {
+    log.ensureDefaultRooms();
+    log.mintChild('K');
+    state.states.set('K.1', 'permission-gate');
+    const before = newBroker({ transport: channelTransport(log), holdMaxMs: 1000 });
+    const held = accepted(await before.post({ from: 'K', to: '#fleet', body: 'ping the child', mentions: ['K.1'] }));
+    expect(held.reason).toContain('1/1 held');
+    const after = newBroker({ transport: channelTransport(log), holdMaxMs: 1000 });
+    expect(after.restoreHeld({ sender: 'K' })).toBe(1);
+    advance(1001);
+    expect(await after.pump()).toEqual({ released: 1, failed: 0, stillHeld: 0 });
+    expect(log.deliveries({ target: 'K.1' }).at(-1)).toMatchObject({ outcome: 'logged', code: 'inbox' }); // never failed/hold-timeout
+  });
+
+  it('a recipient with an open hold gets NOTHING from its pump until the hold resolves', async () => {
+    log.ensureDefaultRooms();
+    log.mintChild('K');
+    state.states.set('K.1', 'permission-gate');
+    const broker = newBroker({ transport: channelTransport(log) });
+    accepted(await broker.post({ from: 'K', to: '#fleet', body: 'gated mention', mentions: ['K.1'] }));
+    log.append({ from: 'R', to: 'K.1', body: 'dm during the gate' });
+    const emitted: number[] = [];
+    const pump = new InboundPump(log, 'K.1', (_e, r) => { emitted.push(r.id); }, { sinceId: 0 });
+    expect(await pump.tick()).toEqual({ emitted: 0, failed: 0 }); // gate contract holds even against the recipient's own pump
+    expect(emitted).toEqual([]);
+    state.states.set('K.1', 'idle');
+    expect(await broker.pump()).toMatchObject({ released: 1 });   // broker resolves the hold…
+    expect((await pump.tick()).emitted).toBeGreaterThan(0);       // …then the pump resumes in order
+    expect(emitted[0]).toBe(1);
+  });
+
+  it('the channel mention flag is explicit per recipient, never inferred from the room', async () => {
+    log.ensureDefaultRooms();
+    log.register({ address: 'R' });
+    const res = accepted(await newBroker().post({ from: 'K', to: '#fleet', body: 'x', mentions: ['R'] }));
+    const rec = log.get(res.messageId)!;
+    const { toChannelEvent } = await import('../../src/comms/bridge.js');
+    expect(toChannelEvent(rec, 'R').meta).toMatchObject({ mention: '1', room: 'fleet' });
+    expect(toChannelEvent(rec, 'S').meta.mention).toBeUndefined(); // not pinged → no flag, even for the same room post
+    expect(toChannelEvent(rec).meta.mention).toBeUndefined();      // no recipient → never inferred
+  });
 });

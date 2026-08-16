@@ -263,7 +263,7 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
       from: who, to: requireStr(a.to, 'to'), body: requireStr(a.body, 'body'), kind: str(a.kind) as MessageKind | undefined,
       requestedTier: (str(a.requested_tier) as Tier | undefined) ?? null, replyTo: num(a.reply_to) ?? null,
       issue: str(a.issue) ?? null, thread: str(a.thread) ?? null, meta: { transport: 'heddle-comms' },
-      mentions: Array.isArray(a.mentions) ? a.mentions.map(String) : null,
+      mentions: validMentionsArg(a.mentions),
       holdFloor: a.hold_floor === true, releaseFloor: a.release_floor === true,
     });
     if (res.outcome === 'refused') return res;
@@ -463,6 +463,13 @@ function compact(r: ReturnType<CommsLog['get']>) {
   return { id: r.id, ts: r.ts, from: r.from, to: r.to, tier: r.tier, kind: r.kind, body: r.body, replyTo: r.replyTo, thread: r.thread, issue: r.issue };
 }
 function str(v: unknown): string | undefined { return typeof v === 'string' && v.length ? v : undefined; }
+function validMentionsArg(v: unknown): string[] | null {
+  if (v === undefined || v === null) return null;
+  if (!Array.isArray(v) || v.some((m) => typeof m !== 'string')) {
+    throw new Error('mentions must be an array of address strings'); // fail fast — never coerce or silently drop
+  }
+  return v as string[];
+}
 function requireStr(v: unknown, name: string): string {
   if (typeof v !== 'string' || v.length === 0) throw new Error(`${name} must be a non-empty string`);
   return v;

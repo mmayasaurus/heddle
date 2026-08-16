@@ -478,12 +478,20 @@ mention; the result reason reads `mentions: N/M pushed, K/M to inbox`.
 - Closed rooms require the mentioned address to be a member (`mention-not-member` — add them
   first).
 - The operator is always mentionable.
-- Each mention charges the `(from → mentioned)` pair rate-limit budget.
+- Each mention is preflighted against — and charges — the `(from → mentioned)` pair rate-limit
+  budget (`rate-limited` with `retryAfterMs` when a mentioned pair is exhausted: drop the mention
+  or wait); a `hold_floor` post refused over its mentions releases the floor it just took.
 
 Mentioned room posts appear in the mentioned member's INBOX (`check_inbox`, the `{inbox}`
-transcript scope, and therefore the channel pump) — the channel event carries `room` and
-`mention="1"` meta; the `message_mentions` table (append-only, `(message_id, address)` PK,
-indexed by address) is the queryable surface for dashboards.
+transcript scope, and therefore the channel pump) — the channel event carries `room` meta and an
+EXPLICIT per-recipient `mention="1"` flag (set iff the recipient is in the post's mentions, never
+inferred); mention order is insertion order (pinned in SQL). The `message_mentions` table
+(append-only, `(message_id, address)` PK, indexed by address) is the queryable surface for
+dashboards. A held mention keeps the guaranteed-delivery contract across broker restarts (inbox
+at deadline, never failed), and a recipient with an OPEN HOLD receives nothing from its channel
+pump until the hold resolves — the permission-gate contract binds the recipient's own pump too.
+Schema note: mentions are schema **v2** — a v1 database migrates in place on open; older binaries
+refuse a v2 file loudly instead of silently missing targeted posts.
 
 - **Operator send**: the `operator` identity binds ONLY through a configuration-level credential
   — `heddle-comms --init-operator-token` writes `~/.heddle/operator.token` (0600, once; the value

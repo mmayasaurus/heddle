@@ -33,14 +33,25 @@ import { isSealed } from './seal.js';
 
 export const DEFAULT_COMMS_PATH = join(homedir(), '.heddle', 'comms.db');
 
-/** Bump when the schema changes shape; recorded as PRAGMA user_version. */
-export const COMMS_SCHEMA_VERSION = 1;
+/**
+ * Bump when the schema changes shape; recorded as PRAGMA user_version.
+ * v2 (HED-94): message_mentions + mention-aware inbox scope — older binaries must refuse a v2 db
+ * loudly rather than silently miss targeted room posts.
+ */
+export const COMMS_SCHEMA_VERSION = 2;
+
+/** Versions this binary can migrate FROM. Each migration is idempotent-schema + stamp. */
+const MIGRATABLE_VERSIONS = new Set([1]);
 
 const sqlList = (xs: readonly string[]) => xs.map((x) => `'${x.replace(/'/g, "''")}'`).join(', ');
 
-/** A message row with its mentions folded in (comma-joined; addresses cannot contain commas). */
+/**
+ * A message row with its mentions folded in (comma-joined; addresses cannot contain commas).
+ * The inner ORDER BY rowid pins insertion order — without it SQLite satisfies the subquery from
+ * the (message_id, address) PK index and returns mentions address-sorted.
+ */
 const SELECT_WITH_MENTIONS =
-  'SELECT m.*, (SELECT group_concat(address) FROM message_mentions mm WHERE mm.message_id = m.id) AS mentions FROM messages m';
+  'SELECT m.*, (SELECT group_concat(address) FROM (SELECT address FROM message_mentions mm WHERE mm.message_id = m.id ORDER BY mm.rowid)) AS mentions FROM messages m';
 
 export const MAX_MENTIONS = 16;
 
@@ -283,11 +294,11 @@ export class CommsLog {
       if (found > COMMS_SCHEMA_VERSION) {
         throw new Error(`comms db ${path} is schema v${found}; this heddle understands v${COMMS_SCHEMA_VERSION} — upgrade heddle`);
       }
-      if (found !== 0 && found !== COMMS_SCHEMA_VERSION) {
+      if (found !== 0 && found !== COMMS_SCHEMA_VERSION && !MIGRATABLE_VERSIONS.has(found)) {
         throw new Error(`comms db ${path} is schema v${found}; no migration to v${COMMS_SCHEMA_VERSION} exists`);
       }
-      db.exec(SCHEMA); // idempotent (IF NOT EXISTS) — creates a fresh db, no-op on a current one
-      if (found === 0) db.exec(`PRAGMA user_version = ${COMMS_SCHEMA_VERSION};`);
+      db.exec(SCHEMA); // idempotent (IF NOT EXISTS) — creates a fresh db, adds v2 tables to a v1 one, no-op on current
+      if (found !== COMMS_SCHEMA_VERSION) db.exec(`PRAGMA user_version = ${COMMS_SCHEMA_VERSION};`);
     } catch (err) {
       db.close();
       throw err;

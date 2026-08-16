@@ -403,9 +403,12 @@ export class Broker {
     if (kind === 'room') {
       const gate = this.checkRoom(req.from, to, req.holdFloor === true);
       if ('code' in gate) return this.refuse(req.from, to, gate.code, gate.reason, undefined, gate.retryAfterMs);
-      const bad = this.checkMentions(to, mentions);
-      if (bad) return this.refuse(req.from, to, bad.code, bad.reason);
       floorTakenHere = gate.acquired;
+      const bad = this.checkMentions(req.from, to, mentions);
+      if (bad) {
+        if (floorTakenHere) this.log.releaseFloor(to, req.from); // no message → no floor
+        return this.refuse(req.from, to, bad.code, bad.reason, undefined, bad.retryAfterMs);
+      }
     }
     const pairKey = `${req.from}->${to}`;
 
@@ -443,15 +446,22 @@ export class Broker {
    * address, and — for a closed room — a member (pinging someone into a room they cannot read is
    * broken; add them first). The operator may always be mentioned.
    */
-  private checkMentions(room: string, mentions: string[]): { code: RefusalCode; reason: string } | null {
+  private checkMentions(from: string, room: string, mentions: string[]): { code: RefusalCode; reason: string; retryAfterMs?: number } | null {
     if (!mentions.length) return null;
     const r = this.log.room(room)!; // the room gate ran first
     for (const m of mentions) {
       if (RESERVED_ADDRESSES.has(m)) return { code: 'unknown-mention', reason: `${JSON.stringify(m)} is a reserved bookkeeping address` };
-      if (m === 'operator') continue;
-      if (!this.log.participant(m)) return { code: 'unknown-mention', reason: `mention ${JSON.stringify(m)} is not a registered participant` };
-      if (!r.open && !this.log.member(room, m)) {
-        return { code: 'mention-not-member', reason: `${m} is not a member of ${room} — add them (join_room) before pinging them into it` };
+      if (m !== 'operator') {
+        if (!this.log.participant(m)) return { code: 'unknown-mention', reason: `mention ${JSON.stringify(m)} is not a registered participant` };
+        if (!r.open && !this.log.member(room, m)) {
+          return { code: 'mention-not-member', reason: `${m} is not a member of ${room} — add them (join_room) before pinging them into it` };
+        }
+      }
+      // A mention is a targeted delivery, so it must fit the (from → mentioned) budget like a DM
+      // would — otherwise mentioning is a way to out-deliver the per-recipient rate limit.
+      const retryAfterMs = this.overLimit(`${from}->${m}`);
+      if (retryAfterMs !== null) {
+        return { code: 'rate-limited', retryAfterMs, reason: `mention of ${m} exceeds the ${from}->${m} budget; retry in ${retryAfterMs} ms or drop the mention` };
       }
     }
     return null;
@@ -653,7 +663,8 @@ export class Broker {
       const heldAt = Date.parse(ev.ts);
       // The broadcast flag survives restarts: an @all hold restored from the log keeps its
       // inbox-not-failed contract (the record's target says what it was).
-      this.held.push({ record, envelope: renderEnvelope(record), target: ev.to, heldAt: Number.isFinite(heldAt) ? heldAt : this.now(), attempts: 1, broadcast: record.to === BROADCAST });
+      const guaranteed = record.to === BROADCAST || (record.to.startsWith('#') && record.mentions.includes(ev.to)); // @all recipient or room-mention: inbox at deadline, never failed
+      this.held.push({ record, envelope: renderEnvelope(record), target: ev.to, heldAt: Number.isFinite(heldAt) ? heldAt : this.now(), attempts: 1, broadcast: guaranteed });
       restored += 1;
     }
     return restored;
