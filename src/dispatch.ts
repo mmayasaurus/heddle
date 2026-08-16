@@ -571,8 +571,10 @@ export async function dispatch(
   // CLAUDE_CONFIG_DIR and the ledger account would be wrong; PR #12, five reviewers).
   if (fallback.provider === 'claude') {
     try {
+      // forFable on the RUNTIME fallback too: a claude/fable fallback must be picked by Fable
+      // headroom, not 5h (PR #24, codeant).
       ctx.claudeAccount = pickClaudeAccount(fbSnap.claude, req.accounts ?? readClaudeAccounts(),
-        { pin: req.accountPin, routeAwayAtPct: capAwarePolicy(table).routeAwayAtPct }) ?? null;
+        { pin: req.accountPin, routeAwayAtPct: capAwarePolicy(table).routeAwayAtPct, forFable: fallback.model === 'fable' }) ?? null;
       ctx.account = ctx.claudeAccount?.account.id ?? null;
     } catch (err) {
       // A pinned-but-unaddressable account is a caller error, but the primary's outcome is already
@@ -584,7 +586,11 @@ export async function dispatch(
     ctx.claudeAccount = null;
     ctx.account = fallback.provider === 'codex' && req.env?.CODEX_HOME ? basename(req.env.CODEX_HOME) : null;
   }
-  ctx.routeReason = `${plan.decision.routeReason}; ${target.provider}/${target.model} failed → class fallback`;
+  // The account pick's REASON rides along too (the plan path already does this): without it a
+  // runtime-fallback row records which account ran but never why it was chosen — the fable-headroom
+  // / 5h-headroom evidence the scoreboard is built on (PR #24, found by the dispatched test worker).
+  ctx.routeReason = `${plan.decision.routeReason}; ${target.provider}/${target.model} failed → class fallback`
+    + (ctx.claudeAccount ? `; ${ctx.claudeAccount.reason}` : '');
   return runTarget(fallback, req, ctx, route, `${route.provider}/${route.model}`);
 }
 
@@ -695,10 +701,19 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
   // Cap-aware routing (HED-67): may swap target→fallback, or refuse a metered pool. Explicit routes
   // are never routed away (naming it is the choice) but the refusals still apply.
   const caps = req.caps ?? readProviderCaps();
+  // Memoized registry read: at most one accounts.json read per plan, and none at all for routes
+  // that never consult it (PR #24 — the eager read hit every codex/cursor/gemini dispatch).
+  let claudeAccountsCache: ClaudeAccount[] | undefined;
+  const claudeAccounts = (): ClaudeAccount[] => (claudeAccountsCache ??= req.accounts ?? readClaudeAccounts());
   // A non-dispatchable class is refused regardless, so no cap decision is made for it.
   const decision: RouteDecision = notDispatchable
     ? { target, fallback, routedAwayForCap: false, routeReason: 'not-dispatchable', checks: ['class is dispatchable: false — refused before any route'] }
-    : decideRoute(table, target, fallback, caps, { explicit: origin !== 'class' });
+    : decideRoute(table, target, fallback, caps, {
+        explicit: origin !== 'class', accountPin: req.accountPin,
+        // Memoized thunk: accounts.json is read AT MOST once per plan, and never for a route that
+        // does not consult it (codex/cursor/gemini plans do zero disk IO here — PR #24).
+        claudeAccounts: () => claudeAccounts(),
+      });
   target = decision.target;
   fallback = decision.fallback;
   if (reviewerPick) decision.routeReason = `${decision.routeReason}; reviewer ${reviewerPick.reason}`;
@@ -739,10 +754,10 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
   let accountPick: AccountPick | null | undefined;
   if (target.provider === 'codex' && req.env?.CODEX_HOME) account = basename(req.env.CODEX_HOME);
   if (target.provider === 'claude') {
-    const accounts = req.accounts ?? readClaudeAccounts();
+    const accounts = claudeAccounts();
     accountAdvice = adviseClaudeAccount(caps.claude, accounts);
     if (!req.inSession && !notDispatchable) {
-      accountPick = pickClaudeAccount(caps.claude, accounts, { pin: req.accountPin, routeAwayAtPct: capAwarePolicy(table).routeAwayAtPct });
+      accountPick = pickClaudeAccount(caps.claude, accounts, { pin: req.accountPin, routeAwayAtPct: capAwarePolicy(table).routeAwayAtPct, forFable: target.model === 'fable' });
       account = accountPick?.account.id ?? null;
       if (accountPick) decision.routeReason = `${decision.routeReason}; ${accountPick.reason}`;
     } else {

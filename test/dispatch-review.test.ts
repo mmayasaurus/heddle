@@ -5,7 +5,6 @@ import { describe, expect, it } from 'vitest';
 import { dispatch } from '../src/dispatch.js';
 import { CodexAdapter } from '../src/adapters/codex.js';
 import { ClaudeAdapter } from '../src/adapters/claude.js';
-import { Ledger } from '../src/ledger.js';
 import type { CapsByProvider } from '../src/usage.js';
 import type { WorkerAdapter } from '../src/types.js';
 import { fakeAdapter, IDENTITIES, useTempResources } from './helpers.js';
@@ -21,9 +20,12 @@ function commitTrackedProbe(cwd: string): void {
   execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '-m', 'track probe'], { cwd });
 }
 
+// The copy flips auto_assess off for ALL classes (replaceAll): any class left true spawns a REAL
+// classifier subprocess mid-test and times the suite out (bit us when escalate-judgment landed
+// ahead of adversarial-review in the yaml and a single replace() flipped the wrong class).
 function reviewRouting(tempDir: () => string): () => void {
   const path = join(tempDir(), 'routing.yaml');
-  writeFileSync(path, readFileSync(join(process.cwd(), 'routing', 'routing.v0.yaml'), 'utf8').replace('auto_assess: true', 'auto_assess: false'));
+  writeFileSync(path, readFileSync(join(process.cwd(), 'routing', 'routing.v0.yaml'), 'utf8').replaceAll('auto_assess: true', 'auto_assess: false'));
   const previous = process.env.HEDDLE_ROUTING;
   process.env.HEDDLE_ROUTING = path;
   return () => { if (previous === undefined) delete process.env.HEDDLE_ROUTING; else process.env.HEDDLE_ROUTING = previous; };

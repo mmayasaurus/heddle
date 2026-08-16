@@ -18,6 +18,16 @@ export default defineConfig({
     // suffix is ignored and which hides every process warning (verified 2026-08-15, Node 22.23:
     // a DeprecationWarning stays visible under --disable-warning, vanishes under --no-warnings).
     execArgv: ['--disable-warning=ExperimentalWarning'],
+    // Vitest's 5s default is wrong for THIS suite: most dispatch/review/materialization tests spawn
+    // real subprocesses (git, and fake adapters through the full pipeline) — a single mandate
+    // snapshot alone is ~6 git spawns — and vitest runs test FILES in parallel with no worker cap.
+    // On a developer box already running several agent sessions (load 40+ observed 2026-08-16) the
+    // slow files timed out NONDETERMINISTICALLY: the failing file moved run to run, each passed in
+    // isolation, and CI stayed green because its runner is quiet. Diagnosed jointly with Agent V
+    // (HED-98) from saved output — "Test timed out in 5000ms", never an assertion diff. 30s is the
+    // floor for a subprocess test here; the two snapshot-heaviest keep explicit 45s budgets.
+    testTimeout: 30_000,
+    hookTimeout: 30_000,
     // Every dispatch/ledger test must point Ledger at a temp path — never ~/.heddle/ledger.db.
     // (Enforced by convention + the ledger tests themselves; see test/ledger.test.ts.)
   },
