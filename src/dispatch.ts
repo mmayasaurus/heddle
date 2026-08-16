@@ -278,7 +278,7 @@ async function runTarget(
       extraFlags,
       timeoutMs: req.timeoutMs,
       resume: req.resume,
-      env: { ...(req.env ?? {}), ...stamps },
+      env: { ...req.env, ...stamps },
       capabilities: caps.granted,
     });
   } catch (err) {
