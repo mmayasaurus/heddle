@@ -68,4 +68,41 @@ describe('Ledger in-session reports (temp db)', () => {
       dispatches: 1, succeeded: 0, refusals: 0,
     });
   });
+
+  it('rejects invalid report numbers without changing the refusal or provider usage', () => {
+    const id = ledger.refuse(dispatchRecord(), 'claude-in-session', 'run this yourself', 'in-session');
+
+    expect(() => ledger.reportInSession(id, { ok: true, inputTokens: -1 })).toThrow(TypeError);
+    expect(() => ledger.reportInSession(id, { ok: true, outputTokens: 1.5 })).toThrow(TypeError);
+    expect(() => ledger.reportInSession(1.5, { ok: true })).toThrow(TypeError);
+
+    expect(ledger.get(id)).toMatchObject({ refusal: 'claude-in-session', ok: 0 });
+    expect(ledger.usageByProvider().find((row) => row.provider === 'claude')).toMatchObject({
+      dispatches: 0, refusals: 1, input_tokens: 0, output_tokens: 0,
+    });
+  });
+
+  it('clears a supplied error from a successful in-session report', () => {
+    const id = ledger.refuse(dispatchRecord(), 'claude-in-session', 'run this yourself', 'in-session');
+
+    expect(ledger.reportInSession(id, { ok: true, error: 'stale failure' })).toBe(true);
+
+    expect(ledger.get(id)).toMatchObject({ ok: 1, error: null, refusal: null });
+  });
+
+  it('only lets the owning orchestrator report an in-session handoff', () => {
+    const id = ledger.refuse({ ...dispatchRecord(), orchestrator: 'owner' }, 'claude-in-session', 'run this yourself', 'in-session');
+
+    expect(ledger.reportInSession(id, { ok: true }, 'other')).toBe(false);
+    expect(ledger.get(id)).toMatchObject({ refusal: 'claude-in-session', ok: 0 });
+    expect(ledger.reportInSession(id, { ok: true }, 'owner')).toBe(true);
+    expect(ledger.get(id)).toMatchObject({ refusal: null, ok: 1 });
+  });
+
+  it('allows an administrative in-session report without an orchestrator argument', () => {
+    const id = ledger.refuse({ ...dispatchRecord(), orchestrator: 'owner' }, 'claude-in-session', 'run this yourself', 'in-session');
+
+    expect(ledger.reportInSession(id, { ok: true })).toBe(true);
+    expect(ledger.get(id)).toMatchObject({ refusal: null, ok: 1 });
+  });
 });

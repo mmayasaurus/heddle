@@ -98,6 +98,7 @@ CREATE TABLE IF NOT EXISTS dispatches (
   route_reason TEXT,
   account TEXT,
   identity_source TEXT,
+  execution_mode TEXT,
   started_at TEXT NOT NULL,
   finished_at TEXT
 );
@@ -300,19 +301,39 @@ export class Ledger {
    * Confirm an orchestrator-owned in-session handoff actually ran. The handoff begins as a finished
    * refusal so it cannot occupy a worker slot; clearing that refusal only after this guarded update
    * makes the existing usage query count the reported outcome without creating an in-flight row.
+   * This mirrors dispatches_lineage_immutable: who dispatched what is a fact, and confirming another
+   * orchestrator's handoff corrupts attribution just as surely as rewriting its orchestrator column.
    */
   reportInSession(id: number, outcome: {
     ok: boolean; error?: string; durationMs?: number;
     inputTokens?: number; cachedInputTokens?: number; outputTokens?: number; reasoningTokens?: number;
-  }): boolean {
-    const info = this.db.prepare(`
+  }, orchestrator?: string): boolean {
+    if (!Number.isInteger(id) || id <= 0) {
+      throw new TypeError(`id must be a positive integer (got ${id})`);
+    }
+    for (const [field, value] of Object.entries({
+      durationMs: outcome.durationMs,
+      inputTokens: outcome.inputTokens,
+      cachedInputTokens: outcome.cachedInputTokens,
+      outputTokens: outcome.outputTokens,
+      reasoningTokens: outcome.reasoningTokens,
+    })) {
+      if (value !== undefined && (!Number.isInteger(value) || value < 0)) {
+        // false means no matching row, a normal outcome callers act on; malformed values are caller bugs.
+        throw new TypeError(`${field} must be a non-negative integer (got ${value})`);
+      }
+    }
+    const sql = `
       UPDATE dispatches SET refusal = NULL, ok = ?, error = ?, duration_ms = ?, input_tokens = ?,
         cached_input_tokens = ?, output_tokens = ?, reasoning_tokens = ?, finished_at = ?
-      WHERE id = ? AND execution_mode = 'in-session' AND refusal IS NOT NULL
-    `).run(
-      outcome.ok ? 1 : 0, outcome.error ?? null, outcome.durationMs ?? null,
+      WHERE id = ? AND execution_mode = 'in-session' AND refusal IS NOT NULL${orchestrator === undefined ? '' : ' AND orchestrator = ?'}
+    `;
+    // A failed handoff without an observed error stays null: do not fabricate failure text nobody observed.
+    const info = this.db.prepare(sql).run(
+      outcome.ok ? 1 : 0, outcome.ok ? null : outcome.error ?? null, outcome.durationMs ?? null,
       outcome.inputTokens ?? null, outcome.cachedInputTokens ?? null, outcome.outputTokens ?? null,
       outcome.reasoningTokens ?? null, new Date().toISOString(), id,
+      ...(orchestrator === undefined ? [] : [orchestrator]),
     );
     return Number(info.changes) > 0;
   }
