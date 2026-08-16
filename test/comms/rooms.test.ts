@@ -199,6 +199,17 @@ describe('rooms (temp db)', () => {
     advance(1001);
     expect(await after.pump()).toEqual({ released: 1, failed: 0, stillHeld: 0 });
     expect(log.deliveries({ target: 'K.1' }).at(-1)).toMatchObject({ outcome: 'logged', code: 'inbox' }); // never failed/hold-timeout
+    // Only logged/inbox resolves a hold — a logged event with any other code must not (forward-safety).
+    log.mintChild('K');
+    const state2 = { states: new Map<string, 'idle' | 'permission-gate'>(), state(a: string) { return this.states.get(a) ?? 'idle'; } };
+    state2.states.set('K.2', 'permission-gate');
+    const b2 = new Broker({ log, transport: channelTransport(log), targetState: state2 as never, now, holdMaxMs: 60_000 });
+    const held2 = await b2.post({ from: 'K', to: 'K.2', body: 'held direct' });
+    expect(held2).toMatchObject({ outcome: 'held' });
+    if (held2.outcome !== 'refused') {
+      log.recordDelivery({ messageId: held2.messageId, from: 'K', to: 'K.2', outcome: 'logged', code: 'some-future-code', transport: 'channel' });
+      expect(log.openHolds().map((d) => d.messageId)).toContain(held2.messageId); // still owed
+    }
   });
 
   it('broadcasts to live sessions and durable inboxes with ChannelTransport', async () => {
