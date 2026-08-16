@@ -164,6 +164,13 @@ export function decideRoute(
     checks.push(`fallback ${fallback.provider} ${fb.label} also over — running the primary (fallback kept for failure retry: the cap is soft)`);
     return { target, fallback, routedAwayForCap: false, routeReason: `cap:both-over ${target.provider} ${primary.label}, ${fallback.provider} ${fb.label} → ran primary`, checks };
   }
+  // DELIBERATE (raised by several reviewers): an unknown fallback does NOT keep us on the primary.
+  // The primary is KNOWN to be at/over the route-away threshold; "unknown" is absence of data, not
+  // a bad signal — and the "unknown never refuses" rule above already guarantees the fallback can't
+  // hard-refuse on stale data. Worst case it fails and the failure path retries/refuses (with the
+  // hard guards re-checked). The live case that set this: claude fresh at 94% while the codex
+  // mirror was stale — staying on claude would have burned the last 6% of a known-nearly-exhausted
+  // pool to honor missing data. route_reason/checks say "caps unknown" so the ledger shows it.
   checks.push(`ROUTE AWAY → ${fallback.provider}/${fallback.model}` + (fb ? ` (${fallback.provider} ${fb.label})` : ` (${fallback.provider} caps unknown, ${src(fallback.provider)})`));
   return {
     target: fallback, fallback: undefined, routedAwayForCap: true,
