@@ -127,9 +127,16 @@ export class ClaudeAdapter implements WorkerAdapter {
     // Read,Grep,Glob` "read-only" reviewer still had Serena's replace_content available.
     if (opts.mcpConfigPath) args.push('--mcp-config', opts.mcpConfigPath, '--strict-mcp-config');
     if (opts.readOnly) {
-      // HED-3 reviewers: only the read built-ins exist for the session — no Edit/Write/Bash at all
-      // (`--tools` restricts the built-in set; verified live: Write reported disabled, no file created).
-      args.push('--tools', 'Read', 'Grep', 'Glob', '--permission-mode', 'acceptEdits');
+      // HED-3 reviewers: only the read built-ins exist in the TOOL SET — no Edit/Write/Bash at all.
+      // `--tools` (set restriction) is the ONLY mechanism verified to hold (live, 2026-08-15,
+      // twice): a permission-layer allowlist is NOT a boundary — a probe with `--tools … Bash` +
+      // `--allowedTools Bash(git …)` still appended to a tracked file and created a new one,
+      // because the OPERATOR's global settings.json permission allows leak into workers (the same
+      // class of leak as the global MCP one; see docs/LANDMINES.md). Reviewers therefore cannot
+      // run git — a diff_base review gets the diff EMBEDDED in its prompt (src/dispatch.ts).
+      // A granted `browse` keeps WebFetch/WebSearch (set-level, so it actually holds); MCP tools
+      // are governed by the per-dispatch --strict-mcp-config file, not --tools.
+      args.push('--tools', 'Read', 'Grep', 'Glob', ...(caps.has('browse') ? ['WebFetch', 'WebSearch'] : []), '--permission-mode', 'acceptEdits');
     } else if (caps.has('exec-privileged')) {
       args.push('--dangerously-skip-permissions');
     } else {

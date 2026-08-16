@@ -345,6 +345,9 @@ export class Ledger {
     dispatchId: number; authorProvider: string | null; authorModel: string | null; authorDispatchId: number | null;
     reviewerProvider: string; reviewerModel: string;
   }): void {
+    if (r.authorDispatchId !== null && (!Number.isInteger(r.authorDispatchId) || r.authorDispatchId <= 0)) {
+      throw new Error(`review for #${r.dispatchId}: author_dispatch_id must be a positive integer (got ${r.authorDispatchId})`);
+    }
     // Upsert that never wipes mandate_ok / findings / notes / outcome_at (INSERT OR REPLACE would).
     this.db.prepare(`
       INSERT INTO reviews
@@ -368,6 +371,12 @@ export class Ledger {
     if (!Number.isInteger(o.findingsTotal) || !Number.isInteger(o.findingsAccepted) || o.findingsTotal < 0 ||
         o.findingsAccepted < 0 || o.findingsAccepted > o.findingsTotal) {
       throw new Error(`review outcome for #${dispatchId}: findings_accepted (${o.findingsAccepted}) must be 0..findings_total (${o.findingsTotal})`);
+    }
+    // Scoring an IN-FLIGHT review is always a mistake (the findings don't exist yet); re-scoring a
+    // finished one is a legitimate correction and stays allowed.
+    const dispatchRow = this.db.prepare('SELECT finished_at FROM dispatches WHERE id = ?').get(dispatchId) as { finished_at: string | null } | undefined;
+    if (dispatchRow && dispatchRow.finished_at === null) {
+      throw new Error(`review outcome for #${dispatchId}: the review dispatch is still in flight — score it after it finishes`);
     }
     const info = this.db.prepare(
       'UPDATE reviews SET findings_total = ?, findings_accepted = ?, notes = ?, outcome_at = ? WHERE dispatch_id = ?',

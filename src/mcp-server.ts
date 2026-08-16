@@ -200,10 +200,9 @@ server.tool(
   },
   async (a) => {
     try {
-      const ledger = new Ledger();
-      const ok = ledger.recordReviewOutcome(a.dispatch_id, { findingsTotal: a.findings_total, findingsAccepted: a.findings_accepted, notes: a.notes });
+      const ok = ledger().recordReviewOutcome(a.dispatch_id, { findingsTotal: a.findings_total, findingsAccepted: a.findings_accepted, notes: a.notes });
       if (!ok) return errorText(`no review row for dispatch #${a.dispatch_id} — was it dispatched with the adversarial-review class?`);
-      return text({ recorded: true, review: ledger.getReview(a.dispatch_id) });
+      return text({ recorded: true, review: ledger().getReview(a.dispatch_id) });
     } catch (err) { return errorText(`record_review_outcome failed: ${err instanceof Error ? err.message : String(err)}`); }
   },
 );
@@ -213,11 +212,10 @@ server.tool(
   'Adversarial-review scoreboard: per author→reviewer provider pair — reviews, scored reviews, findings, ' +
     'accepted findings, acceptance rate, mandate violations — plus the most recent reviews. Use it to pick ' +
     'the reviewer family that finds real problems for a given author family.',
-  { limit: z.number().optional().describe('Recent reviews to include (default 10).') },
+  { limit: z.number().int().min(1).max(100).optional().describe('Recent reviews to include (default 10, max 100).') },
   async (a) => {
     try {
-      const ledger = new Ledger();
-      return text({ pairs: ledger.reviewPairStats(), recent: ledger.recentReviews(a.limit ?? 10) });
+      return text({ pairs: ledger().reviewPairStats(), recent: ledger().recentReviews(a.limit ?? 10) });
     } catch (err) { return errorText(`review_stats failed: ${err instanceof Error ? err.message : String(err)}`); }
   },
 );

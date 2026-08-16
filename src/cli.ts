@@ -155,7 +155,6 @@ try {
       const summary = summarizePlan(plan) as any;
       out(json, summary, () =>
         `${plan.route.taskClass}` +
-        (summary.would_refuse_same_provider ? `\n  ✗ WOULD REFUSE (same-provider-review): ${summary.would_refuse_same_provider}` : '') +
         (summary.reviewer_pick ? `\n  reviewer: ${summary.reviewer_pick}` : '') +
         (summary.refusal ? `\n  ✗ WOULD REFUSE (${summary.refusal.code}): ${summary.refusal.reason}`
           : `\n  → ${summary.would_run}${summary.in_session ? '  [in-session: use your Agent tool]' : ''}` +

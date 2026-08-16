@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { appendFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, rmSync, writeFileSync, chmodSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { diffInstruction, pickReviewer, sameSnapshot, snapshotWorktree } from '../src/review.js';
@@ -82,6 +82,37 @@ describe('adversarial review helpers', () => {
 
     expect(sameSnapshot(clean, { git: true, hash: null, error: 'boom' })).toBe(false);
     expect(sameSnapshot({ git: true, hash: null }, snapshotWorktree(cwd))).toBeNull();
+  }, 15_000);
+
+  it('normalizes provider casing on BOTH sides and skips unusable pool entries with a reasoned error', () => {
+    const route = { taskClass: 'adversarial-review', provider: 'Cursor', model: 'cursor-grok-4.6-high',
+      reviewerPool: [{ provider: ' Cursor ', model: 'cursor-grok-4.6-high' }, { provider: 'Gemini', model: 'gemini-3.1-pro-high' }, { provider: 'codex', model: 'gpt-5.6-sol' }] } as any;
+    // YAML casing must not dodge the same-family guard: 'Cursor' route + 'cursor' author still matches,
+    // the cased pool entry is still recognized as the author's family, and the pick is normalized.
+    expect(pickReviewer(route, 'cursor')).toMatchObject({ provider: 'gemini', model: 'gemini-3.1-pro-high', reason: 'pool:2 (author is cursor)' });
+    // an unusable differing entry (excluded provider, unknown model) is skipped to the next one
+    expect(pickReviewer(route, 'cursor', (p) => (p === 'gemini' ? 'provider excluded by policy' : null)))
+      .toMatchObject({ provider: 'codex', model: 'gpt-5.6-sol', reason: 'pool:3 (author is cursor)' });
+    // no usable different entry → the error names what was skipped and why
+    expect(() => pickReviewer(route, 'cursor', () => 'provider excluded by policy')).toThrow(/skipped: gemini\/gemini-3.1-pro-high: provider excluded by policy/);
+  });
+
+  it('detects a bare git add and a mode-only chmod — index state and file modes are in the digest', () => {
+    const cwd = tempDir();
+    git(cwd, 'init', '-q');
+    writeFileSync(join(cwd, 'tracked.txt'), 'body');
+    git(cwd, 'add', 'tracked.txt');
+    commit(cwd, 'init');
+    writeFileSync(join(cwd, 'tracked.txt'), 'dirty');
+    const base = snapshotWorktree(cwd);
+    // staging the already-dirty file changes NO bytes and does not move HEAD — only the index
+    git(cwd, 'add', 'tracked.txt');
+    expect(sameSnapshot(base, snapshotWorktree(cwd))).toBe(false);
+    git(cwd, 'reset', '-q'); // back to the baseline index
+    expect(sameSnapshot(base, snapshotWorktree(cwd))).toBe(true);
+    // a chmod changes no bytes either — the mode is part of each file line
+    chmodSync(join(cwd, 'tracked.txt'), 0o755);
+    expect(sameSnapshot(base, snapshotWorktree(cwd))).toBe(false);
   }, 15_000);
 
   it('prepends an actionable diff instruction and leaves a blank line before the task', () => {

@@ -96,7 +96,8 @@ export function validateWorkerMcp(provider: string, serverNames: string[]): void
 /**
  * Claude headless workers take MCP servers from `--mcp-config <file>` (+ `--strict-mcp-config`), so
  * heddle writes a per-dispatch JSON in the OS temp dir — nothing touches the worktree — and removes it
- * afterwards. Returns null when no servers were requested.
+ * afterwards. ALWAYS returns a file — an empty {mcpServers:{}} when none were requested — because
+ * --strict-mcp-config must always be passed to hide the operator's global servers.
  */
 export function claudeMcpConfigFile(serverNames: string[]): { path: string; cleanup: () => void } {
   // An EMPTY config is deliberate: paired with --strict-mcp-config it hides the operator's global

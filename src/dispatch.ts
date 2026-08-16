@@ -10,7 +10,7 @@ import {
 import { materializeAgentsMd, readPack, withMandatoryPacks, composePacks } from './skillpacks.js';
 import { materializeWorkerMcp, validateWorkerMcp, codexMcpFlags, claudeMcpConfigFile } from './mcp.js';
 import { classifyEffort, assessResult, type ResultAssessment } from './classify.js';
-import { pickReviewer, snapshotWorktree, sameSnapshot, diffInstruction, normalizeProvider, type ReviewerPick } from './review.js';
+import { pickReviewer, snapshotWorktree, sameSnapshot, diffInstruction, embeddedDiff, normalizeProvider, type ReviewerPick } from './review.js';
 import { decideCapabilities, capabilityPolicy } from './capabilities.js';
 import { resolveIdentity, attributeDispatch, WORKER_ENV, type BoundIdentity } from './identity.js';
 import { readProviderCaps, type CapsByProvider } from './usage.js';
@@ -234,7 +234,11 @@ async function runTarget(
 ): Promise<DispatchOutcome> {
   // Caller's explicit list REPLACES the table default; the mandatory governance pack(s) are unioned
   // into whichever applies (see skillpacks.ts) — the ledger records the result, so it is auditable.
-  const skills = withMandatoryPacks(req.skills ?? target.skills ?? []);
+  // Review classes: the class packs carry the find-only MANDATE — an explicit skills list may add
+  // packs but can never drop them (same posture as the worker-role union).
+  const skills = route.reviewerPool
+    ? withMandatoryPacks([...new Set([...(target.skills ?? []), ...(req.skills ?? [])])])
+    : withMandatoryPacks(req.skills ?? target.skills ?? []);
   const mcp = req.mcp ?? target.mcp ?? [];
 
   // Capabilities are decided per TARGET provider (a fallback may enforce a different set).
@@ -273,8 +277,6 @@ async function runTarget(
       authorDispatchId: ctx.review.authorDispatchId, reviewerProvider: target.provider, reviewerModel: target.model,
     });
   }
-  const before = route.readOnly ? snapshotWorktree(req.cwd) : null;
-
   // Codex needs its attached MCP servers' tools pre-approved per-invocation, or headless calls
   // cancel. This makes heddle self-contained — it works even if the user's global codex config
   // hasn't pre-approved the server.
@@ -305,6 +307,8 @@ async function runTarget(
   const acct = isClaude ? ctx.claudeAccount ?? null : null;
   let restoreSkills: () => void = () => {};
   let restoreMcp: () => void = () => {};
+  let before: ReturnType<typeof snapshotWorktree> | null = null;
+  let after: ReturnType<typeof snapshotWorktree> | null = null;
   let result: WorkerResult;
   try {
     let systemPromptAppend: string | undefined;
@@ -323,7 +327,16 @@ async function runTarget(
       restoreSkills = materializeAgentsMd(req.cwd, skills);
       restoreMcp = materializeWorkerMcp(req.cwd, target.provider, mcp);
     }
-    result = await adapter.dispatch(req.prompt, {
+    // The mandate baseline is taken AFTER materialization and compared BEFORE restore (in finally):
+    // injected files are part of the baseline, so a reviewer that edits AGENTS.md/.mcp.json is
+    // caught — with the old before-materialize/after-restore ordering, restore MASKED those edits.
+    before = route.readOnly ? snapshotWorktree(req.cwd) : null;
+    // diff_base delivery is PER TARGET: a claude read-only reviewer has no Bash (its --tools set),
+    // so it gets the diff embedded; every other reviewer is told to run git itself.
+    const prompt = req.diffBase
+      ? (isClaude && route.readOnly ? embeddedDiff(req.cwd, req.diffBase) : diffInstruction(req.diffBase)) + req.prompt
+      : req.prompt;
+    result = await adapter.dispatch(prompt, {
       model: target.model,
       cwd: req.cwd,
       effort: req.effort ?? target.effort,
@@ -341,6 +354,7 @@ async function runTarget(
   } catch (err) {
     result = { ok: false, output: '', exitCode: null, error: err instanceof Error ? err.message : String(err) };
   } finally {
+    if (before) after = snapshotWorktree(req.cwd); // BEFORE restore — see the baseline comment above
     // Restore is best-effort and must never keep the row from being finished (a restore failure is
     // reported in the outcome error instead).
     for (const restore of [restoreMcp, restoreSkills]) {
@@ -357,8 +371,8 @@ async function runTarget(
   // HED-3 read-only mandate: the worktree must be exactly as it was. A violation is recorded and
   // surfaced — the reviewer's findings are still returned and nothing is reverted (operator's call).
   let mandateOk: boolean | null = null;
-  if (before) {
-    mandateOk = sameSnapshot(before, snapshotWorktree(req.cwd));
+  if (before && after) {
+    mandateOk = sameSnapshot(before, after);
     if (ctx.review) ctx.ledger.setReviewMandate(ledgerId, mandateOk);
     if (mandateOk === false) {
       // A reviewer that changed the worktree did NOT do the job it was given: the dispatch is not ok
@@ -439,13 +453,14 @@ export async function dispatch(
   ctx.account = plan.account;
   ctx.claudeAccount = plan.accountPick;
   const { route, target, fallback, origin, skillsForRefusal } = plan;
-  if (route.reviewerPool || route.readOnly) {
+  // Review rows (and the pair scoreboard) are for classes WITH reviewer semantics; a generic
+  // read_only class still gets the mandate snapshot below, just no reviews row.
+  if (route.reviewerPool) {
     ctx.review = {
       authorProvider: normalizeProvider(req.authorProvider) ?? null, authorModel: req.authorModel ?? null,
       authorDispatchId: req.authorDispatchId ?? null, reviewerPick: plan.reviewerPick?.reason,
     };
   }
-  if (req.diffBase) req = { ...req, prompt: diffInstruction(req.diffBase) + req.prompt };
 
   // ---- Non-dispatchable class (`orchestration`) — refused on EVERY path ------------------------
   // A named subprocess route does not turn the orchestrator's own work into a worker task.
@@ -498,7 +513,7 @@ export async function dispatch(
   // for a review class the fallback must still not be the author's family.
   if (primary.refusal?.code === 'capability-denied' && primary.capabilityRefusalKind === 'unenforceable'
       && !req.noFallback && fallback
-      && !(route.reviewerPool && fallback.provider === normalizeProvider(req.authorProvider))) {
+      && !(route.reviewerPool && normalizeProvider(fallback.provider) === normalizeProvider(req.authorProvider))) {
     const fbCaps = decideCapabilities(fallback.provider, req.capabilities, req.optIn === true, capabilityPolicy(table));
     if (!fbCaps.refusal && providerExecution(table, fallback.provider) !== 'in-session-subagent') {
       ctx.routeReason = `${plan.decision.routeReason}; capability-fit fallback: ${target.provider} cannot enforce [${(req.capabilities ?? []).join(', ')}] → ${fallback.provider}/${fallback.model}`;
@@ -512,7 +527,7 @@ export async function dispatch(
   // Primary failed and the table names a fallback — try it, recording the origin so the ledger
   // shows which routes actually hold up in practice. A fallback that is itself in-session (custom
   // tables) gets the same structured refusal instead of a throw.
-  if (route.reviewerPool && fallback.provider === normalizeProvider(req.authorProvider)) return primary; // never review with the author's family
+  if (route.reviewerPool && normalizeProvider(fallback.provider) === normalizeProvider(req.authorProvider)) return primary; // never review with the author's family
   const fbExecution = fallback.provider === 'claude'
     ? (req.inSession ? 'in-session-subagent' : 'headless')
     : providerExecution(table, fallback.provider);
@@ -638,7 +653,15 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
       target = route;
       fallback = route.fallback;
       // HED-3: when the class primary is the author's provider, take the first differing pool entry.
-      const pick = route.reviewerPool ? pickReviewer(route, author) : null;
+      const pick = route.reviewerPool
+        ? pickReviewer(route, author, (provider, model) => {
+            const cfg = table.providers[provider];
+            if (!cfg) return 'unknown provider';
+            if (cfg.status === 'excluded') return 'provider excluded by policy';
+            if (Array.isArray(cfg.models) && cfg.models.length && !cfg.models.includes(model)) return 'model not in provider list';
+            return null;
+          })
+        : null;
       if (pick) {
         reviewerPick = pick;
         target = { ...route, provider: pick.provider, model: pick.model };
@@ -648,7 +671,7 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
     }
     // HED-3 review classes: the author's family never reviews — not as the named route, not as the
     // class fallback, and (below, after cap-aware routing) not as the effective target.
-    if (route.reviewerPool && fallback && fallback.provider === author) fallback = undefined;
+    if (route.reviewerPool && fallback && normalizeProvider(fallback.provider) === author) fallback = undefined;
   }
 
   // Cap-aware routing (HED-67): may swap target→fallback, or refuse a metered pool. Explicit routes
@@ -665,6 +688,13 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
   // route-away): a review class never runs on the author's family. author_provider is REQUIRED for
   // review classes — an orchestrator reviewing its own edits passes 'claude'.
   if (route.reviewerPool && !notDispatchable) {
+    if (author && !table.providers[author]) {
+      throw new Error(
+        `task class "${route.taskClass}": author_provider "${author}" is not a known provider ` +
+        `(${Object.keys(table.providers).join(', ')}) — a typo here would silently disable the ` +
+        `different-family guard, so it is rejected.`,
+      );
+    }
     if (!author) {
       throw new Error(
         `task class "${route.taskClass}" requires author_provider (the provider that WROTE the change — for your ` +
@@ -709,7 +739,7 @@ export function summarizePlan(plan: DispatchPlan): Record<string, unknown> {
   const notDispatchable = plan.notDispatchable;
   return {
     task_class: plan.route.taskClass,
-    would_run: notDispatchable || plan.decision.refusal ? null : `${plan.target.provider}/${plan.target.model}`,
+    would_run: notDispatchable || plan.decision.refusal || plan.sameProviderReview ? null : `${plan.target.provider}/${plan.target.model}`,
     execution: plan.execution ?? null,
     in_session: plan.execution === 'in-session-subagent',
     routed_away_for_cap: plan.decision.routedAwayForCap,
@@ -717,6 +747,8 @@ export function summarizePlan(plan: DispatchPlan): Record<string, unknown> {
     route_reason: plan.decision.routeReason,
     refusal: notDispatchable
       ? { code: 'not-dispatchable', reason: `task class "${plan.route.taskClass}" is not dispatchable (dispatchable: false) — the orchestrator's own in-session work` }
+      : plan.sameProviderReview
+      ? { code: 'same-provider-review', reason: plan.sameProviderReview }
       : plan.decision.refusal ?? null,
     checks: plan.decision.checks,
     account: plan.account,

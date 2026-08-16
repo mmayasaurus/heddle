@@ -115,10 +115,84 @@ describe('adversarial review dispatch', () => {
 
   it('surfaces and records a write mandate violation without discarding findings or reverting files', async () => {
     const restore = reviewRouting(tempDir); const cwd = tempDir(); gitRepo(cwd); commitTrackedProbe(cwd); const ledger = tempLedger();
-    const writer: WorkerAdapter = { name: 'writer', provider: 'codex', dispatch: async (_prompt, opts) => { writeFileSync(join(opts.cwd, 'tracked-probe.txt'), 'after'); return { ok: true, output: 'done', exitCode: 0 }; } };
+    let writerCalls = 0;
+    const writer: WorkerAdapter = { name: 'writer', provider: 'codex', dispatch: async (_prompt, opts) => { writerCalls += 1; writeFileSync(join(opts.cwd, 'tracked-probe.txt'), 'after'); return { ok: true, output: 'done', exitCode: 0 }; } };
     try {
       const outcome = await dispatch({ taskClass: 'adversarial-review', authorProvider: 'claude', prompt: 'review', cwd, identity: unbound }, ledger, () => writer);
       expect(readFileSync(join(cwd, 'tracked-probe.txt'), 'utf8')).toBe('after'); expect(outcome.review?.mandateOk).toBe(false); expect(ledger.getReview(outcome.ledgerId)?.mandate_ok).toBe(0); expect(outcome.error).toContain('MANDATE VIOLATION'); expect(outcome.output).toBe('done');
+      // a violation is a POLICY failure of this reviewer, never retried on the class fallback —
+      // the tree is already mutated, so a second reviewer would review tampered state
+      expect(writerCalls).toBe(1);
+      expect(ledger.recent()).toHaveLength(1);
+    } finally { restore(); }
+  });
+
+  it('catches a reviewer that edits the injected AGENTS.md — restore must not mask the violation', async () => {
+    const restore = reviewRouting(tempDir); const cwd = tempDir(); gitRepo(cwd); const ledger = tempLedger();
+    // the cursor reviewer gets AGENTS.md materialized; an edit to it was invisible under the old
+    // before-materialize/after-restore snapshot ordering (restore reinstated the original bytes)
+    const agentsEditor: WorkerAdapter = { name: 'w', provider: 'codex', dispatch: async (_prompt, opts) => {
+      writeFileSync(join(opts.cwd, 'AGENTS.md'), 'REVIEWER WAS HERE'); return { ok: true, output: 'done', exitCode: 0 };
+    } };
+    try {
+      const outcome = await dispatch({ taskClass: 'adversarial-review', authorProvider: 'claude', prompt: 'review', cwd, identity: unbound }, ledger, () => agentsEditor);
+      expect(outcome.review?.mandateOk).toBe(false); expect(outcome.error).toContain('MANDATE VIOLATION');
+    } finally { restore(); }
+  });
+
+  it('catches a bare git add — the index is part of the mandate digest even when no bytes change', async () => {
+    const restore = reviewRouting(tempDir); const cwd = tempDir(); gitRepo(cwd); commitTrackedProbe(cwd); const ledger = tempLedger();
+    writeFileSync(join(cwd, 'tracked-probe.txt'), 'dirty'); // dirty BEFORE the review starts
+    const stager: WorkerAdapter = { name: 'w', provider: 'codex', dispatch: async (_prompt, opts) => {
+      execFileSync('git', ['add', 'tracked-probe.txt'], { cwd: opts.cwd }); return { ok: true, output: 'done', exitCode: 0 };
+    } };
+    try {
+      const outcome = await dispatch({ taskClass: 'adversarial-review', authorProvider: 'claude', prompt: 'review', cwd, identity: unbound }, ledger, () => stager);
+      expect(outcome.review?.mandateOk).toBe(false);
+    } finally { restore(); }
+  });
+
+  it('refuses an author_provider that is not a known provider instead of silently disabling the family guard', async () => {
+    const restore = reviewRouting(tempDir); const ledger = tempLedger(); const fake = fakeAdapter();
+    try {
+      await expect(dispatch({ taskClass: 'adversarial-review', authorProvider: 'cursur', prompt: 'review', cwd: tempDir(), identity: unbound }, ledger, () => fake.adapter))
+        .rejects.toThrow(/not a known provider/);
+      expect(fake.calls).toHaveLength(0);
+    } finally { restore(); }
+  });
+
+  it('embeds the actual diff for a claude read-only reviewer and keeps the run-it-yourself instruction for others', async () => {
+    const restore = reviewRouting(tempDir); const cwd = tempDir(); gitRepo(cwd); const ledger = tempLedger();
+    execFileSync('git', ['checkout', '-q', '-b', 'work'], { cwd });
+    writeFileSync(join(cwd, 'feature.txt'), 'THE-CHANGED-LINE');
+    execFileSync('git', ['add', 'feature.txt'], { cwd });
+    execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '-m', 'feat'], { cwd });
+    const fake = fakeAdapter(undefined, { readAgents: false }); // claude materializes no AGENTS.md
+    try {
+      // claude reviewer (explicit different-family route): no Bash in its tool set → diff embedded
+      const claudeOutcome = await dispatch({ taskClass: 'adversarial-review', provider: 'claude', model: 'opus', authorProvider: 'cursor', diffBase: 'master', prompt: 'review', cwd, identity: unbound }, ledger, () => fake.adapter);
+      if (!fake.calls.length) throw new Error('claude reviewer never ran: ' + JSON.stringify({ refusal: claudeOutcome.refusal, error: claudeOutcome.error, execution: claudeOutcome.execution }));
+      const claudePrompt = fake.calls[0].prompt;
+      expect(claudePrompt).toContain('You cannot run shell commands');
+      expect(claudePrompt).toContain('```diff');
+      expect(claudePrompt).toContain('THE-CHANGED-LINE');
+      // cursor reviewer (class primary): runs git itself
+      await dispatch({ taskClass: 'adversarial-review', authorProvider: 'claude', diffBase: 'master', prompt: 'review', cwd, identity: unbound }, ledger, () => fake.adapter);
+      const cursorPrompt = fake.calls[1].prompt;
+      expect(cursorPrompt).toContain('run `git diff master...HEAD`');
+      expect(cursorPrompt).not.toContain('```diff');
+    } finally { restore(); }
+  });
+
+  it('unions the class mandate packs with an explicit skills list — the find-only mandate cannot be dropped', async () => {
+    const restore = reviewRouting(tempDir); const ledger = tempLedger(); const fake = fakeAdapter();
+    try {
+      const outcome = await dispatch({ taskClass: 'adversarial-review', authorProvider: 'claude', skills: ['code-discovery'], prompt: 'review', cwd: tempDir(), identity: unbound }, ledger, () => fake.adapter);
+      expect(fake.calls[0].agents).toContain('### adversarial-review');
+      expect(fake.calls[0].agents).toContain('### code-discovery');
+      const skills = String(ledger.recent(1)[0].skills);
+      expect(skills).toContain('adversarial-review'); expect(skills).toContain('worker-role'); expect(skills).toContain('code-discovery');
+      expect(outcome.ok).toBe(true);
     } finally { restore(); }
   });
 
@@ -146,6 +220,14 @@ describe('adversarial review dispatch', () => {
     const codex = new CodexAdapter().buildArgs('x', { model: 'gpt-5.6-sol', cwd: '/tmp', readOnly: true, capabilities: ['exec-privileged'] });
     expect(codex).toEqual(expect.arrayContaining(['--sandbox', 'read-only'])); expect(codex).not.toContain('danger-full-access');
     const claude = new ClaudeAdapter().buildArgs('x', { model: 'opus', cwd: '/tmp', readOnly: true });
-    expect(claude).toEqual(expect.arrayContaining(['--tools', 'Read', 'Grep', 'Glob'])); expect(claude).not.toContain('--allowedTools'); expect(claude).not.toContain('--dangerously-skip-permissions');
+    // ONLY the read built-ins in the tool set — no Bash at all: the permission layer is not a
+    // boundary (verified live: an --allowedTools git-only Bash still wrote files, because operator
+    // global settings leak into workers), so the set restriction is the whole enforcement.
+    expect(claude).toEqual(expect.arrayContaining(['--tools', 'Read', 'Grep', 'Glob']));
+    expect(claude).not.toContain('Bash'); expect(claude).not.toContain('--allowedTools');
+    expect(claude).not.toContain('Edit'); expect(claude).not.toContain('Write'); expect(claude).not.toContain('--dangerously-skip-permissions');
+    // a granted browse survives read-only mode at the SET level (so it actually holds)
+    const browsing = new ClaudeAdapter().buildArgs('x', { model: 'opus', cwd: '/tmp', readOnly: true, capabilities: ['browse'] });
+    expect(browsing.slice(browsing.indexOf('--tools') + 1, browsing.indexOf('--permission-mode'))).toEqual(['Read', 'Grep', 'Glob', 'WebFetch', 'WebSearch']);
   });
 });
