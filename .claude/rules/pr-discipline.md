@@ -37,3 +37,13 @@ When all six conditions in `/Users/mayatobi/Developer/Spinventory-Rebuild-App/.c
 6. Stacked PRs merge bottom-up (base first, retarget children, re-sweep).
 
 Still waits for Maya: security-semantics changes, user-visible feature removal, or touching another agent's files — see the full rule.
+
+## Config-text exception (Maya-ratified 2026-08-16)
+
+When a PR's ENTIRE diff is `.claude/**` + `docs/**` + root config-text (CLAUDE.md, .gitignore,
+.memtraceignore, eslint ignore lists) — nothing under `src/`, `src-tauri/`, tests, or
+`.github/workflows/` — a non-overlapping `main` advance neither forces a re-merge nor restarts the
+sweep clock. Three mechanical conditions: (1) the zero-overlap measurement runs in the SAME BREATH
+as the merge (against then-current main); (2) the merge is pinned with `--match-head-commit`;
+(3) the merge report states the exception and the overlap measurement. Authority + rationale:
+`/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/rules/heddle-self-merge.md`.
