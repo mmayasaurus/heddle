@@ -41,9 +41,16 @@ export function withFileLock<T>(lockDir: string, fn: () => T): T {
         if (age > STALE_MS) {
           // Steal by ATOMIC RENAME: of two racers that both saw the stale mtime, exactly one
           // rename succeeds — an rmdir here could delete the WINNER's freshly-created lock and
-          // let both proceed (gitar, #17). The renamed husk is removed best-effort.
-          const husk = `${lockDir}.stale-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
-          try { renameSync(lockDir, husk); rmdirSync(husk); } catch { /* the other racer won the steal */ }
+          // let both proceed (gitar, #17). pid+time make the husk name unique (the two racers
+          // are different processes by definition — no RNG needed).
+          const husk = `${lockDir}.stale-${process.pid}-${Date.now()}`;
+          let stolen = false;
+          try { renameSync(lockDir, husk); stolen = true; } catch { /* the other racer won the steal — benign */ }
+          if (stolen) {
+            try { rmdirSync(husk); } catch (err) {
+              process.stderr.write(`heddle: stale lock husk ${husk} could not be removed (${err instanceof Error ? err.message : String(err)}) — harmless leftover, remove manually\n`);
+            }
+          }
           continue;
         }
       } catch { continue; /* lock vanished between mkdir and stat — retry (deadline-bounded) */ }

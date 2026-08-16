@@ -13,7 +13,10 @@ import type { Route } from './routing.js';
  * .cursor/mcp.json is hashed as the sidecar's pre-heddle `original` when a sidecar exists; the
  * sidecar and lock dirs themselves are skipped.
  */
-const TRANSIENT_BASENAMES = new Set(['.heddle-mcp-refs.json', '.heddle-agents.lock', '.heddle-mcp.lock']);
+/** Every heddle bookkeeping artifact starts with `.heddle-` (refs sidecar, lock dirs, corrupt
+ *  quarantines `.heddle-mcp-refs.json.corrupt-<ts>`) — prefix-matched so new bookkeeping never
+ *  silently re-enters the mandate digest. */
+const isTransientBasename = (base: string): boolean => base.startsWith('.heddle-');
 const HEDDLE_SPAN = /[ \t]*<!-- heddle:begin( id=[A-Za-z0-9._-]+)? -->[\s\S]*?<!-- heddle:end(?: id=[A-Za-z0-9._-]+)? -->\n?/g;
 
 function mandateBytes(cwd: string, rel: string, raw: Buffer): Buffer {
@@ -24,7 +27,13 @@ function mandateBytes(cwd: string, rel: string, raw: Buffer): Buffer {
       const sidecar = JSON.parse(readFileSync(join(cwd, rel, '..', '.heddle-mcp-refs.json'), 'utf8')) as { original?: string | null };
       if (typeof sidecar.original === 'string') return Buffer.from(sidecar.original, 'utf8');
       if (sidecar && sidecar.original === null) return Buffer.alloc(0); // heddle-created — no pre-heddle bytes
-    } catch { /* no sidecar → the file is not heddle-managed; hash it as is */ }
+    } catch (err) {
+      // ENOENT = no sidecar (file not heddle-managed) — expected and silent. Anything else
+      // (malformed sidecar mid-quarantine) is surfaced; the raw bytes are hashed either way.
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+        process.stderr.write(`heddle: mandate digest could not read the MCP sidecar for ${rel} (${err instanceof Error ? err.message : String(err)}) — hashing the raw file\n`);
+      }
+    }
   }
   return raw;
 }
@@ -140,7 +149,7 @@ export function snapshotWorktree(cwd: string): WorktreeSnapshot {
     const transformed: Array<{ rel: string; mode: number }> = [];
     for (const rel of paths) {
       const base = rel.split('/').pop() ?? rel;
-      if (TRANSIENT_BASENAMES.has(base)) continue; // heddle bookkeeping churn — outside the mandate
+      if (isTransientBasename(base)) continue; // heddle bookkeeping churn — outside the mandate
       let st;
       try { st = statSync(join(cwd, rel)); } catch { h.update(rel).update('=<missing>\n'); continue; } // deleted tracked file
       if (st.isDirectory()) continue; // submodule dir etc.

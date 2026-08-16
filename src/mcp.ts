@@ -181,7 +181,7 @@ function mergedContent(sidecar: McpSidecar): string {
   const base = sidecar.original !== null
     ? (JSON.parse(sidecar.original) as { mcpServers?: Record<string, unknown> })
     : { mcpServers: {} as Record<string, unknown> };
-  const merged: Record<string, unknown> = { ...(base.mcpServers ?? {}) };
+  const merged: Record<string, unknown> = { ...base.mcpServers };
   for (const list of Object.values(sidecar.refs)) {
     for (const name of list) merged[name] = WORKER_MCP_SERVERS[name] ?? merged[name];
   }
