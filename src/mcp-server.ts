@@ -2,7 +2,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
-import { dispatch } from './dispatch.js';
+import { dispatch, planDispatch, summarizePlan } from './dispatch.js';
 import { Ledger } from './ledger.js';
 import { loadRouting, describeTaskClasses } from './routing.js';
 import { listPacks, withMandatoryPacks } from './skillpacks.js';
@@ -106,6 +106,34 @@ server.tool(
       return text(summary);
     } catch (err) {
       return errorText(`dispatch failed: ${(err as Error).message ?? String(err)}`);
+    }
+  },
+);
+
+server.tool(
+  'plan_dispatch',
+  'DRY RUN of dispatch_worker: where a task class (or explicit provider+model) would run RIGHT NOW ' +
+    'and why — live provider caps (route-away when the primary is near its cap, metered-pool ' +
+    'refusals), whether it is in-session, and which Claude account has the most headroom. No ledger ' +
+    'row, no worker. Use it to pick a class when caps are tight.',
+  {
+    task_class: z.string().optional(),
+    provider: z.string().optional(),
+    model: z.string().optional(),
+    opt_in: z.boolean().optional(),
+    codex_home: z.string().optional(),
+  },
+  async (a) => {
+    try {
+      const env: Record<string, string> = {};
+      if (a.codex_home) env.CODEX_HOME = a.codex_home;
+      const plan = planDispatch({
+        taskClass: a.task_class, provider: a.provider, model: a.model, prompt: '(dry run)',
+        cwd: process.cwd(), optIn: a.opt_in, env: Object.keys(env).length ? env : undefined, identity: IDENTITY,
+      });
+      return text(summarizePlan(plan));
+    } catch (err) {
+      return errorText(`plan_dispatch failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   },
 );

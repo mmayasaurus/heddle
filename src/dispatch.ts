@@ -11,6 +11,11 @@ import { materializeWorkerMcp, validateWorkerMcp, codexMcpFlags } from './mcp.js
 import { classifyEffort } from './classify.js';
 import { decideCapabilities, capabilityPolicy } from './capabilities.js';
 import { resolveIdentity, attributeDispatch, WORKER_ENV, type BoundIdentity } from './identity.js';
+import { readProviderCaps, type CapsByProvider } from './usage.js';
+import {
+  decideRoute, readClaudeAccounts, adviseClaudeAccount, hardRefusal, type RouteDecision, type ClaudeAccount, type AccountAdvice,
+} from './capaware.js';
+import { basename } from 'node:path';
 import type { WorkerAdapter, WorkerResult } from './types.js';
 
 /**
@@ -68,6 +73,10 @@ export interface DispatchRequest {
   capabilities?: string[];
   /** Process-bound identity; resolved from the environment when omitted (tests inject one). */
   identity?: BoundIdentity;
+  /** Provider caps snapshot; read from ~/.heddle/usage when omitted (tests inject fixtures). */
+  caps?: CapsByProvider;
+  /** Claude account registry; read from ~/.heddle/accounts.json when omitted (tests inject). */
+  accounts?: ClaudeAccount[];
 }
 
 /**
@@ -76,7 +85,7 @@ export interface DispatchRequest {
  * `refusal` column.
  */
 export interface DispatchRefusal {
-  code: 'claude-in-session' | 'not-dispatchable' | 'depth-1' | 'max-children' | 'capability-denied';
+  code: 'claude-in-session' | 'not-dispatchable' | 'depth-1' | 'max-children' | 'capability-denied' | 'metered-pool-exhausted';
   reason: string;
   /** What to do instead, when there is a clear alternative. */
   instruction?: string;
@@ -100,6 +109,10 @@ export interface DispatchOutcome extends WorkerResult {
   execution?: string;
   /** Present iff heddle refused to run the dispatch (ok is then false). */
   refusal?: DispatchRefusal;
+  /** Why this route ran — the cap-aware decision, verbatim from the ledger's `route_reason` (HED-67). */
+  routeReason?: string;
+  /** Account the worker was billed to / advised (codex: CODEX_HOME basename; claude advisory: best acct id). */
+  account?: string | null;
   /** Set on capability-denied refusals: which check failed (`unenforceable` means a fallback may fit). */
   capabilityRefusalKind?: 'unknown-token' | 'operator-gate' | 'opt-in' | 'unenforceable';
 }
@@ -132,8 +145,9 @@ interface DispatchContext {
   identity: BoundIdentity;
   attribution: ReturnType<typeof attributeDispatch>;
   caps: StructuralCaps;
-  /** Why this route ran (recorded as route_reason on later HED-67 branches; here: capability-fit notes). */
+  /** Set once the cap-aware decision is made; recorded on every row of this dispatch. */
   routeReason?: string;
+  account?: string | null;
 }
 
 function baseRecord(
@@ -154,6 +168,8 @@ function baseRecord(
     promptPreview: req.prompt,
     sessionId: req.resume ?? null,
     fellBackFrom,
+    routeReason: ctx.routeReason ?? null,
+    account: ctx.account ?? null,
   };
 }
 
@@ -182,6 +198,7 @@ function refusalOutcome(
     ledgerId: id, usedFallback: false,
     orchestrator: ctx.attribution.orchestrator, identitySource: ctx.attribution.identitySource,
     ...(ctx.attribution.ignoredCallerAgent ? { ignoredCallerAgent: ctx.attribution.ignoredCallerAgent } : {}),
+    routeReason: ctx.routeReason, account: ctx.account ?? null,
     refusal, ...extra,
   };
 }
@@ -304,6 +321,8 @@ async function runTarget(
     identitySource: ctx.attribution.identitySource,
     ...(ctx.attribution.ignoredCallerAgent ? { ignoredCallerAgent: ctx.attribution.ignoredCallerAgent } : {}),
     execution: providerExecution(ctx.table, target.provider),
+    routeReason: ctx.routeReason,
+    account: ctx.account ?? null,
   };
 }
 
@@ -328,7 +347,111 @@ export async function dispatch(
   // depth-1 refusal, never a bare throw, and never costs a classifier spawn.
   if (identity.worker) return refuseDepth1(req, ctx, table);
 
-  // ---- Resolve the route + policy (HED-1 contract) -------------------------------------------
+  const plan = planDispatch(req, table);
+  ctx.routeReason = plan.decision.routeReason;
+  ctx.account = plan.account;
+  const { route, target, fallback, origin, skillsForRefusal } = plan;
+
+  // ---- Non-dispatchable class (`orchestration`) — refused on EVERY path ------------------------
+  // A named subprocess route does not turn the orchestrator's own work into a worker task.
+  if (plan.notDispatchable) return refuseNotDispatchable({ ...route, provider: target.provider, model: target.model }, req, ctx);
+
+  // ---- Cap-aware refusal (metered pool exhausted / on-demand hard stop) ------------------------
+  if (plan.decision.refusal) {
+    return refusalOutcome(ctx, req, route.taskClass, target, skillsForRefusal, {
+      code: 'metered-pool-exhausted', reason: plan.decision.refusal.reason,
+      instruction: 'Pick a class/route on a provider with headroom (heddle route <class> shows the live decision); never on-demand billing.',
+    });
+  }
+
+  // ---- Claude-primary → structured, ledgered in-session refusal (HED-18) ----------------------
+  if (plan.execution === 'in-session-subagent') {
+    // The class's declared fallback rides along even on the explicit path — the instruction can still
+    // name a subprocess route (class = policy). Account advice (HED-68) is appended.
+    return refuseInSession(
+      { ...target, taskClass: route.taskClass, dispatchable: route.dispatchable, fallback: route.fallback },
+      req, ctx, plan.execution, origin, plan.decision.routedAwayForCap ? `${route.provider}/${route.model}` : null,
+      plan.accountAdvice?.line,
+    );
+  }
+
+  // Auto-effort (opt-in): classify the sub-task's difficulty and pin the effort, unless the caller
+  // already set one. Runs only after every plan-level refusal gate has passed — a refused dispatch
+  // never spends a classifier (a max-children refusal can still waste one: that count is
+  // transactional inside runTarget). Best-effort; failures are noted, not fatal.
+  if (req.autoEffort && !req.effort) {
+    try {
+      req = { ...req, effort: await classifyEffort(route.taskClass, req.prompt, req.cwd) };
+    } catch (err) {
+      process.stderr.write(`heddle: auto-effort classification failed (${err instanceof Error ? err.message : String(err)}) — using the route default\n`);
+    }
+  }
+
+  // ---- Run (capabilities + max-children are decided per target inside runTarget) --------------
+  const primary = await runTarget(target, req, ctx, route, plan.decision.routedAwayForCap ? `${route.provider}/${route.model}` : null);
+  // Capability-fit fallback: when the PRIMARY provider merely lacks the knob (`unenforceable`) and
+  // the class declares a fallback whose provider CAN enforce every requested capability, route there
+  // — that's fit-routing, same spirit as the model fallback. Caller/operator errors stay terminal.
+  if (primary.refusal?.code === 'capability-denied' && primary.capabilityRefusalKind === 'unenforceable'
+      && !req.noFallback && fallback) {
+    const fbCaps = decideCapabilities(fallback.provider, req.capabilities, req.optIn === true, capabilityPolicy(table));
+    if (!fbCaps.refusal && providerExecution(table, fallback.provider) !== 'in-session-subagent') {
+      ctx.routeReason = `${plan.decision.routeReason}; capability-fit fallback: ${target.provider} cannot enforce [${(req.capabilities ?? []).join(', ')}] → ${fallback.provider}/${fallback.model}`;
+      return runTarget(fallback, req, ctx, route, `${route.provider}/${route.model} (capability-unenforceable)`);
+    }
+  }
+  if (primary.ok || primary.refusal || req.noFallback || !fallback) return primary;
+
+  // Primary failed and the table names a fallback — try it, recording the origin so the ledger
+  // shows which routes actually hold up in practice. A fallback that is itself in-session (custom
+  // tables) gets the same structured refusal instead of a throw.
+  const fbExecution = providerExecution(table, fallback.provider);
+  if (fbExecution === 'in-session-subagent') {
+    return refuseInSession(
+      { ...fallback, taskClass: route.taskClass, dispatchable: route.dispatchable, fallback: undefined },
+      req, ctx, fbExecution, 'fallback', `${route.provider}/${route.model}`, plan.accountAdvice?.line,
+    );
+  }
+  // The never-on-demand HARD guard applies to the runtime fallback too: a below-threshold primary
+  // failing over to cursor must not bypass an on-demand stop the plan never evaluated for it.
+  const fbHard = hardRefusal(fallback, req.caps ?? readProviderCaps());
+  if (fbHard) {
+    return refusalOutcome(ctx, req, route.taskClass, fallback, skillsForRefusal, {
+      code: 'metered-pool-exhausted', reason: `failure fallback blocked: ${fbHard}`,
+      instruction: 'The primary failed and the class fallback would bill on-demand — pick another route (heddle route <class>).',
+    }, { extra: { usedFallback: true } });
+  }
+  // Attribution follows the provider that actually runs (a codex fallback bills its CODEX_HOME; a
+  // non-codex fallback is not the plan's account).
+  ctx.account = fallback.provider === 'codex' && req.env?.CODEX_HOME ? basename(req.env.CODEX_HOME) : null;
+  ctx.routeReason = `${plan.decision.routeReason}; ${target.provider}/${target.model} failed → class fallback`;
+  return runTarget(fallback, req, ctx, route, `${route.provider}/${route.model}`);
+}
+
+/** Everything a dispatch decides BEFORE any ledger row or worker: route, policy, caps, accounts. */
+export interface DispatchPlan {
+  route: Route;
+  /** What would run (already swapped to the fallback when the cap-aware decision routed away). */
+  target: RouteTarget;
+  /** The class fallback still available for a failure retry (undefined once consumed). */
+  fallback?: RouteTarget;
+  origin: InSessionOrigin;
+  execution: string | undefined;
+  decision: RouteDecision;
+  skillsForRefusal: string[];
+  /** Account the run bills to / is advised (see DispatchOutcome.account). */
+  account: string | null;
+  accountAdvice?: AccountAdvice;
+  /** True for a `dispatchable: false` class — dispatch() refuses before any route runs. */
+  notDispatchable: boolean;
+}
+
+/**
+ * The dry-run half of dispatch(): resolves the class/route contract (HED-1), applies cap-aware
+ * routing (HED-67) and Claude account advice (HED-68) — no ledger row, no worker. Used by
+ * dispatch() itself and by `heddle route` / the `plan_dispatch` MCP tool.
+ */
+export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRouting()): DispatchPlan {
   // A route override is provider AND model, or neither — a lone half would silently run the class's
   // default route (or the wrong one), so it is rejected outright.
   if (Boolean(req.provider) !== Boolean(req.model)) {
@@ -380,63 +503,51 @@ export async function dispatch(
       fallback = route.fallback;
     }
   }
-  // ---- Non-dispatchable class (`orchestration`) — refused on EVERY path ------------------------
-  // A named subprocess route does not turn the orchestrator's own work into a worker task. The
-  // structured fields + ledger row report the route the caller actually named (target), the class
-  // stays the ledger's task_class.
-  if (notDispatchable) return refuseNotDispatchable({ ...route, provider: target.provider, model: target.model }, req, ctx);
 
-  // ---- Claude-primary → structured, ledgered in-session refusal (HED-18) ----------------------
+  // Cap-aware routing (HED-67): may swap target→fallback, or refuse a metered pool. Explicit routes
+  // are never routed away (naming it is the choice) but the refusals still apply.
+  const caps = req.caps ?? readProviderCaps();
+  // A non-dispatchable class is refused regardless, so no cap decision is made for it.
+  const decision: RouteDecision = notDispatchable
+    ? { target, fallback, routedAwayForCap: false, routeReason: 'not-dispatchable', checks: ['class is dispatchable: false — refused before any route'] }
+    : decideRoute(table, target, fallback, caps, { explicit: origin !== 'class' });
+  target = decision.target;
+  fallback = decision.fallback;
+
   const execution = providerExecution(table, target.provider);
-  if (execution === 'in-session-subagent') {
-    // The class's declared fallback rides along even on the explicit path — the instruction can still
-    // name a subprocess route (class = policy).
-    return refuseInSession(
-      { ...target, taskClass: route.taskClass, dispatchable: route.dispatchable, fallback: route.fallback },
-      req, ctx, execution, origin,
-    );
-  }
-  // Auto-effort (opt-in): classify the sub-task's difficulty and pin the effort, unless the caller
-  // already set one. Runs only after every plan-level refusal gate has passed — a refused dispatch
-  // never spends a classifier (a max-children refusal can still waste one: that count is
-  // transactional inside runTarget). Best-effort; failures are noted, not fatal.
-  if (req.autoEffort && !req.effort) {
-    try {
-      req = { ...req, effort: await classifyEffort(route.taskClass, req.prompt, req.cwd) };
-    } catch (err) {
-      process.stderr.write(`heddle: auto-effort classification failed (${err instanceof Error ? err.message : String(err)}) — using the route default\n`);
-    }
-  }
+  const skillsForRefusal = withMandatoryPacks(req.skills ?? target.skills ?? []);
 
-  // ---- Run (capabilities + max-children are decided per target inside runTarget) --------------
-  const primary = await runTarget(target, req, ctx, route, null);
-  // Capability-fit fallback: when the PRIMARY provider merely lacks the knob (`unenforceable`) and
-  // the class declares a fallback whose provider CAN enforce every requested capability, route there
-  // — that's fit-routing, same spirit as the model fallback. Caller/operator errors stay terminal.
-  if (primary.refusal?.code === 'capability-denied' && primary.capabilityRefusalKind === 'unenforceable'
-      && !req.noFallback && fallback) {
-    const fbCaps = decideCapabilities(fallback.provider, req.capabilities, req.optIn === true, capabilityPolicy(table));
-    if (!fbCaps.refusal) {
-      ctx.routeReason = `${ctx.routeReason ?? ''}; capability-fit fallback: ${target.provider} cannot enforce [${(req.capabilities ?? []).join(', ')}] → ${fallback.provider}/${fallback.model}`.replace(/^; /, '');
-      const fbExec = providerExecution(table, fallback.provider);
-      if (fbExec !== 'in-session-subagent') {
-        return runTarget(fallback, req, ctx, route, `${route.provider}/${route.model} (capability-unenforceable)`);
-      }
-    }
+  // Account (HED-68): codex → the CODEX_HOME the caller selected; claude in-session → advice.
+  let account: string | null = null;
+  let accountAdvice: AccountAdvice | undefined;
+  if (target.provider === 'codex' && req.env?.CODEX_HOME) account = basename(req.env.CODEX_HOME);
+  if (target.provider === 'claude') {
+    accountAdvice = adviseClaudeAccount(caps.claude, req.accounts ?? readClaudeAccounts());
+    account = accountAdvice.best?.id ?? null;
   }
-  if (primary.ok || primary.refusal || req.noFallback || !fallback) return primary;
+  return { route, target, fallback, origin, execution, decision, skillsForRefusal, account, accountAdvice, notDispatchable };
+}
 
-  // Primary failed and the table names a fallback — try it, recording the origin so the ledger
-  // shows which routes actually hold up in practice. A fallback that is itself in-session (custom
-  // tables) gets the same structured refusal instead of a throw.
-  const fbExecution = providerExecution(table, fallback.provider);
-  if (fbExecution === 'in-session-subagent') {
-    return refuseInSession(
-      { ...fallback, taskClass: route.taskClass, dispatchable: route.dispatchable, fallback: undefined },
-      req, ctx, fbExecution, 'fallback', `${route.provider}/${route.model}`,
-    );
-  }
-  return runTarget(fallback, req, ctx, route, `${route.provider}/${route.model}`);
+/** One shared dry-run summary for `heddle route` and the `plan_dispatch` MCP tool (identical fields). */
+export function summarizePlan(plan: DispatchPlan): Record<string, unknown> {
+  const notDispatchable = plan.notDispatchable;
+  return {
+    task_class: plan.route.taskClass,
+    would_run: notDispatchable || plan.decision.refusal ? null : `${plan.target.provider}/${plan.target.model}`,
+    execution: plan.execution ?? null,
+    in_session: plan.execution === 'in-session-subagent',
+    routed_away_for_cap: plan.decision.routedAwayForCap,
+    remaining_fallback: plan.fallback ? `${plan.fallback.provider}/${plan.fallback.model}` : null,
+    route_reason: plan.decision.routeReason,
+    refusal: notDispatchable
+      ? { code: 'not-dispatchable', reason: `task class "${plan.route.taskClass}" is not dispatchable (dispatchable: false) — the orchestrator's own in-session work` }
+      : plan.decision.refusal ?? null,
+    checks: plan.decision.checks,
+    account: plan.account,
+    account_pick: null as unknown,
+    account_advice: plan.accountAdvice?.line ?? null,
+    skills: plan.skillsForRefusal,
+  };
 }
 
 /** How the in-session route was chosen — the refusal reason must not misstate the YAML policy. */
@@ -482,7 +593,7 @@ function refuseNotDispatchable(route: Route, req: DispatchRequest, ctx: Dispatch
 function refuseInSession(
   route: RouteTarget & { taskClass: string; dispatchable: boolean; fallback?: RouteTarget },
   req: DispatchRequest, ctx: DispatchContext, execution: string, origin: InSessionOrigin,
-  fellBackFrom: string | null = null,
+  fellBackFrom: string | null = null, adviceLine?: string,
 ): DispatchOutcome {
   // (Non-dispatchable classes never reach here — refuseNotDispatchable handles them earlier.)
   const skills = withMandatoryPacks(req.skills ?? route.skills ?? []);
@@ -499,7 +610,8 @@ function refuseInSession(
   const reason = `${head} runs as an in-session subagent of the orchestrator, not a subprocess heddle can spawn.`;
   const instruction =
     `Use your own Agent tool with model "${route.model}" and skills [${skills.join(', ')}]` +
-    (mcp.length ? ` and MCP [${mcp.join(', ')}]` : '') + `.` + alt;
+    (mcp.length ? ` and MCP [${mcp.join(', ')}]` : '') + `.` + alt +
+    (adviceLine ? ` ${adviceLine}` : '');
   const id = ctx.ledger.refuse(
     baseRecord(ctx, req, route.taskClass, route, skills, fellBackFrom), 'claude-in-session', reason,
   );
