@@ -45,12 +45,19 @@ Addresses identify senders and receivers. Five forms exist (`src/comms/address.t
 
 ## Schema
 
-The database uses `PRAGMA user_version = 1` (`COMMS_SCHEMA_VERSION`), WAL journal mode,
-`PRAGMA foreign_keys = ON`, and `PRAGMA busy_timeout = 5000` because multiple agent processes
-share the file and write concurrently. On open the constructor READS `user_version` first: `0`
-⇒ fresh file, create schema and stamp the version; equal ⇒ open; anything else ⇒ throw (a newer
-heddle may have migrated the shared file — never relabel it; an older shape needs an explicit
-migration). `PRAGMA user_version` is written only when initialising a fresh database.
+The database uses `PRAGMA user_version = 2` (`COMMS_SCHEMA_VERSION`; v2 added `message_mentions`
+for HED-94), WAL journal mode, `PRAGMA foreign_keys = ON`, and `PRAGMA busy_timeout = 5000`
+because multiple agent processes share the file and write concurrently. On open the constructor
+READS `user_version` first: `0` ⇒ fresh file, create schema and stamp the version; equal ⇒ open;
+a version in `MIGRATABLE_VERSIONS` (today `{1}`) ⇒ apply the schema and re-stamp, in place;
+anything else ⇒ throw (a NEWER heddle may have migrated the shared file — never relabel it).
+
+Upgrading is therefore one-way for older binaries, by design: once a v2 process opens the shared
+file, a pre-v2 heddle refuses it with `comms db … is schema v2; this heddle understands v1 —
+upgrade heddle` rather than reading it half-blind. A process that is ALREADY RUNNING is not
+disturbed — it holds its connection and never re-checks the version, and v2 is purely additive
+(a new table; `messages` is untouched), so old and new binaries coexist on a migrated file until
+the old ones restart. Both properties were verified live on 2026-08-16 when the fleet migrated.
 
 ### `messages` table
 
