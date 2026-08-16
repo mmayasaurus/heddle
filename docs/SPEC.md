@@ -152,7 +152,17 @@ up + discarded the moment they're no longer used. Therefore:
 ## 6. Routing & dispatch modes
 
 - **Task-class path** (default): orchestrator picks a class; the table maps to model/effort/skills/
-  mcp/fallback — this is where policy lives, tunable in one YAML without a rebuild.
+  mcp/fallback — this is where policy lives, tunable in one YAML without a rebuild. Each class also
+  carries dispatch-time guidance (`why:` one-liner, `edits_code:`) surfaced by `list_task_classes`.
+  **Skill-pack semantics (DECIDED 2026-08-15, HED-1):** the class's `skills:` list IS the dispatch
+  default when the caller omits `skills`; an explicit list REPLACES those task-fit defaults;
+  separately `worker-role` is mandatory and unioned into whichever list applies (both paths) — an
+  explicit list can add packs but never drops worker-role. Fallback routes inherit class skills/mcp
+  (not effort). The ledger `skills` column records what was actually materialized.
+  **Class + explicit route:** `task_class` may be combined with `provider`+`model` — class = policy,
+  named model = route, no fallback. **Claude-primary classes** return a structured, ledgered
+  `claude-in-session` refusal (HED-18) instead of throwing: the orchestrator runs them as its own
+  subagent, or names the fallback provider/model explicitly.
 - **Direct path**: orchestrator names provider+model itself — full dynamic choice, still guarded.
 - **Race-and-merge ("fusion") mode** (CONFIRMED wanted, for hard / highest-quality tasks): fan ONE
   task out to a DIVERSE cross-provider set (e.g. Opus + gpt-5.6-sol + gemini-3.1-pro + kimi-k3 +
@@ -183,6 +193,11 @@ stepping in only where context/judgment demand. This is the intended model, not 
   orchestrator) — visible and correctable.
 - Encoded as an explicit principle in the orchestration skill: delegate when a different model is
   better-suited or parallelism helps; otherwise do it yourself. Trivial work stays in-session.
+- **Dispatch-guidance hook (BUILT, HED-1)** — a PreToolUse hook on `mcp__heddle__dispatch_worker`
+  (`dist/hook-dispatch-guidance.js`) that nudges (never blocks, fails open) when a code-editing
+  class is dispatched with no task-fit packs or an opt-in-gated class without `opt_in`; pairs with
+  `list_task_classes` returning why/skills/edits_code so fit + cost surface at the moment of choosing
+  a worker. Registration snippet: `docs/MODELS.md` "Dispatch-time surfacing".
 
 Agents ARE allowed to do work themselves — delegation is a tool, not a mandate.
 
@@ -399,6 +414,9 @@ not skills.
 ### Hooks (enforcement + injection; keep subagent-aware)
 - **orchestration-primer** [planned] — SessionStart, extend `agent-identity.py`, tiny. P1.
 - **delegation-discipline nudge** [planned] — PreToolUse, on orchestrators. P1.
+- **dispatch-guidance nudge** [have, HED-1] — PreToolUse on `mcp__heddle__dispatch_worker`: no task-fit
+  packs on a code-editing class / opt-in class without opt-in → `additionalContext` warning, never a
+  block, fails open. Registered by the operator in user settings (snippet in MODELS.md).
 - **goal-auditor stop** [planned] — Stop/SubagentStop, tiny-model, keep-going/done/stuck×3. P2.
 - **worker-scoped safeguard bundle** [NEW] — materialized per-dispatch for codex/cursor/agy (which
   lack Claude's hooks): no-delete-without-permission, no-secrets, stay-in-lane, memtrace-first.
@@ -480,7 +498,9 @@ savings analytics.
   **Dashboard UI vision:** `docs/DASHBOARD.md` (tmux parts superseded by §13 here).
 - **Routing policy:** `routing/routing.v0.yaml`. **Skill packs:** `skills/`.
 - **Comms broker (built so far):** `docs/COMMS.md` — log schema, address grammar, `CommsLog` API.
-- **Code:** `src/{adapters,dispatch,routing,ledger,skillpacks,mcp,env,cli,types}.ts`.
+- **Code:** `src/adapters/*.ts` (codex, cursor, agy, claude protocol), `src/comms/*.ts` (broker) and
+  `src/{dispatch,routing,ledger,skillpacks,mcp,env,cli,types,guidance,hook-dispatch-guidance,mcp-server}.ts`;
+  tests `test/*.test.ts` (`npm test`).
 - **Research detail & decision log (session-durable):** memory `project-agent-orchestration-lane`.
 - **Spinventory integration:** the L0 systems — `.claude/bin/lin.sh`, `pr-own.sh`, `pr-sweep.sh`,
   `agent-identity.py`, `worktree-discipline.md`; vault doc

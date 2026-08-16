@@ -26,6 +26,7 @@
   "bin": {
     "heddle": "dist/cli.js",
     "heddle-mcp": "dist/mcp-server.js",
-    "heddle-comms": "dist/comms/channel-server.js"
+    "heddle-comms": "dist/comms/channel-server.js",
+    "heddle-hook-dispatch-guidance": "dist/hook-dispatch-guidance.js"
   }
 }

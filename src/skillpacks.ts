@@ -29,6 +29,29 @@ export function listPacks(): string[] {
   return readdirSync(dir).filter((f) => f.endsWith('.md')).map((f) => f.replace(/\.md$/, ''));
 }
 
+/**
+ * Packs EVERY delegated worker gets, no matter what the routing table or the caller lists.
+ * `worker-role` is governance, not task fit: the first real pilot dispatch (2026-08-10) had a codex
+ * worker inherit the fleet's claim-before-code policy and refuse to work ("which agent am I?");
+ * without it a worker may also claim issues / own PRs it must not. Decided 2026-08-15 (Maya via
+ * Agent R): an explicit `skills` list ADDS to policy, it never removes worker-role.
+ */
+export const MANDATORY_PACKS = ['worker-role'] as const;
+
+/**
+ * The dispatcher's union rule: mandatory packs first, then the requested packs in their given
+ * order, de-duplicated. Applied to BOTH the task-class defaults and a caller's explicit list, on
+ * both the task-class and direct provider/model paths — so what the ledger records as `skills` is
+ * exactly what was materialized.
+ */
+export function withMandatoryPacks(skills: readonly string[] | undefined): string[] {
+  const out: string[] = [];
+  for (const p of [...MANDATORY_PACKS, ...(skills ?? [])]) {
+    if (!out.includes(p)) out.push(p);
+  }
+  return out;
+}
+
 export function readPack(name: string): string {
   const p = join(packsDir(), `${name}.md`);
   if (!existsSync(p)) {

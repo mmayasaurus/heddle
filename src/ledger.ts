@@ -41,6 +41,13 @@ export interface DispatchRecord {
   durationMs: number | null;
   /** Set when the routing table's primary choice failed and a fallback ran. */
   fellBackFrom: string | null;
+  /**
+   * Set when heddle itself declined to run the dispatch (no worker was spawned): a short machine
+   * code such as `claude-in-session`, `depth-1`, `max-children`, `capability-denied`. `error`
+   * carries the human-readable reason. Refusals are finished rows (ok=0) so they never look
+   * in-flight, and they are queryable separately from worker failures.
+   */
+  refusal: string | null;
   startedAt: string;
   finishedAt: string | null;
 }
@@ -66,6 +73,7 @@ CREATE TABLE IF NOT EXISTS dispatches (
   reasoning_tokens INTEGER,
   duration_ms INTEGER,
   fell_back_from TEXT,
+  refusal TEXT,
   started_at TEXT NOT NULL,
   finished_at TEXT
 );
@@ -74,19 +82,58 @@ CREATE INDEX IF NOT EXISTS idx_dispatches_orch ON dispatches(orchestrator);
 CREATE INDEX IF NOT EXISTS idx_dispatches_started ON dispatches(started_at);
 `;
 
+/**
+ * Add every missing column. `existing` is the column set observed BEFORE the ALTERs — several heddle
+ * processes may open a pre-migration ledger at once (MCP servers, CLIs, the dashboard); if another
+ * one added a column between our check and our ALTER, SQLite says "duplicate column name" — that is
+ * success, not failure. Exported so the race path itself is testable (pass a stale `existing`).
+ */
+export function applyLedgerMigrations(db: DatabaseSync, existing: Set<string>): { applied: string[]; alreadyPresent: string[] } {
+  const applied: string[] = [];
+  const alreadyPresent: string[] = [];
+  for (const m of MIGRATIONS) {
+    if (existing.has(m.column)) continue;
+    try {
+      db.exec(m.ddl);
+      applied.push(m.column);
+    } catch (err) {
+      if (!/duplicate column name/i.test(err instanceof Error ? err.message : String(err))) throw err;
+      alreadyPresent.push(m.column); // a concurrent opener won the race — fine
+    }
+  }
+  return { applied, alreadyPresent };
+}
+
+/**
+ * Columns added after the first schema shipped. `CREATE TABLE IF NOT EXISTS` never alters an
+ * existing table, so each is added with ALTER TABLE when missing — a real ledger (~/.heddle) predates
+ * them. Additive only; the dashboard reads columns by name, so extra columns are safe.
+ */
+const MIGRATIONS: { column: string; ddl: string }[] = [
+  { column: 'refusal', ddl: 'ALTER TABLE dispatches ADD COLUMN refusal TEXT' },
+];
+
 export class Ledger {
   private db: DatabaseSync;
 
   constructor(path: string = DEFAULT_LEDGER_PATH) {
     mkdirSync(dirname(path), { recursive: true });
     this.db = new DatabaseSync(path);
+    // Several heddle processes (one MCP server per orchestrator session, CLIs, the dashboard) share
+    // this file; wait briefly for a writer instead of failing with SQLITE_BUSY. Set FIRST so it also
+    // covers the WAL switch and the migration window below (check, then ALTER).
+    this.db.exec('PRAGMA busy_timeout = 5000;');
     this.db.exec('PRAGMA journal_mode = WAL;');
     this.db.exec(SCHEMA);
+    const have = new Set(
+      (this.db.prepare('PRAGMA table_info(dispatches)').all() as { name: string }[]).map((c) => c.name),
+    );
+    applyLedgerMigrations(this.db, have);
   }
 
   /** Record a dispatch at start; returns the row id to finish() later. */
   start(r: Omit<DispatchRecord, 'id' | 'ok' | 'error' | 'inputTokens' | 'cachedInputTokens' |
-    'outputTokens' | 'reasoningTokens' | 'durationMs' | 'finishedAt' | 'startedAt'>): number {
+    'outputTokens' | 'reasoningTokens' | 'durationMs' | 'finishedAt' | 'startedAt' | 'refusal'>): number {
     const stmt = this.db.prepare(`
       INSERT INTO dispatches
         (orchestrator, task_class, provider, model, skills, issue, pr, cwd, prompt_preview,
@@ -96,6 +143,28 @@ export class Ledger {
     const info = stmt.run(
       r.orchestrator, r.taskClass, r.provider, r.model, r.skills, r.issue, r.pr, r.cwd,
       r.promptPreview.slice(0, 500), r.sessionId, r.fellBackFrom, new Date().toISOString(),
+    );
+    return Number(info.lastInsertRowid);
+  }
+
+  /**
+   * Record a dispatch heddle REFUSED to run (policy/structural cap): a finished row, ok=0, with the
+   * refusal code and reason, so the decision is auditable and never shows as in-flight.
+   */
+  refuse(
+    r: Omit<DispatchRecord, 'id' | 'ok' | 'error' | 'inputTokens' | 'cachedInputTokens' |
+      'outputTokens' | 'reasoningTokens' | 'durationMs' | 'finishedAt' | 'startedAt' | 'refusal'>,
+    refusal: string, reason: string,
+  ): number {
+    const now = new Date().toISOString();
+    const info = this.db.prepare(`
+      INSERT INTO dispatches
+        (orchestrator, task_class, provider, model, skills, issue, pr, cwd, prompt_preview,
+         session_id, fell_back_from, refusal, ok, error, started_at, finished_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+    `).run(
+      r.orchestrator, r.taskClass, r.provider, r.model, r.skills, r.issue, r.pr, r.cwd,
+      r.promptPreview.slice(0, 500), r.sessionId, r.fellBackFrom, refusal, reason, now, now,
     );
     return Number(info.lastInsertRowid);
   }
@@ -132,17 +201,23 @@ export class Ledger {
     ).all() as Record<string, unknown>[];
   }
 
-  /** Aggregate usage by provider — the raw material for the savings stat. */
+  /**
+   * Aggregate usage by provider — the raw material for the savings stat. Refusals (no worker was
+   * spawned) are NOT dispatches: they are excluded from `dispatches`/`succeeded`/tokens and reported
+   * separately as `refusals`, so a stream of claude-in-session refusals cannot masquerade as failed
+   * Claude runs in success rates or savings math.
+   */
   usageByProvider(sinceIso?: string): Record<string, unknown>[] {
     const where = sinceIso ? 'WHERE started_at >= ?' : '';
     const stmt = this.db.prepare(`
       SELECT provider,
-             COUNT(*) AS dispatches,
-             SUM(ok) AS succeeded,
-             SUM(COALESCE(input_tokens,0)) AS input_tokens,
-             SUM(COALESCE(cached_input_tokens,0)) AS cached_tokens,
-             SUM(COALESCE(output_tokens,0)) AS output_tokens,
-             SUM(COALESCE(duration_ms,0)) AS duration_ms
+             SUM(CASE WHEN refusal IS NULL THEN 1 ELSE 0 END) AS dispatches,
+             SUM(CASE WHEN refusal IS NULL THEN ok ELSE 0 END) AS succeeded,
+             SUM(CASE WHEN refusal IS NOT NULL THEN 1 ELSE 0 END) AS refusals,
+             SUM(CASE WHEN refusal IS NULL THEN COALESCE(input_tokens,0) ELSE 0 END) AS input_tokens,
+             SUM(CASE WHEN refusal IS NULL THEN COALESCE(cached_input_tokens,0) ELSE 0 END) AS cached_tokens,
+             SUM(CASE WHEN refusal IS NULL THEN COALESCE(output_tokens,0) ELSE 0 END) AS output_tokens,
+             SUM(CASE WHEN refusal IS NULL THEN COALESCE(duration_ms,0) ELSE 0 END) AS duration_ms
       FROM dispatches ${where}
       GROUP BY provider ORDER BY dispatches DESC
     `);
