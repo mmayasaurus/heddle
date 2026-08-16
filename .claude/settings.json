@@ -1,0 +1,121 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/agent-identity.py",
+            "timeout": 15000
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/remind-owned-prs.py",
+            "timeout": 8000
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-memtrace-first.py deny-recursive-search",
+            "timeout": 5000
+          },
+          {
+            "type": "command",
+            "command": "python3 /Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-memtrace-first.py enforce-query",
+            "timeout": 5000
+          }
+        ]
+      },
+      {
+        "matcher": "Grep|Glob|Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-memtrace-first.py enforce-query",
+            "timeout": 5000
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|MultiEdit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/delegation-nudge.py",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-memtrace-first.py record",
+            "timeout": 5000
+          },
+          {
+            "type": "command",
+            "command": "python3 /Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-pr-sweep.py record",
+            "timeout": 5000
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__memtrace__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-memtrace-first.py record",
+            "timeout": 5000
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-memtrace-first.py stop",
+            "timeout": 5000
+          },
+          {
+            "type": "command",
+            "command": "python3 /Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-pr-sweep.py enforce-stop",
+            "timeout": 5000
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-memtrace-first.py stop",
+            "timeout": 5000
+          }
+        ]
+      }
+    ]
+  }
+}
