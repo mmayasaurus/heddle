@@ -419,7 +419,7 @@ export async function dispatch(
     return refusalOutcome(ctx, req, route.taskClass, fallback, skillsForRefusal, {
       code: 'metered-pool-exhausted', reason: `failure fallback blocked: ${fbHard}`,
       instruction: 'The primary failed and the class fallback would bill on-demand — pick another route (heddle route <class>).',
-    }, { usedFallback: true });
+    }, { extra: { usedFallback: true } });
   }
   // Attribution follows the provider that actually runs (a codex fallback bills its CODEX_HOME; a
   // non-codex fallback is not the plan's account).
