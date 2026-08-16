@@ -1,6 +1,8 @@
-import { readFileSync, existsSync, writeFileSync, unlinkSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { readFileSync, existsSync, writeFileSync, unlinkSync, mkdirSync, mkdtempSync, rmSync, renameSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
+import { withFileLock } from './matlock.js';
+import type { MaterializeOpts } from './skillpacks.js';
 
 /**
  * Worker MCP attachment — grants a cross-provider worker the code-discovery tools its task needs.
@@ -109,7 +111,7 @@ export function claudeMcpConfigFile(serverNames: string[]): { path: string; clea
   return { path, cleanup: () => { try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ } } };
 }
 
-export function materializeWorkerMcp(cwd: string, provider: string, serverNames: string[]): () => void {
+export function materializeWorkerMcp(cwd: string, provider: string, serverNames: string[], opts: MaterializeOpts): () => void {
   if (serverNames.length === 0) return () => { /* nothing to attach */ };
 
   // Codex reads its servers (memtrace, serena) from the user's global config — nothing to write,
@@ -120,7 +122,7 @@ export function materializeWorkerMcp(cwd: string, provider: string, serverNames:
   const servers = resolveMcpServers(serverNames);
   switch (provider) {
     case 'cursor':
-      return writeMergedMcpJson(join(cwd, '.cursor', 'mcp.json'), servers);
+      return writeMergedMcpJson(join(cwd, '.cursor', 'mcp.json'), servers, opts);
     case 'gemini':
       throw new Error(
         'worker MCP attachment for agy/gemini is not implemented yet: the .agents/mcp_config.json ' +
@@ -132,31 +134,118 @@ export function materializeWorkerMcp(cwd: string, provider: string, serverNames:
   }
 }
 
+/**
+ * The sidecar that makes a JSON config concurrency-safe (JSON carries no comment markers, so the
+ * AGENTS.md per-block trick does not transfer — HED-56). It records the PRE-heddle file content
+ * once (`original`, captured by the first attaching dispatch) and one server list per live
+ * dispatch (`refs`). Every mutation rebuilds the merged file from original + all live refs, so the
+ * merged view is order-independent; the LAST ref out restores the original bytes (or deletes a
+ * file heddle created) and removes the sidecar. Dead refs (crashed dispatches, per the liveness
+ * oracle) are dropped on the next mutation.
+ */
+interface McpSidecar {
+  original: string | null;
+  refs: Record<string, string[]>;
+}
+
+function sidecarPath(path: string): string {
+  return join(dirname(path), '.heddle-mcp-refs.json');
+}
+
+/** Missing sidecar → null (fresh state). A CORRUPT sidecar is different: treating it as missing
+ *  would silently drop other live dispatches' refs — it is preserved under a .corrupt-<ts> name
+ *  (never deleted) and surfaced, and the caller starts fresh from the current file. */
+function readSidecar(path: string): McpSidecar | null {
+  const sc = sidecarPath(path);
+  if (!existsSync(sc)) return null;
+  try {
+    const raw = JSON.parse(readFileSync(sc, 'utf8')) as McpSidecar;
+    if (raw && typeof raw === 'object' && raw.refs && typeof raw.refs === 'object' && !Array.isArray(raw.refs)) {
+      const refs: Record<string, string[]> = {};
+      for (const [id, list] of Object.entries(raw.refs)) {
+        // shape-validate each entry: server lists are arrays of strings
+        if (Array.isArray(list) && list.every((x) => typeof x === 'string')) refs[id] = list;
+      }
+      return { original: typeof raw.original === 'string' ? raw.original : null, refs };
+    }
+    throw new Error('unexpected shape');
+  } catch (err) {
+    const quarantine = `${sc}.corrupt-${Date.now()}`;
+    try { renameSync(sc, quarantine); } catch { /* even the rename failed — leave it */ }
+    process.stderr.write(`heddle: MCP sidecar ${sc} was unreadable (${err instanceof Error ? err.message : String(err)}) — preserved as ${quarantine}; starting fresh\n`);
+    return null;
+  }
+}
+
+function mergedContent(sidecar: McpSidecar): string {
+  const base = sidecar.original !== null
+    ? (JSON.parse(sidecar.original) as { mcpServers?: Record<string, unknown> })
+    : { mcpServers: {} as Record<string, unknown> };
+  const merged: Record<string, unknown> = { ...base.mcpServers };
+  for (const list of Object.values(sidecar.refs)) {
+    for (const name of list) merged[name] = WORKER_MCP_SERVERS[name] ?? merged[name];
+  }
+  return JSON.stringify({ ...base, mcpServers: merged }, null, 2);
+}
+
 function writeMergedMcpJson(
-  path: string, servers: Record<string, { command: string; args: string[] }>,
+  path: string, servers: Record<string, { command: string; args: string[] }>, opts: MaterializeOpts,
 ): () => void {
-  const existed = existsSync(path);
-  const original = existed ? readFileSync(path, 'utf8') : null;
+  const ownId = String(opts.dispatchId);
+  const lock = join(dirname(path), '.heddle-mcp.lock');
+  // The lock lives inside the config dir — create the dir FIRST or two fresh processes both fail
+  // the lock mkdir with ENOENT and race the file unlocked.
   mkdirSync(dirname(path), { recursive: true });
 
-  let next: string;
-  if (original !== null) {
-    const parsed = JSON.parse(original) as { mcpServers?: Record<string, unknown> };
-    parsed.mcpServers = { ...(parsed.mcpServers ?? {}), ...servers };
-    next = JSON.stringify(parsed, null, 2);
-  } else {
-    next = JSON.stringify({ mcpServers: servers }, null, 2);
-  }
-  writeFileSync(path, next, 'utf8');
+  withFileLock(lock, () => {
+    const sidecar = readSidecar(path)
+      ?? { original: existsSync(path) ? readFileSync(path, 'utf8') : null, refs: {} };
+    // A malformed pre-existing config must fail BEFORE any state is persisted — writing the
+    // sidecar first would leave a half-mutated pair behind the crash.
+    if (sidecar.original !== null) {
+      try { JSON.parse(sidecar.original); } catch {
+        throw new Error(`${path} exists but is not valid JSON — fix or remove it before dispatching a worker with MCP attached`);
+      }
+    }
+    for (const id of Object.keys(sidecar.refs)) {
+      if (id !== ownId && opts.isLive && !opts.isLive(id)) delete sidecar.refs[id]; // dead dispatch
+    }
+    sidecar.refs[ownId] = Object.keys(servers);
+    const merged = mergedContent(sidecar); // compute BEFORE persisting anything
+    writeFileSync(sidecarPath(path), JSON.stringify(sidecar, null, 2), 'utf8');
+    writeFileSync(path, merged, 'utf8');
+  });
 
   return () => {
-    if (original !== null) {
-      writeFileSync(path, original, 'utf8');
-      return;
-    }
-    // Only remove a file we created, and only if untouched since — never discard others' work.
-    try {
-      if (readFileSync(path, 'utf8') === next) unlinkSync(path);
-    } catch { /* gone or unreadable — leave it */ }
+    withFileLock(lock, () => {
+      try {
+        const sidecar = readSidecar(path);
+        if (!sidecar || !(ownId in sidecar.refs)) return; // nothing of ours recorded — leave it
+        // Tamper check: if the file no longer matches what the sidecar says heddle last wrote,
+        // someone (the worker, a human) edited it mid-dispatch — NEVER rewrite or delete over
+        // their bytes; drop only our ref so the bookkeeping stays truthful.
+        const expected = mergedContent(sidecar);
+        const current = existsSync(path) ? readFileSync(path, 'utf8') : null;
+        const tampered = current !== expected;
+        delete sidecar.refs[ownId];
+        if (tampered) {
+          process.stderr.write(`heddle: ${path} was edited during dispatch #${ownId} — leaving the file; removed only heddle's ref\n`);
+          if (Object.keys(sidecar.refs).length === 0) { try { unlinkSync(sidecarPath(path)); } catch { /* already gone */ } }
+          else writeFileSync(sidecarPath(path), JSON.stringify(sidecar, null, 2), 'utf8');
+          return;
+        }
+        if (Object.keys(sidecar.refs).length === 0) {
+          // Last one out restores the pre-heddle state exactly.
+          if (sidecar.original !== null) writeFileSync(path, sidecar.original, 'utf8');
+          else { try { unlinkSync(path); } catch { /* already gone */ } }
+          try { unlinkSync(sidecarPath(path)); } catch { /* already gone */ }
+        } else {
+          writeFileSync(sidecarPath(path), JSON.stringify(sidecar, null, 2), 'utf8');
+          writeFileSync(path, mergedContent(sidecar), 'utf8');
+        }
+      } catch (err) {
+        process.stderr.write(`heddle: MCP restore for dispatch #${ownId} failed (${err instanceof Error ? err.message : String(err)}) — left as is\n`);
+      }
+    });
   };
 }

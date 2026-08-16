@@ -1,6 +1,7 @@
 import { readFileSync, existsSync, writeFileSync, unlinkSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { withFileLock } from './matlock.js';
 
 /**
  * Skill-pack materializer.
@@ -68,45 +69,91 @@ export function composePacks(packNames: readonly string[]): string {
   return packNames.map((n) => `### ${n}\n\n${readPack(n)}`).join('\n\n---\n\n');
 }
 
-const BEGIN = '<!-- heddle:begin -->';
-const END = '<!-- heddle:end -->';
+/**
+ * Per-dispatch marker pair. The id makes concurrent dispatches into ONE cwd (the normal case,
+ * SPEC §5) safe: each dispatch appends, replaces, and removes ONLY its own block (HED-56 — the
+ * id-less predecessor raced: dispatch B captured A's block as its "original" and restored it
+ * forever, while worker A read B's packs).
+ */
+const beginMarker = (id: string): string => `<!-- heddle:begin id=${id} -->`;
+const endMarker = (id: string): string => `<!-- heddle:end id=${id} -->`;
+/** Any heddle block, old id-less format included — used only to recognize heddle-authored spans. */
+const ANY_BLOCK = /[ \t]*<!-- heddle:begin( id=([A-Za-z0-9._-]+))? -->[\s\S]*?<!-- heddle:end(?: id=\2)? -->\n?/g;
+
+export interface MaterializeOpts {
+  /** Unique per dispatch (the ledger row id). Distinct concurrent dispatches MUST differ. */
+  dispatchId: string | number;
+  /**
+   * Liveness oracle for OTHER dispatches' blocks (ledger in-flight check). A block whose id is not
+   * live belongs to a crashed dispatch — it is garbage-collected on the next materialization into
+   * that cwd, which also self-heals blocks left by the old id-less format (id undefined → dead).
+   */
+  isLive?: (dispatchId: string) => boolean;
+}
+
+function stripDeadBlocks(content: string, ownId: string, isLive?: (id: string) => boolean): string {
+  return content.replace(ANY_BLOCK, (whole, _g1, id?: string) => {
+    if (id === ownId) return ''; // a same-id leftover (crashed retry) is always replaced
+    if (id && isLive?.(id)) return whole; // a LIVE peer's block stays untouched
+    if (id && !isLive) return whole; // no oracle → never GC a peer (only own/legacy)
+    return ''; // dead peer, or legacy id-less block: heddle-authored garbage, collect it
+  });
+}
 
 /**
- * Compose packs into an AGENTS.md section in `cwd`, preserving any existing human-authored
- * content outside heddle's markers. Returns a restore function that puts the file back exactly
- * as it was — dispatch always restores, so a worktree is never left mutated by orchestration.
+ * Compose packs into a per-dispatch AGENTS.md block in `cwd`, preserving existing human-authored
+ * content AND other live dispatches' blocks. Returns a restore function that removes exactly this
+ * dispatch's insertion: the file ends byte-identical for the surviving content whatever order
+ * overlapping dispatches finish in, and is deleted only when nothing but whitespace remains.
  */
-export function materializeAgentsMd(cwd: string, packNames: string[]): () => void {
+export function materializeAgentsMd(cwd: string, packNames: string[], opts: MaterializeOpts): () => void {
   const target = join(cwd, 'AGENTS.md');
-  const existed = existsSync(target);
-  const original = existed ? readFileSync(target, 'utf8') : null;
-
   if (packNames.length === 0) return () => { /* nothing written */ };
+  const ownId = String(opts.dispatchId);
 
   const body = packNames.map((n) => `### ${n}\n\n${readPack(n)}`).join('\n\n---\n\n');
-  const block = `${BEGIN}\n<!-- Task-scoped instructions written by heddle. Restored after dispatch. -->\n\n${body}\n${END}`;
+  const block = `${beginMarker(ownId)}\n<!-- Task-scoped instructions for heddle dispatch #${ownId}. Written by heddle; removed when that dispatch ends. If you are a worker for a DIFFERENT dispatch id, follow your own block only. -->\n\n${body}\n${endMarker(ownId)}`;
 
-  let next: string;
-  if (original === null) {
-    next = `${block}\n`;
-  } else if (original.includes(BEGIN) && original.includes(END)) {
-    next = original.replace(new RegExp(`${BEGIN}[\\s\\S]*?${END}`), block);
-  } else {
-    next = `${original.trimEnd()}\n\n${block}\n`;
-  }
-
-  writeFileSync(target, next, 'utf8');
+  let inserted = '';
+  let deletable = false;
+  withFileLock(join(cwd, '.heddle-agents.lock'), () => {
+    const current = existsSync(target) ? readFileSync(target, 'utf8') : null;
+    // Deletable at restore time = heddle owns every byte: the file was absent, or contained
+    // nothing but heddle marker blocks. A pre-existing file with ANY non-heddle bytes — even
+    // whitespace-only (an intentionally-empty AGENTS.md is a real convention) — is NEVER
+    // unlinked; the exact-insert removal returns it to its original bytes instead.
+    deletable = current === null || current.replace(ANY_BLOCK, '') === '';
+    const base = current === null ? null : stripDeadBlocks(current, ownId, opts.isLive);
+    if (base === null) {
+      inserted = `${block}\n`;
+      writeFileSync(target, inserted, 'utf8');
+    } else {
+      inserted = `${base.endsWith('\n') ? '\n' : '\n\n'}${block}\n`;
+      writeFileSync(target, base + inserted, 'utf8');
+    }
+  });
 
   return () => {
-    if (original !== null) {
-      writeFileSync(target, original, 'utf8');
-      return;
-    }
-    // We created this file. Remove it only if it is still byte-identical to what we wrote —
-    // if anything (a human, the worker) touched it since, leave it alone rather than discard
-    // work we didn't author.
-    try {
-      if (readFileSync(target, 'utf8') === next) unlinkSync(target);
-    } catch { /* already gone, or unreadable — leave it */ }
+    withFileLock(join(cwd, '.heddle-agents.lock'), () => {
+      // Remove exactly what THIS dispatch inserted (other blocks may sit before/after it). If the
+      // exact bytes are gone — someone edited INSIDE our block — we LEAVE it: content we cannot
+      // verify as ours is never removed (a read-only class records the edit as a mandate
+      // violation; a later materialization's dead-block GC reclaims the span, whose markers
+      // declare heddle ownership of transient instruction text).
+      try {
+        const current = readFileSync(target, 'utf8');
+        if (!current.includes(inserted)) {
+          process.stderr.write(`heddle: dispatch #${ownId}'s AGENTS.md block was edited during the run — leaving it in place (${target})\n`);
+          return;
+        }
+        const next = current.replace(inserted, '');
+        // Delete only when heddle owned every original byte AND nothing but whitespace remains —
+        // a pre-existing human file (even whitespace-only) keeps its bytes.
+        if (deletable && next.trim() === '') unlinkSync(target);
+        else writeFileSync(target, next, 'utf8');
+      } catch (err) {
+        process.stderr.write(`heddle: AGENTS.md restore for dispatch #${ownId} failed (${err instanceof Error ? err.message : String(err)}) — left as is\n`);
+      }
+    });
   };
 }

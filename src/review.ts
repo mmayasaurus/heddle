@@ -5,6 +5,40 @@ import { join } from 'node:path';
 import type { Route } from './routing.js';
 
 /**
+ * heddle-transient paths and spans are EXCLUDED from the mandate digest (HED-56 × HED-3): a peer
+ * dispatch in the same cwd may materialize/restore its AGENTS.md block, rewrite the merged
+ * .cursor/mcp.json, or bump the refcount sidecar while a read-only review runs — none of that is
+ * the reviewer's doing, and hashing it would mint false MANDATE VIOLATIONS. AGENTS.md is hashed
+ * with all heddle marker spans stripped (the human content is what the mandate protects);
+ * .cursor/mcp.json is hashed as the sidecar's pre-heddle `original` when a sidecar exists; the
+ * sidecar and lock dirs themselves are skipped.
+ */
+/** Every heddle bookkeeping artifact starts with `.heddle-` (refs sidecar, lock dirs, corrupt
+ *  quarantines `.heddle-mcp-refs.json.corrupt-<ts>`) — prefix-matched so new bookkeeping never
+ *  silently re-enters the mandate digest. */
+const isTransientBasename = (base: string): boolean => base.startsWith('.heddle-');
+const HEDDLE_SPAN = /[ \t]*<!-- heddle:begin( id=[A-Za-z0-9._-]+)? -->[\s\S]*?<!-- heddle:end(?: id=[A-Za-z0-9._-]+)? -->\n?/g;
+
+function mandateBytes(cwd: string, rel: string, raw: Buffer): Buffer {
+  const base = rel.split('/').pop() ?? rel;
+  if (base === 'AGENTS.md') return Buffer.from(raw.toString('utf8').replace(HEDDLE_SPAN, ''), 'utf8');
+  if (base === 'mcp.json' && rel.endsWith('.cursor/mcp.json')) {
+    try {
+      const sidecar = JSON.parse(readFileSync(join(cwd, rel, '..', '.heddle-mcp-refs.json'), 'utf8')) as { original?: string | null };
+      if (typeof sidecar.original === 'string') return Buffer.from(sidecar.original, 'utf8');
+      if (sidecar && sidecar.original === null) return Buffer.alloc(0); // heddle-created — no pre-heddle bytes
+    } catch (err) {
+      // ENOENT = no sidecar (file not heddle-managed) — expected and silent. Anything else
+      // (malformed sidecar mid-quarantine) is surfaced; the raw bytes are hashed either way.
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+        process.stderr.write(`heddle: mandate digest could not read the MCP sidecar for ${rel} (${err instanceof Error ? err.message : String(err)}) — hashing the raw file\n`);
+      }
+    }
+  }
+  return raw;
+}
+
+/**
  * Adversarial review support (HED-3, Maya: "super important"): a DIFFERENT model family reviews a
  * diff/worktree read-only and find-only; the author fixes; the ledger scores each author→reviewer
  * provider pair by accepted-finding rate.
@@ -112,16 +146,31 @@ export function snapshotWorktree(cwd: string): WorktreeSnapshot {
     const list = gitOut(cwd, ['ls-files', '-z', '--cached', '--others', '--exclude-standard']);
     const paths = list.split('\0').filter(Boolean).sort();
     const files: Array<{ rel: string; size: number; mode: number }> = [];
+    const transformed: Array<{ rel: string; mode: number }> = [];
     for (const rel of paths) {
+      const base = rel.split('/').pop() ?? rel;
+      if (isTransientBasename(base)) continue; // heddle bookkeeping churn — outside the mandate
       let st;
       try { st = statSync(join(cwd, rel)); } catch { h.update(rel).update('=<missing>\n'); continue; } // deleted tracked file
       if (st.isDirectory()) continue; // submodule dir etc.
-      files.push({ rel, size: st.size, mode: st.mode & 0o7777 });
+      // Files whose bytes carry heddle-transient spans are hashed through mandateBytes in-process;
+      // everything else streams through one git hash-object batch.
+      if (base === 'AGENTS.md' || rel.endsWith('.cursor/mcp.json')) transformed.push({ rel, mode: st.mode & 0o7777 });
+      else files.push({ rel, size: st.size, mode: st.mode & 0o7777 });
     }
     const oids = hashFileBatch(cwd, files.map((f) => f.rel));
     for (let i = 0; i < files.length; i++) {
       const f = files[i];
       h.update(f.rel).update('=').update((f.mode).toString(8)).update(':').update(String(f.size)).update(':').update(oids[i]).update('\n');
+    }
+    for (const f of transformed) {
+      const bytes = mandateBytes(cwd, f.rel, readFileSync(join(cwd, f.rel)));
+      // Empty transformed bytes = the file is PURE heddle-transient content (all marker blocks, or
+      // a heddle-created mcp.json) — omit its line entirely, or a peer CREATING the file mid-review
+      // would still flip the digest even though nothing mandate-relevant exists in it.
+      if (bytes.length === 0) continue;
+      const fh = createHash('sha256').update(bytes).digest('hex');
+      h.update(f.rel).update('=').update((f.mode).toString(8)).update(':').update(String(bytes.length)).update(':').update(fh).update('\n');
     }
     let stash = '';
     try { stash = gitOut(cwd, ['stash', 'list']); } catch { stash = ''; }
