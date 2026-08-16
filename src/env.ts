@@ -40,6 +40,14 @@ const ACCOUNT_SELECTOR_VARS = new Set([
   'CURSOR_API_KEY',
 ]);
 
+/**
+ * Process-bound identity of the ORCHESTRATOR must not leak into a worker: a heddle process started
+ * inside the worker would otherwise resolve the parent's identity and, with the worker stamp
+ * scrubbed, dispatch AS the parent (HED-2 review, grok #2). Workers get their own stamps
+ * (HEDDLE_WORKER / HEDDLE_DISPATCH_ID / HEDDLE_PARENT) via overrides instead.
+ */
+const PARENT_IDENTITY_VARS = ['HEDDLE_AGENT', 'FLEET_AGENT'] as const;
+
 export interface WorkerEnvOptions {
   /** Explicit overrides — typically an account selector from the account registry. */
   overrides?: Record<string, string>;
@@ -63,6 +71,12 @@ export function buildWorkerEnv(opts: WorkerEnvOptions = {}): {
       stripped.push(key);
     }
   }
+  for (const key of PARENT_IDENTITY_VARS) {
+    if (env[key] !== undefined) {
+      delete env[key];
+      stripped.push(key);
+    }
+  }
 
   for (const [key, value] of Object.entries(opts.overrides ?? {})) {
     if (!ACCOUNT_SELECTOR_VARS.has(key) && (BILLING_SWITCH_VARS as readonly string[]).includes(key)) {
@@ -71,6 +85,7 @@ export function buildWorkerEnv(opts: WorkerEnvOptions = {}): {
           `Use an account selector (${[...ACCOUNT_SELECTOR_VARS].join(', ')}) instead.`,
       );
     }
+    if ((PARENT_IDENTITY_VARS as readonly string[]).includes(key)) continue; // overrides cannot re-inject the parent's identity
     env[key] = value;
   }
 

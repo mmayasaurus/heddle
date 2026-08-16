@@ -1,34 +1,19 @@
-import { describe, it, expect, afterEach } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { describe, it, expect } from 'vitest';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { Ledger, applyLedgerMigrations } from '../src/ledger.js';
+import { useTempResources } from './helpers.js';
 
 describe('Ledger.refuse + refusal-column migration', () => {
-  const dirs: string[] = [];
-  const ledgers: Ledger[] = [];
-
-  afterEach(() => {
-    for (const ledger of ledgers) ledger.close();
-    for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
-    dirs.length = 0;
-    ledgers.length = 0;
-  });
-
-  function tempPath(): string {
-    const dir = mkdtempSync(join(tmpdir(), 'heddle-ledger-refusal-test-'));
-    dirs.push(dir);
-    return join(dir, 'ledger.db');
-  }
+  const { tempDir, trackLedger } = useTempResources('heddle-ledger-refusal-test-');
+  function tempPath(): string { return join(tempDir(), 'ledger.db'); }
 
   function refusalRecord() {
     return { orchestrator: 'U', taskClass: 'implementation', provider: 'claude', model: 'sonnet', skills: 'worker-role', issue: null, pr: null, cwd: '/tmp/x', promptPreview: 'p', sessionId: null, fellBackFrom: null };
   }
 
   it('persists a refusal as a finished unsuccessful row that is never in flight', () => {
-    const ledger = new Ledger(tempPath());
-    ledgers.push(ledger);
+    const ledger = trackLedger(new Ledger(tempPath()));
     const id = ledger.refuse(refusalRecord(), 'claude-in-session', 'why');
     expect(ledger.recent(1)[0]).toMatchObject({ id, refusal: 'claude-in-session', error: 'why', ok: 0 });
     expect(ledger.recent(1)[0].started_at).not.toBeNull();
@@ -54,7 +39,7 @@ describe('Ledger.refuse + refusal-column migration', () => {
       .run('implementation', 'claude', 'sonnet', '/tmp/x', 'p', '2026-01-01T00:00:00.000Z');
     old.close();
 
-    const ledger = new Ledger(path);
+    const ledger = trackLedger(new Ledger(path));
     const [existing] = ledger.recent(1);
     expect(existing.refusal).toBeNull();
     ledger.close();
@@ -65,13 +50,13 @@ describe('Ledger.refuse + refusal-column migration', () => {
     expect(names).toContain('refusal');
 
     const reopened = new Ledger(path);
-    ledgers.push(reopened);
+    trackLedger(reopened);
     expect(reopened.refuse(refusalRecord(), 'claude-in-session', 'why')).toBeTypeOf('number');
   });
 
   it('opens an already migrated ledger a second time without throwing', () => {
     const path = tempPath();
-    const first = new Ledger(path);
+    const first = trackLedger(new Ledger(path));
     first.close();
     expect(() => {
       const second = new Ledger(path);
@@ -81,21 +66,8 @@ describe('Ledger.refuse + refusal-column migration', () => {
 });
 
 describe('Ledger — usage excludes refusals; migration tolerates a concurrent ALTER', () => {
-  const dirs: string[] = [];
-  const ledgers: Ledger[] = [];
-
-  afterEach(() => {
-    for (const ledger of ledgers) ledger.close();
-    for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
-    dirs.length = 0;
-    ledgers.length = 0;
-  });
-
-  function tempPath(): string {
-    const dir = mkdtempSync(join(tmpdir(), 'heddle-ledger-review-test-'));
-    dirs.push(dir);
-    return join(dir, 'ledger.db');
-  }
+  const { tempDir, trackLedger } = useTempResources('heddle-ledger-review-test-');
+  function tempPath(): string { return join(tempDir(), 'ledger.db'); }
 
   function record(provider: string) {
     return { orchestrator: 'U', taskClass: 'implementation', provider, model: 'm1', skills: null, issue: null, pr: null, cwd: '/tmp/x', promptPreview: 'p', sessionId: null, fellBackFrom: null };
@@ -103,7 +75,7 @@ describe('Ledger — usage excludes refusals; migration tolerates a concurrent A
 
   it('counts refusals separately from dispatched work in provider usage', () => {
     const ledger = new Ledger(tempPath());
-    ledgers.push(ledger);
+    trackLedger(ledger);
     const id = ledger.start(record('codex'));
     ledger.finish(id, { ok: true, inputTokens: 100 });
     ledger.refuse(record('claude'), 'claude-in-session', 'why');

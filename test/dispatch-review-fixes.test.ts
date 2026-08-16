@@ -1,45 +1,11 @@
-import { describe, it, expect, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { describe, it, expect } from 'vitest';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { dispatch } from '../src/dispatch.js';
-import { Ledger } from '../src/ledger.js';
-import type { DispatchOptions, WorkerAdapter, WorkerResult } from '../src/types.js';
+import { useTempResources, fakeAdapter } from './helpers.js';
 
 describe('dispatch — review fixes', () => {
-  const dirs: string[] = [];
-  const ledgers: Ledger[] = [];
-
-  afterEach(() => {
-    for (const ledger of ledgers) ledger.close();
-    for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
-    dirs.length = 0;
-    ledgers.length = 0;
-  });
-
-  function tempDir(): string {
-    const dir = mkdtempSync(join(tmpdir(), 'heddle-dispatch-review-test-'));
-    dirs.push(dir);
-    return dir;
-  }
-
-  function tempLedger(): Ledger {
-    const ledger = new Ledger(join(tempDir(), 'ledger.db'));
-    ledgers.push(ledger);
-    return ledger;
-  }
-
-  function fakeAdapter(result: WorkerResult = { ok: true, output: 'done', exitCode: 0 }) {
-    const calls: { prompt: string; opts: DispatchOptions }[] = [];
-    const adapter: WorkerAdapter = {
-      name: 'fake', provider: 'codex',
-      dispatch: async (prompt, opts) => {
-        calls.push({ prompt, opts });
-        return result;
-      },
-    };
-    return { adapter, calls };
-  }
+  const { tempDir, tempLedger } = useTempResources('heddle-dispatch-review-test-');
 
   it('rejects incomplete explicit routes before invoking an adapter', async () => {
     const fake = fakeAdapter();

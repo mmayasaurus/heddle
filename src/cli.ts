@@ -8,6 +8,7 @@ import { Ledger } from './ledger.js';
 import { loadRouting, describeTaskClasses } from './routing.js';
 import { listPacks, withMandatoryPacks } from './skillpacks.js';
 import { classifyEffort, assessResult } from './classify.js';
+import { resolveIdentity } from './identity.js';
 
 /**
  * heddle CLI — the surface orchestrators (and later the dashboard) drive.
@@ -31,8 +32,9 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
       --resume <id>        continue a prior worker session
       --timeout <ms>       wall-clock budget (default 600000)
       --codex-home <path>  account selection for codex workers
-      --opt-in             required for task classes that gate on it
+      --opt-in             required for task classes that gate on it (and for exec-privileged)
       --no-fallback        do not try the table's fallback on failure
+      --capabilities a,b   GRANT worker capabilities: net | browse | exec-privileged (default: none)
       --json               machine-readable result
 
   heddle classify-effort --class <c> --task "<prompt>" [--json]   difficulty → effort (cheap model)
@@ -40,8 +42,10 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
                                  judge a worker result: done | needs-rework | needs-human
   heddle classes [--json]        task classes: route, why, default skill packs, edits-code
   heddle packs                   list available skill packs
-  heddle workers [--json]        dispatches still in flight
+  heddle whoami [--json]         this process's bound identity (HEDDLE_AGENT / FLEET_AGENT / .fleet-agent) + worker context
+  heddle workers [--stale <hours>] [--json]   dispatches still in flight (--stale: only orphans older than N hours)
   heddle ledger [--issue SPI-n] [--limit N] [--json]
+  heddle ledger finish <id> --error "<why>"   close an orphaned in-flight row (ok=0)
   heddle usage [--since <iso>] [--json]    per-provider totals
 `;
 
@@ -100,12 +104,14 @@ try {
         env: Object.keys(env).length ? env : undefined,
         optIn: has('--opt-in'),
         noFallback: has('--no-fallback'),
+        capabilities: arg('--capabilities')?.split(',').map((s) => s.trim()).filter(Boolean),
       });
 
       const { raw, ...summary } = res;
       out(json, summary, () => {
         const head = `${res.ok ? '✓' : '✗'} ${res.taskClass} → ${res.provider}/${res.model}` +
           (res.usedFallback ? ' (fallback)' : '') +
+          (res.refusal ? ` [refused: ${res.refusal.code}]` : '') +
           (res.durationMs ? ` · ${(res.durationMs / 1000).toFixed(1)}s` : '') +
           (res.sessionId ? `\n  resume: ${res.sessionId}` : '');
         return res.ok ? `${head}\n\n${res.output}` : `${head}\n  error: ${res.error}`;
@@ -153,16 +159,47 @@ try {
       break;
     }
 
+    case 'whoami': {
+      const id = resolveIdentity(process.cwd());
+      out(json, id, () => `agent: ${id.agent ?? '(unbound)'}  source: ${id.source}` +
+        (id.worker ? `\nWORKER context: dispatch #${id.worker.dispatchId ?? '?'} parent ${id.worker.parent ?? '?'} — this process may not dispatch (depth-1)` : ''));
+      break;
+    }
+
     case 'workers': {
-      const rows = new Ledger().inFlight();
+      const staleHours = arg('--stale');
+      if (staleHours !== undefined && !(Number.isFinite(Number(staleHours)) && Number(staleHours) > 0)) {
+        console.error('usage: heddle workers [--stale <hours>] — <hours> must be a positive number');
+        process.exit(2);
+      }
+      const ledger = new Ledger();
+      const rows = staleHours ? ledger.staleInFlight(Number(staleHours) * 3_600_000) : ledger.inFlight();
       out(json, rows, () => rows.length
         ? rows.map((r) => `#${r.id} ${r.provider}/${r.model} ${r.task_class}` +
-            (r.issue ? ` ${r.issue}` : '') + ` since ${r.started_at}`).join('\n')
-        : '(nothing in flight)');
+            (r.orchestrator ? ` [${r.orchestrator}]` : '') +
+            (r.issue ? ` ${r.issue}` : '') + ` since ${r.started_at}`).join('\n') +
+          (staleHours ? `\n(close an orphan: heddle ledger finish <id> --error "…")` : '')
+        : (staleHours ? `(no in-flight rows older than ${staleHours}h)` : '(nothing in flight)'));
       break;
     }
 
     case 'ledger': {
+      if (process.argv[3] === 'finish') {
+        const id = Number(process.argv[4]);
+        const error = arg('--error');
+        if (!Number.isInteger(id) || !error) {
+          console.error('usage: heddle ledger finish <id> --error "<why>"');
+          process.exit(2);
+        }
+        const ledger = new Ledger();
+        // Atomic: only an in-flight row can be closed; a row the worker already finished stays as is.
+        if (!ledger.closeIfInFlight(id, `closed manually: ${error}`)) {
+          console.error(`heddle: row #${id} is not in flight (no such row, or already finished) — nothing to close`);
+          process.exit(1);
+        }
+        out(json, { id, closed: true }, () => `closed #${id} (ok=0): ${error}`);
+        break;
+      }
       const rows = new Ledger().recent(Number(arg('--limit') ?? 20), arg('--issue'));
       out(json, rows, () => rows.length
         ? rows.map((r) => `${r.ok ? '✓' : '✗'} #${r.id} ${r.task_class} ${r.provider}/${r.model}` +

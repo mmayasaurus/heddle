@@ -10,6 +10,9 @@ export default defineConfig({
   test: {
     include: ['test/**/*.test.ts'],
     environment: 'node',
+    // Strip identity/worker/env overrides so results don't depend on who runs the suite (a heddle
+    // worker inherits HEDDLE_WORKER=1 and would trip depth-1 in every un-injected dispatch test).
+    setupFiles: ['test/setup.ts'],
     // node:sqlite (the ledger) is still flagged experimental on Node 22. `--disable-warning=<type>`
     // (Node ≥ 20.11/21.3) silences ONLY that category — unlike `--no-warnings[=…]`, whose `=…`
     // suffix is ignored and which hides every process warning (verified 2026-08-15, Node 22.23:

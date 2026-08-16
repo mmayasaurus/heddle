@@ -73,6 +73,24 @@ export function resolveMcpServers(names: string[]): Record<string, { command: st
  * - gemini/agy: project `.agents/mcp_config.json` — format NOT yet verified against agy docs, so
  *   this path throws rather than write a guessed schema. (Tracked follow-up.)
  */
+/**
+ * Validate an MCP attachment request WITHOUT writing anything — the dispatcher calls this before it
+ * opens a ledger row (HED-19: an unknown server / unsupported provider must fail fast, leaving no
+ * orphan row and no mutated worktree). Same rules as materializeWorkerMcp + codexMcpFlags.
+ */
+export function validateWorkerMcp(provider: string, serverNames: string[]): void {
+  if (serverNames.length === 0) return;
+  if (provider === 'codex') { codexMcpFlags(serverNames); return; }
+  if (provider === 'gemini') {
+    throw new Error(
+      'worker MCP attachment for agy/gemini is not implemented yet: the .agents/mcp_config.json ' +
+      'schema has not been verified against Antigravity docs, and heddle does not write guessed ' +
+      'config. Dispatch without --mcp for gemini, or use a codex/cursor worker for discovery tasks.',
+    );
+  }
+  resolveMcpServers(serverNames);
+}
+
 export function materializeWorkerMcp(cwd: string, provider: string, serverNames: string[]): () => void {
   if (serverNames.length === 0) return () => { /* nothing to attach */ };
 

@@ -1,45 +1,9 @@
-import { describe, it, expect, afterEach } from 'vitest';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { describe, it, expect } from 'vitest';
 import { dispatch } from '../src/dispatch.js';
-import { Ledger } from '../src/ledger.js';
-import type { DispatchOptions, WorkerAdapter, WorkerResult } from '../src/types.js';
+import { useTempResources, fakeAdapter } from './helpers.js';
 
 describe('dispatch — class + explicit route, and in-session refusal', () => {
-  const dirs: string[] = [];
-  const ledgers: Ledger[] = [];
-
-  afterEach(() => {
-    for (const ledger of ledgers) ledger.close();
-    for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
-    dirs.length = 0;
-    ledgers.length = 0;
-  });
-
-  function tempDir(): string {
-    const dir = mkdtempSync(join(tmpdir(), 'heddle-dispatch-test-'));
-    dirs.push(dir);
-    return dir;
-  }
-
-  function tempLedger(): Ledger {
-    const ledger = new Ledger(join(tempDir(), 'ledger.db'));
-    ledgers.push(ledger);
-    return ledger;
-  }
-
-  function fakeAdapter(result: WorkerResult = { ok: true, output: 'done', exitCode: 0 }) {
-    const calls: { prompt: string; opts: DispatchOptions; agents: string }[] = [];
-    const adapter: WorkerAdapter = {
-      name: 'fake', provider: 'codex',
-      dispatch: async (prompt, opts) => {
-        calls.push({ prompt, opts, agents: readFileSync(join(opts.cwd, 'AGENTS.md'), 'utf8') });
-        return result;
-      },
-    };
-    return { adapter, calls };
-  }
+  const { tempDir, tempLedger } = useTempResources('heddle-dispatch-test-');
 
   it('keeps class policy and ledger identity when an explicit provider and model replace the route', async () => {
     const cwd = tempDir();

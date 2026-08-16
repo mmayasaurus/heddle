@@ -302,7 +302,17 @@ Cursor ~18, Codex ~11, agy 9).
   tool surface" — a worker can't discover capabilities by trying and failing; it simply has none
   beyond what was granted. Fleet-management tools (heddle MCP) sit behind a hard allowlist (can
   spawn/list, cannot delete sessions/worktrees or run arbitrary shell). Secrets attached-not-pasted
-  (never in prompt text).
+  (never in prompt text). **BUILT (HED-2, 2026-08-15):** per-dispatch capability allowlist
+  (`net`, `browse`, `exec-privileged`; default-deny; ledgered; passed only where the CLI enforces —
+  codex today; unenforceable grants REFUSED; `exec-privileged` = operator YAML switch + call opt-in),
+  plus the structural caps **depth-1** (workers are never given the dispatch surface; every worker
+  env is stamped `HEDDLE_WORKER/HEDDLE_DISPATCH_ID/HEDDLE_PARENT` and stripped of the parent's
+  identity, so a nested heddle refuses — best-effort against a worker that scrubs its env; the
+  machine is the trust boundary) and **max-children** per orchestrator (policy default 8,
+  transactional count+insert), and process-bound identity (`HEDDLE_AGENT`/`FLEET_AGENT`/
+  `.fleet-agent`, never a tool arg). "The grant is the tool surface" holds for codex workers
+  (workspace-write sandbox, network off by default); cursor/agy headless workers are NOT fenced by
+  heddle today (LANDMINES). Details + enforcement matrix: `docs/MODELS.md` "Structural caps".
 - **omp's hook return-contract shape** is the clean API to mirror: `{block, reason}` to refuse a
   call (reason surfaces to the model), `{content, isError}` to mutate a result, chainable handlers.
 
