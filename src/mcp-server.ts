@@ -208,6 +208,33 @@ server.tool(
 );
 
 server.tool(
+  'report_in_session',
+  'report the outcome of an in-session (claude-class) dispatch heddle handed back, so it counts in the ledger.',
+  {
+    id: z.number().int().describe('Ledger id returned by the in-session claude dispatch.'),
+    ok: z.boolean().describe('Whether the in-session subagent completed successfully.'),
+    error: z.string().optional().describe('Failure reason when ok is false.'),
+    duration_ms: z.number().optional().describe('Elapsed wall-clock time in milliseconds.'),
+    input_tokens: z.number().optional().describe('Input tokens used by the subagent.'),
+    cached_input_tokens: z.number().optional().describe('Cached input tokens used by the subagent.'),
+    output_tokens: z.number().optional().describe('Output tokens used by the subagent.'),
+    reasoning_tokens: z.number().optional().describe('Reasoning tokens used by the subagent.'),
+  },
+  async (a) => {
+    try {
+      // The ledger guards this to the one reportable, still-refusal handoff state; a stale or wrong
+      // id is deliberately a no-op rather than overwriting an independently recorded outcome.
+      const matched = ledger().reportInSession(a.id, {
+        ok: a.ok, error: a.error, durationMs: a.duration_ms, inputTokens: a.input_tokens,
+        cachedInputTokens: a.cached_input_tokens, outputTokens: a.output_tokens,
+        reasoningTokens: a.reasoning_tokens,
+      });
+      return text({ id: a.id, matched });
+    } catch (err) { return errorText(`report_in_session failed: ${err instanceof Error ? err.message : String(err)}`); }
+  },
+);
+
+server.tool(
   'review_stats',
   'Adversarial-review scoreboard: per author→reviewer provider pair — reviews, scored reviews, findings, ' +
     'accepted findings, acceptance rate, mandate violations — plus the most recent reviews. Use it to pick ' +

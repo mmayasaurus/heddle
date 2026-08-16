@@ -856,7 +856,7 @@ function refuseInSession(
     (mcp.length ? ` and MCP [${mcp.join(', ')}]` : '') + `.` + alt +
     (adviceLine ? ` ${adviceLine}` : '');
   const id = ctx.ledger.refuse(
-    baseRecord(ctx, req, route.taskClass, route, skills, fellBackFrom), 'claude-in-session', reason,
+    baseRecord(ctx, req, route.taskClass, route, skills, fellBackFrom), 'claude-in-session', reason, 'in-session',
   );
   return refusalOutcome(ctx, req, route.taskClass, route, skills,
     { code: 'claude-in-session', reason, instruction }, { extra: { execution, usedFallback: fellBackFrom !== null }, ledgerId: id });

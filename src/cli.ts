@@ -54,6 +54,7 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
   heddle workers [--stale <hours>] [--json]   dispatches still in flight (--stale: only orphans older than N hours)
   heddle ledger [--issue SPI-n] [--limit N] [--json]
   heddle ledger finish <id> --error "<why>"   close an orphaned in-flight row (ok=0)
+  heddle ledger report-in-session <id> (--ok | --failed) [--error "<why>"] [--input-tokens N] [--output-tokens N] [--duration-ms N] [--json]
   heddle usage [--since <iso>] [--json]    per-provider totals
   heddle reviews [--limit N] [--json]      adversarial-review scoreboard (author→reviewer pairs) + recent reviews
   heddle review-outcome <dispatch-id> --total N --accepted M [--notes "…"]   record how many findings you accepted
@@ -248,6 +249,29 @@ try {
           process.exit(1);
         }
         out(json, { id, closed: true }, () => `closed #${id} (ok=0): ${error}`);
+        break;
+      }
+      if (process.argv[3] === 'report-in-session') {
+        const id = Number(process.argv[4]);
+        const ok = has('--ok');
+        const failed = has('--failed');
+        if (!Number.isInteger(id) || ok === failed) {
+          console.error('usage: heddle ledger report-in-session <id> (--ok | --failed) [--error "<why>"] [--input-tokens N] [--output-tokens N] [--duration-ms N] [--json]');
+          process.exit(2);
+        }
+        const ledger = new Ledger();
+        const matched = ledger.reportInSession(id, {
+          ok,
+          error: arg('--error'),
+          inputTokens: arg('--input-tokens') === undefined ? undefined : Number(arg('--input-tokens')),
+          outputTokens: arg('--output-tokens') === undefined ? undefined : Number(arg('--output-tokens')),
+          durationMs: arg('--duration-ms') === undefined ? undefined : Number(arg('--duration-ms')),
+        });
+        if (!matched) {
+          console.error(`heddle: row #${id} is not an unreported in-session handoff — nothing recorded`);
+          process.exit(1);
+        }
+        out(json, { id, matched: true }, () => `reported in-session outcome for #${id} (${ok ? 'ok' : 'failed'})`);
         break;
       }
       const rows = new Ledger().recent(Number(arg('--limit') ?? 20), arg('--issue'));

@@ -58,6 +58,8 @@ export interface DispatchRecord {
   account: string | null;
   /** How `orchestrator` was determined: `bound` (process identity) or `caller` (tool/CLI argument). */
   identitySource: string | null;
+  /** How the work ran: a heddle subprocess, or an orchestrator-owned in-session subagent. */
+  executionMode: string | null;
   startedAt: string;
   finishedAt: string | null;
 }
@@ -67,7 +69,7 @@ export interface DispatchRecord {
 export type DispatchStartRecord =
   Omit<DispatchRecord, 'id' | 'ok' | 'error' | 'inputTokens' | 'cachedInputTokens' | 'outputTokens' |
     'reasoningTokens' | 'durationMs' | 'finishedAt' | 'startedAt' | 'refusal' | 'capabilities' |
-    'routeReason' | 'account' | 'identitySource'> &
+    'routeReason' | 'account' | 'identitySource' | 'executionMode'> &
   Partial<Pick<DispatchRecord, 'capabilities' | 'routeReason' | 'account' | 'identitySource'>>;
 
 const SCHEMA = `
@@ -153,6 +155,8 @@ const MIGRATIONS: { column: string; ddl: string }[] = [
   { column: 'route_reason', ddl: 'ALTER TABLE dispatches ADD COLUMN route_reason TEXT' },
   { column: 'account', ddl: 'ALTER TABLE dispatches ADD COLUMN account TEXT' },
   { column: 'identity_source', ddl: 'ALTER TABLE dispatches ADD COLUMN identity_source TEXT' },
+  // HED-99: a finished in-session handoff becomes a real dispatch only after its orchestrator reports it.
+  { column: 'execution_mode', ddl: 'ALTER TABLE dispatches ADD COLUMN execution_mode TEXT' },
 ];
 
 /**
@@ -213,8 +217,8 @@ export class Ledger {
     const info = this.db.prepare(`
       INSERT INTO dispatches
         (orchestrator, task_class, provider, model, skills, issue, pr, cwd, prompt_preview,
-         session_id, fell_back_from, capabilities, route_reason, account, identity_source, started_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         session_id, fell_back_from, capabilities, route_reason, account, identity_source, execution_mode, started_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'subprocess', ?)
     `).run(
       r.orchestrator, r.taskClass, r.provider, r.model, r.skills, r.issue, r.pr, r.cwd,
       r.promptPreview.slice(0, 500), r.sessionId, r.fellBackFrom, r.capabilities ?? null,
@@ -223,17 +227,19 @@ export class Ledger {
     return Number(info.lastInsertRowid);
   }
 
-  private insertRefusal(r: DispatchStartRecord, refusal: string, reason: string, now: string): number {
+  private insertRefusal(
+    r: DispatchStartRecord, refusal: string, reason: string, now: string, executionMode?: string,
+  ): number {
     const info = this.db.prepare(`
       INSERT INTO dispatches
         (orchestrator, task_class, provider, model, skills, issue, pr, cwd, prompt_preview,
          session_id, fell_back_from, refusal, capabilities, route_reason, account, identity_source,
-         ok, error, started_at, finished_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+         execution_mode, ok, error, started_at, finished_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
     `).run(
       r.orchestrator, r.taskClass, r.provider, r.model, r.skills, r.issue, r.pr, r.cwd,
       r.promptPreview.slice(0, 500), r.sessionId, r.fellBackFrom, refusal, r.capabilities ?? null,
-      r.routeReason ?? null, r.account ?? null, r.identitySource ?? null, reason, now, now,
+      r.routeReason ?? null, r.account ?? null, r.identitySource ?? null, executionMode ?? null, reason, now, now,
     );
     return Number(info.lastInsertRowid);
   }
@@ -286,8 +292,29 @@ export class Ledger {
    * Record a dispatch heddle REFUSED to run (policy/structural cap): a finished row, ok=0, with the
    * refusal code and reason, so the decision is auditable and never shows as in-flight.
    */
-  refuse(r: DispatchStartRecord, refusal: string, reason: string): number {
-    return this.insertRefusal(r, refusal, reason, new Date().toISOString());
+  refuse(r: DispatchStartRecord, refusal: string, reason: string, executionMode?: string): number {
+    return this.insertRefusal(r, refusal, reason, new Date().toISOString(), executionMode);
+  }
+
+  /**
+   * Confirm an orchestrator-owned in-session handoff actually ran. The handoff begins as a finished
+   * refusal so it cannot occupy a worker slot; clearing that refusal only after this guarded update
+   * makes the existing usage query count the reported outcome without creating an in-flight row.
+   */
+  reportInSession(id: number, outcome: {
+    ok: boolean; error?: string; durationMs?: number;
+    inputTokens?: number; cachedInputTokens?: number; outputTokens?: number; reasoningTokens?: number;
+  }): boolean {
+    const info = this.db.prepare(`
+      UPDATE dispatches SET refusal = NULL, ok = ?, error = ?, duration_ms = ?, input_tokens = ?,
+        cached_input_tokens = ?, output_tokens = ?, reasoning_tokens = ?, finished_at = ?
+      WHERE id = ? AND execution_mode = 'in-session' AND refusal IS NOT NULL
+    `).run(
+      outcome.ok ? 1 : 0, outcome.error ?? null, outcome.durationMs ?? null,
+      outcome.inputTokens ?? null, outcome.cachedInputTokens ?? null, outcome.outputTokens ?? null,
+      outcome.reasoningTokens ?? null, new Date().toISOString(), id,
+    );
+    return Number(info.changes) > 0;
   }
 
   finish(id: number, outcome: {
