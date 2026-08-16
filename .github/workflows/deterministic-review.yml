@@ -290,15 +290,19 @@ jobs:
           mkdir -p "$DELTA_DIR"
           DELTA_COUNT=0
           for m in $MERGES; do
-            PARENTLINE=$(git rev-list --parents -n 1 "$m") \
-              || { echo "::error::git rev-list --parents failed on $m — NOT a clean pass"; exit 1; }
-            set -- $PARENTLINE; shift
-            if [ "$#" -ne 2 ]; then
-              echo "::error::merge $m has $# parents — the merge-delta guard supports 2-parent merges only; review by hand. NOT a clean pass."
+            # `rev-parse <m>^@` lists parents one per line — no `set --`
+            # word-splitting (SC2086) and no clobbering of $@.
+            PARENTS=$(git rev-parse "$m^@") \
+              || { echo "::error::git rev-parse (parents) failed on $m — NOT a clean pass"; exit 1; }
+            NPAR=$(printf '%s\n' "$PARENTS" | grep -c .)
+            if [ "$NPAR" -ne 2 ]; then
+              echo "::error::merge $m has $NPAR parents — the merge-delta guard supports 2-parent merges only; review by hand. NOT a clean pass."
               exit 1
             fi
+            P1=$(printf '%s\n' "$PARENTS" | sed -n 1p)
+            P2=$(printf '%s\n' "$PARENTS" | sed -n 2p)
             MT_RC=0
-            AUTO_OUT=$(git merge-tree --write-tree "$1" "$2") || MT_RC=$?
+            AUTO_OUT=$(git merge-tree --write-tree "$P1" "$P2") || MT_RC=$?
             # rc 0 = clean automerge, 1 = conflicts (tree still written with
             # conflict markers), anything else = tool failure.
             if [ "$MT_RC" -gt 1 ]; then
