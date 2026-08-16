@@ -14,6 +14,14 @@ policy:
     ollama_cloud: excluded            # reserved for PR reviewer bots (account-scoped limits)
   official_binaries_only: true        # each vendor's own CLI + own auth; never a third-party
                                       # client wearing another vendor's credentials (see README)
+  cap_aware_routing:                  # HED-67 — src/capaware.ts consults ~/.heddle/usage at dispatch
+    enabled: true
+    route_away_at_pct: 90             # primary's binding window (5h, else 7d; cursor: its pool) >= this
+                                      #   → run the class fallback instead (soft; both over → primary).
+                                      # Metered refusals are structural: cursor included-api >= 100% or
+                                      #   cursor.includedApiExhausted → named 3P models (kimi) REFUSED;
+                                      #   cursor.onDemandLimitReached → everything on cursor REFUSED.
+                                      # Unknown/stale caps never route away and never refuse.
   capabilities:                       # HED-2 — operator-owned switches for worker capability grants
     allow_exec_privileged: false      # exec-privileged (codex danger-full-access, no sandbox) stays REFUSED
                                       #   until the operator flips this; the call must ALSO pass opt_in.
@@ -33,9 +41,13 @@ policy:
 providers:
   claude:
     auth: anthropic-subscription
-    execution: in-session-subagent    # spawned via the orchestrator's Agent tool, not a subprocess
+    execution: headless               # HED-78: `claude -p --output-format json` under CLAUDE_CONFIG_DIR of the
+                                      #   registry account (~/.heddle/accounts.json) with the most 5h headroom —
+                                      #   automatic account rotation. dispatch_worker(in_session: true) keeps the
+                                      #   original protocol (the orchestrator's own Agent-tool subagent: shared
+                                      #   prompt cache, same account) as a structured claude-in-session instruction.
     models: [fable, opus, sonnet, haiku]
-    notes: shared prompt cache with orchestrator; per-agent skills/mcpServers/permissionMode native
+    notes: "headless posture = --permission-mode acceptEdits + an explicit tool allowlist (LANDMINES: auto aborts headless); packs via --append-system-prompt; never --bare"
   codex:
     auth: chatgpt-subscription
     execution: headless               # codex exec --json, stdin CLOSED (see docs/LANDMINES.md)
@@ -99,6 +111,13 @@ providers:
 #   edits_code: true for classes whose workers change files. Drives the dispatch-guidance hook's
 #               "code-editing class dispatched with no task-fit packs" nudge and the `worker-role`+
 #               `quality-gate` pairing rule in MODELS.md. Review/read-only classes are false.
+#   read_only:  (HED-3) the worker must not change the worktree: heddle passes a read-only sandbox where
+#               the CLI has one (codex --sandbox read-only; claude --tools Read,Grep,Glob) and always
+#               snapshots `git status`/`git diff` before+after — a mutated worktree is a MANDATE
+#               VIOLATION recorded on the review row (findings are still returned).
+#   auto_assess: (HED-3) run assess_result on the worker's output and return the assessment with it.
+#   reviewer_pool: (HED-3) ordered provider/model alternatives used when the caller names the
+#               author's provider (`author_provider`) — a reviewer must be a DIFFERENT family.
 task_classes:
   orchestration:            # decompose, integrate, judge, land — the orchestrator itself
     provider: claude
@@ -142,6 +161,7 @@ task_classes:
     provider: codex
     model: gpt-5.6-luna
     effort: low             # cheap + fast for low-reasoning mechanical work
+    mcp: [memtrace]         # memtrace-first discipline for every code-editing class (Maya, 2026-08-15)
     fallback: {provider: cursor, model: composer-2.5-fast}
     why: renames, sweeps, codemods, boilerplate, test scaffolds — Luna at low effort is cheap volume; the -fast fallback bills ~2x on Cursor
     skills: [worker-role, quality-gate]
@@ -149,6 +169,7 @@ task_classes:
   scaffold:                 # fast structural code drafts — Cursor's coding-tuned model
     provider: cursor
     model: composer-2.5
+    mcp: [memtrace]         # memtrace-first discipline for every code-editing class (Maya, 2026-08-15)
     fallback: {provider: codex, model: gpt-5.6-luna}
     why: fast structural drafts (files, stubs, wiring) — Composer is Cursor-native, cache-warm, ~1.8s on a trivial prompt; coding-tuned, not a reasoner
     skills: [worker-role, quality-gate]
@@ -173,6 +194,20 @@ task_classes:
     why: cheap second draft to compare against a primary — same family as second-opinion, lower effort
     skills: [worker-role]
     edits_code: false
+  adversarial-review:       # HED-3 (Maya: "super important") — a DIFFERENT model family reviews a diff/
+    provider: cursor        #   worktree read-only, find-only; the author fixes; the ledger scores each
+    model: cursor-grok-4.6-high   # author→reviewer provider pair by accepted-finding rate.
+    fallback: {provider: gemini, model: gemini-3.1-pro-high}
+    reviewer_pool:          # first entry whose provider differs from `author_provider` is used
+      - {provider: cursor, model: cursor-grok-4.6-high}
+      - {provider: gemini, model: gemini-3.1-pro-high}
+      - {provider: codex, model: gpt-5.6-sol}
+      - {provider: claude, model: opus}
+    why: pre-PR adversarial review by another model family, read-only + find-only, with a test-quality lens (a toggle test is not a behavior test); the author fixes, the ledger scores reviewer pairs
+    skills: [worker-role, adversarial-review]
+    edits_code: false
+    read_only: true
+    auto_assess: true
   gemini-analysis:          # long-context reading, doc/log analysis, cross-checking
     provider: gemini
     model: gemini-3.1-pro-high

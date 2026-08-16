@@ -1,0 +1,291 @@
+{
+  "limits": [
+    {
+      "accounts": null,
+      "activeAccount": null,
+      "capturedAt": 1786831140,
+      "fiveHour": {
+        "resetsAt": 1786846200,
+        "usedPercentage": 32.0
+      },
+      "model": "claude-fable-5",
+      "note": null,
+      "noteCodes": null,
+      "provider": "claude",
+      "sevenDay": {
+        "resetsAt": 1786892400,
+        "usedPercentage": 24.0
+      },
+      "source": "statusline-tap",
+      "stale": false,
+      "staleAfterSecs": 600,
+      "windows": null
+    },
+    {
+      "accounts": [
+        {
+          "capturedAt": 1786831170,
+          "detail": null,
+          "fiveHour": {
+            "resetsAt": null,
+            "usedPercentage": null
+          },
+          "id": "00000000-0000-0000-0000-000000000007",
+          "label": "a…@example.com",
+          "limitReached": false,
+          "note": null,
+          "noteCodes": [],
+          "plan": "prolite",
+          "sevenDay": {
+            "resetsAt": 1787343662,
+            "usedPercentage": 5.0
+          },
+          "stale": false,
+          "windows": [
+            {
+              "id": "codex_bengalfox-7d",
+              "label": "GPT-5.3-Codex-Spark 7d",
+              "limitAmount": null,
+              "resetsAt": 1787427150,
+              "unit": null,
+              "usedAmount": null,
+              "usedPercentage": 0.0
+            }
+          ]
+        },
+        {
+          "capturedAt": 1786831170,
+          "detail": null,
+          "fiveHour": {
+            "resetsAt": null,
+            "usedPercentage": null
+          },
+          "id": "00000000-0000-0000-0000-000000000005",
+          "label": "b…@example.org",
+          "limitReached": false,
+          "note": null,
+          "noteCodes": [],
+          "plan": "pro",
+          "sevenDay": {
+            "resetsAt": 1787333190,
+            "usedPercentage": 1.0
+          },
+          "stale": false,
+          "windows": [
+            {
+              "id": "codex_bengalfox-7d",
+              "label": "GPT-5.3-Codex-Spark 7d",
+              "limitAmount": null,
+              "resetsAt": 1787427150,
+              "unit": null,
+              "usedAmount": null,
+              "usedPercentage": 12.0
+            }
+          ]
+        }
+      ],
+      "activeAccount": null,
+      "capturedAt": 1786831170,
+      "fiveHour": {
+        "resetsAt": null,
+        "usedPercentage": null
+      },
+      "model": "chatgpt · 2 acct",
+      "note": "no 5h window in wham/usage — OpenAI currently exposes only the 7d window (secondary_window null); it reappears here automatically if the provider restores it",
+      "noteCodes": [
+        "codex.no5hWindow"
+      ],
+      "provider": "codex",
+      "sevenDay": {
+        "resetsAt": 1787343662,
+        "usedPercentage": 5.0
+      },
+      "source": "claudex-usage-cache",
+      "stale": false,
+      "staleAfterSecs": 300,
+      "windows": [
+        {
+          "id": "codex_bengalfox-7d",
+          "label": "GPT-5.3-Codex-Spark 7d",
+          "limitAmount": null,
+          "resetsAt": 1787427150,
+          "unit": null,
+          "usedAmount": null,
+          "usedPercentage": 12.0
+        }
+      ]
+    },
+    {
+      "accounts": [
+        {
+          "capturedAt": 1786831155,
+          "detail": {
+            "autoModelSelectedDisplayMessage": "You've used 17% of your included total usage",
+            "billingCycleEnd": 1787696688,
+            "billingCycleStart": 1785018288,
+            "fetchedAt": 1786831155,
+            "isUnlimited": false,
+            "limitType": "user",
+            "membershipType": "ultra",
+            "namedModelSelectedDisplayMessage": "You've used 87% of your included API usage",
+            "onDemand": {
+              "enabled": true,
+              "limit": 10000,
+              "remaining": 10000,
+              "used": 0
+            },
+            "plan": {
+              "apiPercentUsed": 86.688,
+              "autoPercentUsed": 0,
+              "breakdown": {
+                "bonus": 3344,
+                "included": 40000,
+                "total": 43344
+              },
+              "enabled": true,
+              "limit": 40000,
+              "remaining": 0,
+              "totalPercentUsed": 17.337600000000002,
+              "used": 40000
+            },
+            "source": "cursor-ide",
+            "tokenExpiresAt": 1789423200
+          },
+          "fiveHour": {
+            "resetsAt": null,
+            "usedPercentage": null
+          },
+          "id": "cursor-ide",
+          "label": "v…@example.com",
+          "limitReached": false,
+          "note": "You've used 17% of your included total usage; You've used 87% of your included API usage; included API pool used up ($400.00 of $400.00) — named third-party models bill on-demand until the cycle resets",
+          "noteCodes": [
+            "cursor.includedApiExhausted"
+          ],
+          "plan": "ultra",
+          "sevenDay": {
+            "resetsAt": null,
+            "usedPercentage": null
+          },
+          "stale": false,
+          "windows": [
+            {
+              "id": "included-total",
+              "label": "included total (Auto / Cursor models)",
+              "limitAmount": null,
+              "resetsAt": 1787696688,
+              "unit": null,
+              "usedAmount": null,
+              "usedPercentage": 17.337600000000002
+            },
+            {
+              "id": "included-api",
+              "label": "included API (named 3rd-party models)",
+              "limitAmount": 400.0,
+              "resetsAt": 1787696688,
+              "unit": "usd",
+              "usedAmount": 400.0,
+              "usedPercentage": 86.688
+            },
+            {
+              "id": "usage-based",
+              "label": "on-demand (usage-based)",
+              "limitAmount": 100.0,
+              "resetsAt": 1787696688,
+              "unit": "usd",
+              "usedAmount": 0.0,
+              "usedPercentage": 0.0
+            }
+          ]
+        }
+      ],
+      "activeAccount": null,
+      "capturedAt": 1786831155,
+      "fiveHour": {
+        "resetsAt": null,
+        "usedPercentage": null
+      },
+      "model": "cursor.com · 1 acct",
+      "note": null,
+      "noteCodes": [],
+      "provider": "cursor",
+      "sevenDay": {
+        "resetsAt": null,
+        "usedPercentage": null
+      },
+      "source": "cursor-usage-summary",
+      "stale": false,
+      "staleAfterSecs": 900,
+      "windows": [
+        {
+          "id": "included-total",
+          "label": "included total (Auto / Cursor models)",
+          "limitAmount": null,
+          "resetsAt": 1787696688,
+          "unit": null,
+          "usedAmount": null,
+          "usedPercentage": 17.337600000000002
+        },
+        {
+          "id": "included-api",
+          "label": "included API (named 3rd-party models)",
+          "limitAmount": 400.0,
+          "resetsAt": 1787696688,
+          "unit": "usd",
+          "usedAmount": 400.0,
+          "usedPercentage": 86.688
+        },
+        {
+          "id": "usage-based",
+          "label": "on-demand (usage-based)",
+          "limitAmount": 100.0,
+          "resetsAt": 1787696688,
+          "unit": "usd",
+          "usedAmount": 0.0,
+          "usedPercentage": 0.0
+        }
+      ]
+    },
+    {
+      "accounts": null,
+      "activeAccount": null,
+      "capturedAt": 1786831110,
+      "fiveHour": {
+        "resetsAt": 1786840240,
+        "usedPercentage": 3.931260108947765
+      },
+      "model": "antigravity",
+      "note": null,
+      "noteCodes": [],
+      "provider": "gemini",
+      "sevenDay": {
+        "resetsAt": 1787350118,
+        "usedPercentage": 0.7488667964935192
+      },
+      "source": "agy-quota",
+      "stale": false,
+      "staleAfterSecs": 600,
+      "windows": [
+        {
+          "id": "3p-weekly",
+          "label": "Claude and GPT models 7d",
+          "limitAmount": null,
+          "resetsAt": 1787432627,
+          "unit": null,
+          "usedAmount": null,
+          "usedPercentage": 0.0
+        },
+        {
+          "id": "3p-5h",
+          "label": "Claude and GPT models 5h",
+          "limitAmount": null,
+          "resetsAt": 1786845827,
+          "unit": null,
+          "usedAmount": null,
+          "usedPercentage": 0.0
+        }
+      ]
+    }
+  ],
+  "writtenAt": 1786831200
+}

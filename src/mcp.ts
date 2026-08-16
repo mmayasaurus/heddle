@@ -1,5 +1,6 @@
-import { readFileSync, existsSync, writeFileSync, unlinkSync, mkdirSync } from 'node:fs';
+import { readFileSync, existsSync, writeFileSync, unlinkSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { join, dirname } from 'node:path';
+import { tmpdir } from 'node:os';
 
 /**
  * Worker MCP attachment — grants a cross-provider worker the code-discovery tools its task needs.
@@ -81,6 +82,7 @@ export function resolveMcpServers(names: string[]): Record<string, { command: st
 export function validateWorkerMcp(provider: string, serverNames: string[]): void {
   if (serverNames.length === 0) return;
   if (provider === 'codex') { codexMcpFlags(serverNames); return; }
+  if (provider === 'claude') { resolveMcpServers(serverNames); return; } // written to a temp --mcp-config file at run time
   if (provider === 'gemini') {
     throw new Error(
       'worker MCP attachment for agy/gemini is not implemented yet: the .agents/mcp_config.json ' +
@@ -89,6 +91,22 @@ export function validateWorkerMcp(provider: string, serverNames: string[]): void
     );
   }
   resolveMcpServers(serverNames);
+}
+
+/**
+ * Claude headless workers take MCP servers from `--mcp-config <file>` (+ `--strict-mcp-config`), so
+ * heddle writes a per-dispatch JSON in the OS temp dir — nothing touches the worktree — and removes it
+ * afterwards. ALWAYS returns a file — an empty {mcpServers:{}} when none were requested — because
+ * --strict-mcp-config must always be passed to hide the operator's global servers.
+ */
+export function claudeMcpConfigFile(serverNames: string[]): { path: string; cleanup: () => void } {
+  // An EMPTY config is deliberate: paired with --strict-mcp-config it hides the operator's global
+  // servers from the worker (see src/adapters/claude.ts).
+  const servers = serverNames.length ? resolveMcpServers(serverNames) : {};
+  const dir = mkdtempSync(join(tmpdir(), 'heddle-claude-mcp-'));
+  const path = join(dir, 'mcp.json');
+  writeFileSync(path, JSON.stringify({ mcpServers: servers }, null, 2), 'utf8');
+  return { path, cleanup: () => { try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ } } };
 }
 
 export function materializeWorkerMcp(cwd: string, provider: string, serverNames: string[]): () => void {

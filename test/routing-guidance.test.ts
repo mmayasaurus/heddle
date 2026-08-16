@@ -46,7 +46,7 @@ describe('routing.v0.yaml — shipped dispatch guidance', () => {
     expect(descriptions).toHaveLength(classes.length);
     expect(descriptions.map((row) => row.task_class)).toEqual(classes);
     expect(descriptions.find((row) => row.task_class === 'implementation')).toMatchObject({
-      provider: 'claude', model: 'sonnet', execution: 'in-session-subagent', effort: null,
+      provider: 'claude', model: 'sonnet', execution: 'headless', effort: null,
       fallback: 'codex/gpt-5.6-terra', opt_in_required: false, edits_code: true,
       mcp: ['memtrace'], skills: ['worker-role', 'code-discovery', 'quality-gate'],
     });

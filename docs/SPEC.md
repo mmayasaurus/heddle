@@ -445,8 +445,11 @@ not skills.
 - **Build / code:** [have] spinventory-core, code-discovery, quality-gate, supabase-dev; [have,
   invoke] sleek-style-guide, social-style-guide; [NEW, extract-from-source, P2] condensed style
   skill materialized into non-Claude workers' AGENTS.md (they can't invoke the Claude commands).
-- **Review:** `code-review` worker skill [NEW, P2] encoding the DR reviewer lenses (correctness /
-  runtime / security / parity / conventions); [have, reuse] /code-review, security-review, find-bugs.
+- **Review:** `adversarial-review` [BUILT, HED-3] — the `adversarial-review` task class + skill pack:
+  a different model family, read-only (sandbox where the CLI has one + content-digest mandate check),
+  find-only, five lenses incl. test quality; review ledger + per-pair acceptance scores; see MODELS.md.
+  `code-review` worker skill [NEW, P2] encoding the DR reviewer lenses (correctness / runtime /
+  security / parity / conventions); [have, reuse] /code-review, security-review, find-bugs.
 - **Test / verify:** [have] quality-gate; [reuse] vitest, verification-before-completion,
   systematic-debugging, test-driven-development.
 - **Land / PR:** [have] pr-sweep.sh + clean-pr/clean-all-prs; optional `drive-pr-to-green` skill P3.

@@ -25,6 +25,7 @@ bots — do not dispatch workers there.
 | `quick-alt-take` | cursor **grok-4.6-medium** | — | Cheap second draft to compare against a primary. Same family as second-opinion, lower effort. |
 | `research-summarize` | claude **haiku** | luna | Doc reading, log triage, summarization. Haiku is the cheap Claude; do not use Sonnet/Opus to read logs. |
 | `documentation` | gemini **3.6-flash-low** | luna | READMEs, comments, changelogs, docstrings. Flash: cheap, fast (~3s), fine for prose over known facts. Not for designing architecture. (3.7-flash verified 8-14 — in catalog; class default pending a quota check.) |
+| `adversarial-review` | cursor **grok-4.6-high** (or the first `reviewer_pool` entry that is not the author's provider) | gemini **3.1-pro-high** | Pre-PR review by a DIFFERENT model family, read-only + find-only, test-quality lens; `author_provider` required; the ledger scores each author→reviewer pair (HED-3, section below). |
 | `gemini-analysis` | gemini **3.1-pro-high** | composer-2.5 | Long-context reading, doc/log analysis, cross-checking, and **web-grounded research** (agy has Google Search). Gemini is still **piloting** (adapter timeouts + model-echo checks). |
 
 Race-and-merge (hard/high-value only): fan one task across **diverse families**
@@ -32,10 +33,12 @@ Race-and-merge (hard/high-value only): fan one task across **diverse families**
 
 ## Family strengths / weaknesses
 
-**Claude (Anthropic sub, in-session subagents).** Best judgment, native
-`skills`/`mcpServers`/`permissionMode`, thinking visible, shared cache with
-the orchestrator. Weakness: burning Opus/Sonnet on mechanical or prose work
-wastes the flat pool; workers are subagents, not `claude -p`.
+**Claude (Anthropic sub, headless `claude -p` workers by default — HED-78;
+in-session subagents on `in_session: true`).** Best judgment; headless workers
+rotate onto the registry account with the most 5h headroom; the in-session
+protocol keeps native `skills`/`mcpServers`/`permissionMode`, visible thinking
+and the orchestrator's shared cache. Weakness: burning Opus/Sonnet on
+mechanical or prose work wastes the flat pool.
 
 **Codex (ChatGPT sub, `codex exec`).** Effort knob (`minimal`…`xhigh`); Luna
 wins on volume; Sol/Terra are capable coding fallbacks. Lean by default
@@ -109,6 +112,149 @@ get a temporary `AGENTS.md` block (restored after dispatch).
 
 Authoritative contracts: `docs/LANDMINES.md`. Authoritative map: the YAML.
 
+## Adversarial review (BUILT — HED-3, 2026-08-15; Maya: "super important")
+
+Pre-PR, before the human looks: a **different model family** is dropped into the
+author's worktree **read-only** with a **find-only** mandate; the author fixes;
+the ledger scores each author→reviewer pair by accepted-finding rate.
+
+- **Class** `adversarial-review` (routing YAML): primary `cursor/cursor-grok-4.6-high`,
+  fallback `gemini/gemini-3.1-pro-high`, `reviewer_pool` `[cursor/grok, gemini/pro,
+  codex/sol, claude/opus]`, packs `[worker-role, adversarial-review]`, `read_only:
+  true`, `auto_assess: true`. Call it with `author_provider` (**required** — the
+  provider that wrote the change; an orchestrator reviewing its own edits passes
+  `claude`), optional `author_model` / `author_dispatch_id` (lineage) and
+  `diff_base` (a git ref — heddle prepends "review `git diff <ref>...HEAD`").
+- **Different family, enforced on the effective route:** if the class primary is
+  the author's provider, the first differing `reviewer_pool` entry is used
+  (`route_reason: … reviewer pool:2 (author is cursor)`); a fallback in the
+  author's family is dropped; naming the author's own provider explicitly, or a
+  cap-aware route-away landing there, is refused (`same-provider-review`,
+  ledgered). Provider names are normalized (`Cursor ` = cursor).
+- **Read-only, enforced where the CLI has a knob and PROVEN everywhere:** codex
+  `--sandbox read-only`; claude `--tools Read Grep Glob` (verified live: Write
+  reported disabled, no file created) — and every claude worker now runs
+  `--strict-mcp-config` with a per-dispatch (possibly empty) MCP file, because a
+  live check showed the operator's global MCP servers (Serena can edit code;
+  Linear/Supabase act on live systems) leaking into a "read-only" reviewer;
+  cursor/agy have no knob. Structurally, heddle hashes the worktree **contents**
+  before and after (HEAD + every tracked/untracked non-ignored file + the stash
+  list): a changed digest — or an after-snapshot that fails in a repo that worked
+  before — is a **MANDATE VIOLATION**: `ok=false`, `review.mandateOk=false`,
+  `mandate_ok=0` on the review row, findings still returned, nothing reverted.
+  Ignored paths (`.gitignore`) are outside the boundary by design.
+- **The mandate pack** (`skills/adversarial-review.md`): find only, never fix;
+  adversarial not agreeable; five lenses — correctness, security, **test quality
+  (Maya's bar: a test that proves a switch toggles is not a test that proves the
+  switch DOES the thing — name every test that would still pass if the feature
+  were silently broken)**, docs/messages, unverifiable PR claims; a fixed report
+  format ending in `VERDICT: N findings`.
+- **Ledger:** `reviews` table (dispatch_id → author_provider/model/dispatch,
+  reviewer_provider/model, mandate_ok, findings_total/accepted, notes); the
+  reviewer's output also runs through `assess_result` (`assessment` on the
+  outcome). **Follow-up:** after triage the author records
+  `record_review_outcome(dispatch_id, findings_total, findings_accepted, notes)`
+  (MCP) / `heddle review-outcome <id> --total N --accepted M`; `review_stats` /
+  `heddle reviews` show per-pair reviews, scored, findings, accepted,
+  acceptance rate, mandate violations — the scoreboard that picks the reviewer
+  family for a given author family.
+- **First live review (2026-08-15, ledger #67):** this very diff, author claude →
+  reviewer cursor/grok-4.6-high, 429 s, mandate held, `assessment:
+  needs-rework`, 6 findings (3 high, 3 med) + the test-quality lens — all six
+  accepted (6/6 recorded via `heddle review-outcome`), each changed code or docs
+  before this PR opened. The `claude→cursor` pair now scores 1.0.
+
+## Cap-aware routing (BUILT — HED-67, 2026-08-15)
+
+Ground truth that forced it: six Fable orchestrators burned a full Claude 5h
+window in ~50 min while codex sat at 8%/2% weekly and gemini at 6%. The router
+now consults live caps at every dispatch (`src/usage.ts` → `src/capaware.ts`)
+and records why it chose what it chose (`route_reason` in the ledger).
+
+- **Sources** (never a vendor call from heddle-core): `~/.heddle/usage/limits.json`
+  — the dashboard's mirror of its `heddle_provider_limits` result
+  (`{writtenAt, limits: ProviderLimit[]}`, contract in heddle-dashboard
+  `docs/USAGE_TAP.md`, pinned by its `limits.golden.json`; written every poll
+  while the app runs) — then the raw Claude statusline tap
+  `~/.heddle/usage/claude.json` + per-account `claude-<acctId>.json` (written on
+  every statusline render, app or no app) as the Claude fallback. **Stale is
+  unknown** (limits.json > 15 min old, tap > 10 min old, or a snapshot flagged
+  `stale` upstream): unknown never routes away and never refuses. A window whose
+  `resetsAt` has passed counts as 0 until the next capture.
+- **route-away** (`policy.cap_aware_routing.route_away_at_pct`, default 90):
+  if the primary provider's binding window (5h; 7d when there is no 5h; for
+  cursor, the pool its model draws from) is at/over the threshold and the class
+  declares a fallback whose own window is under it → the fallback runs, ledgered
+  with `fell_back_from` + `route_reason: cap:route-away …`. Both over → the
+  primary runs (soft cap, `cap:both-over`). No fallback → primary (`cap:over`).
+  Applies to Claude-primary classes too: `implementation` at Claude 5h ≥ 90 %
+  runs its declared `codex/gpt-5.6-terra` fallback as a subprocess instead of a
+  headless claude worker (below the threshold you get the claude worker on the
+  best account; with `in_session: true`, the structured refusal + advice).
+- **Cursor pools** (Maya-corrected model, W's fields): `included-total` gates
+  Cursor's own models (`cursor-grok-*`, `composer-*`, `auto`) — soft
+  route-away; `included-api` gates NAMED third-party models (kimi-k3, …) — at
+  ≥ 100 % (or noteCode `cursor.includedApiExhausted`) they would bill
+  on-demand, so heddle **refuses** them (`metered-pool-exhausted`, ledgered);
+  `cursor.onDemandLimitReached` → everything on that Cursor account is refused.
+  The account heddle's dispatches bill is the `cursor-agent-keychain` row when
+  the dashboard reports it (the IDE row is informational).
+- **Explicit routes** (`provider`+`model` named by the caller) are never routed
+  away — naming it is the choice — but the metered-pool refusals still apply.
+- **Dry run:** `heddle route --class <c> [--provider p --model m] [--opt-in]` and
+  the `plan_dispatch` MCP tool print the decision, the checks, the remaining
+  fallback and the account advice — no ledger row, no worker.
+
+## Claude workers & automatic account switching (BUILT — HED-78, 2026-08-15)
+
+Maya: "Yes let's def build the auto account switching!" — so Claude classes now
+run as **out-of-process `claude -p` workers** on the registry account with the
+most 5h headroom (src/adapters/claude.ts + `pickClaudeAccount()` in
+src/capaware.ts), which ends the manual log-out/log-in juggling:
+
+- **Registry** `~/.heddle/accounts.json` (`claude[]: {id, configDir|null,
+  email, note}`; `configDir: null` = the default login — heddle UNSETS
+  `CLAUDE_CONFIG_DIR` for it: setting it explicitly to `~/.claude` changes
+  resolution and `claude auth status` reports logged-out, verified by R).
+  Per-account caps come from the tap's `~/.heddle/usage/claude-<acctId>.json`
+  (or the dashboard's `limits.json` account rows), plus the window-keeper's
+  anchor `claude-<acctId>.keeper.json` (`{account, startedAt, resets_at, used:
+  null, source:"keeper-ping"}` — written when the keeper starts a 5h window with
+  a headless ping the tap cannot see): while its `resets_at` is in the future it
+  counts as a fresh capture at ~0 % (`noteCode claude.keeperAnchor`); the
+  freshest of tap vs keeper wins. Without it, accounts that only ever get keeper
+  pings would stay unknown and never be picked.
+- **Selection**: the account with the lowest 5h used% among those with a
+  FRESH capture; `account_pin` / `--account <id>` overrides; nothing fresh → the
+  default login. The ledger `account` column records the account actually
+  used and `route_reason` carries `account:<id> (5h x%, most headroom of N
+  fresh)` / `pinned` / `default (no fresh per-account caps)`.
+- **Contract** (`claude -p <prompt> --output-format json --model <m>
+  [--effort e] [--resume id] --append-system-prompt <packs> [--mcp-config
+  <tmp> --strict-mcp-config] --permission-mode acceptEdits --allowedTools …`;
+  stdin closed; exit 0 + empty stdout = failure; never `--bare`): skill packs
+  travel on the command line (nothing written into the worktree — no AGENTS.md
+  race for Claude workers), MCP via a per-dispatch temp file. Posture =
+  `acceptEdits` + an explicit tool allowlist (`DEFAULT_CLAUDE_ALLOWED_TOOLS`:
+  read/edit the workspace, run the repo's own scripts, inspect git —
+  LANDMINES: `--permission-mode auto` aborts headless); `browse` adds
+  WebFetch/WebSearch, `exec-privileged` (two keys) → `--dangerously-skip-permissions`,
+  `net` unenforceable → refused. Billing = the subscription OAuth of the
+  config dir; `buildWorkerEnv` strips every API-key/base-URL var.
+- **In-session stays available**: `dispatch_worker(in_session: true)` /
+  `heddle dispatch --in-session` returns the structured `claude-in-session`
+  instruction (run it as your own Agent-tool subagent: shared prompt cache,
+  same account) plus the account advice line.
+- **Route-away stays on**: at Claude 5h ≥ `route_away_at_pct` (90) a Claude
+  class runs its declared fallback (codex/…) instead — Maya's default (lower
+  the knob if Claude should hold).
+- **Live-verified 2026-08-15**: two haiku workers, `heddle dispatch --class
+  research-summarize` → ledger `account=acct1` (default, session persisted
+  under `~/.claude/projects/…`) and `--account acct2` → `account=acct2`
+  (session persisted under `~/.claude-acct2/projects/…`), both `OK`.
+- Codex workers record `account` = `basename(CODEX_HOME)` when the caller
+  selects one.
+
 ## Structural caps (BUILT — HED-2, 2026-08-15; Scape-derived, clean-room)
 
 Enforced in `src/dispatch.ts`, not in prompts. Every refusal is a **finished
@@ -131,7 +277,7 @@ Capability enforcement matrix (verified against each CLI's own docs/help,
 | codex | `-c sandbox_workspace_write.network_access=true` (workspace-write keeps network **off** by default) | `-c web_search="live"` (default `cached` = OpenAI index, no external access) | `--sandbox danger-full-access` |
 | cursor | — | — | — |
 | gemini (agy) | — | — | — |
-| claude | in-session (refused as `claude-in-session` first) | | |
+| claude | no knob (headless has no sandbox) → `net` is refused upstream | `--allowedTools` +WebFetch,WebSearch | `--dangerously-skip-permissions` |
 
 Cursor/agy have no per-capability flags heddle can pass, so a grant there is
 refused; note that their headless workers are also **not** network-fenced by
@@ -174,18 +320,19 @@ choosing a worker instead:
 - **Class + explicit route:** `dispatch_worker` accepts `task_class` **and**
   `provider`+`model` together — the class supplies the policy (default packs,
   MCP, opt-in gate, ledger `task_class`), the named provider/model replaces the
-  route, no fallback (naming it is the choice). This is how a review class
-  can run on "any provider except the author's" (e.g. the planned
-  `adversarial-review` class, HED-3 — not in the table yet). `provider` and
-  `model` must be given together (a lone half is rejected).
-- **Claude-primary classes** (`execution: in-session-subagent` —
-  implementation, deep-implementation, research-summarize, orchestration) are
-  the orchestrator's own Agent-tool subagents, not subprocesses. Since HED-18
-  the dispatcher does not throw for them: it returns a structured refusal
-  `{ok:false, refusal:{code:"claude-in-session", reason, instruction}, execution}`
-  and ledgers it (`refusal` column), where `instruction` names the model, the
-  class packs/MCP to give your subagent, and the declared fallback you can name
-  as `provider`+`model` to run it as a subprocess instead. No auto-fallback.
+  route, no fallback (naming it is the choice). This is how the
+  `adversarial-review` class (HED-3, below) runs on "any provider except the
+  author's". `provider` and `model` must be given together (a lone half is
+  rejected).
+- **Claude-primary classes** (implementation, deep-implementation,
+  research-summarize) run as **headless `claude -p` workers by default**
+  (HED-78, `execution: headless`) on the best registry account. Passing
+  `in_session: true` opts into the HED-18 protocol instead: a structured
+  refusal `{ok:false, refusal:{code:"claude-in-session", reason, instruction},
+  execution: in-session-subagent}`, ledgered (`refusal` column), whose
+  `instruction` names the model, the class packs/MCP to give your own
+  Agent-tool subagent, and the declared fallback you can name as
+  `provider`+`model` to run it as a subprocess. No auto-fallback there.
   `orchestration` is `dispatchable: false` — it is the orchestrator's OWN work;
   a dispatch of it is refused on EVERY path (class, class + explicit route,
   whatever the named provider) with code `not-dispatchable`, "continue
