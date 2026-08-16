@@ -26,7 +26,21 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    # NO base-branch filter, and `edited` included — both halves of HED-91,
+    # found live on heddle#9:
+    #   * `branches: [main]` meant a STACKED PR (base = another agent's branch)
+    #     never ran this workflow at all. The required check `gate` was then
+    #     permanently absent, so the PR could not satisfy the ruleset — an
+    #     unrunnable gate, not a failing one.
+    #   * RETARGETING a PR's base (the normal move once the parent merges) fires
+    #     ONLY `pull_request: edited` — no synchronize, no new commit. Without
+    #     `edited` the retargeted PR silently kept the verdict it earned against
+    #     the OLD base, which is a different merge result.
+    # `edited` also fires on title/body edits (reviewer bots edit bodies often).
+    # Those are filtered twice below: the concurrency group sends them to a
+    # separate `noop` slot so they cannot cancel an in-flight real run, and the
+    # job guard skips them so no runner time is spent.
+    types: [opened, synchronize, reopened, edited]
   # Break-glass manual run, e.g. to re-check main after a runner-side outage.
   workflow_dispatch: {}
 
@@ -36,13 +50,18 @@ permissions: {}
 # report. The gate is a per-commit required check, so a cancelled stale run
 # never reds the PR verdict — only the latest commit's run counts.
 concurrency:
-  group: gate-${{ github.event.pull_request.number || github.ref }}
+  group: gate-${{ github.event.pull_request.number || github.ref }}-${{ (github.event.action != 'edited' || github.event.changes.base.ref.from != '') && 'run' || 'noop' }}
   cancel-in-progress: true
 
 jobs:
   gate:
     # Required-check context string — do not rename (see header).
     name: gate
+    # Title/body edits carry no new commit and no base change: skip them rather
+    # than burn a run (HED-91). A base RETARGET has changes.base.ref.from set and
+    # runs. Non-PR events (push, workflow_dispatch) have an empty action, so the
+    # first clause is true and they always run.
+    if: github.event.action != 'edited' || github.event.changes.base.ref.from != ''
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
