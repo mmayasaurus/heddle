@@ -1,6 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, isAbsolute, join } from 'node:path';
 import { homedir } from 'node:os';
 
 /**
@@ -98,6 +98,7 @@ CREATE TABLE IF NOT EXISTS dispatches (
   route_reason TEXT,
   account TEXT,
   identity_source TEXT,
+  output_path TEXT,
   started_at TEXT NOT NULL,
   finished_at TEXT
 );
@@ -302,10 +303,11 @@ export class Ledger {
     output?: string;
   }): void {
     const outputPath = this.persistOutput(id, outcome.output);
+    // A second finish() without output must not orphan its existing deliverable; match session_id's COALESCE.
     this.db.prepare(`
       UPDATE dispatches SET ok = ?, error = ?, session_id = COALESCE(?, session_id),
         duration_ms = ?, input_tokens = ?, cached_input_tokens = ?, output_tokens = ?,
-        reasoning_tokens = ?, output_path = ?, finished_at = ?
+        reasoning_tokens = ?, output_path = COALESCE(?, output_path), finished_at = ?
       WHERE id = ?
     `).run(
       outcome.ok ? 1 : 0, outcome.error ?? null, outcome.sessionId ?? null,
@@ -316,15 +318,22 @@ export class Ledger {
   }
 
   private persistOutput(id: number, output: string | undefined): string | null {
-    if (!output?.trim()) return null;
-    const path = join(this.outputDir, `${id}.md`);
+    // Worker output is large by design; trim() can scan it all and materialize a second copy just to find non-whitespace.
+    if (!output || !/\S/.test(output)) return null;
+    const filename = `${id}.md`;
+    const path = join(this.outputDir, filename);
     const tempPath = join(this.outputDir, `.${id}.${process.pid}.${Date.now()}.tmp`);
     try {
       mkdirSync(this.outputDir, { recursive: true });
-      writeFileSync(tempPath, output, 'utf8');
+      // Unreviewed model output can quote source, secrets in error text, or customer data; shared machines must not expose it.
+      // The mode is applied at creation, and the rename preserves it.
+      writeFileSync(tempPath, output, { encoding: 'utf8', mode: 0o600 });
       renameSync(tempPath, path);
-      return path;
+      // Keep rows portable when ledger.db and outputs/ move together instead of pointing at a stale home directory.
+      return filename;
     } catch (err) {
+      // A write can succeed before rename fails; remove our temp file so <ledger>/outputs never accumulates debris forever.
+      try { rmSync(tempPath, { force: true }); } catch { /* nothing else to do */ }
       // A completed worker must remain visible even if the secondary deliverable store is unavailable.
       process.stderr.write(`heddle: could not persist output for dispatch #${id} (${err instanceof Error ? err.message : String(err)})\n`);
       return null;
@@ -503,7 +512,8 @@ export class Ledger {
     const outputPath = row.output_path;
     if (typeof outputPath !== 'string') return { ...row, output: null };
     try {
-      return { ...row, output: readFileSync(outputPath, 'utf8') };
+      // Stored filenames keep the ledger portable; existing absolute paths remain readable for local backward compatibility.
+      return { ...row, output: readFileSync(isAbsolute(outputPath) ? outputPath : join(this.outputDir, outputPath), 'utf8') };
     } catch {
       return { ...row, output: null };
     }

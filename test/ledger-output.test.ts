@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join, sep } from 'node:path';
 import { Ledger } from '../src/ledger.js';
 
 function startRow(ledger: Ledger): number {
@@ -25,7 +25,7 @@ describe('Ledger output persistence (temp db)', () => {
     if (dir) rmSync(dir, { recursive: true, force: true });
   });
 
-  it('persists finished output to a file and returns it through getWithOutput', () => {
+  it('stores a portable output filename and returns its content through getWithOutput', () => {
     const id = startRow(ledger);
     const output = '# Result\n\nImplemented the change.';
 
@@ -33,8 +33,10 @@ describe('Ledger output persistence (temp db)', () => {
 
     const row = ledger.get(id)!;
     const outputPath = row.output_path as string;
-    expect(existsSync(outputPath)).toBe(true);
-    expect(readFileSync(outputPath, 'utf8')).toBe(output);
+    expect(isAbsolute(outputPath)).toBe(false);
+    expect(outputPath).not.toContain(sep);
+    expect(existsSync(join(dir, 'outputs', outputPath))).toBe(true);
+    expect(readFileSync(join(dir, 'outputs', outputPath), 'utf8')).toBe(output);
     expect(ledger.getWithOutput(id)).toEqual({ ...row, output });
   });
 
@@ -47,7 +49,7 @@ describe('Ledger output persistence (temp db)', () => {
     expect(ledger.getWithOutput(id)).toMatchObject({ id, ok: 0, error: 'timeout', output });
   });
 
-  it('does not create an output file for empty output', () => {
+  it('does not create an output file for whitespace-only output', () => {
     const id = startRow(ledger);
 
     ledger.finish(id, { ok: true, output: ' \n\t ' });
@@ -60,7 +62,7 @@ describe('Ledger output persistence (temp db)', () => {
   it('returns null output when a persisted output file is later missing', () => {
     const id = startRow(ledger);
     ledger.finish(id, { ok: true, output: 'recoverable result' });
-    unlinkSync(ledger.get(id)!.output_path as string);
+    unlinkSync(join(dir, 'outputs', ledger.get(id)!.output_path as string));
 
     expect(() => ledger.getWithOutput(id)).not.toThrow();
     expect(ledger.getWithOutput(id)).toMatchObject({ id, output: null });
@@ -73,5 +75,37 @@ describe('Ledger output persistence (temp db)', () => {
     ledger.finish(id, { ok: true, output });
 
     expect(ledger.getWithOutput(id)?.output).toBe(output);
+  });
+
+  it('preserves existing output when finish is called again without it', () => {
+    const id = startRow(ledger);
+    const output = 'first worker result';
+    ledger.finish(id, { ok: true, output });
+    const outputPath = ledger.get(id)!.output_path;
+
+    ledger.finish(id, { ok: true });
+
+    expect(ledger.get(id)!.output_path).toBe(outputPath);
+    expect(ledger.getWithOutput(id)).toMatchObject({ id, output });
+  });
+
+  it('creates output files readable only by their owner', () => {
+    const id = startRow(ledger);
+
+    ledger.finish(id, { ok: true, output: 'private worker result' });
+
+    const outputPath = ledger.get(id)!.output_path as string;
+    expect(statSync(join(dir, 'outputs', outputPath)).mode & 0o777).toBe(0o600);
+  });
+
+  it('finishes the row and cleans up temp output when rename fails', () => {
+    const id = startRow(ledger);
+    const outputDir = join(dir, 'outputs');
+    mkdirSync(join(outputDir, `${id}.md`), { recursive: true });
+
+    ledger.finish(id, { ok: true, output: 'result that cannot be renamed', outputTokens: 23 });
+
+    expect(ledger.get(id)).toMatchObject({ id, ok: 1, output_tokens: 23, output_path: null });
+    expect(readdirSync(outputDir)).not.toContainEqual(expect.stringMatching(/\.tmp$/));
   });
 });

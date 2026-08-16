@@ -268,7 +268,10 @@ server.tool(
   'get_dispatch',
   'One dispatch record plus its full recorded worker output, if available.',
   { id: z.number().int().describe('Ledger dispatch id.') },
-  async (a) => text(ledger().getWithOutput(a.id)),
+  async (a) => {
+    const dispatch = ledger().getWithOutput(a.id);
+    return dispatch ? text(dispatch) : errorText(`no dispatch #${a.id} in the ledger`);
+  },
 );
 
 const transport = new StdioServerTransport();
