@@ -77,50 +77,98 @@ providers:
     status: excluded                  # PR reviewer fleet only
 
 # Task classes are intentionally coarse for the pilot. Refine from ledger data, not guesses.
+#
+# Per-class guidance fields (HED-1, 2026-08-15 — surfaced by `list_task_classes` / `heddle classes`
+# so fit + cost are visible at the moment of choosing a worker; docs/MODELS.md is the narrative):
+#   why:        one line — when to pick this class and why it routes where it does.
+#   skills:     the skill packs a dispatch of this class gets when the caller passes none. This IS
+#               the dispatch DEFAULT (routing table = where policy lives), not a suggestion. A
+#               caller's explicit `skills` list REPLACES these task-fit defaults. Separately,
+#               `worker-role` is mandatory for every delegated worker: the dispatcher unions it into
+#               whichever list applies, so an explicit list can add packs but can never drop
+#               worker-role. A class's fallback route inherits `skills`/`mcp` unless the fallback
+#               node sets its own (effort is per-provider and is not inherited).
+#   edits_code: true for classes whose workers change files. Drives the dispatch-guidance hook's
+#               "code-editing class dispatched with no task-fit packs" nudge and the `worker-role`+
+#               `quality-gate` pairing rule in MODELS.md. Review/read-only classes are false.
 task_classes:
   orchestration:            # decompose, integrate, judge, land — the orchestrator itself
     provider: claude
     model: fable
+    why: decompose, integrate, judge, land — the orchestrator's own in-session work; never dispatched to a subprocess
+    skills: []
+    edits_code: false
+    dispatchable: false     # the orchestrator's OWN class — a dispatch of it is refused ("continue in-session")
   deep-implementation:      # gnarly features, cross-cutting refactors, subtle bugs
     provider: claude
     model: opus
     mcp: [memtrace]         # code navigation matters most here — attach discovery by default
     fallback: {provider: codex, model: gpt-5.6-sol}
+    why: gnarly features, cross-cutting refactors, subtle bugs — Opus has the strongest coding judgment; Sol is an independent coding lineage when Opus is spent
+    skills: [worker-role, code-discovery, quality-gate]
+    edits_code: true
   implementation:           # well-scoped feature work with clear spec
     provider: claude
     model: sonnet
     mcp: [memtrace]
     fallback: {provider: codex, model: gpt-5.6-terra}
+    why: well-scoped feature with a clear spec — Sonnet is the default coding workhorse, Terra the Codex equivalent; do not spend Opus here
+    skills: [worker-role, code-discovery, quality-gate]
+    edits_code: true
   second-opinion:           # independent diagnosis/review of a diff or plan (diversity valuable)
     provider: cursor
     model: cursor-grok-4.6-high   # Cursor-Models pool — does NOT touch the PR-review dollar pool
     fallback: {provider: gemini, model: gemini-3.1-pro-high}
+    why: independent diagnosis/review of a diff or plan — diversity of model FAMILY is the point; Grok sits on the generous Cursor-Models pool
+    skills: [worker-role]
+    edits_code: false
   second-opinion-hard:      # opt-in only: costs the metered pool PR review needs
     provider: cursor
     model: kimi-k3-high
     requires_explicit_opt_in: true
     note: burns "Other Models" dollars shared with Cursor PR review — ask before using
+    why: opt-in only — Kimi is ~74s even on a trivial prompt and bills the metered "Other Models" pool that Cursor PR review draws on; ask Maya first
+    skills: [worker-role]
+    edits_code: false
   bulk-mechanical:          # renames, sweeps, codemods, boilerplate, test scaffolds
     provider: codex
     model: gpt-5.6-luna
     effort: low             # cheap + fast for low-reasoning mechanical work
     fallback: {provider: cursor, model: composer-2.5-fast}
+    why: renames, sweeps, codemods, boilerplate, test scaffolds — Luna at low effort is cheap volume; the -fast fallback bills ~2x on Cursor
+    skills: [worker-role, quality-gate]
+    edits_code: true
   scaffold:                 # fast structural code drafts — Cursor's coding-tuned model
     provider: cursor
     model: composer-2.5
     fallback: {provider: codex, model: gpt-5.6-luna}
+    why: fast structural drafts (files, stubs, wiring) — Composer is Cursor-native, cache-warm, ~1.8s on a trivial prompt; coding-tuned, not a reasoner
+    skills: [worker-role, quality-gate]
+    edits_code: true
   research-summarize:       # doc reading, log triage, summarization
     provider: claude
     model: haiku
     fallback: {provider: codex, model: gpt-5.6-luna}
+    why: doc reading, log triage, summarization — Haiku is the cheap Claude; never spend Sonnet/Opus reading logs
+    skills: [worker-role]
+    edits_code: false
   documentation:            # READMEs, comments, changelogs, docstrings — minimal reasoning need
     provider: gemini         # gemini-flash: cheap, fast, fine for prose-over-known-facts
     model: gemini-3.6-flash-low
     fallback: {provider: codex, model: gpt-5.6-luna}
+    why: READMEs, comments, changelogs, docstrings — Flash is cheap and fast for prose over known facts; not for designing architecture
+    skills: [worker-role]
+    edits_code: false       # prose edits only; no quality-gate, no code discovery
   quick-alt-take:           # cheap fast alternative draft to compare against primary
     provider: cursor
     model: cursor-grok-4.6-medium
+    why: cheap second draft to compare against a primary — same family as second-opinion, lower effort
+    skills: [worker-role]
+    edits_code: false
   gemini-analysis:          # long-context reading, doc/log analysis, cross-checking
     provider: gemini
     model: gemini-3.1-pro-high
     fallback: {provider: cursor, model: composer-2.5}
+    why: long-context reading, doc/log analysis, cross-checking, web-grounded research (agy has Google Search) — Gemini is still piloting
+    skills: [worker-role]
+    edits_code: false

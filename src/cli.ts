@@ -1,10 +1,12 @@
-#!/usr/bin/env -S node --no-warnings=ExperimentalWarning
+#!/usr/bin/env -S node --disable-warning=ExperimentalWarning
 // node:sqlite is stable enough for our use but still flagged experimental; the warning would
-// pollute stdout parsing for agents, so it is suppressed at the entry point only.
+// pollute stdout parsing for agents, so it is suppressed at the entry point only —
+// `--disable-warning=<type>` silences just that category (`--no-warnings` would hide every
+// process warning; its `=…` suffix is ignored — verified Node 22.23, 2026-08-15).
 import { dispatch } from './dispatch.js';
 import { Ledger } from './ledger.js';
-import { loadRouting, listTaskClasses, resolveRoute } from './routing.js';
-import { listPacks } from './skillpacks.js';
+import { loadRouting, describeTaskClasses } from './routing.js';
+import { listPacks, withMandatoryPacks } from './skillpacks.js';
 import { classifyEffort, assessResult } from './classify.js';
 
 /**
@@ -22,7 +24,7 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
       --cwd <path>         working directory for the worker (default: cwd)
       --issue <SPI-n>      Linear issue this sub-task serves
       --agent <X>          dispatching orchestrator's fleet identity
-      --skills a,b         override the routing table's skill packs
+      --skills a,b         replace the task class's default skill packs (worker-role stays)
       --mcp a,b            attach code-discovery MCP servers (e.g. memtrace)
       --effort <level>     reasoning effort: codex minimal|low|medium|high|xhigh; agy low|medium|high
       --auto-effort        classify the task's difficulty (cheap model) and pin effort automatically
@@ -36,7 +38,7 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
   heddle classify-effort --class <c> --task "<prompt>" [--json]   difficulty → effort (cheap model)
   heddle assess --task "<prompt>" --output "<worker output>" [--ok] [--json]
                                  judge a worker result: done | needs-rework | needs-human
-  heddle classes [--json]        list task classes and where they route
+  heddle classes [--json]        task classes: route, why, default skill packs, edits-code
   heddle packs                   list available skill packs
   heddle workers [--json]        dispatches still in flight
   heddle ledger [--issue SPI-n] [--limit N] [--json]
@@ -131,19 +133,17 @@ try {
     }
 
     case 'classes': {
-      const table = loadRouting();
-      const rows = listTaskClasses(table).map((c) => {
-        const r = resolveRoute(table, c);
-        return {
-          taskClass: c, provider: r.provider, model: r.model,
-          fallback: r.fallback ? `${r.fallback.provider}/${r.fallback.model}` : null,
-          optInRequired: r.requiresExplicitOptIn ?? false, note: r.note ?? null,
-        };
-      });
+      const rows = describeTaskClasses(loadRouting(), withMandatoryPacks);
       out(json, rows, () => rows.map((r) =>
-        `${r.taskClass.padEnd(22)} ${r.provider}/${r.model}` +
+        `${r.task_class.padEnd(22)} ${r.provider}/${r.model}` +
+        (r.effort ? ` (${r.effort})` : '') +
         (r.fallback ? `  ↳ ${r.fallback}` : '') +
-        (r.optInRequired ? '  [opt-in required]' : '')).join('\n'));
+        (r.opt_in_required ? '  [opt-in required]' : '') +
+        (r.execution === 'in-session-subagent' ? '  [in-session: use your Agent tool — heddle dispatch refuses it]' : '') +
+        (r.edits_code ? '  [edits code]' : '') +
+        `\n${''.padEnd(23)}skills: ${r.skills.join(', ') || '(none)'}` +
+        (r.mcp.length ? `  mcp: ${r.mcp.join(', ')}` : '') +
+        (r.why ? `\n${''.padEnd(23)}why: ${r.why}` : '')).join('\n'));
       break;
     }
 

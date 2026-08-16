@@ -167,6 +167,17 @@ flags churn monthly.
   used-percentage + reset times. Unofficial and could break, but it's the only proactive quota
   signal available anywhere in this stack — reuse it for route-away-before-exhaustion.
 
+## Worker MCP attachment (memtrace) — worktrees
+
+- **memtrace indexes the canonical checkout, not your worktree.** A worker dispatched into a git
+  worktree with `mcp: [memtrace]` queries the index of the main clone (`repo_id` = the canonical
+  path), so it "sees" main's symbols and misses anything new on the branch — a worker asked to test
+  branch-new code will not find it and may conclude it doesn't exist. Verified 2026-08-15 (Agent U,
+  HED-1: memtrace deliberately NOT attached to a test-writing worker in `heddle.agentu` for this
+  reason). Until worktree overlays are wired (`watch_directory` / `worktree=` overlay on the
+  canonical repo_id — tracked as a HED ticket), either omit memtrace for branch-new code or dispatch
+  into the canonical checkout.
+
 ## Everywhere
 
 - **No CLI exposes proactive quota-remaining.** Account usage from per-run structured output; catch
