@@ -33,10 +33,27 @@ import { isSealed } from './seal.js';
 
 export const DEFAULT_COMMS_PATH = join(homedir(), '.heddle', 'comms.db');
 
-/** Bump when the schema changes shape; recorded as PRAGMA user_version. */
-export const COMMS_SCHEMA_VERSION = 1;
+/**
+ * Bump when the schema changes shape; recorded as PRAGMA user_version.
+ * v2 (HED-94): message_mentions + mention-aware inbox scope — older binaries must refuse a v2 db
+ * loudly rather than silently miss targeted room posts.
+ */
+export const COMMS_SCHEMA_VERSION = 2;
+
+/** Versions this binary can migrate FROM. Each migration is idempotent-schema + stamp. */
+const MIGRATABLE_VERSIONS = new Set([1]);
 
 const sqlList = (xs: readonly string[]) => xs.map((x) => `'${x.replace(/'/g, "''")}'`).join(', ');
+
+/**
+ * A message row with its mentions folded in (comma-joined; addresses cannot contain commas).
+ * The inner ORDER BY rowid pins insertion order — without it SQLite satisfies the subquery from
+ * the (message_id, address) PK index and returns mentions address-sorted.
+ */
+const SELECT_WITH_MENTIONS =
+  'SELECT m.*, (SELECT group_concat(address) FROM (SELECT address FROM message_mentions mm WHERE mm.message_id = m.id ORDER BY mm.rowid)) AS mentions FROM messages m';
+
+export const MAX_MENTIONS = 16;
 
 // The SQL enums are generated from the TypeScript lists so the two cannot drift.
 const SCHEMA = `
@@ -111,6 +128,19 @@ CREATE TABLE IF NOT EXISTS sessions (
   started_at   TEXT NOT NULL,
   heartbeat_at TEXT NOT NULL
 );
+
+-- Who a room post explicitly pings (HED-94). Append-only like the message it belongs to; the
+-- inbox scope (and therefore the recipient's channel pump) includes mentioned messages.
+CREATE TABLE IF NOT EXISTS message_mentions (
+  message_id INTEGER NOT NULL REFERENCES messages(id),
+  address    TEXT    NOT NULL,
+  PRIMARY KEY (message_id, address)
+);
+CREATE INDEX IF NOT EXISTS idx_mentions_address ON message_mentions(address, message_id);
+CREATE TRIGGER IF NOT EXISTS mentions_append_only_update BEFORE UPDATE ON message_mentions
+BEGIN SELECT RAISE(ABORT, 'mentions are append-only: UPDATE refused'); END;
+CREATE TRIGGER IF NOT EXISTS mentions_append_only_delete BEFORE DELETE ON message_mentions
+BEGIN SELECT RAISE(ABORT, 'mentions are append-only: DELETE refused'); END;
 
 -- Rooms (SPEC §9): membership is owned by humans / orchestrator config, never self-joined by
 -- workers; open rooms (#fleet) accept posts from any registered participant. The floor is a
@@ -264,11 +294,11 @@ export class CommsLog {
       if (found > COMMS_SCHEMA_VERSION) {
         throw new Error(`comms db ${path} is schema v${found}; this heddle understands v${COMMS_SCHEMA_VERSION} — upgrade heddle`);
       }
-      if (found !== 0 && found !== COMMS_SCHEMA_VERSION) {
+      if (found !== 0 && found !== COMMS_SCHEMA_VERSION && !MIGRATABLE_VERSIONS.has(found)) {
         throw new Error(`comms db ${path} is schema v${found}; no migration to v${COMMS_SCHEMA_VERSION} exists`);
       }
-      db.exec(SCHEMA); // idempotent (IF NOT EXISTS) — creates a fresh db, no-op on a current one
-      if (found === 0) db.exec(`PRAGMA user_version = ${COMMS_SCHEMA_VERSION};`);
+      db.exec(SCHEMA); // idempotent (IF NOT EXISTS) — creates a fresh db, adds v2 tables to a v1 one, no-op on current
+      if (found !== COMMS_SCHEMA_VERSION) db.exec(`PRAGMA user_version = ${COMMS_SCHEMA_VERSION};`);
     } catch (err) {
       db.close();
       throw err;
@@ -332,6 +362,10 @@ export class CommsLog {
         msg.replyTo ?? null, msg.issue ?? null, msg.thread ?? null, dispatchId, meta,
       );
       id = Number(info.lastInsertRowid);
+      if (msg.mentions?.length) {
+        const ins = this.db.prepare('INSERT INTO message_mentions (message_id, address) VALUES (?, ?)');
+        for (const m of msg.mentions) ins.run(id, m);
+      }
       this.db.exec('COMMIT');
     } catch (err) {
       this.db.exec('ROLLBACK');
@@ -346,7 +380,7 @@ export class CommsLog {
   // ---------------------------------------------------------------- reader
 
   get(id: number): MessageRecord | null {
-    const row = this.db.prepare('SELECT * FROM messages WHERE id = ?').get(id) as Row | undefined;
+    const row = this.db.prepare(`${SELECT_WITH_MENTIONS} WHERE m.id = ?`).get(id) as Row | undefined;
     return row ? toRecord(row) : null;
   }
 
@@ -374,7 +408,7 @@ export class CommsLog {
     const limit = q.limit ?? 200;
     if (!Number.isInteger(limit) || limit <= 0) throw new Error('limit must be a positive integer');
     params.push(limit);
-    const sql = `SELECT * FROM messages ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY id ASC LIMIT ?`;
+    const sql = `${SELECT_WITH_MENTIONS} ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY id ASC LIMIT ?`;
     return (this.db.prepare(sql).all(...params) as unknown as Row[]).map(toRecord);
   }
 
@@ -781,8 +815,8 @@ function scopeClause(scope: TranscriptScope, where: string[], params: (string | 
     params.push(a, b, b, a);
   } else if ('inbox' in scope) {
     if (!canSend(requireAddress(scope.inbox, 'to'))) throw new Error('transcript scope.inbox must be an agent/child/operator address');
-    where.push('(target = ? OR target = ?)');
-    params.push(scope.inbox, BROADCAST);
+    where.push('(target = ? OR target = ? OR id IN (SELECT message_id FROM message_mentions WHERE address = ?))');
+    params.push(scope.inbox, BROADCAST, scope.inbox);
   } else if (!('all' in scope) || scope.all !== true) {
     throw new Error('transcript scope must be one of { room }, { pair }, { inbox }, { all: true }');
   }
@@ -818,6 +852,18 @@ function validateNewMessage(msg: NewMessage): ParsedAddress {
   if (typeof msg.body !== 'string' || msg.body.length === 0) throw new Error('message body must be a non-empty string');
   const kind = msg.kind ?? 'chat';
   if (!MESSAGE_KINDS.includes(kind)) throw new Error(`unknown message kind ${JSON.stringify(kind)}`);
+  if (msg.mentions != null) {
+    if (!Array.isArray(msg.mentions) || msg.mentions.length > MAX_MENTIONS) {
+      throw new Error(`mentions must be an array of at most ${MAX_MENTIONS} addresses`);
+    }
+    const seen = new Set<string>();
+    for (const m of msg.mentions) {
+      const parsed = typeof m === 'string' ? parseAddress(m) : null;
+      if (!parsed || !canSend(parsed)) throw new Error(`mention ${JSON.stringify(m)} is not an agent/child/operator address`);
+      if (seen.has(m)) throw new Error(`duplicate mention ${JSON.stringify(m)}`);
+      seen.add(m);
+    }
+  }
   requirePositiveInt(msg.replyTo, 'replyTo must be a positive message id');
   requirePositiveInt(msg.dispatchId, 'dispatchId must be a positive integer ledger row id');
   requireBoundedString(msg.issue, 64, 'issue');
@@ -880,7 +926,7 @@ function applyDecision(
 interface Row {
   id: number; ts: string; sender: string; target: string; kind: string; tier: string;
   verified: number; body: string; reply_to: number | null; issue: string | null; thread: string | null;
-  dispatch_id: number | null; meta: string | null;
+  dispatch_id: number | null; meta: string | null; mentions?: string | null;
 }
 
 interface RRow { name: string; created_by: string; created_at: string; topic: string | null; open: number }
@@ -930,6 +976,7 @@ function toRecord(r: Row): MessageRecord {
     kind: r.kind as MessageKind, tier: r.tier as Tier, verified: r.verified === 1,
     body: r.body, replyTo: r.reply_to == null ? null : Number(r.reply_to),
     issue: r.issue, thread: r.thread ?? null, dispatchId: r.dispatch_id == null ? null : Number(r.dispatch_id), meta,
+    mentions: r.mentions ? r.mentions.split(',') : [],
   };
 }
 
