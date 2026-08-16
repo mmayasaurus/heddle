@@ -48,8 +48,17 @@ permissions: {}
 # A superseded run is dead weight: cancel it and let the newest commit's run
 # report. The gate is a per-commit required check, so a cancelled stale run
 # never reds the PR verdict — only the latest commit's run counts.
+#
+# TWO SLOTS, measured on heddle#27/#31: commit-driven events (opened,
+# synchronize, reopened) and `edited` events get separate groups. With one
+# shared group a reviewer bot editing the PR body CANCELLED the in-flight real
+# run, and a cancelled required check reds the PR (on the dashboard the
+# always() aggregator saw cancelled needs and published `gate: FAILURE`) until
+# the replacement run finished — thrash, not safety. Separated, an edit still
+# re-runs the gate (nothing is skipped, so no `skipped` check-run can ever
+# supersede a red one) but cannot kill the run that matters.
 concurrency:
-  group: gate-${{ github.event.pull_request.number || github.ref }}
+  group: gate-${{ github.event.pull_request.number || github.ref }}-${{ github.event.action == 'edited' && 'edit' || 'run' }}
   cancel-in-progress: true
 
 jobs:
