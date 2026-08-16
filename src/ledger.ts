@@ -1,8 +1,11 @@
 import { DatabaseSync } from 'node:sqlite';
-import { execFileSync } from 'node:child_process';
 import { mkdirSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { homedir } from 'node:os';
+import { makePsProbe, type OwnerProbe } from './ledger-ps.js';
+
+// Re-exported so consumers/tests keep one import surface for ledger concerns.
+export { parsePsTable, ownerVerdict, type OwnerProbe, type PsEntry } from './ledger-ps.js';
 
 /**
  * Dispatch ledger — the durable record of every sub-task heddle routes.
@@ -187,92 +190,37 @@ export interface OrphanCandidate {
 /** Nothing heddle dispatches legitimately runs this long (worker budgets are minutes). */
 export const DEFAULT_ORPHAN_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
-/** What ps reports for one live pid: its start time (when parseable) and executable. */
-export interface PsEntry {
-  startedAtMs: number | null;
-  comm: string;
+/** One-decimal hours (floor): 24.1h must never display as "24h (limit 24h)". */
+function hours(ms: number): string {
+  return (Math.floor(ms / 360_000) / 10).toFixed(1);
 }
 
 /**
- * Parse `ps -p <pids> -o pid=,lstart=,comm=` (LANG=C) output ONCE into a pid table. lstart is the
- * 5-token ctime form ("Thu Aug 15 19:59:47 2026" — V8's Date.parse accepts it); whatever follows
- * is the executable (may contain spaces). Exported for tests.
+ * Why one in-flight row is an orphan, or null when it isn't:
+ *   - its owner is provably gone (pid-reuse-safe start-time verdict), or
+ *   - it exceeded the age limit AND the owner is not demonstrably alive — age alone never
+ *     overrides a POSITIVE liveness verdict (a legitimately long-running dispatch is no orphan).
  */
-export function parsePsTable(output: string): Map<number, PsEntry> {
-  const table = new Map<number, PsEntry>();
-  for (const line of output.split('\n')) {
-    const tokens = line.trim().split(/\s+/);
-    if (tokens.length < 2) continue;
-    const pid = Number(tokens[0]);
-    if (!Number.isInteger(pid) || pid <= 0) continue;
-    const lstart = tokens.slice(1, 6).join(' ');
-    const startedAt = Date.parse(lstart);
-    table.set(pid, {
-      startedAtMs: Number.isFinite(startedAt) ? startedAt : null,
-      comm: tokens.slice(6).join(' '),
-    });
+function orphanReason(
+  row: Record<string, unknown>,
+  probe: OwnerProbe,
+  maxAgeMs: number,
+  now: Date,
+): string | null {
+  const ageMs = now.getTime() - Date.parse(String(row.started_at ?? ''));
+  const ownerPid = row.owner_pid == null ? null : Number(row.owner_pid);
+  const ownerStartedAt = row.owner_started_at == null ? null : Number(row.owner_started_at);
+  // true = same process instance still running · false = provably gone · null = unknown
+  const alive = ownerPid == null ? null : probe(ownerPid, ownerStartedAt);
+  if (alive === false) {
+    return `owner process ${ownerPid} (${row.owner_comm ?? '?'}) is gone`;
   }
-  return table;
-}
-
-/** ps reports whole seconds and our own clock reading is not simultaneous with ps's. */
-const OWNER_START_SLOP_MS = 15_000;
-
-/**
- * Is the process at `pid` the SAME process instance that recorded the row?
- *   - pid absent from a TRUSTED ps table → gone (`false`);
- *   - both start times known → same instance iff they agree within slop (`true`/`false`) — a
- *     recycled pid belongs to a NEWER process, so its start time cannot match;
- *   - otherwise → UNKNOWN (`null`): executable names can neither prove identity (a reused pid may
- *     run another `node`) nor safely disprove it (kernels report thread names and truncate to 15
- *     chars), so comm is recorded for humans but never decides — such rows close via the age rule.
- * Exported for tests.
- */
-export function ownerVerdict(
-  entry: PsEntry | undefined,
-  recordedStartMs: number | null,
-): boolean | null {
-  if (entry === undefined) return false;
-  if (recordedStartMs != null && entry.startedAtMs != null) {
-    return Math.abs(entry.startedAtMs - recordedStartMs) <= OWNER_START_SLOP_MS;
+  if (alive !== true && Number.isFinite(ageMs) && ageMs > maxAgeMs) {
+    return `in-flight for ${hours(ageMs)}h (limit ${hours(maxAgeMs)}h) and owner ${
+      ownerPid == null ? 'unrecorded' : 'liveness unknown'}`;
   }
   return null;
 }
-
-/**
- * One ps call for all candidate pids → a probe closure. Verdict semantics:
- *   - ps succeeded, or exited 1 (its documented "some pids not found" status): the output is an
- *     authoritative table — a missing pid IS gone;
- *   - any other failure (unsupported flags, restricted /proc, sandbox): UNKNOWN (`null`) for every
- *     pid — the sweep never closes a row on a hunch.
- */
-function makePsProbe(rows: Record<string, unknown>[]): OwnerProbe {
-  // No `ps` on Windows: liveness is explicitly UNKNOWN there (rows still close via the age rule).
-  if (process.platform === 'win32') return () => null;
-  const pids = [...new Set(rows.map((r) => Number(r.owner_pid)).filter((p) => Number.isFinite(p) && p > 0))];
-  if (pids.length === 0) return () => null;
-  // The sweeping process itself rides along as a SENTINEL: it is definitionally alive, so a parsed
-  // table that lacks it means the ps output is untrustworthy (busybox/alpine ps also exits 1 for
-  // unsupported flags, with empty stdout) — UNKNOWN for every pid, never "everything is gone".
-  const sentinel = process.pid;
-  let output: string | null;
-  try {
-    output = execFileSync('ps', ['-p', [...new Set([sentinel, ...pids])].join(','), '-o', 'pid=,lstart=,comm='], {
-      encoding: 'utf8',
-      env: { ...process.env, LANG: 'C', LC_ALL: 'C' },
-    });
-  } catch (err) {
-    const e = err as { status?: number | null; stdout?: string };
-    output = e.status === 1 ? (e.stdout ?? '') : null;
-  }
-  if (output === null) return () => null;
-  const table = parsePsTable(output);
-  if (!table.has(sentinel)) return () => null;
-  return (pid, startedAtMs) => ownerVerdict(table.get(pid), startedAtMs);
-}
-
-/** Injectable owner-liveness check: true = same process instance, false = gone, null = unknown. */
-export type OwnerProbe = (pid: number, startedAtMs: number | null) => boolean | null;
 
 export class Ledger {
   private db: DatabaseSync;
@@ -465,27 +413,12 @@ export class Ledger {
     const now = opts.now ?? new Date();
     const rows = this.inFlight();
     const probe = opts.isOwnerAlive ?? makePsProbe(rows);
-    const hours = (ms: number) => (Math.floor(ms / 360_000) / 10).toFixed(1);
     const candidates: OrphanCandidate[] = [];
     for (const row of rows) {
-      const id = Number(row.id);
-      const startedAt = String(row.started_at ?? '');
-      const ageMs = now.getTime() - Date.parse(startedAt);
-      const ownerPid = row.owner_pid == null ? null : Number(row.owner_pid);
-      const ownerComm = row.owner_comm == null ? null : String(row.owner_comm);
-      const ownerStartedAt = row.owner_started_at == null ? null : Number(row.owner_started_at);
-      // true = same process instance still running · false = provably gone · null = unknown
-      const alive = ownerPid == null ? null : probe(ownerPid, ownerStartedAt);
-      let reason: string | null = null;
-      if (alive === false) {
-        reason = `owner process ${ownerPid} (${ownerComm ?? '?'}) is gone`;
-      } else if (alive !== true && Number.isFinite(ageMs) && ageMs > maxAgeMs) {
-        // Age alone never overrides a POSITIVE liveness verdict — a legitimately long-running
-        // dispatch (large timeoutMs) whose owner is demonstrably alive is not an orphan.
-        reason = `in-flight for ${hours(ageMs)}h (limit ${hours(maxAgeMs)}h) and owner ${
-          ownerPid == null ? 'unrecorded' : 'liveness unknown'}`;
+      const reason = orphanReason(row, probe, maxAgeMs, now);
+      if (reason !== null) {
+        candidates.push({ id: Number(row.id), startedAt: String(row.started_at ?? ''), reason });
       }
-      if (reason !== null) candidates.push({ id, startedAt, reason });
     }
     let closed = 0;
     if (!opts.dryRun) {
