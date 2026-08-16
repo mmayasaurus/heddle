@@ -141,9 +141,14 @@ export class ClaudeAdapter implements WorkerAdapter {
   async dispatch(prompt: string, opts: DispatchOptions): Promise<WorkerResult> {
     const args = this.buildArgs(prompt, opts);
     const started = Date.now();
-    const { stdout, stderr, exitCode } = await run(this.bin, args, opts.cwd, opts.timeoutMs ?? 600_000, opts.env, opts.envUnset);
+    const timeoutMs = opts.timeoutMs ?? 600_000;
+    const { stdout, stderr, exitCode, timedOut } = await run(this.bin, args, opts.cwd, timeoutMs, opts.env, opts.envUnset);
     const parsed = parseClaudeResult(stdout, exitCode);
-    if (!parsed.ok && parsed.error && !parsed.raw) {
+    // A timeout must be tellable apart from a crash: SIGKILL alone reports only a null exit.
+    if (timedOut) parsed.error = `claude timed out after ${timeoutMs}ms (SIGKILL)` + (parsed.error ? `; ${parsed.error}` : '');
+    // stderr often carries the useful context even when a result JSON WAS parsed (e.g. error
+    // subtypes with an empty result) — attach the tail on every failure.
+    if (!parsed.ok && parsed.error && stderr.trim().length) {
       parsed.error += `; stderr tail: ${stderr.slice(-400)}`;
     }
     return { ...parsed, durationMs: parsed.durationMs ?? Date.now() - started };
@@ -152,7 +157,7 @@ export class ClaudeAdapter implements WorkerAdapter {
 
 function run(bin: string, args: string[], cwd: string, timeoutMs: number,
              envOverrides?: Record<string, string>, envUnset?: string[]):
-  Promise<{ stdout: string; stderr: string; exitCode: number | null }> {
+  Promise<{ stdout: string; stderr: string; exitCode: number | null; timedOut: boolean }> {
   return new Promise((resolve) => {
     // stdin 'ignore' — same discipline as every subprocess adapter (see codex.ts).
     const { env } = buildWorkerEnv({ overrides: envOverrides, unset: envUnset });
@@ -161,13 +166,14 @@ function run(bin: string, args: string[], cwd: string, timeoutMs: number,
     let stderr = '';
     // 'error' and 'close' can BOTH fire (e.g. spawn failure then close) — settle exactly once.
     let settled = false;
+    let timedOut = false;
     const settle = (v: { stdout: string; stderr: string; exitCode: number | null }) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve(v);
+      resolve({ ...v, timedOut });
     };
-    const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
+    const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, timeoutMs);
     child.stdout.on('data', (d) => { stdout += d; });
     child.stderr.on('data', (d) => { stderr += d; });
     child.on('close', (code) => settle({ stdout, stderr, exitCode: code }));
