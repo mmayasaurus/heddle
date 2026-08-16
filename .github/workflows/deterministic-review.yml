@@ -244,15 +244,30 @@ jobs:
           # (ours AND gitleaks' own) fails with "dubious ownership".
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           echo "scanning $BASE..$HEAD"
-          # gitleaks scans NON-merge commits (`git log -p` shows no diff for a
-          # merge; measured on v8.30.1: 1 merge in range → rev-list 4,
-          # --no-merges 3, gitleaks "3 commits scanned"). The guard below is
-          # `<` not `!=`, so a future gitleaks that counts merges cannot
-          # false-fail it, while an empty/short scan still does (gitar, r6).
-          EXPECTED=$(git rev-list --count --no-merges "$BASE..$HEAD")
-          echo "non-merge commits in range: $EXPECTED"
-          if [ "$EXPECTED" -lt 1 ]; then
+          # gitleaks scans NON-merge commits WITH CONTENT (`git log -p` shows
+          # no diff for a merge OR an --allow-empty commit; measured on
+          # v8.30.1: 1 merge in range → rev-list 4, --no-merges 3, gitleaks
+          # "3 commits scanned"; heddle#12/HED-88: an empty commit in range →
+          # gitleaks 7, plain --no-merges count 8 → false red). EXPECTED
+          # therefore counts only non-merge commits that touch at least one
+          # path. The guard below stays `<` not `!=` (gitar, r6).
+          TOTAL=$(git rev-list --count --no-merges "$BASE..$HEAD")
+          EXPECTED=0
+          for c in $(git rev-list --no-merges "$BASE..$HEAD"); do
+            if [ -n "$(git diff-tree --no-commit-id --name-only -r "$c" | head -1)" ]; then
+              EXPECTED=$((EXPECTED+1))
+            fi
+          done
+          echo "non-merge commits in range: $TOTAL (with content: $EXPECTED)"
+          if [ "$TOTAL" -lt 1 ]; then
             echo "::error::empty commit range $BASE..$HEAD — nothing to scan; NOT a clean pass"; exit 1
+          fi
+          if [ "$EXPECTED" -lt 1 ]; then
+            # Only merge/--allow-empty commits: no blobs exist for gitleaks to
+            # scan, and no content means nothing can leak. Honest green.
+            echo "gitleaks: range $BASE..$HEAD contains only merge/empty commits — no content to scan" >> "$GITHUB_STEP_SUMMARY"
+            echo "::notice::only merge/empty commits in range — nothing gitleaks can scan; passing."
+            exit 0
           fi
           S="${RUNNER_TEMP:-/tmp}/gitleaks-base"; mkdir -p "$S/ignore"
           if git cat-file -e "$BASE:.gitleaks.toml" 2>/dev/null; then
