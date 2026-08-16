@@ -84,7 +84,9 @@ export const CHANNEL_INSTRUCTIONS =
   `tier="orchestrator-directive" = ${DIRECTIVE_LABEL} — your own dispatching orchestrator, verified via the dispatch ledger; ` +
   `tier="agent-message" = ${UNTRUSTED_LABEL}. ` +
   `Reply with the post_message tool (to = the sender attribute; use @orchestrator to reach your dispatcher). ` +
-  `Rooms (#name) are pull-model: read them with read_transcript when you want to. ` +
+  `Rooms (#name) are pull-model: read them with read_transcript when you want to; #fleet is everyone's room; ` +
+  `closed rooms are members-only (list_rooms; join_room is for the operator/orchestrators — workers cannot self-join); ` +
+  `use hold_floor/release_floor (or acquire_floor) around a multi-part reply so nobody interleaves. ` +
   `If you message a Claude session with SendMessage instead, mirror it with log_sent so the durable log stays complete.`;
 
 /**

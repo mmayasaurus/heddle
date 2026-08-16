@@ -438,6 +438,86 @@ Each session's inbox socket exists and is documented (`uds:/tmp/cc-socks/<pid>.s
 not write to it: no reverse-engineering against live sessions. If Anthropic documents the frame,
 a `SocketTransport` slots in beside `ChannelTransport` without touching the broker.
 
+## Rooms, floor, operator send (HED-73)
+
+The chatroom layer on top of the log/broker/bridge. Rooms are **pull-model** (SPEC §9: agents read
+a room when they want to; `@all` / `@agent` are the guaranteed-delivery exceptions).
+
+- **Schema** (mutable state, not append-only): `rooms { name PK, created_by, created_at, topic,
+  open 0|1 }`, `room_members { room, address, added_by, added_at }`, `room_floor { room PK, holder,
+  since, expires_at }`. `#fleet` (open — everyone) is created at every server start; per-lane rooms
+  (`#hed-73`) are created on demand by an orchestrator or the operator (closed by default).
+- **Governance**: creating rooms and changing membership is for the **operator and fleet agents
+  (orchestrators) only** — workers cannot self-join; an orchestrator may add itself, peers and its
+  **own** children; the operator anyone; removal mirrors it (yourself, your own children, or the operator). Every refusal is returned AND ledgered
+  (`deliveries` row `refused` / `room-governance`, `message_id NULL`, from = actor, to = room).
+- **Posting**: the room must exist (`no-such-room`); the operator may post anywhere; an open room
+  accepts any registered participant; a closed room is members-only (`not-a-member`). Room posts
+  are logged, never injected (`logged` / `room-pull`).
+- **Floor lock**: `acquire_floor` (or `post_message { hold_floor: true }`) takes a lease
+  (`DEFAULT_FLOOR_LEASE_MS` = 60 s, renewed by each of the holder's posts); while it is live,
+  posts by anyone else — the operator included — are refused `floor-held` with `retryAfterMs`,
+  so a multi-part reply is never interleaved. `release_floor` / `post_message { release_floor:
+  true }` ends it; a crashed holder cannot lock a room past the lease.
+- **`@all` = guaranteed delivery**: one `deliveries` row per recipient — `sent` /
+  `queued-for-channel` where the recipient has a live channel session, `logged` / `inbox` where it
+  must pull; the result reason reads `N/M pushed, K/M to inbox`.
+- **Operator send**: the `operator` identity binds ONLY through a configuration-level credential
+  — `heddle-comms --init-operator-token` writes `~/.heddle/operator.token` (0600, once; the value
+  is never printed); the operator session's `.mcp.json` sets `HEDDLE_COMMS_ROLE=operator` and
+  `HEDDLE_COMMS_OPERATOR_TOKEN=<file contents>` (constant-time compared). The token path is a
+  **fixed trust root** (`~/.heddle/operator.token`, 0600 enforced with chmod even on rotation) — no
+  env var can point the server at another file. A model cannot edit its own MCP config and agent
+  sessions never see that env, so "origin-verified" means "configured as the operator's session";
+  her posts carry tier `operator` (never wrapped untrusted). The operator does not mint children.
+  `HEDDLE_COMMS_ROLE=operator` WITHOUT a matching token binds nothing (the server runs unbound and
+  refuses sender tools) — no env-only escalation; a worker (`HEDDLE_WORKER=1` /
+  `HEDDLE_COMMS_ADDRESS`) can never bind operator even if it inherited the operator session's env.
+  **Rotate** with `heddle-comms --init-operator-token --rotate`: the token is re-checked on every
+  privileged call AND in the push/heartbeat loop, so an already-running session loses the operator
+  identity immediately — tools refused, presence unregistered, push stopped, `comms_whoami` says
+  `revoked`. The token value is never written to the log, the deliveries, tool outputs or warnings
+  (tested). `log_sent` mirrors DIRECT sends only (rooms/@all always go through `post_message`).
+
+  How Maya becomes operator (5 lines):
+  1. `heddle-comms --init-operator-token` (once) → prints the path only.
+  2. In her session's `.mcp.json`: `"heddle-comms": { "command": "heddle-comms", "env": {
+     "HEDDLE_COMMS_ROLE": "operator", "HEDDLE_COMMS_OPERATOR_TOKEN": "<contents of the file>",
+     "HEDDLE_COMMS_PUSH": "1" } }`.
+  3. Start the session with `--dangerously-load-development-channels server:heddle-comms` (push;
+     without it: pull-only, still operator).
+  4. `comms_whoami` → `identity: operator`; `post_message` to `#fleet` / `@all` → tier `operator`.
+  5. To revoke: `--rotate`, then update step 2.
+- **MCP tools**: `create_room {name, topic?, open?}`, `join_room {room, address?}`, `leave_room`,
+  `list_rooms` (rooms you may post to, with members + floor), `acquire_floor {room, lease_ms?}`,
+  `release_floor {room}`; `post_message` routes `#room` / `@all` and accepts `hold_floor` /
+  `release_floor`; `read_transcript { room, since_id }` reads a room.
+- **Read policy** (`read_transcript`): needs a bound identity; an agent reads rooms it may post to,
+  DM threads it is part of, and its own inbox (the default); `all` and other people's DMs are
+  operator-only — the db file is shared, but the tool surface is not a fleet-wide wiretap.
+- A broadcast recipient held at a permission gate is never "failed": at the hold deadline it is
+  left in its inbox (`logged` / `inbox`), which also resolves the hold for restarts.
+
+## Non-Claude orchestrators (HED-72, comms half)
+
+`heddle-comms` is a plain stdio MCP server, so any MCP-capable CLI can use the **pull-model**
+tools (`post_message`, `check_inbox`, `read_transcript`, rooms, …) with the same identity rules
+(`HEDDLE_AGENT` in the server's env). What they cannot get is **push**: `notifications/claude/channel`
+is a Claude Code channel — other CLIs read their inbox when they want to (`check_inbox`), which
+is the room's pull model anyway. Verified from each CLI's own `--help` on 2026-08-15:
+
+- **Codex CLI**: `codex mcp add heddle-comms --env HEDDLE_AGENT=codex-B -- heddle-comms`
+  (stdio; `--env` sets the server's environment; `codex mcp list` / `remove`).
+- **cursor-agent**: declare the server in `.cursor/mcp.json` (project) or `~/.cursor/mcp.json`
+  (`{ "mcpServers": { "heddle-comms": { "command": "heddle-comms", "env": { "HEDDLE_AGENT": "…" } } } }`),
+  then `agent mcp enable heddle-comms` (approved list); `agent mcp list` / `list-tools heddle-comms`.
+- **agy (Antigravity)**: no MCP flag in `agy --help`; heddle's own worker MCP attachment for agy
+  is unimplemented for the same reason (`.agents/mcp_config.json` schema unverified against the
+  Antigravity docs) — not documented here until verified.
+
+Live verification with a Codex session as orchestrator is pending (HED-72). Identity/env for
+dispatched workers (`HEDDLE_COMMS_ADDRESS`, `HEDDLE_WORKER`) is U's HED-2.
+
 ## Roadmap
 
 - **HED-4:** Comms log & address grammar — durable append-only storage and registry (built).
@@ -454,8 +534,10 @@ a `SocketTransport` slots in beside `ChannelTransport` without touching the brok
 - **HED-7:** Claude bridge — `heddle-comms` channel MCP server (structured push via
   `notifications/claude/channel`, pull tools) + the tactical SendMessage layer mirrored into this
   log (built — see Claude bridge).
-- Later: WebSocket push for the dashboard, room governance / membership (SPEC §9), the
-  needs-human queue (SPEC §10), transports for non-Claude workers beyond pull.
+- **HED-73:** Rooms + operator send — membership governance, floor lock, `@all` guaranteed
+  delivery, operator token binding, room MCP tools, default `#fleet` (built — see Rooms).
+- Later: WebSocket push for the dashboard (HED-74 reads the db directly), the needs-human queue
+  (SPEC §10), transports for non-Claude workers beyond pull (HED-72).
 
 ## Testing
 

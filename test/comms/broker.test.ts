@@ -231,6 +231,7 @@ describe('Broker (temp db)', () => {
 
   describe('rooms and broadcast', () => {
     it('logs room posts for pull without calling transport', async () => {
+      log.ensureDefaultRooms(); // #fleet exists and is open
       const result = await post(newBroker(), 'K', '#fleet');
       expect(result).toMatchObject({ outcome: 'logged', code: 'room-pull' });
       expect(transport.calls).toEqual([]);

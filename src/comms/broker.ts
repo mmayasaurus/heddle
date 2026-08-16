@@ -1,6 +1,6 @@
-import type { CommsLog } from './log.js';
+import type { CommsLog, RoomRecord, RoomMember, FloorRecord } from './log.js';
 import { postEnveloped, renderEnvelope, type LineageSource } from './envelope.js';
-import { canSend, parseAddress, type AddressKind } from './address.js';
+import { BROADCAST, canSend, parseAddress, type AddressKind } from './address.js';
 import type { DeliveryOutcome, MessageKind, MessageRecord, Tier } from './types.js';
 
 /**
@@ -96,6 +96,10 @@ export interface PostRequest {
   issue?: string | null;
   thread?: string | null;
   meta?: Record<string, unknown> | null;
+  /** Rooms only: take the floor before posting (refused if another holder's lease is live). */
+  holdFloor?: boolean;
+  /** Rooms only: release the floor after this post (end of a multi-part reply). */
+  releaseFloor?: boolean;
 }
 
 export type PostResult =
@@ -118,7 +122,8 @@ export type PostResult =
     };
 
 export type RefusalCode =
-  | 'unknown-target' | 'ambiguous-target' | 'no-orchestrator' | 'body-too-large' | 'rate-limited' | 'invalid-message';
+  | 'unknown-target' | 'ambiguous-target' | 'no-orchestrator' | 'body-too-large' | 'rate-limited' | 'invalid-message'
+  | 'no-such-room' | 'not-a-member' | 'floor-held' | 'room-governance';
 
 type AcceptedBase = { messageId: number; to: string; tier: Tier; envelope: string };
 type Refusal = Extract<PostResult, { outcome: 'refused' }>;
@@ -135,6 +140,8 @@ interface Held {
   target: string;
   heldAt: number;
   attempts: number;
+  /** Part of an @all fan-out: "no live session" means inbox (logged), never a transient failure. */
+  broadcast?: boolean;
 }
 
 /** Default target state: the dispatch ledger knows in-flight vs finished; nothing knows "gate" yet. */
@@ -266,6 +273,102 @@ export class Broker {
     return null;
   }
 
+  // ------------------------------------------------------------------ rooms
+
+  /**
+   * May `from` post to `room` right now? Operator: always. Otherwise the room must exist and be
+   * open or list the sender as a member; and no other holder's floor lease may be live. With
+   * `holdFloor` the sender takes (or renews) the floor as part of the check.
+   */
+  private checkRoom(from: string, room: string, holdFloor: boolean): { code: RefusalCode; reason: string; retryAfterMs?: number } | { acquired: boolean } {
+    const r = this.log.room(room);
+    if (!r) return { code: 'no-such-room', reason: `${room} does not exist (rooms are created by the operator or an orchestrator)` };
+    if (from !== 'operator' && !r.open && !this.log.member(room, from)) {
+      return { code: 'not-a-member', reason: `${from} is not a member of ${room} (workers cannot self-join; ask your orchestrator or the operator)` };
+    }
+    const floor = this.log.floor(room);
+    if (floor && floor.holder !== from) {
+      const retryAfterMs = Math.max(0, Date.parse(floor.expiresAt) - this.now());
+      return { code: 'floor-held', reason: `${floor.holder} holds the floor of ${room} (lease ends ${floor.expiresAt}); no interleaved replies`, retryAfterMs };
+    }
+    if (holdFloor || (floor && floor.holder === from)) {
+      // Take (or renew) the floor atomically; losing the race to another holder is a floor-held refusal.
+      const got = this.log.acquireFloor(room, from);
+      if (!got) {
+        const now = this.log.floor(room);
+        return { code: 'floor-held', reason: `${now?.holder ?? 'someone'} took the floor of ${room} first`, retryAfterMs: now ? Math.max(0, Date.parse(now.expiresAt) - this.now()) : 0 };
+      }
+      return { acquired: holdFloor && !floor }; // newly taken for this post (a renewal is not "new")
+    }
+    return { acquired: false };
+  }
+
+  /** Who may govern rooms: the operator and fleet agents (orchestrators). Children never. */
+  private governs(actor: string): boolean {
+    const k = parseAddress(actor)?.kind;
+    return k === 'operator' || k === 'agent';
+  }
+
+  private governanceRefusal(actor: string, room: string, reason: string): PostResult {
+    return this.refuse(actor, room, 'room-governance', reason);
+  }
+
+  /** Create a room. Operator/orchestrators only; idempotent for an existing name. */
+  createRoom(actor: string, name: string, opts: { topic?: string | null; open?: boolean } = {}): { room: RoomRecord } | Extract<PostResult, { outcome: 'refused' }> {
+    if (!this.governs(actor)) return this.governanceRefusal(actor, name, `${actor} may not create rooms (operator/orchestrators only)`) as Extract<PostResult, { outcome: 'refused' }>;
+    if (parseAddress(name)?.kind !== 'room') return this.governanceRefusal(actor, name, `${JSON.stringify(name)} is not a #room name`) as Extract<PostResult, { outcome: 'refused' }>;
+    return { room: this.log.createRoom({ name, by: actor, topic: opts.topic ?? null, open: opts.open ?? false }) };
+  }
+
+  /**
+   * Add a member. Operator/orchestrators only — a worker asking to join itself is refused and
+   * ledgered; an orchestrator may add its own children (and peers), the operator anyone.
+   */
+  addMember(actor: string, room: string, address: string): { member: RoomMember } | Extract<PostResult, { outcome: 'refused' }> {
+    const refused = (reason: string) => this.governanceRefusal(actor, room, reason) as Extract<PostResult, { outcome: 'refused' }>;
+    if (!this.governs(actor)) return refused(`${actor} may not change room membership (workers cannot self-join)`);
+    if (!this.log.room(room)) return refused(`no such room ${room}`);
+    const target = parseAddress(address);
+    if (!target || !canSend(target)) return refused(`${JSON.stringify(address)} cannot be a member`);
+    if (target.kind === 'child' && actor !== 'operator' && target.parent !== actor) {
+      return refused(`${actor} may only add its own children (${address} belongs to ${target.parent})`);
+    }
+    return { member: this.log.addMember({ room, address, by: actor }) };
+  }
+
+  /** Remove a member: anyone may leave; an orchestrator may remove its own children; the operator anyone. */
+  removeMember(actor: string, room: string, address: string): { removed: boolean } | Extract<PostResult, { outcome: 'refused' }> {
+    const refused = (reason: string) => this.governanceRefusal(actor, room, reason) as Extract<PostResult, { outcome: 'refused' }>;
+    if (!this.log.room(room)) return this.refuse(actor, room, 'no-such-room', `no such room ${room}`) as Extract<PostResult, { outcome: 'refused' }>;
+    if (actor !== address && actor !== 'operator') {
+      const target = parseAddress(address);
+      const ownChild = this.governs(actor) && target?.kind === 'child' && target.parent === actor;
+      if (!ownChild) return refused(`${actor} may not remove ${address} from ${room} (only yourself, your own children, or the operator)`);
+    }
+    return { removed: this.log.removeMember(room, address) };
+  }
+
+  /** Take/renew the floor of a room the actor may post to. */
+  acquireFloor(actor: string, room: string, leaseMs?: number): { floor: FloorRecord } | Extract<PostResult, { outcome: 'refused' }> {
+    const gate = this.checkRoom(actor, room, false);
+    if ('code' in gate) return this.refuse(actor, room, gate.code, gate.reason, undefined, gate.retryAfterMs) as Extract<PostResult, { outcome: 'refused' }>;
+    let floor: FloorRecord | null;
+    try { floor = this.log.acquireFloor(room, actor, leaseMs); } catch (err) {
+      return this.refuse(actor, room, 'room-governance', (err as Error).message ?? String(err)) as Extract<PostResult, { outcome: 'refused' }>;
+    }
+    if (!floor) {
+      const held = this.log.floor(room); // may already be free again — then just say retry now
+      return this.refuse(actor, room, 'floor-held', held ? `${held.holder} holds the floor of ${room}` : `the floor of ${room} was taken and released while you asked; retry`,
+        undefined, held ? Math.max(0, Date.parse(held.expiresAt) - this.now()) : 0) as Extract<PostResult, { outcome: 'refused' }>;
+    }
+    return { floor };
+  }
+
+  releaseFloor(actor: string, room: string): { released: boolean } | Extract<PostResult, { outcome: 'refused' }> {
+    if (!this.log.room(room)) return this.refuse(actor, room, 'no-such-room', `no such room ${room}`) as Extract<PostResult, { outcome: 'refused' }>;
+    return { released: this.log.releaseFloor(room, actor) };
+  }
+
   // ------------------------------------------------------------------ post
 
   async post(req: PostRequest): Promise<PostResult> {
@@ -283,6 +386,12 @@ export class Broker {
 
     const constraint = this.checkConstraints(req.from, to, req.body ?? '');
     if (constraint) return this.refuse(req.from, to, constraint.code, constraint.reason + via, undefined, constraint.retryAfterMs);
+    let floorTakenHere = false;
+    if (kind === 'room') {
+      const gate = this.checkRoom(req.from, to, req.holdFloor === true);
+      if ('code' in gate) return this.refuse(req.from, to, gate.code, gate.reason, undefined, gate.retryAfterMs);
+      floorTakenHere = gate.acquired;
+    }
     const pairKey = `${req.from}->${to}`;
 
     // `resolvedFrom` is broker-authored provenance: whatever the caller put there is dropped.
@@ -296,12 +405,17 @@ export class Broker {
         meta: { ...callerMeta, ...(to !== req.to ? { resolvedFrom: req.to } : {}) },
       });
     } catch (err) {
+      if (floorTakenHere) this.log.releaseFloor(to, req.from); // no message → no floor
       return this.refuse(req.from, to, 'invalid-message', (err as Error).message ?? String(err));
     }
     this.consume(pairKey);
     const { record, envelope } = enveloped;
     const base = { messageId: record.id, to, tier: record.tier, envelope };
-    if (kind === 'room') return this.deliverRoom(record, base);
+    if (kind === 'room') {
+      const out = this.deliverRoom(record, base);
+      if (req.releaseFloor) this.log.releaseFloor(to, req.from);
+      return out;
+    }
     if (kind === 'broadcast') return this.deliverBroadcast(record, envelope, base);
     const d = await this.dispatchTo(record, envelope, to, req.from);
     return { ...base, outcome: d.outcome, code: d.code, ...(d.reason ? { reason: d.reason } : {}) };
@@ -323,34 +437,42 @@ export class Broker {
       this.log.recordDelivery({ messageId: record.id, from: record.from, to: record.to, outcome: 'logged', code: 'no-recipients', transport: this.transport.name });
       return { ...base, outcome: 'logged', code: 'no-recipients' };
     }
-    // A broadcast also charges each (from → recipient) budget, so @all is not a way around the
-    // per-recipient rate limit (the broadcast itself was admitted on the from → @all budget).
+    // Guaranteed delivery: push where the recipient has a live channel, inbox (pull) otherwise —
+    // "no live session" is not a failure for a broadcast, it is the pull path. A broadcast also
+    // charges each (from → recipient) budget, so @all is not a way around the per-recipient rate
+    // limit (the broadcast itself was admitted on the from → @all budget).
     for (const r of recipients) this.consume(`${record.from}->${r}`);
-    const outcomes = await Promise.all(recipients.map((r) => this.dispatchTo(record, envelope, r, record.from)));
+    const outcomes = await Promise.all(recipients.map((r) => this.dispatchTo(record, envelope, r, record.from, { broadcast: true })));
     const failed = outcomes.filter((o) => o.outcome === 'failed').length;
     const heldN = outcomes.filter((o) => o.outcome === 'held').length;
+    const pushed = outcomes.filter((o) => o.outcome === 'sent').length;
+    const inbox = outcomes.filter((o) => o.outcome === 'logged').length;
     const n = recipients.length;
     if (failed && heldN) return { ...base, outcome: 'failed', code: 'partial-mixed', reason: `${failed}/${n} recipients failed, ${heldN}/${n} held at a permission gate` };
     if (failed) return { ...base, outcome: 'failed', code: 'partial', reason: `${failed}/${n} recipients failed` };
     if (heldN) return { ...base, outcome: 'held', code: 'partial-hold', reason: `${heldN}/${n} recipients held at a permission gate` };
-    return { ...base, outcome: 'sent', code: 'broadcast' };
+    return { ...base, outcome: 'sent', code: 'broadcast', reason: `${pushed}/${n} pushed, ${inbox}/${n} to inbox` };
   }
 
   /** Hold if the target is at a permission gate, else inject (serialized per target). */
   private async dispatchTo(
-    record: MessageRecord, envelope: string, target: string, from: string,
-  ): Promise<{ outcome: 'sent' | 'held' | 'failed'; code: string; reason?: string }> {
+    record: MessageRecord, envelope: string, target: string, from: string, opts: { broadcast?: boolean } = {},
+  ): Promise<{ outcome: 'sent' | 'held' | 'failed' | 'logged'; code: string; reason?: string }> {
     // Order is preserved per target: while older messages for this target are still held, a new
     // one queues behind them (released in order by pump()) instead of overtaking them.
     const queuedBehind = this.held.some((h) => h.target === target);
     const state = queuedBehind ? 'permission-gate' : await this.stateOf(target);
     if (state === 'permission-gate') {
-      this.held.push({ record, envelope, target, heldAt: this.now(), attempts: 1 }); // the hold itself is attempt 1
+      this.held.push({ record, envelope, target, heldAt: this.now(), attempts: 1, broadcast: opts.broadcast === true }); // the hold itself is attempt 1
       const code = queuedBehind ? 'queued-behind-held' : 'permission-gate';
       this.log.recordDelivery({ messageId: record.id, from, to: target, outcome: 'held', code, transport: this.transport.name });
       return { outcome: 'held', code };
     }
     const res = await this.deliverSerialized(target, { record, envelope, target, attempt: 1 });
+    if (!res.ok && opts.broadcast && res.code === 'no-live-session') {
+      this.log.recordDelivery({ messageId: record.id, from, to: target, outcome: 'logged', code: 'inbox', reason: res.reason ?? null, transport: this.transport.name, attempt: 1 });
+      return { outcome: 'logged', code: 'inbox', reason: res.reason };
+    }
     this.log.recordDelivery({ messageId: record.id, from, to: target, outcome: res.ok ? 'sent' : 'failed', code: res.code, reason: res.reason ?? null, transport: this.transport.name, attempt: 1 });
     return { outcome: res.ok ? 'sent' : 'failed', code: res.code, reason: res.reason };
   }
@@ -425,6 +547,12 @@ export class Broker {
       const age = this.now() - h.heldAt;
       if (age > this.holdMaxMs) {               // the contract is a MAX hold time — stale instructions are not injected late
         h.attempts += 1;
+        if (h.broadcast) {                      // a broadcast recipient is never "failed": it pulls from its inbox
+          this.log.recordDelivery({ messageId: h.record.id, from: h.record.from, to: h.target, outcome: 'logged', code: 'inbox',
+            reason: `held ${age}ms at a permission gate (max ${this.holdMaxMs}ms); left in the inbox`, transport: this.transport.name, attempt: h.attempts });
+          released += 1; done.push(h);
+          continue;
+        }
         this.recordHold(h, 'failed', 'hold-timeout', `held ${age}ms (max ${this.holdMaxMs}ms); recipient can still pull it`);
         failed += 1; done.push(h);
         continue;
@@ -434,6 +562,11 @@ export class Broker {
       const res = await this.deliverSerialized(h.target, { record: h.record, envelope: h.envelope, target: h.target, attempt: h.attempts });
       if (res.ok) {
         this.recordHold(h, 'released', 'gate-cleared', res.reason ?? null);
+        released += 1; done.push(h);
+        continue;
+      }
+      if (h.broadcast && res.code === 'no-live-session') {  // a broadcast recipient without a channel pulls — not a failure
+        this.log.recordDelivery({ messageId: h.record.id, from: h.record.from, to: h.target, outcome: 'logged', code: 'inbox', reason: res.reason ?? null, transport: this.transport.name, attempt: h.attempts });
         released += 1; done.push(h);
         continue;
       }
@@ -463,7 +596,9 @@ export class Broker {
       // heddle-comms per session, shared db) restores only its own, or two brokers would race.
       if (opts.sender && record.from !== opts.sender) continue;
       const heldAt = Date.parse(ev.ts);
-      this.held.push({ record, envelope: renderEnvelope(record), target: ev.to, heldAt: Number.isFinite(heldAt) ? heldAt : this.now(), attempts: 1 });
+      // The broadcast flag survives restarts: an @all hold restored from the log keeps its
+      // inbox-not-failed contract (the record's target says what it was).
+      this.held.push({ record, envelope: renderEnvelope(record), target: ev.to, heldAt: Number.isFinite(heldAt) ? heldAt : this.now(), attempts: 1, broadcast: record.to === BROADCAST });
       restored += 1;
     }
     return restored;
