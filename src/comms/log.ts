@@ -209,6 +209,16 @@ export const RESERVED_META_KEYS: readonly string[] =
 /** A session whose heartbeat is older than this is treated as gone. */
 export const DEFAULT_SESSION_STALE_MS = 90_000;
 
+/** One agent's answer to a fleet-pause request (HED-119). */
+export interface FleetPauseAck {
+  sender: string;
+  messageId: number;
+  at: string;
+  /** The agent's OWN assertion that its work is committed or parked — unverifiable by the broker. */
+  workParked: boolean;
+  note: string | null;
+}
+
 export interface SessionInput {
   address: string;
   sessionId?: string | null;
@@ -388,6 +398,47 @@ export class CommsLog {
   latestId(): number {
     const row = this.db.prepare('SELECT COALESCE(MAX(id), 0) AS id FROM messages').get() as { id: number };
     return Number(row.id);
+  }
+
+  /**
+   * The newest fleet-pause request, or null (HED-119).
+   *
+   * A pause is an OPERATOR-TIER broadcast carrying `meta.fleetPause`. The tier is the whole
+   * security story: the broker stamps it and a sender can never request it, so an agent that
+   * writes `meta.fleetPause` into a post of its own lands at `agent-message` and is invisible
+   * here. Only the human can halt the fleet.
+   */
+  latestFleetPause(): MessageRecord | null {
+    const row = this.db.prepare(
+      `${SELECT_WITH_MENTIONS} WHERE m.tier = 'operator' AND m.target = ?
+       AND json_extract(m.meta, '$.fleetPause') IS NOT NULL ORDER BY m.id DESC LIMIT 1`,
+    ).get(BROADCAST) as Row | undefined;
+    return row ? toRecord(row) : null;
+  }
+
+  /**
+   * Acks answering a pause request — newest per sender, so a re-ack supersedes (HED-119).
+   *
+   * `workParked` is the agent's own assertion that it committed or parked its work, not something
+   * the broker can verify; `pauseReadiness` treats a false one as a blocker precisely because the
+   * point of the pause is that a relaunch must not lose anything.
+   */
+  fleetPauseAcks(pauseId: number): FleetPauseAck[] {
+    const rows = this.db.prepare(
+      `SELECT m.sender, m.id, m.ts, json_extract(m.meta, '$.workParked') AS parked, m.body
+       FROM messages m WHERE m.reply_to = ? AND json_extract(m.meta, '$.pauseAck') IS NOT NULL
+       AND m.id = (SELECT MAX(i.id) FROM messages i WHERE i.sender = m.sender
+                   AND i.reply_to = m.reply_to AND json_extract(i.meta, '$.pauseAck') IS NOT NULL)
+       ORDER BY m.id ASC`,
+    ).all(pauseId) as { sender: string; id: number; ts: string; parked: unknown; body: string }[];
+    return rows.map((r) => ({
+      sender: String(r.sender),
+      messageId: Number(r.id),
+      at: String(r.ts),
+      // json_extract yields 1/0 for booleans; anything not truthy is "not parked".
+      workParked: r.parked === 1 || r.parked === true || r.parked === 'true',
+      note: r.body ? String(r.body) : null,
+    }));
   }
 
   count(): number {

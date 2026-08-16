@@ -12,7 +12,8 @@ import type { LineageSource } from './envelope.js';
 import {
   ChannelTransport, InboundPump, CHANNEL_INSTRUCTIONS, SENDMESSAGE_LIMITS, sendMessageHint, confirmSent, mirrorSent, mirrorReceived, errorMessage,
 } from './bridge.js';
-import { parseAddress } from './address.js';
+import { parseAddress, BROADCAST, OPERATOR } from './address.js';
+import { pauseReadiness, type InFlightSource } from './quiesce.js';
 import { TIERS, MESSAGE_KINDS, type Tier, type MessageKind } from './types.js';
 
 /**
@@ -161,6 +162,11 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
   const log = opts.log ?? new CommsLog(env.HEDDLE_COMMS_DB || DEFAULT_COMMS_PATH);
   const ownsLedger = opts.ledger === undefined;
   const ledger = ownsLedger ? openLedgerIfPresent(env, warn) : opts.ledger;
+  // The ledger is held as the narrow LineageSource the envelope layer needs; quiescence wants the
+  // in-flight view, which only a real Ledger has. Resolve that once, by capability, so an injected
+  // lineage-only stub reports "cannot tell" instead of a misleading zero.
+  const inFlightSource: InFlightSource | null =
+    ledger && typeof (ledger as { inFlight?: unknown }).inFlight === 'function' ? (ledger as InFlightSource) : null;
   const tokenPath = opts.operatorTokenPath ?? OPERATOR_TOKEN_PATH;
   const { identity: me, isOperator } = resolveCommsIdentity(env, cwd, warn, tokenPath);
   const isWorker = env.HEDDLE_WORKER === '1';
@@ -249,6 +255,36 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
         }
         case 'acquire_floor': return text(broker.acquireFloor(requireMe(), requireStr(a.room, 'room'), num(a.lease_ms)));
         case 'release_floor': return text(broker.releaseFloor(requireMe(), requireStr(a.room, 'room')));
+        case 'request_pause': {
+          const who = requireMe();
+          // Operator-only by design: a halt-the-fleet signal any agent could raise would be a
+          // denial-of-service on the whole fleet, and the tier that proves "the human" is the
+          // token-verified operator binding.
+          if (!(isOperator && operatorStillValid())) {
+            return errorText('refused: only the operator can request a fleet pause (bind HEDDLE_COMMS_ROLE=operator + the token)');
+          }
+          const reason = str(a.reason) ?? 'account rotation';
+          const posted = broker.post({
+            from: who, to: BROADCAST, kind: 'status',
+            body: `FLEET PAUSE REQUESTED — ${reason}. Park your work now: commit or push anything uncommitted, stop starting new dispatches, then call ack_pause with work_parked=true. Do not resume until the operator says so.`,
+            // No timestamp here: the broker stamps ts on the row, and pause_status reads it back.
+            meta: { fleetPause: { reason } },
+          });
+          return text({ ...posted, readiness: pauseReadiness(log, inFlightSource) });
+        }
+        case 'ack_pause': {
+          const who = requireMe();
+          const pause = log.latestFleetPause();
+          if (!pause) return errorText('refused: no fleet pause has been requested');
+          const workParked = a.work_parked === true;
+          const posted = broker.post({
+            from: who, to: OPERATOR, kind: 'status', replyTo: pause.id,
+            body: str(a.note) ?? (workParked ? 'paused; work parked' : 'paused; work NOT parked'),
+            meta: { pauseAck: true, workParked },
+          });
+          return text({ ...posted, pauseId: pause.id, workParked });
+        }
+        case 'pause_status': return text(pauseReadiness(log, inFlightSource, { ...(num(a.stale_ms) === undefined ? {} : { staleMs: num(a.stale_ms) as number }) }));
         case 'comms_whoami': return text({
           identity: operatorStillValid() ? me : null, revoked: !operatorStillValid(), sessionName, worker: isWorker, operator: isOperator && operatorStillValid(), pushEnabled, session: me ? log.session(me) : null,
           rooms: me ? log.roomsFor(me).map((r) => r.name) : [], liveSessions: log.liveSessions(), sendMessageLimits: SENDMESSAGE_LIMITS,
@@ -453,6 +489,21 @@ export const TOOLS = [
     name: 'comms_whoami',
     description: "Your bound comms identity, this session's registration, rooms, live comms sessions, and the documented limits of the tactical SendMessage layer.",
     inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'request_pause',
+    description: 'OPERATOR ONLY. Ask the whole fleet to pause and park its work — the first step of a Claude account rotation, which relaunches every session. Broadcasts at operator tier and returns the current readiness.',
+    inputSchema: { type: 'object', properties: { reason: { type: 'string' } } },
+  },
+  {
+    name: 'ack_pause',
+    description: "Answer the operator's pause request. Set work_parked=true ONLY once your work is committed, pushed, or otherwise safe to lose from memory — the fleet is relaunched once everyone acks, and anything you are still holding goes with it.",
+    inputSchema: { type: 'object', properties: { work_parked: { type: 'boolean' }, note: { type: 'string' } }, required: ['work_parked'] },
+  },
+  {
+    name: 'pause_status',
+    description: 'Who has acked the pause, who is still pending, who acked with work NOT parked, and how many dispatches are still in flight. ready=true means the fleet is safe to relaunch.',
+    inputSchema: { type: 'object', properties: { stale_ms: { type: 'number' } } },
   },
 ];
 
