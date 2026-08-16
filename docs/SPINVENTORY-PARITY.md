@@ -7,14 +7,18 @@
 
 Bar (Maya, 2026-08-16): heddle must work **as well as or better than** Spinventory's current
 system — the rest of Spinventory will be built inside heddle, and nothing may regress at
-migration. One row per Spinventory system: heddle equivalent, verdict, receipt. Every **GAP**
-row has a ticket. Spinventory keeps running unchanged until every **non-SKIP** row is
-PARITY or BETTER; SKIP rows are excluded from the migration gate and each carries its scope
+migration. One row per Spinventory system: heddle equivalent, verdict, receipt. Cross-cutting
+rows (Spinventory column `—`) are allowed for properties the audit surfaced that belong to no
+single Spinventory system, and they count in the gate like any other row. Every **GAP** row
+has a ticket. Spinventory keeps running unchanged until every **non-SKIP** row is PARITY or
+BETTER; SKIP rows are excluded from the migration gate and each carries its scope
 justification in its Notes/receipt cell.
 
 Verdict column uses exactly one of: **BETTER** (heddle exceeds it) · **PARITY** (equivalent
-in effect) · **GAP** (missing/weaker — ticketed) · **SKIP** (project-specific, excluded from
-the gate). Qualifiers (priority, maturity, follow-ups) live in the Notes & receipt column.
+in effect) · **GAP** (missing/weaker — ticketed) · **SKIP** (explicitly out of migration
+scope — either project-specific to Spinventory or already global to every project, so nothing
+migrates; the justification is stated per row). Qualifiers (priority, maturity, follow-ups)
+live in the Notes & receipt column.
 
 ## Hooks (runtime enforcement)
 
