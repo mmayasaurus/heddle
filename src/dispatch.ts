@@ -206,11 +206,19 @@ function baseRecord(
   };
 }
 
+interface RefusalOpts {
+  /** Outcome fields specific to this refusal path (execution, usedFallback, …). */
+  extra?: Partial<DispatchOutcome>;
+  /** A ledger row that already exists for this attempt (e.g. the max-children transactional row). */
+  ledgerId?: number;
+  fellBackFrom?: string | null;
+}
+
 function refusalOutcome(
   ctx: DispatchContext, req: DispatchRequest, taskClass: string, target: RouteTarget,
-  skills: string[], refusal: DispatchRefusal, extra: Partial<DispatchOutcome> = {},
-  ledgerId?: number, fellBackFrom: string | null = null,
+  skills: string[], refusal: DispatchRefusal, opts: RefusalOpts = {},
 ): DispatchOutcome {
+  const { extra = {}, ledgerId, fellBackFrom = null } = opts;
   // A refusal row records what was ASKED (e.g. the denied capabilities), so the audit trail shows it.
   const id = ledgerId ?? ctx.ledger.refuse(
     baseRecord(ctx, req, taskClass, target, skills, fellBackFrom, req.capabilities ?? []),
@@ -249,7 +257,7 @@ async function runTarget(
       instruction: caps.refusal.kind === 'unenforceable'
         ? 'Dispatch to a provider that can enforce it (class + explicit provider/model), or drop the capability (see docs/MODELS.md "Capabilities").'
         : 'Drop the capability, or fix the call (see docs/MODELS.md "Capabilities").',
-    }, { usedFallback: fellBackFrom !== null, capabilityRefusalKind: caps.refusal.kind } as Partial<DispatchOutcome>, undefined, fellBackFrom);
+    }, { extra: { usedFallback: fellBackFrom !== null, capabilityRefusalKind: caps.refusal.kind }, fellBackFrom });
   }
 
   // HED-19: fail fast, BEFORE a ledger row exists, on anything materialization would reject —
@@ -267,7 +275,7 @@ async function runTarget(
     return refusalOutcome(ctx, req, route.taskClass, target, skills, {
       code: 'max-children', reason: started.reason,
       instruction: 'Wait for a worker to finish (check_workers), or close orphaned rows.',
-    }, { usedFallback: fellBackFrom !== null }, started.id);
+    }, { extra: { usedFallback: fellBackFrom !== null }, ledgerId: started.id });
   }
   const ledgerId = started.id;
   // HED-3: review rows carry the author→reviewer pair from the moment the row exists.
@@ -548,7 +556,7 @@ export async function dispatch(
     return refusalOutcome(ctx, req, route.taskClass, fallback, skillsForRefusal, {
       code: 'metered-pool-exhausted', reason: `failure fallback blocked: ${fbHard}`,
       instruction: 'The primary failed and the class fallback would bill on-demand — pick another route (heddle route <class>).',
-    }, { usedFallback: true });
+    }, { extra: { usedFallback: true } });
   }
   // Attribution AND account selection follow the provider that actually runs: a codex fallback
   // bills its CODEX_HOME; a CLAUDE fallback gets its own headroom-based account pick (the plan only
@@ -784,7 +792,10 @@ function refuseDepth1(req: DispatchRequest, ctx: DispatchContext, table: Routing
       target = req.provider && req.model ? { ...route, provider: req.provider, model: req.model } : route;
       skills = route.dispatchable ? withMandatoryPacks(req.skills ?? route.skills ?? []) : (req.skills ?? route.skills ?? []);
     }
-  } catch { /* best-effort — the refusal stands regardless */ }
+  } catch (err) {
+    // Best-effort — the refusal stands regardless; but the enrichment failure is visible, not silent.
+    process.stderr.write(`heddle: depth-1 refusal enrichment failed (${err instanceof Error ? err.message : String(err)}) — refusing with defaults\n`);
+  }
   return refusalOutcome(ctx, req, taskClass, target, skills, {
     code: 'depth-1', reason,
     instruction: 'Finish your own task and report; ask your orchestrator to dispatch further work.',
@@ -797,7 +808,7 @@ function refuseNotDispatchable(route: Route, req: DispatchRequest, ctx: Dispatch
     `orchestrator's own in-session work` + (req.provider && req.model ? `; naming a route (${req.provider}/${req.model}) does not change that` : '') + '.';
   const instruction = `Continue yourself; there is nothing to delegate.`;
   return refusalOutcome(ctx, req, route.taskClass, route, skills,
-    { code: 'not-dispatchable', reason, instruction }, { execution: providerExecution(ctx.table, route.provider) });
+    { code: 'not-dispatchable', reason, instruction }, { extra: { execution: providerExecution(ctx.table, route.provider) } });
 }
 
 function refuseInSession(
@@ -826,5 +837,5 @@ function refuseInSession(
     baseRecord(ctx, req, route.taskClass, route, skills, fellBackFrom), 'claude-in-session', reason,
   );
   return refusalOutcome(ctx, req, route.taskClass, route, skills,
-    { code: 'claude-in-session', reason, instruction }, { execution, usedFallback: fellBackFrom !== null }, id);
+    { code: 'claude-in-session', reason, instruction }, { extra: { execution, usedFallback: fellBackFrom !== null }, ledgerId: id });
 }
