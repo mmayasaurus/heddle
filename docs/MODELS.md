@@ -196,3 +196,14 @@ land.
   dispatch handles" for a ticket that says nothing of the kind). `assess_result` caught it
   (`needs-rework`); a human/orchestrator read is still required.
 
+Follow-up data (Agent V, ledger #48–55, later the same day):
+- **codex/gpt-5.6-terra (direct) for test authoring: 2/2 excellent** — with a self-contained brief
+  that names every source file, it wrote behavioural vitest suites and, told not to patch `src/`,
+  reported a real resolver bug instead of hiding it. Prefer it over `bulk-mechanical` for tests.
+- **`documentation` needs a self-contained brief and no `mcp`** — given every source path and the
+  section skeleton it was accurate (2/3 overall; the miss was the fabricated roadmap above).
+- **`second-opinion` (grok) is strong on security-boundary design when the design is pasted in and
+  no memtrace is attached** — 10 ranked findings, 3 critical, all actionable (411 s).
+- **The `implementation` task class is unusable via the CLI today** — its claude primary throws
+  before the fallback runs (U's HED-18 refusal change covers it); use a direct provider/model.
+

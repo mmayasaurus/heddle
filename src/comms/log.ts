@@ -99,6 +99,19 @@ BEGIN SELECT RAISE(ABORT, 'delivery log is append-only: UPDATE refused'); END;
 CREATE TRIGGER IF NOT EXISTS deliveries_append_only_delete BEFORE DELETE ON deliveries
 BEGIN SELECT RAISE(ABORT, 'delivery log is append-only: DELETE refused'); END;
 
+-- Live comms sessions: which participant addresses currently have a channel server attached
+-- (presence, mutable — heartbeat). The bridge consults this to decide "queued for the recipient's
+-- channel" vs "no live session; the recipient must pull". One live session per address.
+CREATE TABLE IF NOT EXISTS sessions (
+  address      TEXT PRIMARY KEY,
+  session_id   TEXT,
+  session_name TEXT,
+  pid          INTEGER,
+  socket       TEXT,
+  started_at   TEXT NOT NULL,
+  heartbeat_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS participants (
   address     TEXT PRIMARY KEY,
   kind        TEXT NOT NULL,
@@ -137,6 +150,29 @@ BEGIN SELECT RAISE(ABORT, 'participant lineage is immutable: only last_seen/labe
  */
 export const RESERVED_META_KEYS: readonly string[] =
   ['tierCode', 'tierReason', 'lineage', 'requestedTier', 'downgradedFrom'];
+
+/** A session whose heartbeat is older than this is treated as gone. */
+export const DEFAULT_SESSION_STALE_MS = 90_000;
+
+export interface SessionInput {
+  address: string;
+  sessionId?: string | null;
+  /** The name SendMessage/ListAgents know the session by (fleet convention: the fleet id). */
+  sessionName?: string | null;
+  pid?: number | null;
+  /** The session's inbox socket path (uds:…), when Claude Code exported one. */
+  socket?: string | null;
+}
+
+export interface SessionRecord {
+  address: string;
+  sessionId: string | null;
+  sessionName: string | null;
+  pid: number | null;
+  socket: string | null;
+  startedAt: string;
+  heartbeatAt: string;
+}
 
 export interface CommsLogOptions {
   /** Clock override for deterministic tests; must return ISO-8601. */
@@ -371,6 +407,58 @@ export class CommsLog {
     return (rows as unknown as PRow[]).map(toParticipant);
   }
 
+  // ---------------------------------------------------------------- sessions (presence)
+
+  /** Announce that a channel server is attached for `address` (upsert; refreshes the heartbeat). */
+  registerSession(input: SessionInput): SessionRecord {
+    const parsed = requireAddress(input.address, 'from');
+    if (!canSend(parsed)) throw new Error(`sessions are for agent/child/operator addresses, got ${JSON.stringify(input.address)}`);
+    const ts = this.now();
+    this.db.prepare(`
+      INSERT INTO sessions (address, session_id, session_name, pid, socket, started_at, heartbeat_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(address) DO UPDATE SET
+        session_id = excluded.session_id, session_name = excluded.session_name, pid = excluded.pid,
+        socket = excluded.socket, started_at = excluded.started_at, heartbeat_at = excluded.heartbeat_at
+    `).run(input.address, input.sessionId ?? null, input.sessionName ?? null, input.pid ?? null, input.socket ?? null, ts, ts);
+    return this.session(input.address)!;
+  }
+
+  /** Refresh presence. With `sessionId`, only the row owned by that session is touched (a replacement wins). */
+  heartbeatSession(address: string, sessionId?: string | null): boolean {
+    const info = sessionId
+      ? this.db.prepare('UPDATE sessions SET heartbeat_at = ? WHERE address = ? AND session_id = ?').run(this.now(), address, sessionId)
+      : this.db.prepare('UPDATE sessions SET heartbeat_at = ? WHERE address = ?').run(this.now(), address);
+    return Number(info.changes) > 0;
+  }
+
+  /** Drop presence. With `sessionId`, an old process cannot remove a replacement's row. */
+  unregisterSession(address: string, sessionId?: string | null): boolean {
+    const info = sessionId
+      ? this.db.prepare('DELETE FROM sessions WHERE address = ? AND session_id = ?').run(address, sessionId)
+      : this.db.prepare('DELETE FROM sessions WHERE address = ?').run(address);
+    return Number(info.changes) > 0;
+  }
+
+  session(address: string): SessionRecord | null {
+    const row = this.db.prepare('SELECT * FROM sessions WHERE address = ?').get(address) as unknown as SRow | undefined;
+    return row ? toSession(row) : null;
+  }
+
+  /** The session for `address` if its heartbeat is fresher than `staleMs`, else null. */
+  liveSession(address: string, staleMs = DEFAULT_SESSION_STALE_MS): SessionRecord | null {
+    requireStaleMs(staleMs);
+    const s = this.session(address);
+    if (!s) return null;
+    return Date.parse(this.now()) - Date.parse(s.heartbeatAt) <= staleMs ? s : null;
+  }
+
+  liveSessions(staleMs = DEFAULT_SESSION_STALE_MS): SessionRecord[] {
+    requireStaleMs(staleMs);
+    const cutoff = new Date(Date.parse(this.now()) - staleMs).toISOString();
+    return (this.db.prepare('SELECT * FROM sessions WHERE heartbeat_at >= ? ORDER BY address').all(cutoff) as unknown as SRow[]).map(toSession);
+  }
+
   // ---------------------------------------------------------------- deliveries
 
   /** Record one typed delivery outcome (sent / held / released / refused / failed / logged). */
@@ -403,6 +491,51 @@ export class CommsLog {
       ORDER BY d.id ASC
     `).all();
     return (rows as unknown as DRow[]).map(toDelivery);
+  }
+
+  /**
+   * The highest message id this identity's channel has written (`sent`/`channel-written`), or
+   * null. Filtered by the pump's own code — the SENDER side also records transport 'channel'
+   * rows (`queued-for-channel`, `no-live-session`) for the same target, and those say nothing
+   * about what reached the session.
+   */
+  lastChannelWrite(address: string): number | null {
+    const row = this.db.prepare(
+      "SELECT MAX(message_id) AS id FROM deliveries WHERE target = ? AND transport = 'channel' AND outcome = 'sent' AND code = 'channel-written'",
+    ).get(address) as { id: number | null };
+    return row.id == null ? null : Number(row.id);
+  }
+
+  /**
+   * The OLDEST channel write for `address` that failed and was never followed by a successful
+   * write of the same message — the floor a pump must re-scan from so no failure is orphaned.
+   */
+  oldestUnresolvedChannelFailure(address: string): number | null {
+    const failed = this.db.prepare(`
+      SELECT MIN(d.message_id) AS id FROM deliveries d
+      WHERE d.target = ? AND d.transport = 'channel' AND d.outcome = 'failed' AND d.code = 'channel-error'
+        AND NOT EXISTS (SELECT 1 FROM deliveries e WHERE e.target = d.target AND e.message_id = d.message_id
+                        AND e.transport = 'channel' AND e.outcome = 'sent' AND e.code = 'channel-written' AND e.id > d.id)
+    `).get(address) as { id: number | null };
+    return failed.id == null ? null : Number(failed.id);
+  }
+
+  /** Message ids > sinceId that this identity's channel already wrote successfully — never re-emit these. */
+  channelWrittenIds(address: string, sinceId: number): Set<number> {
+    const rows = this.db.prepare(
+      "SELECT DISTINCT message_id AS id FROM deliveries WHERE target = ? AND transport = 'channel' AND outcome = 'sent' AND code = 'channel-written' AND message_id > ?",
+    ).all(address, sinceId) as unknown as { id: number }[];
+    return new Set(rows.map((r) => Number(r.id)));
+  }
+
+  /**
+   * Where a restarted channel pump should resume for `address`: just before the oldest unresolved
+   * failure, else the last successful write, else null (first run — start at the tail).
+   */
+  channelResumeCursor(address: string): number | null {
+    const floor = this.oldestUnresolvedChannelFailure(address);
+    if (floor != null) return floor - 1;
+    return this.lastChannelWrite(address);
   }
 
   delivery(id: number): DeliveryEvent | null {
@@ -447,6 +580,10 @@ export class CommsLog {
   private touch(address: string, ts: string): void {
     this.db.prepare('UPDATE participants SET last_seen = ? WHERE address = ?').run(ts, address);
   }
+}
+
+function requireStaleMs(v: number): void {
+  if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) throw new Error('staleMs must be a finite, non-negative number of milliseconds');
 }
 
 // ------------------------------------------------------------------ delivery helpers
@@ -582,6 +719,18 @@ interface Row {
   id: number; ts: string; sender: string; target: string; kind: string; tier: string;
   verified: number; body: string; reply_to: number | null; issue: string | null; thread: string | null;
   dispatch_id: number | null; meta: string | null;
+}
+
+interface SRow {
+  address: string; session_id: string | null; session_name: string | null; pid: number | null;
+  socket: string | null; started_at: string; heartbeat_at: string;
+}
+
+function toSession(r: SRow): SessionRecord {
+  return {
+    address: r.address, sessionId: r.session_id, sessionName: r.session_name,
+    pid: r.pid == null ? null : Number(r.pid), socket: r.socket, startedAt: r.started_at, heartbeatAt: r.heartbeat_at,
+  };
 }
 
 interface DRow {

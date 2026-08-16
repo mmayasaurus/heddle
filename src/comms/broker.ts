@@ -67,6 +67,8 @@ export const DEFAULT_RATE_LIMIT: RateLimit = { windowMs: 10_000, max: 5, burstWi
 export const DEFAULT_MAX_BODY_BYTES = 8 * 1024;
 export const DEFAULT_HOLD_MAX_MS = 10 * 60_000;
 export const ORCHESTRATOR_ALIAS = '@orchestrator';
+/** Registered for bookkeeping only (e.g. the neutral `peer` sender of mirrored inbound SendMessages) — never a recipient. */
+export const RESERVED_ADDRESSES: ReadonlySet<string> = new Set(['peer']);
 
 export interface BrokerOptions {
   log: CommsLog;
@@ -205,9 +207,12 @@ export class Broker {
     }
     const parsed = parseAddress(to);
     if (parsed && (parsed.kind === 'room' || parsed.kind === 'broadcast' || parsed.kind === 'operator')) return { address: to, kind: parsed.kind };
+    if (RESERVED_ADDRESSES.has(to)) {
+      return { outcome: 'refused', code: 'unknown-target', to, reason: `${JSON.stringify(to)} is a reserved bookkeeping address, never a recipient` };
+    }
     const registered = this.log.participant(to);
     if (registered) return { address: to, kind: registered.kind };
-    const candidates = this.log.participantsWithPrefix(to);
+    const candidates = this.log.participantsWithPrefix(to).filter((p) => !RESERVED_ADDRESSES.has(p.address));
     if (candidates.length === 1) return { address: candidates[0].address, kind: candidates[0].kind };
     if (candidates.length > 1) {
       const names = candidates.map((c) => c.address);
@@ -313,7 +318,7 @@ export class Broker {
    * dispatchTo goes through that recipient's delivery chain); the result summarises the fan-out.
    */
   private async deliverBroadcast(record: MessageRecord, envelope: string, base: AcceptedBase): Promise<PostResult> {
-    const recipients = this.log.participants().map((p) => p.address).filter((a) => a !== record.from);
+    const recipients = this.log.participants().map((p) => p.address).filter((a) => a !== record.from && !RESERVED_ADDRESSES.has(a));
     if (recipients.length === 0) {
       this.log.recordDelivery({ messageId: record.id, from: record.from, to: record.to, outcome: 'logged', code: 'no-recipients', transport: this.transport.name });
       return { ...base, outcome: 'logged', code: 'no-recipients' };
@@ -449,11 +454,14 @@ export class Broker {
    * LAST delivery event for a target is `held` is still owed a release/timeout. Call once at
    * startup (channel server does); returns how many were restored.
    */
-  restoreHeld(): number {
+  restoreHeld(opts: { sender?: string } = {}): number {
     let restored = 0;
     for (const ev of this.log.openHolds()) { // SQL: held rows with no later resolving event — whole log, oldest first
       const record = ev.messageId == null ? null : this.log.get(ev.messageId);
       if (!record || this.held.some((h) => h.record.id === record.id && h.target === ev.to)) continue;
+      // Holds belong to the process that POSTED the message; a multi-broker deployment (one
+      // heddle-comms per session, shared db) restores only its own, or two brokers would race.
+      if (opts.sender && record.from !== opts.sender) continue;
       const heldAt = Date.parse(ev.ts);
       this.held.push({ record, envelope: renderEnvelope(record), target: ev.to, heldAt: Number.isFinite(heldAt) ? heldAt : this.now(), attempts: 1 });
       restored += 1;
