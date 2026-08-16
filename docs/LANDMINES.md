@@ -46,13 +46,26 @@ flags churn monthly.
 
 ## Claude Code (workers)
 
-- Default execution is **in-session subagents** of the interactive orchestrator (shared prompt
-  cache, flat subscription pool, native per-agent `skills`/`mcpServers`/`permissionMode`) — not
-  `claude -p` subprocesses.
-- If headless IS used: `--permission-mode auto` ABORTS the whole session after repeated classifier
-  blocks in `-p` mode — use explicit allowlists. `bypassPermissions` requires a one-time
-  interactive accept per machine. Resume is cwd-scoped and silently drops
-  `--mcp-config`/`--settings`/`--plugin-dir`/`--add-dir` — re-pass on every call. (docs)
+- Two execution modes (HED-78, 2026-08-15): the original **in-session subagents** of the interactive
+  orchestrator (shared prompt cache, same account, native per-agent `skills`/`mcpServers`/
+  `permissionMode`; `dispatch_worker(in_session: true)`), and the default **headless `claude -p`
+  worker** under `CLAUDE_CONFIG_DIR=<account dir>` picked for headroom (src/adapters/claude.ts).
+- **Headless contract (live-verified 2026-08-15, Claude Code 2.1.232):** `claude -p <prompt>
+  --output-format json` prints ONE JSON object `{type:"result", subtype:"success"|…, is_error,
+  result, session_id, duration_ms, num_turns, total_cost_usd, usage:{input_tokens, output_tokens,
+  cache_read_input_tokens, cache_creation_input_tokens, output_tokens_details:{thinking_tokens}}}`;
+  `--effort low|medium|high|xhigh|max`; `--model fable|opus|sonnet|haiku`; `--resume <session_id>`;
+  `--append-system-prompt <text>` (packs, no file writes); `--mcp-config <file> --strict-mcp-config`;
+  `--allowedTools <names…>` with `--permission-mode acceptEdits`. Session persistence writes to
+  `<CLAUDE_CONFIG_DIR>/projects/<cwd-slug>/<session_id>.jsonl` — the proof that a worker ran under
+  the intended account (verified for the default dir and ~/.claude-acct2).
+- `--permission-mode auto` ABORTS the whole session after repeated classifier blocks in `-p` mode —
+  use explicit allowlists. `bypassPermissions` requires a one-time interactive accept per machine.
+  Resume is cwd-scoped and silently drops `--mcp-config`/`--settings`/`--plugin-dir`/`--add-dir` —
+  re-pass on every call. (docs)
+- **CLAUDE_CONFIG_DIR gotcha (R, 2026-08-15):** for the DEFAULT account leave it UNSET — setting it
+  explicitly to `~/.claude` changes resolution and `claude auth status` reports loggedIn=false. heddle
+  unsets it (buildWorkerEnv `unset`) for the default registry account and sets it for the others.
 - Transcript JSONL under `~/.claude/projects` is explicitly format-unstable — consume
   `--output-format stream-json` and hooks, never parse transcripts. (docs)
 - Billing: subscription flat pool covers Claude Code usage; "usage credits" are optional opt-in

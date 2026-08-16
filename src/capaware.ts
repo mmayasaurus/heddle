@@ -191,6 +191,12 @@ export interface ClaudeAccount {
   configDir: string | null;
   email?: string;
   note?: string;
+  /**
+   * false = the dir's credential is gone (e.g. the default login was switched over it) — the account
+   * is NOT addressable until the operator runs `claude /login` there. The picker never selects it
+   * and a pin to it is refused. Absent = assumed logged in (registries predating the field).
+   */
+  loggedIn?: boolean;
 }
 
 /** `~/.heddle/accounts.json` → `claude[]`. Missing/corrupt → []. Never throws. */
@@ -206,6 +212,7 @@ export function readClaudeAccounts(path: string = process.env.HEDDLE_ACCOUNTS ??
         configDir: typeof a.configDir === 'string' && a.configDir ? a.configDir : null,
         email: typeof a.email === 'string' ? a.email : undefined,
         note: typeof a.note === 'string' ? a.note : undefined,
+        loggedIn: a.loggedIn === false ? false : undefined,
       }));
   } catch {
     return [];
@@ -235,7 +242,8 @@ export function adviseClaudeAccount(caps: ProviderCaps | undefined, accounts: Cl
   const usable = caps !== undefined && !caps.stale && caps.source !== 'none';
   const rows = (usable ? caps.accounts : []).map((a) => ({ id: a.id, usedPct: a.stale ? null : a.fiveHour.usedPercentage, stale: a.stale }));
   const known = accounts.map((a) => rows.find((r) => r.id === a.id) ?? { id: a.id, usedPct: null, stale: true });
-  const fresh = known.filter((r): r is { id: string; usedPct: number; stale: boolean } => r.usedPct !== null);
+  const loggedOut = new Set(accounts.filter((a) => a.loggedIn === false).map((a) => a.id));
+  const fresh = known.filter((r): r is { id: string; usedPct: number; stale: boolean } => r.usedPct !== null && !loggedOut.has(r.id));
   const bestRow = fresh.sort((x, y) => x.usedPct - y.usedPct)[0];
   const best = bestRow ? { id: bestRow.id, usedPct: bestRow.usedPct, configDir: accounts.find((a) => a.id === bestRow.id)?.configDir ?? null } : null;
   const cur = currentClaudeAccount(accounts, env);
@@ -250,4 +258,61 @@ export function adviseClaudeAccount(caps: ProviderCaps | undefined, accounts: Cl
       ? `Claude accounts: ${accounts.length} registered, no fresh per-account capture (claude-<acctId>.json) — cannot advise.`
       : 'Claude accounts: none registered in ~/.heddle/accounts.json.';
   return { best, current, known, line };
+}
+
+/**
+ * HED-78 — pick the Claude account a headless worker runs on. The account with the most 5h headroom
+ * among those with a FRESH per-account capture; `pin` overrides (must be a registry id); nothing
+ * fresh → the default login (configDir null) when registered, else the first account. Never throws
+ * for missing data — only for an unknown pin (a caller error).
+ */
+export interface AccountPick {
+  account: ClaudeAccount;
+  /** 5h used% behind the choice, null when unknown. */
+  usedPct: number | null;
+  /** Ledger-friendly reason, e.g. `account:acct2 (5h 12%)`, `account:acct1 pinned`, `account:acct1 default (no fresh caps)`. */
+  reason: string;
+  /** Env to apply: CLAUDE_CONFIG_DIR set for a non-default account; UNSET for the default login. */
+  env: Record<string, string>;
+  envUnset: string[];
+}
+
+export function pickClaudeAccount(
+  caps: ProviderCaps | undefined, accounts: ClaudeAccount[], opts: { pin?: string; routeAwayAtPct?: number } = {},
+): AccountPick | null {
+  if (accounts.length === 0) return null;
+  const envFor = (a: ClaudeAccount): { env: Record<string, string>; envUnset: string[] } => a.configDir
+    ? { env: { CLAUDE_CONFIG_DIR: a.configDir }, envUnset: [] }
+    : { env: {}, envUnset: ['CLAUDE_CONFIG_DIR'] };
+  const usedOf = (id: string): number | null => {
+    const row = caps?.accounts.find((r) => r.id === id);
+    return row && !row.stale ? row.fiveHour.usedPercentage : null;
+  };
+  if (opts.pin) {
+    const a = accounts.find((x) => x.id === opts.pin);
+    if (!a) throw new Error(`account_pin "${opts.pin}" is not in ~/.heddle/accounts.json (known: ${accounts.map((x) => x.id).join(', ')})`);
+    if (a.loggedIn === false) {
+      throw new Error(
+        `account_pin "${opts.pin}" is registered but NOT logged in (its credential was replaced) — run ` +
+        `\`${a.configDir ? `CLAUDE_CONFIG_DIR=${a.configDir} ` : ''}claude /login\` there first, then update accounts.json.`,
+      );
+    }
+    const used = usedOf(a.id);
+    return { account: a, usedPct: used, reason: `account:${a.id} pinned${used !== null ? ` (5h ${used.toFixed(0)}%)` : ''}`, ...envFor(a) };
+  }
+  // A logged-out account is not addressable, whatever its caps say (a fresh keeper anchor for a dir
+  // whose credential was replaced would otherwise make the picker choose an account that 401s).
+  const addressable = accounts.filter((a) => a.loggedIn !== false);
+  const fresh = addressable
+    .map((a) => ({ a, used: usedOf(a.id) }))
+    .filter((x): x is { a: ClaudeAccount; used: number } => x.used !== null)
+    .sort((x, y) => x.used - y.used);
+  if (fresh.length) {
+    const best = fresh[0];
+    const threshold = opts.routeAwayAtPct ?? DEFAULT_CAP_AWARE_POLICY.routeAwayAtPct;
+    const note = best.used >= threshold ? ` — every fresh account is at/over ${threshold}%` : '';
+    return { account: best.a, usedPct: best.used, reason: `account:${best.a.id} (5h ${best.used.toFixed(0)}%, most headroom of ${fresh.length} fresh)${note}`, ...envFor(best.a) };
+  }
+  const dflt = addressable.find((a) => a.configDir === null) ?? addressable[0] ?? accounts[0];
+  return { account: dflt, usedPct: null, reason: `account:${dflt.id} default (no fresh per-account caps)`, ...envFor(dflt) };
 }

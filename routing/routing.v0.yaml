@@ -41,9 +41,13 @@ policy:
 providers:
   claude:
     auth: anthropic-subscription
-    execution: in-session-subagent    # spawned via the orchestrator's Agent tool, not a subprocess
+    execution: headless               # HED-78: `claude -p --output-format json` under CLAUDE_CONFIG_DIR of the
+                                      #   registry account (~/.heddle/accounts.json) with the most 5h headroom —
+                                      #   automatic account rotation. dispatch_worker(in_session: true) keeps the
+                                      #   original protocol (the orchestrator's own Agent-tool subagent: shared
+                                      #   prompt cache, same account) as a structured claude-in-session instruction.
     models: [fable, opus, sonnet, haiku]
-    notes: shared prompt cache with orchestrator; per-agent skills/mcpServers/permissionMode native
+    notes: "headless posture = --permission-mode acceptEdits + an explicit tool allowlist (LANDMINES: auto aborts headless); packs via --append-system-prompt; never --bare"
   codex:
     auth: chatgpt-subscription
     execution: headless               # codex exec --json, stdin CLOSED (see docs/LANDMINES.md)
@@ -150,6 +154,7 @@ task_classes:
     provider: codex
     model: gpt-5.6-luna
     effort: low             # cheap + fast for low-reasoning mechanical work
+    mcp: [memtrace]         # memtrace-first discipline for every code-editing class (Maya, 2026-08-15)
     fallback: {provider: cursor, model: composer-2.5-fast}
     why: renames, sweeps, codemods, boilerplate, test scaffolds — Luna at low effort is cheap volume; the -fast fallback bills ~2x on Cursor
     skills: [worker-role, quality-gate]
@@ -157,6 +162,7 @@ task_classes:
   scaffold:                 # fast structural code drafts — Cursor's coding-tuned model
     provider: cursor
     model: composer-2.5
+    mcp: [memtrace]         # memtrace-first discipline for every code-editing class (Maya, 2026-08-15)
     fallback: {provider: codex, model: gpt-5.6-luna}
     why: fast structural drafts (files, stubs, wiring) — Composer is Cursor-native, cache-warm, ~1.8s on a trivial prompt; coding-tuned, not a reasoner
     skills: [worker-role, quality-gate]

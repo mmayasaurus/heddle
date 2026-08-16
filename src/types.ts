@@ -35,6 +35,14 @@ export interface DispatchOptions {
    * maps them to flags it can enforce; it never receives one it cannot). Empty/absent = default-deny.
    */
   capabilities?: string[];
+  /** Env vars to REMOVE from the worker env (e.g. CLAUDE_CONFIG_DIR for the default Claude account). */
+  envUnset?: string[];
+  /** Skill packs as text for CLIs that take instructions on the command line (claude --append-system-prompt). */
+  systemPromptAppend?: string;
+  /** Path to a per-dispatch MCP config file for CLIs that read one (claude --mcp-config). */
+  mcpConfigPath?: string;
+  /** Names of the MCP servers in mcpConfigPath — claude allowlists them as `mcp__<name>`. */
+  mcpServers?: string[];
 }
 
 export interface TokenUsage {

@@ -32,10 +32,12 @@ Race-and-merge (hard/high-value only): fan one task across **diverse families**
 
 ## Family strengths / weaknesses
 
-**Claude (Anthropic sub, in-session subagents).** Best judgment, native
-`skills`/`mcpServers`/`permissionMode`, thinking visible, shared cache with
-the orchestrator. Weakness: burning Opus/Sonnet on mechanical or prose work
-wastes the flat pool; workers are subagents, not `claude -p`.
+**Claude (Anthropic sub, headless `claude -p` workers by default — HED-78;
+in-session subagents on `in_session: true`).** Best judgment; headless workers
+rotate onto the registry account with the most 5h headroom; the in-session
+protocol keeps native `skills`/`mcpServers`/`permissionMode`, visible thinking
+and the orchestrator's shared cache. Weakness: burning Opus/Sonnet on
+mechanical or prose work wastes the flat pool.
 
 **Codex (ChatGPT sub, `codex exec`).** Effort knob (`minimal`…`xhigh`); Luna
 wins on volume; Sol/Terra are capable coding fallbacks. Lean by default
@@ -133,9 +135,9 @@ and records why it chose what it chose (`route_reason` in the ledger).
   with `fell_back_from` + `route_reason: cap:route-away …`. Both over → the
   primary runs (soft cap, `cap:both-over`). No fallback → primary (`cap:over`).
   Applies to Claude-primary classes too: `implementation` at Claude 5h ≥ 90 %
-  runs its declared `codex/gpt-5.6-terra` fallback as a subprocess instead of
-  returning the in-session refusal (below the threshold you still get the
-  refusal + account advice).
+  runs its declared `codex/gpt-5.6-terra` fallback as a subprocess instead of a
+  headless claude worker (below the threshold you get the claude worker on the
+  best account; with `in_session: true`, the structured refusal + advice).
 - **Cursor pools** (Maya-corrected model, W's fields): `included-total` gates
   Cursor's own models (`cursor-grok-*`, `composer-*`, `auto`) — soft
   route-away; `included-api` gates NAMED third-party models (kimi-k3, …) — at
@@ -150,23 +152,55 @@ and records why it chose what it chose (`route_reason` in the ledger).
   the `plan_dispatch` MCP tool print the decision, the checks, the remaining
   fallback and the account advice — no ledger row, no worker.
 
-## Claude accounts (HED-68 — advisory today)
+## Claude workers & automatic account switching (BUILT — HED-78, 2026-08-15)
 
-`~/.heddle/accounts.json` (`claude[]: {id, configDir|null, email, note}`;
-`configDir: null` = the default login — do NOT set `CLAUDE_CONFIG_DIR` for it,
-`claude auth status` reports logged-out that way) is the registry of Maya's
-Claude Max20 accounts. The statusline tap writes per-account caps to
-`~/.heddle/usage/claude-<acctId>.json`. Because heddle's Claude workers are the
-orchestrator's own in-session subagents (same account as the parent), heddle
-cannot rotate them by itself yet — so today it **advises**: every
-`claude-in-session` refusal, `heddle route implementation` and `plan_dispatch`
-end with `Claude accounts: acct3 has the most 5h headroom (12 % used); this
-session is on acct1 (43 %) — CLAUDE_CONFIG_DIR=…`, and the ledger `account`
-column records the advised account. Operating guidance until rotation is real:
-pin ~2 orchestrators per account. Codex workers record `account` =
-`basename(CODEX_HOME)` when the caller selects one. A true out-of-process
-Claude worker (headless `claude -p` under `CLAUDE_CONFIG_DIR`) is a design
-decision for Maya — drafted, not built (see the HED-67/68 PR).
+Maya: "Yes let's def build the auto account switching!" — so Claude classes now
+run as **out-of-process `claude -p` workers** on the registry account with the
+most 5h headroom (src/adapters/claude.ts + `pickClaudeAccount()` in
+src/capaware.ts), which ends the manual log-out/log-in juggling:
+
+- **Registry** `~/.heddle/accounts.json` (`claude[]: {id, configDir|null,
+  email, note}`; `configDir: null` = the default login — heddle UNSETS
+  `CLAUDE_CONFIG_DIR` for it: setting it explicitly to `~/.claude` changes
+  resolution and `claude auth status` reports logged-out, verified by R).
+  Per-account caps come from the tap's `~/.heddle/usage/claude-<acctId>.json`
+  (or the dashboard's `limits.json` account rows), plus the window-keeper's
+  anchor `claude-<acctId>.keeper.json` (`{account, startedAt, resets_at, used:
+  null, source:"keeper-ping"}` — written when the keeper starts a 5h window with
+  a headless ping the tap cannot see): while its `resets_at` is in the future it
+  counts as a fresh capture at ~0 % (`noteCode claude.keeperAnchor`); the
+  freshest of tap vs keeper wins. Without it, accounts that only ever get keeper
+  pings would stay unknown and never be picked.
+- **Selection**: the account with the lowest 5h used% among those with a
+  FRESH capture; `account_pin` / `--account <id>` overrides; nothing fresh → the
+  default login. The ledger `account` column records the account actually
+  used and `route_reason` carries `account:<id> (5h x%, most headroom of N
+  fresh)` / `pinned` / `default (no fresh per-account caps)`.
+- **Contract** (`claude -p <prompt> --output-format json --model <m>
+  [--effort e] [--resume id] --append-system-prompt <packs> [--mcp-config
+  <tmp> --strict-mcp-config] --permission-mode acceptEdits --allowedTools …`;
+  stdin closed; exit 0 + empty stdout = failure; never `--bare`): skill packs
+  travel on the command line (nothing written into the worktree — no AGENTS.md
+  race for Claude workers), MCP via a per-dispatch temp file. Posture =
+  `acceptEdits` + an explicit tool allowlist (`DEFAULT_CLAUDE_ALLOWED_TOOLS`:
+  read/edit the workspace, run the repo's own scripts, inspect git —
+  LANDMINES: `--permission-mode auto` aborts headless); `browse` adds
+  WebFetch/WebSearch, `exec-privileged` (two keys) → `--dangerously-skip-permissions`,
+  `net` unenforceable → refused. Billing = the subscription OAuth of the
+  config dir; `buildWorkerEnv` strips every API-key/base-URL var.
+- **In-session stays available**: `dispatch_worker(in_session: true)` /
+  `heddle dispatch --in-session` returns the structured `claude-in-session`
+  instruction (run it as your own Agent-tool subagent: shared prompt cache,
+  same account) plus the account advice line.
+- **Route-away stays on**: at Claude 5h ≥ `route_away_at_pct` (90) a Claude
+  class runs its declared fallback (codex/…) instead — Maya's default (lower
+  the knob if Claude should hold).
+- **Live-verified 2026-08-15**: two haiku workers, `heddle dispatch --class
+  research-summarize` → ledger `account=acct1` (default, session persisted
+  under `~/.claude/projects/…`) and `--account acct2` → `account=acct2`
+  (session persisted under `~/.claude-acct2/projects/…`), both `OK`.
+- Codex workers record `account` = `basename(CODEX_HOME)` when the caller
+  selects one.
 
 ## Structural caps (BUILT — HED-2, 2026-08-15; Scape-derived, clean-room)
 
@@ -190,7 +224,7 @@ Capability enforcement matrix (verified against each CLI's own docs/help,
 | codex | `-c sandbox_workspace_write.network_access=true` (workspace-write keeps network **off** by default) | `-c web_search="live"` (default `cached` = OpenAI index, no external access) | `--sandbox danger-full-access` |
 | cursor | — | — | — |
 | gemini (agy) | — | — | — |
-| claude | in-session (refused as `claude-in-session` first) | | |
+| claude | no knob (headless has no sandbox) → `net` is refused upstream | `--allowedTools` +WebFetch,WebSearch | `--dangerously-skip-permissions` |
 
 Cursor/agy have no per-capability flags heddle can pass, so a grant there is
 refused; note that their headless workers are also **not** network-fenced by
@@ -237,14 +271,15 @@ choosing a worker instead:
   can run on "any provider except the author's" (e.g. the planned
   `adversarial-review` class, HED-3 — not in the table yet). `provider` and
   `model` must be given together (a lone half is rejected).
-- **Claude-primary classes** (`execution: in-session-subagent` —
-  implementation, deep-implementation, research-summarize, orchestration) are
-  the orchestrator's own Agent-tool subagents, not subprocesses. Since HED-18
-  the dispatcher does not throw for them: it returns a structured refusal
-  `{ok:false, refusal:{code:"claude-in-session", reason, instruction}, execution}`
-  and ledgers it (`refusal` column), where `instruction` names the model, the
-  class packs/MCP to give your subagent, and the declared fallback you can name
-  as `provider`+`model` to run it as a subprocess instead. No auto-fallback.
+- **Claude-primary classes** (implementation, deep-implementation,
+  research-summarize) run as **headless `claude -p` workers by default**
+  (HED-78, `execution: headless`) on the best registry account. Passing
+  `in_session: true` opts into the HED-18 protocol instead: a structured
+  refusal `{ok:false, refusal:{code:"claude-in-session", reason, instruction},
+  execution: in-session-subagent}`, ledgered (`refusal` column), whose
+  `instruction` names the model, the class packs/MCP to give your own
+  Agent-tool subagent, and the declared fallback you can name as
+  `provider`+`model` to run it as a subprocess. No auto-fallback there.
   `orchestration` is `dispatchable: false` — it is the orchestrator's OWN work;
   a dispatch of it is refused on EVERY path (class, class + explicit route,
   whatever the named provider) with code `not-dispatchable`, "continue

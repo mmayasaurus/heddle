@@ -50,13 +50,14 @@ server.tool(
     'provider+model directly, OR both (class = policy, named model = route, no fallback). Workers ' +
     'run on subscription CLIs as subprocesses; this call blocks until the worker finishes (seconds ' +
     'to minutes). Returns {ok, output, provider, model, skills, sessionId (resume handle), usage, ' +
-    'ledgerId}. Claude-primary classes (execution in-session-subagent) are NOT spawned: you get ' +
-    '{ok:false, refusal:{code:"claude-in-session", instruction}} — run them with your own Agent ' +
-    'tool as instructed, or name a subprocess provider+model.',
+    'ledgerId, account, routeReason}. Claude classes run as a headless `claude -p` worker on the ' +
+    'registry account with the most 5h headroom (automatic account rotation); pass in_session:true to ' +
+    'get {ok:false, refusal:{code:"claude-in-session", instruction}} and run it as your own Agent-tool ' +
+    'subagent instead (shared prompt cache, same account).',
   {
     prompt: z.string().describe('The sub-task instructions for the worker.'),
     task_class: z.string().optional().describe('Routing task class (see list_task_classes) — supplies policy. Alone: the table\'s route. With provider+model: the named route under this class\'s policy.'),
-    provider: z.string().optional().describe('Explicit route: codex | cursor | gemini (the agy CLI). Requires model (both or neither). Without task_class = direct path. "claude" is accepted but returns a structured claude-in-session refusal (Claude workers are your own Agent-tool subagents).'),
+    provider: z.string().optional().describe('Explicit route: claude | codex | cursor | gemini (the agy CLI). Requires model (both or neither). Without task_class = direct path. "claude" runs a headless claude -p worker on the best registry account (in_session:true instead returns the structured claude-in-session refusal to run it as your own Agent-tool subagent).'),
     model: z.string().optional().describe('Explicit route: model id for provider (e.g. cursor-grok-4.6-high).'),
     cwd: z.string().optional().describe('Working directory for the worker (default: server cwd).'),
     issue: z.string().optional().describe('Linear issue this sub-task serves, e.g. SPI-712.'),
@@ -71,6 +72,8 @@ server.tool(
     resume: z.string().optional().describe('Resume a prior worker session by its sessionId.'),
     codex_home: z.string().optional().describe('Account selection for codex workers (CODEX_HOME path).'),
     opt_in: z.boolean().optional().describe('Required for task classes gated behind explicit opt-in, and to grant the exec-privileged capability.'),
+    in_session: z.boolean().optional().describe('Claude classes: return the in-session (Agent tool) instruction instead of spawning a headless claude worker.'),
+    account_pin: z.string().optional().describe('Claude classes: pin a registry account id (~/.heddle/accounts.json); default = most 5h headroom.'),
     capabilities: z.array(z.string()).optional().describe(
       'Capabilities to GRANT the worker: net | browse | exec-privileged (default: none — default-deny). ' +
       'Grants are ledgered and passed only to a provider whose CLI can enforce them (codex); an ' +
@@ -100,6 +103,8 @@ server.tool(
         noFallback: a.no_fallback,
         timeoutMs: a.timeout_ms,
         capabilities: a.capabilities,
+        inSession: a.in_session,
+        accountPin: a.account_pin,
         identity: IDENTITY,
       });
       const { raw, ...summary } = res;
@@ -122,6 +127,8 @@ server.tool(
     model: z.string().optional(),
     opt_in: z.boolean().optional(),
     codex_home: z.string().optional(),
+    in_session: z.boolean().optional(),
+    account_pin: z.string().optional(),
   },
   async (a) => {
     try {
@@ -130,6 +137,7 @@ server.tool(
       const plan = planDispatch({
         taskClass: a.task_class, provider: a.provider, model: a.model, prompt: '(dry run)',
         cwd: process.cwd(), optIn: a.opt_in, env: Object.keys(env).length ? env : undefined, identity: IDENTITY,
+        inSession: a.in_session, accountPin: a.account_pin,
       });
       return text(summarizePlan(plan));
     } catch (err) {

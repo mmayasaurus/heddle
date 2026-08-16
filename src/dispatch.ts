@@ -1,19 +1,21 @@
 import { AgyAdapter } from './adapters/agy.js';
 import { CodexAdapter } from './adapters/codex.js';
 import { CursorAdapter } from './adapters/cursor.js';
+import { ClaudeAdapter } from './adapters/claude.js';
 import { Ledger, type DispatchStartRecord } from './ledger.js';
 import {
   loadRouting, resolveRoute, directRoute, providerExecution, structuralCaps,
   type Route, type RouteTarget, type RoutingTable, type StructuralCaps,
 } from './routing.js';
-import { materializeAgentsMd, readPack, withMandatoryPacks } from './skillpacks.js';
-import { materializeWorkerMcp, validateWorkerMcp, codexMcpFlags } from './mcp.js';
+import { materializeAgentsMd, readPack, withMandatoryPacks, composePacks } from './skillpacks.js';
+import { materializeWorkerMcp, validateWorkerMcp, codexMcpFlags, claudeMcpConfigFile } from './mcp.js';
 import { classifyEffort } from './classify.js';
 import { decideCapabilities, capabilityPolicy } from './capabilities.js';
 import { resolveIdentity, attributeDispatch, WORKER_ENV, type BoundIdentity } from './identity.js';
 import { readProviderCaps, type CapsByProvider } from './usage.js';
 import {
-  decideRoute, readClaudeAccounts, adviseClaudeAccount, hardRefusal, type RouteDecision, type ClaudeAccount, type AccountAdvice,
+  decideRoute, readClaudeAccounts, adviseClaudeAccount, pickClaudeAccount, capAwarePolicy, hardRefusal,
+  type RouteDecision, type ClaudeAccount, type AccountAdvice, type AccountPick,
 } from './capaware.js';
 import { basename } from 'node:path';
 import type { WorkerAdapter, WorkerResult } from './types.js';
@@ -77,6 +79,14 @@ export interface DispatchRequest {
   caps?: CapsByProvider;
   /** Claude account registry; read from ~/.heddle/accounts.json when omitted (tests inject). */
   accounts?: ClaudeAccount[];
+  /**
+   * Claude-primary classes: return the structured `claude-in-session` instruction (run it as your
+   * own Agent-tool subagent, shared prompt cache + same account) instead of spawning a headless
+   * `claude -p` worker on the account with the most headroom (HED-78 default).
+   */
+  inSession?: boolean;
+  /** Force a specific registry account id for a headless Claude worker (else: most 5h headroom). */
+  accountPin?: string;
 }
 
 /**
@@ -126,12 +136,7 @@ export function defaultAdapterFor(provider: string): WorkerAdapter {
     case 'codex': return new CodexAdapter();
     case 'cursor': return new CursorAdapter();
     case 'gemini': return new AgyAdapter();
-    case 'claude':
-      throw new Error(
-        'claude workers are in-session subagents of the orchestrator, not spawned subprocesses — ' +
-        'use your own Agent tool with the routed model instead of `heddle dispatch` ' +
-        '(see src/adapters/claude.ts for why)',
-      );
+    case 'claude': return new ClaudeAdapter();
     default:
       throw new Error(`no adapter for provider "${provider}"`);
   }
@@ -148,6 +153,8 @@ interface DispatchContext {
   /** Set once the cap-aware decision is made; recorded on every row of this dispatch. */
   routeReason?: string;
   account?: string | null;
+  /** HED-78: the Claude account (env) a headless claude worker runs under. */
+  claudeAccount?: AccountPick | null;
 }
 
 function baseRecord(
@@ -265,12 +272,31 @@ async function runTarget(
 
   // Materialize → run → restore, all inside one guarded region (HED-19): whatever was written is
   // restored even if a later step throws, and the ledger row is ALWAYS finished.
+  // Claude workers (HED-78) get their packs via --append-system-prompt and MCP via a temp
+  // --mcp-config file — nothing is written into the worktree — and run under the chosen account's
+  // CLAUDE_CONFIG_DIR (unset for the default login).
+  const isClaude = target.provider === 'claude';
+  const acct = isClaude ? ctx.claudeAccount ?? null : null;
   let restoreSkills: () => void = () => {};
   let restoreMcp: () => void = () => {};
   let result: WorkerResult;
   try {
-    restoreSkills = materializeAgentsMd(req.cwd, skills);
-    restoreMcp = materializeWorkerMcp(req.cwd, target.provider, mcp);
+    let systemPromptAppend: string | undefined;
+    let mcpConfigPath: string | undefined;
+    if (isClaude) {
+      const discovery = mcp.includes('memtrace')
+        ? '\n\n---\n\nMemtrace MCP is attached: for code discovery use find_symbol / find_code FIRST ' +
+          '(graph + semantic search), get_impact before changing a symbol — never blind-grep the tree. ' +
+          'A zero-hit is not proof of absence; broaden the query.'
+        : '';
+      const packText = skills.length ? composePacks(skills) : '';
+      systemPromptAppend = (packText + discovery) || undefined;
+      const mcpFile = claudeMcpConfigFile(mcp);
+      if (mcpFile) { mcpConfigPath = mcpFile.path; restoreMcp = mcpFile.cleanup; }
+    } else {
+      restoreSkills = materializeAgentsMd(req.cwd, skills);
+      restoreMcp = materializeWorkerMcp(req.cwd, target.provider, mcp);
+    }
     result = await adapter.dispatch(req.prompt, {
       model: target.model,
       cwd: req.cwd,
@@ -278,8 +304,12 @@ async function runTarget(
       extraFlags,
       timeoutMs: req.timeoutMs,
       resume: req.resume,
-      env: { ...req.env, ...stamps },
+      env: { ...req.env, ...acct?.env, ...stamps },
+      envUnset: acct?.envUnset,
       capabilities: caps.granted,
+      systemPromptAppend,
+      mcpConfigPath,
+      mcpServers: isClaude ? mcp : undefined,
     });
   } catch (err) {
     result = { ok: false, output: '', exitCode: null, error: err instanceof Error ? err.message : String(err) };
@@ -347,9 +377,18 @@ export async function dispatch(
   // depth-1 refusal, never a bare throw, and never costs a classifier spawn.
   if (identity.worker) return refuseDepth1(req, ctx, table);
 
+  // Resume affinity (HED-78): a claude session is persisted under ONE config dir — resuming it on a
+  // freshly-picked account would not find the session. Pin the pick to the account the session last
+  // ran under (explicit accountPin still wins; unknown session ids keep the normal pick).
+  if (req.resume && !req.accountPin) {
+    const prior = ledger.sessionAccount(req.resume);
+    if (prior) req = { ...req, accountPin: prior };
+  }
+
   const plan = planDispatch(req, table);
   ctx.routeReason = plan.decision.routeReason;
   ctx.account = plan.account;
+  ctx.claudeAccount = plan.accountPick;
   const { route, target, fallback, origin, skillsForRefusal } = plan;
 
   // ---- Non-dispatchable class (`orchestration`) — refused on EVERY path ------------------------
@@ -405,7 +444,9 @@ export async function dispatch(
   // Primary failed and the table names a fallback — try it, recording the origin so the ledger
   // shows which routes actually hold up in practice. A fallback that is itself in-session (custom
   // tables) gets the same structured refusal instead of a throw.
-  const fbExecution = providerExecution(table, fallback.provider);
+  const fbExecution = fallback.provider === 'claude'
+    ? (req.inSession ? 'in-session-subagent' : 'headless')
+    : providerExecution(table, fallback.provider);
   if (fbExecution === 'in-session-subagent') {
     return refuseInSession(
       { ...fallback, taskClass: route.taskClass, dispatchable: route.dispatchable, fallback: undefined },
@@ -414,16 +455,33 @@ export async function dispatch(
   }
   // The never-on-demand HARD guard applies to the runtime fallback too: a below-threshold primary
   // failing over to cursor must not bypass an on-demand stop the plan never evaluated for it.
-  const fbHard = hardRefusal(fallback, req.caps ?? readProviderCaps());
+  const fbSnap = req.caps ?? readProviderCaps();
+  const fbHard = hardRefusal(fallback, fbSnap);
   if (fbHard) {
     return refusalOutcome(ctx, req, route.taskClass, fallback, skillsForRefusal, {
       code: 'metered-pool-exhausted', reason: `failure fallback blocked: ${fbHard}`,
       instruction: 'The primary failed and the class fallback would bill on-demand — pick another route (heddle route <class>).',
     }, { extra: { usedFallback: true } });
   }
-  // Attribution follows the provider that actually runs (a codex fallback bills its CODEX_HOME; a
-  // non-codex fallback is not the plan's account).
-  ctx.account = fallback.provider === 'codex' && req.env?.CODEX_HOME ? basename(req.env.CODEX_HOME) : null;
+  // Attribution AND account selection follow the provider that actually runs: a codex fallback
+  // bills its CODEX_HOME; a CLAUDE fallback gets its own headroom-based account pick (the plan only
+  // picked for a claude PRIMARY — without this the subprocess would inherit the caller's
+  // CLAUDE_CONFIG_DIR and the ledger account would be wrong; PR #12, five reviewers).
+  if (fallback.provider === 'claude') {
+    try {
+      ctx.claudeAccount = pickClaudeAccount(fbSnap.claude, req.accounts ?? readClaudeAccounts(),
+        { pin: req.accountPin, routeAwayAtPct: capAwarePolicy(table).routeAwayAtPct }) ?? null;
+      ctx.account = ctx.claudeAccount?.account.id ?? null;
+    } catch (err) {
+      // A pinned-but-unaddressable account is a caller error, but the primary's outcome is already
+      // ledgered — report the blocked fallback on it instead of throwing away the whole dispatch.
+      primary.error = `${primary.error ?? 'primary failed'}; claude fallback blocked: ${err instanceof Error ? err.message : String(err)}`;
+      return primary;
+    }
+  } else {
+    ctx.claudeAccount = null;
+    ctx.account = fallback.provider === 'codex' && req.env?.CODEX_HOME ? basename(req.env.CODEX_HOME) : null;
+  }
   ctx.routeReason = `${plan.decision.routeReason}; ${target.provider}/${target.model} failed → class fallback`;
   return runTarget(fallback, req, ctx, route, `${route.provider}/${route.model}`);
 }
@@ -442,6 +500,8 @@ export interface DispatchPlan {
   /** Account the run bills to / is advised (see DispatchOutcome.account). */
   account: string | null;
   accountAdvice?: AccountAdvice;
+  /** HED-78: the Claude account a headless worker will run on (null = in-session / not Claude / no registry). */
+  accountPick?: AccountPick | null;
   /** True for a `dispatchable: false` class — dispatch() refuses before any route runs. */
   notDispatchable: boolean;
 }
@@ -514,18 +574,30 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
   target = decision.target;
   fallback = decision.fallback;
 
-  const execution = providerExecution(table, target.provider);
+  // Claude runs headless by default (HED-78); `inSession` keeps the shared-cache subagent protocol.
+  const execution = target.provider === 'claude'
+    ? (req.inSession ? 'in-session-subagent' : 'headless')
+    : providerExecution(table, target.provider);
   const skillsForRefusal = withMandatoryPacks(req.skills ?? target.skills ?? []);
 
-  // Account (HED-68): codex → the CODEX_HOME the caller selected; claude in-session → advice.
+  // Account (HED-68/78): codex → the CODEX_HOME the caller selected; claude → the registry account
+  // with the most 5h headroom (headless worker) — or advice only when the caller wants in-session.
   let account: string | null = null;
   let accountAdvice: AccountAdvice | undefined;
+  let accountPick: AccountPick | null | undefined;
   if (target.provider === 'codex' && req.env?.CODEX_HOME) account = basename(req.env.CODEX_HOME);
   if (target.provider === 'claude') {
-    accountAdvice = adviseClaudeAccount(caps.claude, req.accounts ?? readClaudeAccounts());
-    account = accountAdvice.best?.id ?? null;
+    const accounts = req.accounts ?? readClaudeAccounts();
+    accountAdvice = adviseClaudeAccount(caps.claude, accounts);
+    if (!req.inSession && !notDispatchable) {
+      accountPick = pickClaudeAccount(caps.claude, accounts, { pin: req.accountPin, routeAwayAtPct: capAwarePolicy(table).routeAwayAtPct });
+      account = accountPick?.account.id ?? null;
+      if (accountPick) decision.routeReason = `${decision.routeReason}; ${accountPick.reason}`;
+    } else {
+      account = accountAdvice.best?.id ?? null;
+    }
   }
-  return { route, target, fallback, origin, execution, decision, skillsForRefusal, account, accountAdvice, notDispatchable };
+  return { route, target, fallback, origin, execution, decision, skillsForRefusal, account, accountAdvice, accountPick, notDispatchable };
 }
 
 /** One shared dry-run summary for `heddle route` and the `plan_dispatch` MCP tool (identical fields). */
@@ -544,7 +616,7 @@ export function summarizePlan(plan: DispatchPlan): Record<string, unknown> {
       : plan.decision.refusal ?? null,
     checks: plan.decision.checks,
     account: plan.account,
-    account_pick: null as unknown,
+    account_pick: plan.accountPick ? { id: plan.accountPick.account.id, used_pct: plan.accountPick.usedPct, reason: plan.accountPick.reason, config_dir: plan.accountPick.account.configDir } : null,
     account_advice: plan.accountAdvice?.line ?? null,
     skills: plan.skillsForRefusal,
   };

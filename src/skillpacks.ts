@@ -60,6 +60,14 @@ export function readPack(name: string): string {
   return readFileSync(p, 'utf8').trim();
 }
 
+/**
+ * The packs as one text block — for CLIs that take instructions on the command line instead of a
+ * file (claude `--append-system-prompt`). Same content the AGENTS.md block carries.
+ */
+export function composePacks(packNames: readonly string[]): string {
+  return packNames.map((n) => `### ${n}\n\n${readPack(n)}`).join('\n\n---\n\n');
+}
+
 const BEGIN = '<!-- heddle:begin -->';
 const END = '<!-- heddle:end -->';
 
