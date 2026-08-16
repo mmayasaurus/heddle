@@ -47,6 +47,11 @@ export interface NewMessage {
   to: string;
   body: string;
   kind?: MessageKind;
+  /**
+   * Room posts only: addresses this post explicitly pings (HED-94). Explicit, never parsed from
+   * the body. Grammar checked here; policy (registration, membership, budgets) is the broker's.
+   */
+  mentions?: string[] | null;
   /** Message id this one answers. Must be an existing message (checked at append time). */
   replyTo?: number | null;
   /** Issue this conversation serves (e.g. "SPI-712", "HED-4"). */
@@ -79,6 +84,8 @@ export interface MessageRecord {
   thread: string | null;
   dispatchId: number | null;
   meta: Record<string, unknown> | null;
+  /** Addresses this post explicitly pings (empty for non-mention posts). */
+  mentions: string[];
 }
 
 /** How a privileged tier was verified. */
