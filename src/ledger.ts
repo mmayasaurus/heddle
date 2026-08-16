@@ -253,6 +253,8 @@ export function ownerVerdict(
  *     pid — the sweep never closes a row on a hunch.
  */
 function makePsProbe(rows: Record<string, unknown>[]): OwnerProbe {
+  // No `ps` on Windows: liveness is explicitly UNKNOWN there (rows still close via the age rule).
+  if (process.platform === 'win32') return () => null;
   const pids = [...new Set(rows.map((r) => Number(r.owner_pid)).filter((p) => Number.isFinite(p) && p > 0))];
   if (pids.length === 0) return () => null;
   let output: string | null;
