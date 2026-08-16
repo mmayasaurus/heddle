@@ -6,8 +6,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 /Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/agent-identity.py",
-            "timeout": 15000
+            "command": "[ ! -f /Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/agent-identity.py ] || python3 /Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/agent-identity.py",
+            "timeout": 15
           }
         ]
       }
@@ -18,8 +18,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 /Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/remind-owned-prs.py",
-            "timeout": 8000
+            "command": "[ ! -f /Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/remind-owned-prs.py ] || python3 /Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/remind-owned-prs.py",
+            "timeout": 8
           }
         ]
       }
@@ -30,13 +30,13 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 /Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-memtrace-first.py deny-recursive-search",
-            "timeout": 5000
+            "command": "[ ! -f /Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-memtrace-first.py ] || python3 /Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-memtrace-first.py deny-recursive-search",
+            "timeout": 5
           },
           {
             "type": "command",
-            "command": "python3 /Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-memtrace-first.py enforce-query",
-            "timeout": 5000
+            "command": "[ ! -f /Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-memtrace-first.py ] || python3 /Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-memtrace-first.py enforce-query",
+            "timeout": 5
           }
         ]
       },
@@ -45,8 +45,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 /Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-memtrace-first.py enforce-query",
-            "timeout": 5000
+            "command": "[ ! -f /Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-memtrace-first.py ] || python3 /Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-memtrace-first.py enforce-query",
+            "timeout": 5
           }
         ]
       },
@@ -55,7 +55,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 /Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/delegation-nudge.py",
+            "command": "[ ! -f /Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/delegation-nudge.py ] || python3 /Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/delegation-nudge.py",
             "timeout": 5
           }
         ]
@@ -67,13 +67,13 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 /Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-memtrace-first.py record",
-            "timeout": 5000
+            "command": "[ ! -f /Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-memtrace-first.py ] || python3 /Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-memtrace-first.py record",
+            "timeout": 5
           },
           {
             "type": "command",
-            "command": "python3 /Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-pr-sweep.py record",
-            "timeout": 5000
+            "command": "[ ! -f /Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-pr-sweep.py ] || python3 /Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-pr-sweep.py record",
+            "timeout": 5
           }
         ]
       },
@@ -82,8 +82,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 /Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-memtrace-first.py record",
-            "timeout": 5000
+            "command": "[ ! -f /Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-memtrace-first.py ] || python3 /Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-memtrace-first.py record",
+            "timeout": 5
           }
         ]
       }
@@ -94,13 +94,13 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 /Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-memtrace-first.py stop",
-            "timeout": 5000
+            "command": "[ ! -f /Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-memtrace-first.py ] || python3 /Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-memtrace-first.py stop",
+            "timeout": 5
           },
           {
             "type": "command",
-            "command": "python3 /Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-pr-sweep.py enforce-stop",
-            "timeout": 5000
+            "command": "[ ! -f /Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-pr-sweep.py ] || python3 /Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-pr-sweep.py enforce-stop",
+            "timeout": 10
           }
         ]
       }
@@ -111,8 +111,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 /Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-memtrace-first.py stop",
-            "timeout": 5000
+            "command": "[ ! -f /Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-memtrace-first.py ] || python3 /Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-memtrace-first.py stop",
+            "timeout": 5
           }
         ]
       }

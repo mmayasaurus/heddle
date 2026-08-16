@@ -28,4 +28,4 @@ branch off fresh `origin/main` in the SAME folder. Do not create a new worktree 
    `git status` is clean, and no live agent has its cwd inside. Then:
    `git worktree remove <dir>` + `unwatch_directory(path="<dir>")` immediately.
    Anything with uncommitted work stays until committed to a `wip/` branch or Maya rules.
-   **No worktree may keep existing that no agent is using.**
+   **No worktree may remain that no agent is using.**
