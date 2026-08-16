@@ -55,8 +55,15 @@ concurrency:
 
 jobs:
   gate:
-    # Required-check context string — do not rename (see header).
-    name: gate
+    # Required-check context string — do not rename (see header). The name is an
+    # EXPRESSION for one reason, measured on heddle#30: a skipped job still
+    # publishes a check-run under its name, and GitHub's required-check
+    # evaluation takes the NEWEST run of a given name — and treats `skipped` as
+    # passing. So a no-op run publishing `gate` would SUPERSEDE the real
+    # verdict, meaning any reviewer bot editing the PR body could turn a RED
+    # gate into a passing one. Renaming the no-op keeps it out of the required
+    # context entirely; the last real `gate` check-run stands.
+    name: ${{ (github.event.action != 'edited' || github.event.changes.base.ref.from != '') && 'gate' || 'gate (noop — PR title/body edit)' }}
     # Title/body edits carry no new commit and no base change: skip them rather
     # than burn a run (HED-91). A base RETARGET has changes.base.ref.from set and
     # runs. Non-PR events (push, workflow_dispatch) have an empty action, so the
