@@ -163,6 +163,9 @@ describe('adversarial review dispatch', () => {
 
   it('embeds the actual diff for a claude read-only reviewer and keeps the run-it-yourself instruction for others', async () => {
     const restore = reviewRouting(tempDir); const cwd = tempDir(); gitRepo(cwd); const ledger = tempLedger();
+    // diff_base is a COMMIT SHA, not a branch name — machine git config (init.defaultBranch) must
+    // not decide whether the base ref exists (V hit a red herring here mid-edit, 2026-08-16).
+    const baseSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd, encoding: 'utf8' }).trim();
     execFileSync('git', ['checkout', '-q', '-b', 'work'], { cwd });
     writeFileSync(join(cwd, 'feature.txt'), 'THE-CHANGED-LINE');
     execFileSync('git', ['add', 'feature.txt'], { cwd });
@@ -170,16 +173,16 @@ describe('adversarial review dispatch', () => {
     const fake = fakeAdapter(undefined, { readAgents: false }); // claude materializes no AGENTS.md
     try {
       // claude reviewer (explicit different-family route): no Bash in its tool set → diff embedded
-      const claudeOutcome = await dispatch({ taskClass: 'adversarial-review', provider: 'claude', model: 'opus', authorProvider: 'cursor', diffBase: 'master', prompt: 'review', cwd, identity: unbound }, ledger, () => fake.adapter);
+      const claudeOutcome = await dispatch({ taskClass: 'adversarial-review', provider: 'claude', model: 'opus', authorProvider: 'cursor', diffBase: baseSha, prompt: 'review', cwd, identity: unbound }, ledger, () => fake.adapter);
       if (!fake.calls.length) throw new Error('claude reviewer never ran: ' + JSON.stringify({ refusal: claudeOutcome.refusal, error: claudeOutcome.error, execution: claudeOutcome.execution }));
       const claudePrompt = fake.calls[0].prompt;
       expect(claudePrompt).toContain('You cannot run shell commands');
       expect(claudePrompt).toContain('```diff');
       expect(claudePrompt).toContain('THE-CHANGED-LINE');
       // cursor reviewer (class primary): runs git itself
-      await dispatch({ taskClass: 'adversarial-review', authorProvider: 'claude', diffBase: 'master', prompt: 'review', cwd, identity: unbound }, ledger, () => fake.adapter);
+      await dispatch({ taskClass: 'adversarial-review', authorProvider: 'claude', diffBase: baseSha, prompt: 'review', cwd, identity: unbound }, ledger, () => fake.adapter);
       const cursorPrompt = fake.calls[1].prompt;
-      expect(cursorPrompt).toContain('run `git diff master...HEAD`');
+      expect(cursorPrompt).toContain('run `git diff ' + baseSha + '...HEAD`');
       expect(cursorPrompt).not.toContain('```diff');
     } finally { restore(); }
   });
