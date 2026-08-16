@@ -69,7 +69,7 @@ flags churn monthly.
 - **The permission layer is NOT a worker boundary — only `--tools` is** (live probe, 2026-08-15,
   PR #15 sweep): a worker launched with `--tools Read Grep Glob Bash` + a git-only `--allowedTools`
   list ("Bash(git status:*)" …) still appended to a tracked file and created a new one via plain
-  Bash redirection — the OPERATOR's global settings.json permission allows apply inside `-p`
+  Bash redirection — the OPERATOR's global settings.json permission allow-rules apply inside `-p`
   workers, the same leak class as global MCP servers before `--strict-mcp-config` (and there is no
   settings analog of that flag). Enforcement is therefore tool-SET restriction (`--tools`, verified
   to hold: Write reported disabled, no file created) or an OS sandbox (codex); `--allowedTools` is
