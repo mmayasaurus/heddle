@@ -115,10 +115,16 @@ export function materializeAgentsMd(cwd: string, packNames: string[], opts: Mate
   const block = `${beginMarker(ownId)}\n<!-- Task-scoped instructions for heddle dispatch #${ownId}. Written by heddle; removed when that dispatch ends. If you are a worker for a DIFFERENT dispatch id, follow your own block only. -->\n\n${body}\n${endMarker(ownId)}`;
 
   let inserted = '';
+  let deletable = false;
   withFileLock(join(cwd, '.heddle-agents.lock'), () => {
     const current = existsSync(target) ? readFileSync(target, 'utf8') : null;
+    // Deletable at restore time = heddle owns every byte: the file was absent, or contained
+    // nothing but heddle marker blocks. A pre-existing file with ANY non-heddle bytes — even
+    // whitespace-only (an intentionally-empty AGENTS.md is a real convention) — is NEVER
+    // unlinked; the exact-insert removal returns it to its original bytes instead.
+    deletable = current === null || current.replace(ANY_BLOCK, '') === '';
     const base = current === null ? null : stripDeadBlocks(current, ownId, opts.isLive);
-    if (base === null || base.trim() === '') {
+    if (base === null) {
       inserted = `${block}\n`;
       writeFileSync(target, inserted, 'utf8');
     } else {
@@ -129,18 +135,25 @@ export function materializeAgentsMd(cwd: string, packNames: string[], opts: Mate
 
   return () => {
     withFileLock(join(cwd, '.heddle-agents.lock'), () => {
-      // Remove exactly what THIS dispatch inserted (other blocks may sit before/after it).
-      // If the exact insertion is gone (a human or the worker edited inside it), fall back to
-      // removing the marker-delimited span; if even the markers are gone, leave the file alone.
+      // Remove exactly what THIS dispatch inserted (other blocks may sit before/after it). If the
+      // exact bytes are gone — someone edited INSIDE our block — we LEAVE it: content we cannot
+      // verify as ours is never removed (a read-only class records the edit as a mandate
+      // violation; a later materialization's dead-block GC reclaims the span, whose markers
+      // declare heddle ownership of transient instruction text).
       try {
         const current = readFileSync(target, 'utf8');
-        let next = current.includes(inserted)
-          ? current.replace(inserted, '')
-          : current.replace(new RegExp(`\\n*[ \\t]*${beginMarker(ownId).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[\\s\\S]*?${endMarker(ownId).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\n?`), '\n');
-        if (next === current) return; // our block is gone entirely — nothing of ours to remove
-        if (next.trim() === '') unlinkSync(target);
+        if (!current.includes(inserted)) {
+          process.stderr.write(`heddle: dispatch #${ownId}'s AGENTS.md block was edited during the run — leaving it in place (${target})\n`);
+          return;
+        }
+        const next = current.replace(inserted, '');
+        // Delete only when heddle owned every original byte AND nothing but whitespace remains —
+        // a pre-existing human file (even whitespace-only) keeps its bytes.
+        if (deletable && next.trim() === '') unlinkSync(target);
         else writeFileSync(target, next, 'utf8');
-      } catch { /* already gone, or unreadable — leave it */ }
+      } catch (err) {
+        process.stderr.write(`heddle: AGENTS.md restore for dispatch #${ownId} failed (${err instanceof Error ? err.message : String(err)}) — left as is\n`);
+      }
     });
   };
 }

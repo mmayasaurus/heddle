@@ -1,4 +1,4 @@
-import { mkdirSync, rmdirSync, statSync } from 'node:fs';
+import { mkdirSync, renameSync, rmdirSync, statSync } from 'node:fs';
 
 /**
  * Advisory cross-PROCESS lock for the short read-modify-write mutations of shared worktree files
@@ -38,7 +38,14 @@ export function withFileLock<T>(lockDir: string, fn: () => T): T {
       }
       try {
         const age = Date.now() - statSync(lockDir).mtimeMs;
-        if (age > STALE_MS) { try { rmdirSync(lockDir); } catch { /* peer removed it first */ } continue; }
+        if (age > STALE_MS) {
+          // Steal by ATOMIC RENAME: of two racers that both saw the stale mtime, exactly one
+          // rename succeeds — an rmdir here could delete the WINNER's freshly-created lock and
+          // let both proceed (gitar, #17). The renamed husk is removed best-effort.
+          const husk = `${lockDir}.stale-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+          try { renameSync(lockDir, husk); rmdirSync(husk); } catch { /* the other racer won the steal */ }
+          continue;
+        }
       } catch { continue; /* lock vanished between mkdir and stat — retry (deadline-bounded) */ }
       sleepSync(SPIN_MS);
     }
@@ -49,6 +56,11 @@ export function withFileLock<T>(lockDir: string, fn: () => T): T {
   try {
     return fn();
   } finally {
-    if (locked) { try { rmdirSync(lockDir); } catch { /* already gone */ } }
+    if (locked) {
+      try { rmdirSync(lockDir); } catch (err) {
+        // A release failure means the NEXT taker waits out the stale window — say so.
+        process.stderr.write(`heddle: could not release file lock ${lockDir} (${err instanceof Error ? err.message : String(err)}) — peers will stale-break it\n`);
+      }
+    }
   }
 }

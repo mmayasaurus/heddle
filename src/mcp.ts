@@ -1,4 +1,4 @@
-import { readFileSync, existsSync, writeFileSync, unlinkSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { readFileSync, existsSync, writeFileSync, unlinkSync, mkdirSync, mkdtempSync, rmSync, renameSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { withFileLock } from './matlock.js';
@@ -152,13 +152,27 @@ function sidecarPath(path: string): string {
   return join(dirname(path), '.heddle-mcp-refs.json');
 }
 
+/** Missing sidecar → null (fresh state). A CORRUPT sidecar is different: treating it as missing
+ *  would silently drop other live dispatches' refs — it is preserved under a .corrupt-<ts> name
+ *  (never deleted) and surfaced, and the caller starts fresh from the current file. */
 function readSidecar(path: string): McpSidecar | null {
+  const sc = sidecarPath(path);
+  if (!existsSync(sc)) return null;
   try {
-    const raw = JSON.parse(readFileSync(sidecarPath(path), 'utf8')) as McpSidecar;
-    return raw && typeof raw === 'object' && raw.refs && typeof raw.refs === 'object'
-      ? { original: typeof raw.original === 'string' ? raw.original : null, refs: raw.refs }
-      : null;
-  } catch {
+    const raw = JSON.parse(readFileSync(sc, 'utf8')) as McpSidecar;
+    if (raw && typeof raw === 'object' && raw.refs && typeof raw.refs === 'object' && !Array.isArray(raw.refs)) {
+      const refs: Record<string, string[]> = {};
+      for (const [id, list] of Object.entries(raw.refs)) {
+        // shape-validate each entry: server lists are arrays of strings
+        if (Array.isArray(list) && list.every((x) => typeof x === 'string')) refs[id] = list;
+      }
+      return { original: typeof raw.original === 'string' ? raw.original : null, refs };
+    }
+    throw new Error('unexpected shape');
+  } catch (err) {
+    const quarantine = `${sc}.corrupt-${Date.now()}`;
+    try { renameSync(sc, quarantine); } catch { /* even the rename failed — leave it */ }
+    process.stderr.write(`heddle: MCP sidecar ${sc} was unreadable (${err instanceof Error ? err.message : String(err)}) — preserved as ${quarantine}; starting fresh\n`);
     return null;
   }
 }
@@ -179,17 +193,27 @@ function writeMergedMcpJson(
 ): () => void {
   const ownId = String(opts.dispatchId);
   const lock = join(dirname(path), '.heddle-mcp.lock');
+  // The lock lives inside the config dir — create the dir FIRST or two fresh processes both fail
+  // the lock mkdir with ENOENT and race the file unlocked.
+  mkdirSync(dirname(path), { recursive: true });
 
   withFileLock(lock, () => {
-    mkdirSync(dirname(path), { recursive: true });
     const sidecar = readSidecar(path)
       ?? { original: existsSync(path) ? readFileSync(path, 'utf8') : null, refs: {} };
+    // A malformed pre-existing config must fail BEFORE any state is persisted — writing the
+    // sidecar first would leave a half-mutated pair behind the crash.
+    if (sidecar.original !== null) {
+      try { JSON.parse(sidecar.original); } catch {
+        throw new Error(`${path} exists but is not valid JSON — fix or remove it before dispatching a worker with MCP attached`);
+      }
+    }
     for (const id of Object.keys(sidecar.refs)) {
       if (id !== ownId && opts.isLive && !opts.isLive(id)) delete sidecar.refs[id]; // dead dispatch
     }
     sidecar.refs[ownId] = Object.keys(servers);
+    const merged = mergedContent(sidecar); // compute BEFORE persisting anything
     writeFileSync(sidecarPath(path), JSON.stringify(sidecar, null, 2), 'utf8');
-    writeFileSync(path, mergedContent(sidecar), 'utf8');
+    writeFileSync(path, merged, 'utf8');
   });
 
   return () => {
@@ -197,7 +221,19 @@ function writeMergedMcpJson(
       try {
         const sidecar = readSidecar(path);
         if (!sidecar || !(ownId in sidecar.refs)) return; // nothing of ours recorded — leave it
+        // Tamper check: if the file no longer matches what the sidecar says heddle last wrote,
+        // someone (the worker, a human) edited it mid-dispatch — NEVER rewrite or delete over
+        // their bytes; drop only our ref so the bookkeeping stays truthful.
+        const expected = mergedContent(sidecar);
+        const current = existsSync(path) ? readFileSync(path, 'utf8') : null;
+        const tampered = current !== expected;
         delete sidecar.refs[ownId];
+        if (tampered) {
+          process.stderr.write(`heddle: ${path} was edited during dispatch #${ownId} — leaving the file; removed only heddle's ref\n`);
+          if (Object.keys(sidecar.refs).length === 0) { try { unlinkSync(sidecarPath(path)); } catch { /* already gone */ } }
+          else writeFileSync(sidecarPath(path), JSON.stringify(sidecar, null, 2), 'utf8');
+          return;
+        }
         if (Object.keys(sidecar.refs).length === 0) {
           // Last one out restores the pre-heddle state exactly.
           if (sidecar.original !== null) writeFileSync(path, sidecar.original, 'utf8');
@@ -207,7 +243,9 @@ function writeMergedMcpJson(
           writeFileSync(sidecarPath(path), JSON.stringify(sidecar, null, 2), 'utf8');
           writeFileSync(path, mergedContent(sidecar), 'utf8');
         }
-      } catch { /* unreadable — leave the worktree as it is rather than guess */ }
+      } catch (err) {
+        process.stderr.write(`heddle: MCP restore for dispatch #${ownId} failed (${err instanceof Error ? err.message : String(err)}) — left as is\n`);
+      }
     });
   };
 }

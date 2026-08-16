@@ -1,10 +1,13 @@
 import { describe, it, expect } from 'vitest';
-import { existsSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, utimesSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { materializeAgentsMd } from '../src/skillpacks.js';
 import { materializeWorkerMcp } from '../src/mcp.js';
 import { withFileLock } from '../src/matlock.js';
 import { dispatch } from '../src/dispatch.js';
+import { Ledger } from '../src/ledger.js';
+import { sameSnapshot, snapshotWorktree } from '../src/review.js';
 import { IDENTITIES, useTempResources } from './helpers.js';
 import type { WorkerAdapter } from '../src/types.js';
 
@@ -251,5 +254,109 @@ describe('concurrent materialization', () => {
       else process.env.HEDDLE_ROUTING = priorRouting;
       restorePacks();
     }
+  });
+
+  it('preserves a pre-existing whitespace-only AGENTS.md byte-identically after its materialized block restores', () => {
+    const restoreEnv = installPacks();
+    try {
+      const cwd = tempDir();
+      const path = join(cwd, 'AGENTS.md');
+      writeFileSync(path, '  \n\n');
+      const restore = materializeAgentsMd(cwd, ['alpha'], { dispatchId: 1 });
+      expect(agents(cwd)).toBe(`  \n\n\n<!-- heddle:begin id=1 -->\n<!-- Task-scoped instructions for heddle dispatch #1. Written by heddle; removed when that dispatch ends. If you are a worker for a DIFFERENT dispatch id, follow your own block only. -->\n\n### alpha\n\nALPHA-CONTENT\n<!-- heddle:end id=1 -->\n`);
+      restore();
+      expect(existsSync(path)).toBe(true);
+      expect(readFileSync(path, 'utf8')).toBe('  \n\n');
+    } finally { restoreEnv(); }
+  });
+
+  it('leaves an own AGENTS.md block with an edited interior byte fully in place during restore', () => {
+    const restoreEnv = installPacks();
+    try {
+      const cwd = tempDir();
+      const path = join(cwd, 'AGENTS.md');
+      const restore = materializeAgentsMd(cwd, ['alpha'], { dispatchId: 1 });
+      writeFileSync(path, readFileSync(path, 'utf8').replace('Task-scoped', 'Task-scoped INTRUDER'));
+      restore();
+      const content = readFileSync(path, 'utf8');
+      expect(existsSync(path)).toBe(true);
+      expect(content).toContain('INTRUDER');
+      expect(content).toContain('<!-- heddle:begin id=1 -->');
+      expect(content).toContain('<!-- heddle:end id=1 -->');
+    } finally { restoreEnv(); }
+  });
+
+  it('treats an unfinished ledger row past its stale window as dead to the liveness oracle', () => {
+    const ledger = tempLedger();
+    const id = ledger.start({
+      orchestrator: 'U', taskClass: 'implementation', provider: 'codex', model: 'gpt-5.6-terra',
+      skills: 'worker-role', issue: 'HED-78', pr: null, cwd: '/tmp/x', promptPreview: 'in flight',
+      sessionId: null, fellBackFrom: null,
+    });
+    expect(ledger.isInFlight(id)).toBe(true);
+    expect(ledger.isInFlight(id, 1_000, Date.now() + 60_000)).toBe(false);
+    expect(ledger.isInFlight(id, 3_600_000)).toBe(true);
+    expect(ledger.isInFlight(999999)).toBe(false);
+  });
+
+  it('quarantines a corrupt cursor MCP sidecar and creates a fresh reference instead of trusting it', () => {
+    const cwd = tempDir();
+    const cursorDir = join(cwd, '.cursor');
+    const corrupt = 'NOT JSON{{';
+    mkdirSync(cursorDir);
+    writeFileSync(join(cursorDir, '.heddle-mcp-refs.json'), corrupt);
+    materializeWorkerMcp(cwd, 'cursor', ['memtrace'], { dispatchId: 1 });
+    expect(JSON.parse(readFileSync(join(cursorDir, 'mcp.json'), 'utf8')).mcpServers.memtrace).toBeDefined();
+    const quarantined = readdirSync(cursorDir);
+    const corruptName = quarantined.find((name) => /^\.heddle-mcp-refs\.json\.corrupt-\d+$/.test(name));
+    expect(corruptName).toBeDefined();
+    expect(readFileSync(join(cursorDir, corruptName!), 'utf8')).toBe(corrupt);
+    expect(JSON.parse(readFileSync(join(cursorDir, '.heddle-mcp-refs.json'), 'utf8')).refs).toHaveProperty('1');
+  });
+
+  it('fails a malformed pre-existing cursor MCP file before creating a sidecar or changing its bytes', () => {
+    const cwd = tempDir();
+    const cursorDir = join(cwd, '.cursor');
+    const path = join(cursorDir, 'mcp.json');
+    mkdirSync(cursorDir);
+    writeFileSync(path, 'oops{');
+    expect(() => materializeWorkerMcp(cwd, 'cursor', ['memtrace'], { dispatchId: 1 })).toThrow(/not valid JSON/);
+    expect(existsSync(join(cursorDir, '.heddle-mcp-refs.json'))).toBe(false);
+    expect(readFileSync(path, 'utf8')).toBe('oops{');
+  });
+
+  it('leaves a tampered merged cursor MCP file byte-identical while dropping its last heddle reference', () => {
+    const cwd = tempDir();
+    const path = join(cwd, '.cursor', 'mcp.json');
+    const sidecar = join(cwd, '.cursor', '.heddle-mcp-refs.json');
+    const restore = materializeWorkerMcp(cwd, 'cursor', ['memtrace'], { dispatchId: 1 });
+    const tampered = '{"mcpServers":{"user-added":{"command":"x","args":[]}}}';
+    writeFileSync(path, tampered);
+    restore();
+    expect(readFileSync(path, 'utf8')).toBe(tampered);
+    expect(existsSync(sidecar)).toBe(false);
+  });
+
+  it('ignores peer AGENTS.md and cursor MCP materialization churn while still detecting tracked worktree edits', () => {
+    const restoreEnv = installPacks();
+    try {
+      const cwd = tempDir();
+      const tracked = join(cwd, 'tracked.txt');
+      execFileSync('git', ['init', '-q'], { cwd });
+      writeFileSync(tracked, 'base');
+      execFileSync('git', ['add', 'tracked.txt'], { cwd });
+      execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '-m', 'init'], { cwd });
+      const before = snapshotWorktree(cwd);
+      const restoreAgents = materializeAgentsMd(cwd, ['alpha'], { dispatchId: 7 });
+      const restoreMcp = materializeWorkerMcp(cwd, 'cursor', ['memtrace'], { dispatchId: 7 });
+      try {
+        expect(sameSnapshot(before, snapshotWorktree(cwd))).toBe(true);
+        appendFileSync(tracked, ' changed');
+        expect(sameSnapshot(before, snapshotWorktree(cwd))).toBe(false);
+      } finally {
+        restoreMcp();
+        restoreAgents();
+      }
+    } finally { restoreEnv(); }
   });
 });

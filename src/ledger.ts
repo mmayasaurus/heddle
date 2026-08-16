@@ -315,10 +315,15 @@ export class Ledger {
    */
   /** True while a dispatch row exists and has not finished — the liveness oracle for HED-56
    *  materialization GC (a block/ref whose dispatch is finished or unknown is garbage). */
-  isInFlight(id: number): boolean {
+  isInFlight(id: number, staleAfterMs?: number, now = Date.now()): boolean {
     if (!Number.isInteger(id)) return false;
-    const row = this.db.prepare('SELECT finished_at FROM dispatches WHERE id = ?').get(id) as { finished_at: string | null } | undefined;
-    return row !== undefined && row.finished_at === null;
+    const row = this.db.prepare('SELECT finished_at, started_at FROM dispatches WHERE id = ?').get(id) as { finished_at: string | null; started_at: string } | undefined;
+    if (row === undefined || row.finished_at !== null) return false;
+    // A crashed PROCESS never calls finish() — its row would read "live" forever and its
+    // materialized blocks would never GC. The same stale window the concurrency cap uses
+    // (structural_caps.in_flight_stale_after_ms, default 3h) declares such rows dead here too.
+    if (staleAfterMs !== undefined && new Date(row.started_at).getTime() < now - staleAfterMs) return false;
+    return true;
   }
 
   /** The account a session last ran under — resume affinity: a claude session lives inside ONE
