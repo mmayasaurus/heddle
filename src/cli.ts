@@ -49,6 +49,8 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
   heddle workers [--stale <hours>] [--json]   dispatches still in flight (--stale: only orphans older than N hours)
   heddle ledger [--issue SPI-n] [--limit N] [--json]
   heddle ledger finish <id> --error "<why>"   close an orphaned in-flight row (ok=0)
+  heddle ledger sweep [--dry-run] [--max-age-h N] [--json]   close orphans: age > N hours (default 24)
+                                 or owner process provably gone (outcome='orphaned'); dry-run lists only
   heddle usage [--since <iso>] [--json]    per-provider totals
 `;
 
@@ -72,6 +74,18 @@ async function readStdin(): Promise<string> {
 
 const cmd = process.argv[2];
 const json = has('--json');
+
+/**
+ * Orphan hygiene at CLI start (HED-90): close provably-dead in-flight rows so every read below sees
+ * an honest ledger. Skipped for `ledger sweep` itself (its --dry-run must observe, not mutate) and
+ * best-effort — a hygiene failure must never break the command the operator actually ran.
+ */
+if (!(cmd === 'ledger' && process.argv[3] === 'sweep')) {
+  try {
+    const { closed } = new Ledger().sweepOrphans();
+    if (closed > 0) console.error(`heddle: closed ${closed} orphaned in-flight dispatch row${closed === 1 ? '' : 's'} (heddle ledger --json shows outcome='orphaned')`);
+  } catch { /* hygiene is best-effort */ }
+}
 
 try {
   switch (cmd) {
@@ -215,6 +229,23 @@ try {
     }
 
     case 'ledger': {
+      if (process.argv[3] === 'sweep') {
+        const maxAgeH = arg('--max-age-h');
+        if (maxAgeH !== undefined && !(Number.isFinite(Number(maxAgeH)) && Number(maxAgeH) > 0)) {
+          console.error('usage: heddle ledger sweep [--dry-run] [--max-age-h N] — N must be a positive number');
+          process.exit(2);
+        }
+        const dryRun = has('--dry-run');
+        const { candidates, closed } = new Ledger().sweepOrphans({
+          dryRun,
+          maxAgeMs: maxAgeH ? Number(maxAgeH) * 3_600_000 : undefined,
+        });
+        out(json, { dryRun, closed, candidates }, () => candidates.length
+          ? candidates.map((c) => `${dryRun ? 'would close' : 'closed'} #${c.id} (started ${c.startedAt}): ${c.reason}`).join('\n') +
+            (dryRun ? `\n(${candidates.length} candidate${candidates.length === 1 ? '' : 's'} — run without --dry-run to close)` : `\n(${closed} closed)`)
+          : '(no orphaned in-flight rows)');
+        break;
+      }
       if (process.argv[3] === 'finish') {
         const id = Number(process.argv[4]);
         const error = arg('--error');

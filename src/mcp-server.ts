@@ -214,5 +214,12 @@ server.tool(
   async (a) => text(ledger().recent(a.limit ?? 20, a.issue)),
 );
 
+// Orphan hygiene at server start (HED-90): close provably-dead in-flight rows before the first
+// check_workers/recent_dispatches read. Best-effort; stderr only (stdout is the MCP protocol).
+try {
+  const { closed } = ledger().sweepOrphans();
+  if (closed > 0) console.error(`heddle-mcp: closed ${closed} orphaned in-flight dispatch row(s)`);
+} catch { /* hygiene must never block server start */ }
+
 const transport = new StdioServerTransport();
 await server.connect(transport);

@@ -1,6 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
+import { execFileSync } from 'node:child_process';
 import { mkdirSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 
 /**
@@ -60,6 +61,14 @@ export interface DispatchRecord {
   identitySource: string | null;
   startedAt: string;
   finishedAt: string | null;
+  /** pid of the process that recorded this dispatch. start() and finish() always run in the same
+   *  process, so this pid being provably gone means finish() can never arrive (HED-90). */
+  ownerPid: number | null;
+  /** Executable basename of that process (node/bun) — the ps-comm half of the pid-reuse-safe
+   *  liveness check (HED-87 pattern). */
+  ownerComm: string | null;
+  /** null for normal rows; 'orphaned' when the hygiene sweep closed the row (HED-90). */
+  outcome: string | null;
 }
 
 /** What a dispatch must supply to start (or refuse) a row; the trailing lineage/policy fields are
@@ -67,7 +76,10 @@ export interface DispatchRecord {
 export type DispatchStartRecord =
   Omit<DispatchRecord, 'id' | 'ok' | 'error' | 'inputTokens' | 'cachedInputTokens' | 'outputTokens' |
     'reasoningTokens' | 'durationMs' | 'finishedAt' | 'startedAt' | 'refusal' | 'capabilities' |
-    'routeReason' | 'account' | 'identitySource'> &
+    'routeReason' | 'account' | 'identitySource' |
+    // Derived/sweep-owned, never caller-provided: the owner identity is stamped by insertStart
+    // itself; `outcome` is written only by the orphan sweep (HED-90).
+    'ownerPid' | 'ownerComm' | 'outcome'> &
   Partial<Pick<DispatchRecord, 'capabilities' | 'routeReason' | 'account' | 'identitySource'>>;
 
 const SCHEMA = `
@@ -138,6 +150,10 @@ const MIGRATIONS: { column: string; ddl: string }[] = [
   { column: 'route_reason', ddl: 'ALTER TABLE dispatches ADD COLUMN route_reason TEXT' },
   { column: 'account', ddl: 'ALTER TABLE dispatches ADD COLUMN account TEXT' },
   { column: 'identity_source', ddl: 'ALTER TABLE dispatches ADD COLUMN identity_source TEXT' },
+  // HED-90 (orphan hygiene, 2026-08-16):
+  { column: 'owner_pid', ddl: 'ALTER TABLE dispatches ADD COLUMN owner_pid INTEGER' },
+  { column: 'owner_comm', ddl: 'ALTER TABLE dispatches ADD COLUMN owner_comm TEXT' },
+  { column: 'outcome', ddl: 'ALTER TABLE dispatches ADD COLUMN outcome TEXT' },
 ];
 
 /**
@@ -155,6 +171,56 @@ END;
 
 /** Trigger bodies are frozen at CREATE; drop the v1 (id, orchestrator only) body so the widened one applies. */
 const LINEAGE_TRIGGER_DROP_V1 = "DROP TRIGGER IF EXISTS dispatches_lineage_immutable;";
+
+/** One in-flight row the sweep would close, and why. */
+export interface OrphanCandidate {
+  id: number;
+  startedAt: string;
+  reason: string;
+}
+
+/** Nothing heddle dispatches legitimately runs this long (worker budgets are minutes). */
+export const DEFAULT_ORPHAN_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Parse `ps -p <pids> -o pid=,comm=` output into per-pid liveness: a pid is alive only if it is
+ * listed AND its executable basename matches the comm recorded at dispatch time — a reused pid
+ * running something else is NOT the owner (HED-87's pattern). Rows recorded without a comm accept
+ * any listed executable. Exported for tests.
+ */
+export function parsePsLiveness(output: string, pid: number, expectedComm: string | null): boolean {
+  for (const line of output.split('\n')) {
+    const trimmed = line.trim();
+    if (trimmed === '') continue;
+    const space = trimmed.search(/\s/);
+    const pidField = space === -1 ? trimmed : trimmed.slice(0, space);
+    if (Number(pidField) !== pid) continue;
+    if (expectedComm === null) return true;
+    const comm = space === -1 ? '' : trimmed.slice(space).trim();
+    return basename(comm) === expectedComm;
+  }
+  return false;
+}
+
+/**
+ * One ps call for all candidate pids → a probe closure. ps failing entirely (not installed,
+ * sandbox) yields UNKNOWN (`null`) for every pid, so the sweep never closes a row on a hunch.
+ * An empty result for a listed pid IS a verdict: that pid does not exist.
+ */
+function makePsProbe(rows: Record<string, unknown>[]): (pid: number, comm: string | null) => boolean | null {
+  const pids = [...new Set(rows.map((r) => Number(r.owner_pid)).filter((p) => Number.isFinite(p) && p > 0))];
+  if (pids.length === 0) return () => null;
+  let output: string | null;
+  try {
+    output = execFileSync('ps', ['-p', pids.join(','), '-o', 'pid=,comm='], { encoding: 'utf8' });
+  } catch (err) {
+    // ps exits non-zero when NONE of the pids exist — that is an answer, not a failure. The
+    // captured stdout (possibly empty) still tells us which pids were found.
+    output = (err as { stdout?: string }).stdout ?? null;
+  }
+  const seen = output;
+  return (pid, comm) => (seen === null ? null : parsePsLiveness(seen, pid, comm));
+}
 
 export class Ledger {
   private db: DatabaseSync;
@@ -194,15 +260,19 @@ export class Ledger {
   }
 
   private insertStart(r: DispatchStartRecord, now: string): number {
+    // start() and finish() always run in this same process, so its identity is the row's owner:
+    // if this pid is later provably gone, finish() can never arrive and the row is an orphan.
     const info = this.db.prepare(`
       INSERT INTO dispatches
         (orchestrator, task_class, provider, model, skills, issue, pr, cwd, prompt_preview,
-         session_id, fell_back_from, capabilities, route_reason, account, identity_source, started_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         session_id, fell_back_from, capabilities, route_reason, account, identity_source,
+         started_at, owner_pid, owner_comm)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       r.orchestrator, r.taskClass, r.provider, r.model, r.skills, r.issue, r.pr, r.cwd,
       r.promptPreview.slice(0, 500), r.sessionId, r.fellBackFrom, r.capabilities ?? null,
       r.routeReason ?? null, r.account ?? null, r.identitySource ?? null, now,
+      process.pid, basename(process.execPath),
     );
     return Number(info.lastInsertRowid);
   }
@@ -297,11 +367,11 @@ export class Ledger {
    * manual close never races a completing worker into two writers. Returns false when nothing was
    * closed (no such row, or already finished).
    */
-  closeIfInFlight(id: number, error: string): boolean {
+  closeIfInFlight(id: number, error: string, opts: { outcome?: string; now?: Date } = {}): boolean {
     const info = this.db.prepare(`
-      UPDATE dispatches SET ok = 0, error = ?, finished_at = ?
+      UPDATE dispatches SET ok = 0, error = ?, outcome = COALESCE(?, outcome), finished_at = ?
       WHERE id = ? AND finished_at IS NULL
-    `).run(error, new Date().toISOString(), id);
+    `).run(error, opts.outcome ?? null, (opts.now ?? new Date()).toISOString(), id);
     return Number(info.changes) > 0;
   }
 
@@ -318,6 +388,53 @@ export class Ledger {
     return this.db.prepare(
       'SELECT * FROM dispatches WHERE finished_at IS NULL ORDER BY id DESC',
     ).all() as Record<string, unknown>[];
+  }
+
+  /**
+   * Orphan hygiene (HED-90): close in-flight rows whose finish() can provably never arrive, so the
+   * ledger's "running" view stays honest. A row is an orphan when
+   *   (a) it is older than `maxAgeMs` (default 24h) — nothing heddle dispatches runs that long — OR
+   *   (b) its recorded owner process is gone: the pid no longer exists, or exists but is no longer
+   *       the recorded executable (pid-reuse-safe ps-comm check, HED-87 pattern).
+   * Closing writes finished_at, ok=0, outcome='orphaned' and the reason into error — guarded by
+   * `finished_at IS NULL`, so a real finish() racing the sweep always wins. `dryRun` computes the
+   * same candidates and mutates nothing.
+   *
+   * `isOwnerAlive` is injectable for tests; the default probes ps once for all candidate pids.
+   * A `null` verdict (ps unavailable) is UNKNOWN — such rows are left alone rather than guessed at.
+   */
+  sweepOrphans(opts: {
+    maxAgeMs?: number;
+    dryRun?: boolean;
+    now?: Date;
+    isOwnerAlive?: (pid: number, comm: string | null) => boolean | null;
+  } = {}): { candidates: OrphanCandidate[]; closed: number } {
+    const maxAgeMs = opts.maxAgeMs ?? DEFAULT_ORPHAN_MAX_AGE_MS;
+    const now = opts.now ?? new Date();
+    const rows = this.inFlight();
+    const probe = opts.isOwnerAlive ?? makePsProbe(rows);
+    const candidates: OrphanCandidate[] = [];
+    for (const row of rows) {
+      const id = Number(row.id);
+      const startedAt = String(row.started_at ?? '');
+      const ageMs = now.getTime() - Date.parse(startedAt);
+      const ownerPid = row.owner_pid == null ? null : Number(row.owner_pid);
+      const ownerComm = row.owner_comm == null ? null : String(row.owner_comm);
+      let reason: string | null = null;
+      if (Number.isFinite(ageMs) && ageMs > maxAgeMs) {
+        reason = `in-flight for ${Math.round(ageMs / 3_600_000)}h (limit ${Math.round(maxAgeMs / 3_600_000)}h)`;
+      } else if (ownerPid != null && probe(ownerPid, ownerComm) === false) {
+        reason = `owner process ${ownerPid} (${ownerComm ?? '?'}) is gone`;
+      }
+      if (reason !== null) candidates.push({ id, startedAt, reason });
+    }
+    let closed = 0;
+    if (!opts.dryRun) {
+      for (const c of candidates) {
+        if (this.closeIfInFlight(c.id, `orphan sweep: ${c.reason}`, { outcome: 'orphaned', now })) closed++;
+      }
+    }
+    return { candidates, closed };
   }
 
   /** In-flight rows started more than `olderThanMs` ago — orphans to close (heddle workers --stale). */
