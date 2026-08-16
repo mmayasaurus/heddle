@@ -264,5 +264,12 @@ server.tool(
   async (a) => text(ledger().recent(a.limit ?? 20, a.issue)),
 );
 
+server.tool(
+  'get_dispatch',
+  'One dispatch record plus its full recorded worker output, if available.',
+  { id: z.number().int().describe('Ledger dispatch id.') },
+  async (a) => text(ledger().getWithOutput(a.id)),
+);
+
 const transport = new StdioServerTransport();
 await server.connect(transport);

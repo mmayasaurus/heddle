@@ -1,5 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 
@@ -58,6 +58,8 @@ export interface DispatchRecord {
   account: string | null;
   /** How `orchestrator` was determined: `bound` (process identity) or `caller` (tool/CLI argument). */
   identitySource: string | null;
+  /** Full worker deliverable lives outside SQLite so dashboard polling never reads large text blobs. */
+  outputPath: string | null;
   startedAt: string;
   finishedAt: string | null;
 }
@@ -67,7 +69,7 @@ export interface DispatchRecord {
 export type DispatchStartRecord =
   Omit<DispatchRecord, 'id' | 'ok' | 'error' | 'inputTokens' | 'cachedInputTokens' | 'outputTokens' |
     'reasoningTokens' | 'durationMs' | 'finishedAt' | 'startedAt' | 'refusal' | 'capabilities' |
-    'routeReason' | 'account' | 'identitySource'> &
+    'routeReason' | 'account' | 'identitySource' | 'outputPath'> &
   Partial<Pick<DispatchRecord, 'capabilities' | 'routeReason' | 'account' | 'identitySource'>>;
 
 const SCHEMA = `
@@ -153,6 +155,8 @@ const MIGRATIONS: { column: string; ddl: string }[] = [
   { column: 'route_reason', ddl: 'ALTER TABLE dispatches ADD COLUMN route_reason TEXT' },
   { column: 'account', ddl: 'ALTER TABLE dispatches ADD COLUMN account TEXT' },
   { column: 'identity_source', ddl: 'ALTER TABLE dispatches ADD COLUMN identity_source TEXT' },
+  // HED-23: worker deliverables can be large, so SQLite keeps only their atomically-written path.
+  { column: 'output_path', ddl: 'ALTER TABLE dispatches ADD COLUMN output_path TEXT' },
 ];
 
 /**
@@ -173,9 +177,11 @@ const LINEAGE_TRIGGER_DROP_V1 = "DROP TRIGGER IF EXISTS dispatches_lineage_immut
 
 export class Ledger {
   private db: DatabaseSync;
+  private outputDir: string;
 
   constructor(path: string = DEFAULT_LEDGER_PATH) {
     mkdirSync(dirname(path), { recursive: true });
+    this.outputDir = join(dirname(path), 'outputs');
     this.db = new DatabaseSync(path);
     // Several heddle processes (one MCP server per orchestrator session, CLIs, the dashboard) share
     // this file; wait briefly for a writer instead of failing with SQLITE_BUSY. Set FIRST so it also
@@ -293,18 +299,36 @@ export class Ledger {
   finish(id: number, outcome: {
     ok: boolean; error?: string; sessionId?: string; durationMs?: number;
     inputTokens?: number; cachedInputTokens?: number; outputTokens?: number; reasoningTokens?: number;
+    output?: string;
   }): void {
+    const outputPath = this.persistOutput(id, outcome.output);
     this.db.prepare(`
       UPDATE dispatches SET ok = ?, error = ?, session_id = COALESCE(?, session_id),
         duration_ms = ?, input_tokens = ?, cached_input_tokens = ?, output_tokens = ?,
-        reasoning_tokens = ?, finished_at = ?
+        reasoning_tokens = ?, output_path = ?, finished_at = ?
       WHERE id = ?
     `).run(
       outcome.ok ? 1 : 0, outcome.error ?? null, outcome.sessionId ?? null,
       outcome.durationMs ?? null, outcome.inputTokens ?? null, outcome.cachedInputTokens ?? null,
       outcome.outputTokens ?? null, outcome.reasoningTokens ?? null,
-      new Date().toISOString(), id,
+      outputPath, new Date().toISOString(), id,
     );
+  }
+
+  private persistOutput(id: number, output: string | undefined): string | null {
+    if (!output?.trim()) return null;
+    const path = join(this.outputDir, `${id}.md`);
+    const tempPath = join(this.outputDir, `.${id}.${process.pid}.${Date.now()}.tmp`);
+    try {
+      mkdirSync(this.outputDir, { recursive: true });
+      writeFileSync(tempPath, output, 'utf8');
+      renameSync(tempPath, path);
+      return path;
+    } catch (err) {
+      // A completed worker must remain visible even if the secondary deliverable store is unavailable.
+      process.stderr.write(`heddle: could not persist output for dispatch #${id} (${err instanceof Error ? err.message : String(err)})\n`);
+      return null;
+    }
   }
 
   /**
@@ -470,6 +494,19 @@ export class Ledger {
   get(id: number): Record<string, unknown> | null {
     const row = this.db.prepare('SELECT * FROM dispatches WHERE id = ?').get(id);
     return (row as Record<string, unknown> | undefined) ?? null;
+  }
+
+  /** A missing output file is recoverable: ledger history stays readable after retention or manual cleanup. */
+  getWithOutput(id: number): (Record<string, unknown> & { output: string | null }) | null {
+    const row = this.get(id);
+    if (!row) return null;
+    const outputPath = row.output_path;
+    if (typeof outputPath !== 'string') return { ...row, output: null };
+    try {
+      return { ...row, output: readFileSync(outputPath, 'utf8') };
+    } catch {
+      return { ...row, output: null };
+    }
   }
 
   close(): void {
