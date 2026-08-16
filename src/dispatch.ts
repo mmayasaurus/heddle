@@ -332,8 +332,11 @@ async function runTarget(
       const mcpFile = claudeMcpConfigFile(mcp); // always a file (possibly empty) → --strict-mcp-config
       mcpConfigPath = mcpFile.path; restoreMcp = mcpFile.cleanup;
     } else {
-      restoreSkills = materializeAgentsMd(req.cwd, skills);
-      restoreMcp = materializeWorkerMcp(req.cwd, target.provider, mcp);
+      // Per-dispatch blocks + liveness GC (HED-56): concurrent dispatches into one cwd each own
+      // their block/ref; blocks left by crashed dispatches are collected on the next dispatch.
+      const matOpts = { dispatchId: ledgerId, isLive: (id: string) => ctx.ledger.isInFlight(Number(id)) };
+      restoreSkills = materializeAgentsMd(req.cwd, skills, matOpts);
+      restoreMcp = materializeWorkerMcp(req.cwd, target.provider, mcp, matOpts);
     }
     // The mandate baseline is taken AFTER materialization and compared BEFORE restore (in finally):
     // injected files are part of the baseline, so a reviewer that edits AGENTS.md/.mcp.json is

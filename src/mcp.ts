@@ -1,6 +1,8 @@
 import { readFileSync, existsSync, writeFileSync, unlinkSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
+import { withFileLock } from './matlock.js';
+import type { MaterializeOpts } from './skillpacks.js';
 
 /**
  * Worker MCP attachment — grants a cross-provider worker the code-discovery tools its task needs.
@@ -109,7 +111,7 @@ export function claudeMcpConfigFile(serverNames: string[]): { path: string; clea
   return { path, cleanup: () => { try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ } } };
 }
 
-export function materializeWorkerMcp(cwd: string, provider: string, serverNames: string[]): () => void {
+export function materializeWorkerMcp(cwd: string, provider: string, serverNames: string[], opts: MaterializeOpts): () => void {
   if (serverNames.length === 0) return () => { /* nothing to attach */ };
 
   // Codex reads its servers (memtrace, serena) from the user's global config — nothing to write,
@@ -120,7 +122,7 @@ export function materializeWorkerMcp(cwd: string, provider: string, serverNames:
   const servers = resolveMcpServers(serverNames);
   switch (provider) {
     case 'cursor':
-      return writeMergedMcpJson(join(cwd, '.cursor', 'mcp.json'), servers);
+      return writeMergedMcpJson(join(cwd, '.cursor', 'mcp.json'), servers, opts);
     case 'gemini':
       throw new Error(
         'worker MCP attachment for agy/gemini is not implemented yet: the .agents/mcp_config.json ' +
@@ -132,31 +134,80 @@ export function materializeWorkerMcp(cwd: string, provider: string, serverNames:
   }
 }
 
-function writeMergedMcpJson(
-  path: string, servers: Record<string, { command: string; args: string[] }>,
-): () => void {
-  const existed = existsSync(path);
-  const original = existed ? readFileSync(path, 'utf8') : null;
-  mkdirSync(dirname(path), { recursive: true });
+/**
+ * The sidecar that makes a JSON config concurrency-safe (JSON carries no comment markers, so the
+ * AGENTS.md per-block trick does not transfer — HED-56). It records the PRE-heddle file content
+ * once (`original`, captured by the first attaching dispatch) and one server list per live
+ * dispatch (`refs`). Every mutation rebuilds the merged file from original + all live refs, so the
+ * merged view is order-independent; the LAST ref out restores the original bytes (or deletes a
+ * file heddle created) and removes the sidecar. Dead refs (crashed dispatches, per the liveness
+ * oracle) are dropped on the next mutation.
+ */
+interface McpSidecar {
+  original: string | null;
+  refs: Record<string, string[]>;
+}
 
-  let next: string;
-  if (original !== null) {
-    const parsed = JSON.parse(original) as { mcpServers?: Record<string, unknown> };
-    parsed.mcpServers = { ...(parsed.mcpServers ?? {}), ...servers };
-    next = JSON.stringify(parsed, null, 2);
-  } else {
-    next = JSON.stringify({ mcpServers: servers }, null, 2);
+function sidecarPath(path: string): string {
+  return join(dirname(path), '.heddle-mcp-refs.json');
+}
+
+function readSidecar(path: string): McpSidecar | null {
+  try {
+    const raw = JSON.parse(readFileSync(sidecarPath(path), 'utf8')) as McpSidecar;
+    return raw && typeof raw === 'object' && raw.refs && typeof raw.refs === 'object'
+      ? { original: typeof raw.original === 'string' ? raw.original : null, refs: raw.refs }
+      : null;
+  } catch {
+    return null;
   }
-  writeFileSync(path, next, 'utf8');
+}
+
+function mergedContent(sidecar: McpSidecar): string {
+  const base = sidecar.original !== null
+    ? (JSON.parse(sidecar.original) as { mcpServers?: Record<string, unknown> })
+    : { mcpServers: {} as Record<string, unknown> };
+  const merged: Record<string, unknown> = { ...(base.mcpServers ?? {}) };
+  for (const list of Object.values(sidecar.refs)) {
+    for (const name of list) merged[name] = WORKER_MCP_SERVERS[name] ?? merged[name];
+  }
+  return JSON.stringify({ ...base, mcpServers: merged }, null, 2);
+}
+
+function writeMergedMcpJson(
+  path: string, servers: Record<string, { command: string; args: string[] }>, opts: MaterializeOpts,
+): () => void {
+  const ownId = String(opts.dispatchId);
+  const lock = join(dirname(path), '.heddle-mcp.lock');
+
+  withFileLock(lock, () => {
+    mkdirSync(dirname(path), { recursive: true });
+    const sidecar = readSidecar(path)
+      ?? { original: existsSync(path) ? readFileSync(path, 'utf8') : null, refs: {} };
+    for (const id of Object.keys(sidecar.refs)) {
+      if (id !== ownId && opts.isLive && !opts.isLive(id)) delete sidecar.refs[id]; // dead dispatch
+    }
+    sidecar.refs[ownId] = Object.keys(servers);
+    writeFileSync(sidecarPath(path), JSON.stringify(sidecar, null, 2), 'utf8');
+    writeFileSync(path, mergedContent(sidecar), 'utf8');
+  });
 
   return () => {
-    if (original !== null) {
-      writeFileSync(path, original, 'utf8');
-      return;
-    }
-    // Only remove a file we created, and only if untouched since — never discard others' work.
-    try {
-      if (readFileSync(path, 'utf8') === next) unlinkSync(path);
-    } catch { /* gone or unreadable — leave it */ }
+    withFileLock(lock, () => {
+      try {
+        const sidecar = readSidecar(path);
+        if (!sidecar || !(ownId in sidecar.refs)) return; // nothing of ours recorded — leave it
+        delete sidecar.refs[ownId];
+        if (Object.keys(sidecar.refs).length === 0) {
+          // Last one out restores the pre-heddle state exactly.
+          if (sidecar.original !== null) writeFileSync(path, sidecar.original, 'utf8');
+          else { try { unlinkSync(path); } catch { /* already gone */ } }
+          try { unlinkSync(sidecarPath(path)); } catch { /* already gone */ }
+        } else {
+          writeFileSync(sidecarPath(path), JSON.stringify(sidecar, null, 2), 'utf8');
+          writeFileSync(path, mergedContent(sidecar), 'utf8');
+        }
+      } catch { /* unreadable — leave the worktree as it is rather than guess */ }
+    });
   };
 }
