@@ -55,8 +55,12 @@ export interface ChannelEvent {
   meta: Record<string, string>;
 }
 
-/** Turn a log row into the structured channel event a recipient session will see. */
-export function toChannelEvent(record: MessageRecord): ChannelEvent {
+/**
+ * Turn a log row into the structured channel event a recipient session will see. Pass the
+ * recipient so the mention flag is EXPLICIT (set iff the recipient is in record.mentions), not
+ * inferred from "a room post reached an inbox".
+ */
+export function toChannelEvent(record: MessageRecord, recipient?: string): ChannelEvent {
   const meta: Record<string, string> = {
     tier: record.tier,
     sender: record.from,
@@ -67,6 +71,8 @@ export function toChannelEvent(record: MessageRecord): ChannelEvent {
     ts: record.ts,
   };
   if (record.replyTo != null) meta.reply_to = String(record.replyTo);
+  if (record.to.startsWith('#')) meta.room = record.to.slice(1);
+  if (recipient && record.mentions.includes(recipient)) meta.mention = '1';
   if (record.thread) meta.thread = record.thread;
   if (record.issue) meta.issue = record.issue;
   const code = record.meta?.tierCode;
@@ -138,6 +144,10 @@ export class InboundPump {
     if (this.ticking) return { emitted: 0, failed: 0 };
     this.ticking = true;
     try {
+      // A recipient with an open hold is at a permission gate: injecting ANYTHING would bypass the
+      // hold contract, so the pump goes quiet until the broker resolves the hold (release/inbox/
+      // timeout), then resumes in order. Latent until a state provider emits permission-gate.
+      if (this.log.openHolds().some((d) => d.to === this.me)) return { emitted: 0, failed: 0 };
       const floor = this.log.oldestUnresolvedChannelFailure(this.me);
       if (floor != null && floor - 1 < this.cursor) this.cursor = floor - 1; // rewind to retry the failure
       const written = this.log.channelWrittenIds(this.me, this.cursor);
@@ -148,7 +158,7 @@ export class InboundPump {
         if (r.from === this.me && r.to === BROADCAST) continue; // my own broadcast is not news to me (a self-DM is)
         if (written.has(r.id)) continue;                        // already in the session — never twice
         try {
-          await this.emit(toChannelEvent(r), r);
+          await this.emit(toChannelEvent(r, this.me), r);
           this.log.recordDelivery({ messageId: r.id, from: r.from, to: this.me, outcome: 'sent', code: 'channel-written', transport: 'channel' });
           emitted += 1;
         } catch (err) {

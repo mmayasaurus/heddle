@@ -263,6 +263,7 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
       from: who, to: requireStr(a.to, 'to'), body: requireStr(a.body, 'body'), kind: str(a.kind) as MessageKind | undefined,
       requestedTier: (str(a.requested_tier) as Tier | undefined) ?? null, replyTo: num(a.reply_to) ?? null,
       issue: str(a.issue) ?? null, thread: str(a.thread) ?? null, meta: { transport: 'heddle-comms' },
+      mentions: validMentionsArg(a.mentions),
       holdFloor: a.hold_floor === true, releaseFloor: a.release_floor === true,
     });
     if (res.outcome === 'refused') return res;
@@ -374,6 +375,7 @@ export const TOOLS = [
         reply_to: { type: 'number' },
         issue: { type: 'string' },
         thread: { type: 'string' },
+        mentions: { type: 'array', items: { type: 'string' }, maxItems: 16, description: 'Rooms: addresses to explicitly ping — each gets a targeted push-or-inbox delivery (never parsed from the body).' },
         hold_floor: { type: 'boolean', description: 'Rooms: take the floor before posting (multi-part reply).' },
         release_floor: { type: 'boolean', description: 'Rooms: release the floor after this post.' },
       },
@@ -394,7 +396,7 @@ export const TOOLS = [
   },
   {
     name: 'check_inbox',
-    description: 'New messages addressed to you (direct + @all) since a message id. Pull model — call it when you want to know.',
+    description: 'New messages addressed to you (direct + @all + room posts that mention you) since a message id. Pull model — call it when you want to know.',
     inputSchema: { type: 'object', properties: { since_id: { type: 'number' }, limit: { type: 'number' } } },
   },
   {
@@ -461,6 +463,13 @@ function compact(r: ReturnType<CommsLog['get']>) {
   return { id: r.id, ts: r.ts, from: r.from, to: r.to, tier: r.tier, kind: r.kind, body: r.body, replyTo: r.replyTo, thread: r.thread, issue: r.issue };
 }
 function str(v: unknown): string | undefined { return typeof v === 'string' && v.length ? v : undefined; }
+function validMentionsArg(v: unknown): string[] | null {
+  if (v === undefined || v === null) return null;
+  if (!Array.isArray(v) || v.some((m) => typeof m !== 'string')) {
+    throw new Error('mentions must be an array of address strings'); // fail fast — never coerce or silently drop
+  }
+  return v as string[];
+}
 function requireStr(v: unknown, name: string): string {
   if (typeof v !== 'string' || v.length === 0) throw new Error(`${name} must be a non-empty string`);
   return v;
