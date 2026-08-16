@@ -286,9 +286,17 @@ jobs:
           done
           MERGES=$(git rev-list --merges "$BASE..$HEAD") \
             || { echo "::error::git rev-list (--merges) failed — NOT a clean pass"; exit 1; }
-          DELTA_DIR="${RUNNER_TEMP:-/tmp}/gitleaks-merge-delta"
-          mkdir -p "$DELTA_DIR"
+          # mktemp -d, NOT a fixed path: a reused ${RUNNER_TEMP:-/tmp} dir
+          # (self-hosted runner, or the /tmp fallback) would otherwise feed
+          # stale blobs from an earlier run into the scan (copilot/codacy/qodo).
+          DELTA_DIR=$(mktemp -d "${RUNNER_TEMP:-/tmp}/gitleaks-merge-delta.XXXXXX") \
+            || { echo "::error::mktemp for the merge-delta scan dir failed — NOT a clean pass"; exit 1; }
           DELTA_COUNT=0
+          # Globbing OFF for the rest of the step: `for p in $DELTA` would
+          # pathname-expand a delta path containing * ? [ ] and extract the
+          # WRONG file (or none), silently leaving merge content unscanned
+          # (copilot + qodo). Nothing below needs expansion.
+          set -f
           for m in $MERGES; do
             # `rev-parse <m>^@` lists parents one per line — no `set --`
             # word-splitting (SC2086) and no clobbering of $@.
@@ -302,7 +310,11 @@ jobs:
             P1=$(printf '%s\n' "$PARENTS" | sed -n 1p)
             P2=$(printf '%s\n' "$PARENTS" | sed -n 2p)
             MT_RC=0
-            AUTO_OUT=$(git merge-tree --write-tree "$P1" "$P2") || MT_RC=$?
+            # --allow-unrelated-histories: a legitimate 2-parent merge can
+            # join unrelated histories (this repo pair has fork-merge shapes);
+            # without it merge-tree exits 128 and the guard below would call a
+            # supported merge a tool failure (codex).
+            AUTO_OUT=$(git merge-tree --write-tree --allow-unrelated-histories "$P1" "$P2") || MT_RC=$?
             # rc 0 = clean automerge, 1 = conflicts (tree still written with
             # conflict markers), anything else = tool failure.
             if [ "$MT_RC" -gt 1 ]; then
@@ -317,20 +329,32 @@ jobs:
             # on whitespace — either would SKIP content instead of scanning it.
             # [[:blank:]] (space+tab) — NOT `[ \t]`: POSIX ERE has no \t escape;
             # BSD/busybox grep read it as a literal `t` (caught by fixture F1).
-            if printf '%s\n' "$DELTA" | grep -qE '^"|[[:blank:]]'; then
-              echo "::error::merge $m delta contains quoted/whitespace path names the extractor cannot safely handle — review by hand. NOT a clean pass."
+            # `..` component / absolute path: a crafted tree could otherwise
+            # make the extractor write OUTSIDE $DELTA_DIR (copilot).
+            if printf '%s\n' "$DELTA" | grep -qE '^"|[[:blank:]]|^/|(^|/)\.\.(/|$)'; then
+              echo "::error::merge $m delta contains quoted/whitespace/absolute/traversing path names the extractor cannot safely handle — review by hand. NOT a clean pass."
               exit 1
             fi
             for p in $DELTA; do
               git cat-file -e "$m:$p" 2>/dev/null || continue  # deleted-vs-automerge: no blob to scan
               OUT="$DELTA_DIR/$m/$p"
+              # gitleaks merges <source>/.gitleaksignore and reads
+              # .gitleaks.toml from the scan dir (cmd/root.go) — a merge
+              # resolution could smuggle suppressions in. Renamed so the
+              # CONTENT is scanned but never honored as config. Two measured
+              # constraints on the new name: (1) keep the DIRECTORY — flattening
+              # with tr '/' '_' collided (a/b/.gitleaks.toml vs a_b/…), silently
+              # overwriting one blob while DELTA_COUNT counted both (codex P1);
+              # (2) the name must not contain "gitleaks" — gitleaks' DEFAULT
+              # allowlist path-excludes anything matching `gitleaks.toml`, so
+              # `pr-copy-.gitleaks.toml` was skipped entirely and a planted
+              # secret went undetected (fixture F10). At most one of each file
+              # exists per directory, so these fixed names stay collision-free.
               case "$p" in
-                .gitleaksignore|.gitleaks.toml|*/.gitleaksignore|*/.gitleaks.toml)
-                  # gitleaks merges <source>/.gitleaksignore and reads
-                  # .gitleaks.toml from the scan dir (cmd/root.go) — a merge
-                  # resolution could smuggle suppressions in. Rename so the
-                  # CONTENT is scanned but never honored as config.
-                  OUT="$DELTA_DIR/$m/pr-copy-$(printf '%s' "$p" | tr '/' '_')" ;;
+                .gitleaksignore|*/.gitleaksignore)
+                  OUT="$DELTA_DIR/$m/$(dirname "$p")/merge-delta-ignorefile-copy.txt" ;;
+                .gitleaks.toml|*/.gitleaks.toml)
+                  OUT="$DELTA_DIR/$m/$(dirname "$p")/merge-delta-configfile-copy.txt" ;;
               esac
               mkdir -p "$(dirname "$OUT")"
               git show "$m:$p" > "$OUT" \
@@ -389,15 +413,17 @@ jobs:
           # Merge-delta scan (HED-109): the blobs extracted above are the only
           # content `gitleaks git` never sees (merge-only content — conflict
           # resolutions and hand edits). Scanned directly, same base-branch
-          # config, inline allows ignored. .gitleaksignore fingerprints are
-          # commit-scoped and cannot match a dir scan, so base suppressions
-          # don't carry over here — a false positive needs a dir-format
-          # fingerprint added on main first (same reviewed-on-main rule).
+          # config and ignore file, inline allows ignored. Run from INSIDE
+          # $DELTA_DIR scanning `.` so findings/fingerprints are relative
+          # (`<merge-sha>/<repo-path>:<rule>:<line>` — measured), i.e. stable
+          # across runs despite the mktemp prefix, so the reviewed-on-main
+          # suppression route works here too (codex P2: the earlier version
+          # omitted --gitleaks-ignore-path and could never be unblocked).
           if [ "$DELTA_COUNT" -gt 0 ]; then
             drc=0
-            gitleaks dir "$DELTA_DIR" --redact --no-banner --no-color \
-              --config="$S/gitleaks.toml" --ignore-gitleaks-allow \
-              --exit-code 2 2>"$S/gitleaks-dir.log" || drc=$?
+            ( cd "$DELTA_DIR" && gitleaks dir . --redact --no-banner --no-color \
+                --config="$S/gitleaks.toml" --gitleaks-ignore-path="$S/ignore" \
+                --ignore-gitleaks-allow --exit-code 2 ) 2>"$S/gitleaks-dir.log" || drc=$?
             cat "$S/gitleaks-dir.log"
             if grep -qE '^[^ ]+ (ERR|FTL) ' "$S/gitleaks-dir.log"; then
               echo "::error::gitleaks dir (merge-delta scan) logged ERR/FTL — NOT a clean pass"
