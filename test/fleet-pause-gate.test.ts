@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CommsLog } from '../src/comms/log.js';
+import { CommsLog, DEFAULT_COMMS_PATH } from '../src/comms/log.js';
 import { seal } from '../src/comms/seal.js';
 import { fleetPauseStatus } from '../src/fleet-pause.js';
 import { dispatch } from '../src/dispatch.js';
@@ -22,6 +22,29 @@ describe('fleet pause admission gate', () => {
   const resume = (log: CommsLog, pauseId: number) =>
     log.append({ from: 'operator', to: '@all', kind: 'status', replyTo: pauseId,
       body: 'FLEET RESUMED', meta: { fleetResume: { pauseId } } }, operatorDecision('operator', '@all'));
+
+  const withCommsDbEnv = (value: string | undefined, fn: () => void) => {
+    const prev = process.env.HEDDLE_COMMS_DB;
+    const had = Object.hasOwn(process.env, 'HEDDLE_COMMS_DB');
+    if (value === undefined) delete process.env.HEDDLE_COMMS_DB;
+    else process.env.HEDDLE_COMMS_DB = value;
+    try {
+      fn();
+    } finally {
+      if (had) process.env.HEDDLE_COMMS_DB = prev!;
+      else delete process.env.HEDDLE_COMMS_DB;
+    }
+  };
+
+  const captureResolvedPath = () => {
+    let captured: string | undefined;
+    const capture = (p: string) => {
+      captured = p;
+      return { fleetPauseInForce: () => null, close() {} };
+    };
+    fleetPauseStatus({ logFactory: capture });
+    return captured;
+  };
 
   it('1. reports a fresh comms log as not paused', () => {
     const dbPath = `${tempDir()}/comms.db`;
@@ -147,5 +170,31 @@ describe('fleet pause admission gate', () => {
       else delete process.env.HEDDLE_COMMS_DB;
       log.close();
     }
+  });
+
+  it('9a. resolves HEDDLE_COMMS_DB to DEFAULT_COMMS_PATH when unset', () => {
+    withCommsDbEnv(undefined, () => {
+      expect(captureResolvedPath()).toBe(DEFAULT_COMMS_PATH);
+    });
+  });
+
+  it('9b. resolves empty HEDDLE_COMMS_DB to DEFAULT_COMMS_PATH', () => {
+    withCommsDbEnv('', () => {
+      expect(captureResolvedPath()).toBe(DEFAULT_COMMS_PATH);
+    });
+  });
+
+  it('9c. resolves whitespace-only HEDDLE_COMMS_DB to the literal value (matches server.ts:165)', () => {
+    withCommsDbEnv('   ', () => {
+      // Deliberately untrimmed — must match broker resolution at server.ts:165, not a bug.
+      expect(captureResolvedPath()).toBe('   ');
+    });
+  });
+
+  it('9d. resolves an explicit HEDDLE_COMMS_DB path unchanged', () => {
+    const explicit = '/tmp/heddle-test-xyz.db';
+    withCommsDbEnv(explicit, () => {
+      expect(captureResolvedPath()).toBe(explicit);
+    });
   });
 });
