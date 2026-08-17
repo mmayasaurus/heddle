@@ -20,10 +20,12 @@ describe('fleet pause readiness (temp db)', () => {
   const ledgerWith = (n: number): InFlightSource => ({ inFlight: () => Array.from({ length: n }, (_, i) => ({ id: i })) });
 
   /** The broker stamps tier from a sealed decision bound to one (from, to) pair; tests mint those. */
-  const operatorDecision = (from: string, to: string) =>
-    seal({ from, to, tier: 'operator' as const, verified: true, evidence: null, code: 'operator-token', reason: 'test' });
-  const agentDecision = (from: string, to: string) =>
-    seal({ from, to, tier: 'agent-message' as const, verified: false, evidence: null, code: 'unverified', reason: 'test' });
+  const decision = (from: string, to: string, tier: 'operator' | 'agent-message') =>
+    seal({ from, to, tier, verified: tier !== 'agent-message', evidence: null,
+      code: tier === 'operator' ? 'operator-token' : 'unverified', reason: 'test',
+      dispatchId: null, requestedTier: null, downgradedFrom: null });
+  const operatorDecision = (from: string, to: string) => decision(from, to, 'operator');
+  const agentDecision = (from: string, to: string) => decision(from, to, 'agent-message');
 
   const requestPause = (reason = 'account rotation') =>
     log.append({ from: 'operator', to: '@all', kind: 'status', body: `FLEET PAUSE — ${reason}`,
@@ -35,8 +37,8 @@ describe('fleet pause readiness (temp db)', () => {
 
   const live = (...addresses: string[]) => {
     for (const a of addresses) {
-      log.register({ address: a, kind: 'agent' });
-      log.registerSession({ address: a, sessionId: `s-${a}`, name: a });
+      log.register({ address: a });
+      log.registerSession({ address: a, sessionId: `s-${a}`, sessionName: a });
     }
   };
 
@@ -44,7 +46,7 @@ describe('fleet pause readiness (temp db)', () => {
     dir = mkdtempSync(join(tmpdir(), 'heddle-quiesce-'));
     nowMs = Date.parse('2026-08-16T22:00:00.000Z');
     log = new CommsLog(join(dir, 'comms.db'), { now: clock });
-    log.register({ address: 'operator', kind: 'operator' });
+    log.register({ address: 'operator' });
   });
   afterEach(() => { log.close?.(); rmSync(dir, { recursive: true, force: true }); });
 
@@ -162,7 +164,7 @@ describe('fleet pause readiness (temp db)', () => {
     ack('V', pause.id, true);
     // R's heartbeat ages out; V re-heartbeats so only R goes stale.
     nowMs += 120_000;
-    log.registerSession({ address: 'V', sessionId: 's-V', name: 'V' });
+    log.registerSession({ address: 'V', sessionId: 's-V', sessionName: 'V' });
 
     const r = pauseReadiness(log, ledgerWith(0), { staleMs: 90_000 });
     expect(r.live).toEqual(['V']);
@@ -172,7 +174,7 @@ describe('fleet pause readiness (temp db)', () => {
 
   it('excludes the operator from the agents owing an ack', () => {
     live('V');
-    log.registerSession({ address: 'operator', sessionId: 's-op', name: 'operator' });
+    log.registerSession({ address: 'operator', sessionId: 's-op', sessionName: 'operator' });
     const pause = requestPause();
     ack('V', pause.id, true);
 
