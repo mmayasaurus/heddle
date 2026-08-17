@@ -633,6 +633,7 @@ busy agent look identical from outside.
 | --- | --- | --- |
 | `request_pause` | operator only | Broadcasts an operator-tier `@all` pause and returns readiness |
 | `ack_pause` | any bound agent | Answers the current pause with `work_parked` true/false |
+| `resume_pause` | operator only | Lifts the pause in force — call it after the rotation |
 | `pause_status` | anyone bound | Who acked, who is pending, who is not parked, dispatches in flight |
 
 **Why operator-only.** A halt-the-fleet signal any agent could raise is a denial of service on the
@@ -674,8 +675,15 @@ first-time session at the current tail, so such a session may never have been sh
 is named (and blocks) rather than being silently blamed for ignoring the operator. Re-issue
 `request_pause` to include it.
 
-No schema change was needed: a pause is an ordinary message, an ack is an ordinary reply, and the
-protocol is a query over both.
+**A pause must be LIFTED when the rotation is done.** `resume_pause` posts an operator-tier message
+carrying `meta.fleetResume.pauseId`, and readiness then reports that pause as spent (`pauseId: null`,
+`resumedAt` set) rather than still in force. Without it a pause would outlive the rotation it was
+raised for: `latestFleetPause` would keep returning the pause it had already served, and the
+admission gate in HED-124 would refuse dispatches indefinitely. Lifting is operator-only for the
+same reason raising is — an agent that could resume the fleet could undo a stop the human ordered.
+
+No schema change was needed: a pause is an ordinary message, an ack is an ordinary reply, a resume
+is an ordinary operator broadcast, and the protocol is a query over all three.
 
 ## Roadmap
 
