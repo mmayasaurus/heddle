@@ -23,12 +23,15 @@ branch off fresh `origin/main` in the SAME folder. Do not create a new worktree 
 1. Branch off latest `origin/main`; register the memtrace overlay immediately:
    `watch_directory(path="<worktree>", repo_id="heddle")`.
 2. Commit as you go — uncommitted work is invisible and easy to lose.
-   **COMMIT BEFORE DISPATCH — never dispatch a file-writing worker into a worktree with
-   uncommitted changes; a worker may reset the state it was handed.** Not hypothetical: on
-   2026-08-17 a dispatched worker ran a hard checkout plus a forced removal of untracked files
-   inside another agent's worktree and destroyed uncommitted work (recovered from patches).
-   `git status` is clean, or you commit (a `wip/` branch is enough), BEFORE the dispatch —
-   whatever the worker's stated task.
+   **COMMIT BEFORE DISPATCH — never dispatch a worker into a worktree with uncommitted changes;
+   a worker may reset the state it was handed.** Not hypothetical: on 2026-08-17 a dispatched
+   worker ran `git checkout -- .` followed by `git clean -fd` inside another agent's worktree and
+   destroyed uncommitted work (recovered from patches). So, before every dispatch: **make
+   `git status` clean.** Commit real work (a `wip/` branch is enough) and move scratch files out
+   of the worktree — untracked files are exactly what a force-clean takes. The rule covers EVERY
+   dispatch, not only workers you expect to write files: a "read-only" worker still has a shell,
+   and deciding per dispatch which workers are safe is the judgment call this rule exists to
+   remove.
 3. PR → full sweep (see `pr-discipline.md`) → merge promptly. **Branches are kept after merge.**
 4. **Removal (standing authorization, Maya 2026-08-15):** a worktree may be removed WITHOUT a
    further per-item ask only when ALL hold — its branches are fully merged to `origin/main`,
