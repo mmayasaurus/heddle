@@ -14,7 +14,7 @@ import {
 } from './bridge.js';
 import { parseAddress, BROADCAST, OPERATOR } from './address.js';
 import { pauseReadiness, type InFlightSource } from './quiesce.js';
-import { dueForNudge, nudgeBody, shouldRunNudger, DEFAULT_IDLE_MS, type NudgeOptions } from './nudge.js';
+import { dueForNudge, nudgeBody, shouldRunNudger, isCurrentOperatorInstance, parseNudgeMs, type NudgeOptions } from './nudge.js';
 import { TIERS, MESSAGE_KINDS, type Tier, type MessageKind } from './types.js';
 
 /**
@@ -419,14 +419,18 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
       }, 30_000);
       heartbeat.unref();
 
-      // Idle-nudger (HED-137): only in the operator's session, so exactly one instance runs.
+      // Idle-nudger (HED-137): hosted only by an operator session (static gate), and only by the
+      // one that currently owns the operator presence row (dynamic check, each cycle).
       if (shouldRunNudger(isOperator, pushEnabled)) {
-        const cycleMs = Number(env.HEDDLE_COMMS_NUDGE_MS) || DEFAULT_IDLE_MS;
+        const cycleMs = parseNudgeMs(env.HEDDLE_COMMS_NUDGE_MS);
         const nudgeOpts: NudgeOptions = { idleMs: cycleMs, cooldownMs: cycleMs };
-        nudger = setInterval(() => {
-          if (!operatorStillValid()) { void revokeOperator(); return; }
-          void (async () => {
-            try {
+        // Self-scheduling, never overlapping: the next cycle is armed only after this one's posts
+        // settle, so a slow `broker.post` cannot let two cycles run at once and double-nudge.
+        const nudgeCycle = async () => {
+          if (stopping) return;
+          if (!operatorStillValid()) { await revokeOperator(); return; }
+          try {
+            if (isCurrentOperatorInstance(log, instanceId)) {
               for (const idle of dueForNudge(log, nudgeOpts)) {
                 await broker.post({
                   from: OPERATOR, to: idle.address, kind: 'status', body: nudgeBody(idle),
@@ -437,9 +441,11 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
                   meta: { nudge: { idleMs: idle.idleMs } },
                 });
               }
-            } catch (err) { warn(`nudge cycle failed: ${errorMessage(err)}`); }
-          })();
-        }, cycleMs);
+            }
+          } catch (err) { warn(`nudge cycle failed: ${errorMessage(err)}`); }
+          if (!stopping) { nudger = setTimeout(() => void nudgeCycle(), cycleMs); nudger.unref(); }
+        };
+        nudger = setTimeout(() => void nudgeCycle(), cycleMs);
         nudger.unref();
       }
     } else {
@@ -462,7 +468,7 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
     stopping = true;
     if (timer) clearTimeout(timer);
     if (heartbeat) clearInterval(heartbeat);
-    if (nudger) clearInterval(nudger);
+    if (nudger) clearTimeout(nudger);
     try { if (me && pushEnabled) log.unregisterSession(me, instanceId); } catch (err) { warn(`unregister failed: ${errorMessage(err)}`); }
     try { await mcp.close(); } catch (err) { warn(`mcp close failed (transport likely already gone): ${errorMessage(err)}`); }
     try { log.close(); } catch (err) { warn(`log close failed: ${errorMessage(err)}`); }

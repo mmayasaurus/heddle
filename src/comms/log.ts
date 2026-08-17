@@ -8,7 +8,7 @@ import {
   type NewMessage, type Participant, type ParticipantKind, type Tier, type TierDecision,
   type TranscriptQuery, type TranscriptScope,
 } from './types.js';
-import { BROADCAST, canSend, childAddress, parseAddress, requireAddress, type ParsedAddress } from './address.js';
+import { BROADCAST, OPERATOR, canSend, childAddress, parseAddress, requireAddress, type ParsedAddress } from './address.js';
 import { isSealed } from './seal.js';
 
 /**
@@ -422,17 +422,20 @@ export class CommsLog {
   }
 
   /**
-   * When this address was last NUDGED, or null (HED-137).
+   * When the operator's nudger last NUDGED this address, or null (HED-137).
    *
    * The cooldown lives in the log rather than in process memory on purpose: the nudger runs inside
    * a session that can restart, and a cooldown that resets on restart would let a restarted nudger
    * immediately re-nudge everyone it had just nudged.
    */
   lastNudgeAt(address: string): string | null {
+    // Pinned to sender = operator: the nudger posts as the operator (demoted to agent-message), and
+    // keying off `meta.nudge` alone would let any future internal message carrying that key silently
+    // suppress a real nudge.
     const row = this.db.prepare(
-      `SELECT m.ts FROM messages m WHERE m.target = ?
+      `SELECT m.ts FROM messages m WHERE m.target = ? AND m.sender = ?
        AND json_extract(m.meta, '$.nudge') IS NOT NULL ORDER BY m.id DESC LIMIT 1`,
-    ).get(address) as { ts: string } | undefined;
+    ).get(address, OPERATOR) as { ts: string } | undefined;
     return row ? String(row.ts) : null;
   }
 

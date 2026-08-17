@@ -708,10 +708,34 @@ Three decisions worth knowing, because the obvious implementation of each is wro
   the spoofing the tier system exists to prevent. Nudges request `agent-message` explicitly; the
   envelope layer honours an explicit demotion unconditionally.
 
-The cooldown lives in the log (`lastNudgeAt`, from `meta.nudge` on the last message to that
-address), not in process memory, so a nudger that restarts cannot immediately re-nudge everyone it
-had just nudged. Stale sessions drop out with everything else — a dead terminal window is not an
-idle agent, and there is nobody there to read the nudge.
+The cooldown lives in the log (`lastNudgeAt`, from `meta.nudge` on the last **operator-sent** message
+to that address), not in process memory, so a nudger that restarts cannot immediately re-nudge
+everyone it had just nudged. Stale sessions drop out with everything else — a dead terminal window is
+not an idle agent, and there is nobody there to read the nudge.
+
+Details that matter once accounts rotate (HED-68) and more than one operator session can exist:
+
+- **All configured account transcript roots are searched.** A session launched on a rotated Claude
+  account writes under its own `CLAUDE_CONFIG_DIR/projects`, so the nudger reads `~/.claude/projects`
+  plus every `<configDir>/projects` in `~/.heddle/accounts.json`. Searching only the default root
+  would report those sessions permanently idle and nudge them forever. Roots are de-duplicated by
+  real path (an account whose `projects` symlinks to the shared store is not walked twice), and
+  duplicate roots would be harmless anyway — newest-mtime-wins is idempotent to them.
+- **Exactly one process nudges, checked every cycle.** Being an operator session is the static gate;
+  *owning the operator presence row* (`sessions.session_id == this instance`) is the dynamic one. Two
+  operator sessions can share a token and both pass the gate, but the presence row is keyed by
+  address, so the later registrant owns it and the other stands down. The log-based cooldown is the
+  backstop: even a momentary double-owner cannot double-nudge.
+- **The interval is validated.** `HEDDLE_COMMS_NUDGE_MS` is rejected unless finite and positive
+  (a negative value is truthy — it would otherwise clamp the timer to ~1ms *and* mark every session
+  instantly idle) and is floored at 60s.
+- **The cycle never overlaps.** It self-schedules after each run's posts settle, like the delivery
+  pump, so a slow post cannot let two cycles run at once.
+
+Known limitation: an agent running a single tool for longer than the idle threshold has a stale
+transcript mtime and can draw one nudge. The nudge is advisory and rate-limited to one per window, so
+the cost is a single line ("still working") — deliberately preferred over the alternative of reading
+the always-on heartbeat, which would make no one ever look idle.
 
 ## Roadmap
 

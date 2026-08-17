@@ -1,4 +1,4 @@
-import { readdirSync, statSync } from 'node:fs';
+import { readdirSync, realpathSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { OPERATOR } from './address.js';
@@ -17,8 +17,8 @@ import type { CommsLog } from './log.js';
  *    not that the AGENT is working — nudging on it would mean nobody is ever idle. Activity is read
  *    from the session transcript's mtime instead, which only advances when a turn writes.
  * 2. It does not speak with the operator's authority. The loop runs inside the operator's session
- *    (see `shouldRunNudger`), so its posts would otherwise be stamped `operator` — a machine
- *    wearing the human's authority, which is exactly the spoofing the tier system exists to
+ *    (see `isCurrentOperatorInstance`), so its posts would otherwise be stamped `operator` — a
+ *    machine wearing the human's authority, which is exactly the spoofing the tier system exists to
  *    prevent. Nudges request `agent-message` explicitly; the envelope layer honours a demotion
  *    unconditionally.
  */
@@ -27,12 +27,18 @@ import type { CommsLog } from './log.js';
 export const DEFAULT_IDLE_MS = 15 * 60_000;
 /** One nudge per window per agent — a stuck agent gets prodded, not spammed. */
 export const DEFAULT_COOLDOWN_MS = 15 * 60_000;
+/** The nudge cycle can never run faster than this, however `HEDDLE_COMMS_NUDGE_MS` is set. */
+export const MIN_NUDGE_MS = 60_000;
 
 export interface NudgeOptions {
   idleMs?: number;
   cooldownMs?: number;
-  /** Claude Code's projects root; injectable so tests never touch the real one. */
-  projectsDir?: string;
+  /**
+   * Claude transcript roots to search, newest-mtime wins across all of them. Injected in tests;
+   * in production `transcriptRoots()` derives them from the account registry so a session on a
+   * non-default Claude account is not seen as permanently idle.
+   */
+  roots?: string[];
   now?: () => number;
 }
 
@@ -45,28 +51,76 @@ export interface IdleAgent {
   lastNudgeAt: string | null;
 }
 
-const projectsRoot = (o: NudgeOptions): string => o.projectsDir ?? join(homedir(), '.claude', 'projects');
+/**
+ * Parse `HEDDLE_COMMS_NUDGE_MS`, rejecting anything not a finite positive number.
+ *
+ * `Number(x) || fallback` is not enough: a negative string is truthy, Node then clamps the timer to
+ * ~1ms AND a negative threshold makes every session instantly "idle" — a nudge storm from one typo.
+ * A value below the floor is raised to it rather than honoured.
+ */
+export function parseNudgeMs(raw: string | undefined, fallback = DEFAULT_IDLE_MS): number {
+  if (raw === undefined || raw === '') return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return fallback;
+  return Math.max(n, MIN_NUDGE_MS);
+}
 
 /**
- * Newest mtime of `<projects>/<any project>/<sessionId>.jsonl`, or null when absent.
+ * The Claude `projects` roots to search for transcripts, deduplicated by real path.
  *
- * The project directory is derived from the session's cwd, which this module has no way to know,
- * so every project dir is checked. A missing transcript yields null and the caller treats the
- * session as NOT idle — an unknown activity time must never be read as "silent, go prod it".
+ * The default `~/.claude/projects` PLUS `<configDir>/projects` for every account in
+ * `~/.heddle/accounts.json` — sessions launched on a rotated account (HED-68) write under their own
+ * `CLAUDE_CONFIG_DIR`, and searching only the default root would report them permanently idle and
+ * nudge them forever. Dedup by realpath so an account whose `projects` symlinks to the shared store
+ * is not walked twice.
  */
-export function transcriptActivityAt(sessionId: string, opts: NudgeOptions = {}): number | null {
-  const root = projectsRoot(opts);
-  let newest: number | null = null;
-  let dirs: string[];
+export function transcriptRoots(opts: NudgeOptions = {}): string[] {
+  if (opts.roots) return opts.roots;
+  const candidates = [join(homedir(), '.claude', 'projects')];
   try {
-    dirs = readdirSync(root);
+    const reg = JSON.parse(readFileSync(join(homedir(), '.heddle', 'accounts.json'), 'utf8')) as {
+      claude?: { configDir?: string | null }[];
+    };
+    for (const acct of reg.claude ?? []) {
+      if (acct.configDir) candidates.push(join(acct.configDir, 'projects'));
+    }
   } catch {
-    return null; // no projects dir (not a Claude Code host, or a different config dir)
+    // no registry (single-account install): the default root is the whole story
   }
-  for (const dir of dirs) {
+  const seen = new Set<string>();
+  const roots: string[] = [];
+  for (const c of candidates) {
+    let real: string;
+    try { real = realpathSync(c); } catch { continue; } // a configured-but-absent root is skipped
+    if (!seen.has(real)) { seen.add(real); roots.push(real); }
+  }
+  return roots;
+}
+
+/** Every project directory under the given roots, listed ONCE — the per-cycle filesystem cost. */
+export function listProjectDirs(roots: string[]): string[] {
+  const dirs: string[] = [];
+  for (const root of roots) {
+    let entries: string[];
+    try { entries = readdirSync(root); } catch { continue; }
+    for (const e of entries) dirs.push(join(root, e));
+  }
+  return dirs;
+}
+
+/**
+ * Newest mtime of `<projectDir>/<sessionId>.jsonl` across the pre-listed dirs, or null when absent.
+ *
+ * A missing transcript yields null and the caller treats the session as NOT idle — an unknown
+ * activity time must never be read as "silent, go prod it". A stat that fails for any reason other
+ * than absence (a permission problem, say) also yields null, which is the safe direction: uncertain
+ * ⇒ not idle ⇒ no nudge.
+ */
+export function transcriptActivityAt(sessionId: string, projectDirs: string[]): number | null {
+  let newest: number | null = null;
+  for (const dir of projectDirs) {
     try {
-      const st = statSync(join(root, dir, `${sessionId}.jsonl`));
-      const ms = st.mtimeMs;
+      const ms = statSync(join(dir, `${sessionId}.jsonl`)).mtimeMs;
       if (newest === null || ms > newest) newest = ms;
     } catch {
       // not in this project dir — expected for all but one
@@ -78,17 +132,19 @@ export function transcriptActivityAt(sessionId: string, opts: NudgeOptions = {})
 /**
  * Live agent sessions whose transcript has been quiet longer than `idleMs`.
  *
- * The operator is excluded: a human reading their screen is not a stalled agent, and prodding the
- * person who owns the fleet would be both useless and rude.
+ * The operator is excluded: a human reading their screen is not a stalled agent. The project dirs
+ * are listed once here and reused across every session, so a cycle's readdir cost is O(roots), not
+ * O(roots × sessions).
  */
 export function idleAgents(log: CommsLog, opts: NudgeOptions = {}): IdleAgent[] {
   const now = opts.now?.() ?? Date.now();
   const idleMs = opts.idleMs ?? DEFAULT_IDLE_MS;
+  const projectDirs = listProjectDirs(transcriptRoots(opts));
   const out: IdleAgent[] = [];
   for (const session of log.liveSessions()) {
     if (session.address === OPERATOR) continue;
     if (!session.sessionId) continue; // nothing to measure activity against
-    const lastActivityAt = transcriptActivityAt(session.sessionId, opts);
+    const lastActivityAt = transcriptActivityAt(session.sessionId, projectDirs);
     if (lastActivityAt === null) continue; // unknown ≠ idle
     const quiet = now - lastActivityAt;
     if (quiet < idleMs) continue;
@@ -115,13 +171,23 @@ export function dueForNudge(log: CommsLog, opts: NudgeOptions = {}): IdleAgent[]
 }
 
 /**
- * Exactly one nudger may run, or every pushed session nudges every other one. The operator binding
- * is already unique by construction (it needs the token, and workers can never hold it), so it
- * elects the single instance without any leader protocol. Consequence worth knowing: no operator
- * session up means no nudging.
+ * The STATIC gate: only an operator session with push on may host a nudger at all. An ordinary
+ * agent nudging its peers would be noise; a pull-only session has no channel to inject into.
  */
 export function shouldRunNudger(isOperator: boolean, pushEnabled: boolean): boolean {
   return isOperator && pushEnabled;
+}
+
+/**
+ * The DYNAMIC check, run every cycle: is THIS process the current owner of the operator presence
+ * row? Two operator sessions can share a valid token and both pass `shouldRunNudger`, but the
+ * `sessions` row is keyed by address, so the last to register owns it — and `heartbeatSession` only
+ * touches rows matching its own instance, so ownership does not thrash. The non-owner stops
+ * nudging. (The log-based cooldown is the backstop: even a brief double-owner cannot double-nudge,
+ * because the first nudge's `lastNudgeAt` suppresses the second.)
+ */
+export function isCurrentOperatorInstance(log: CommsLog, instanceId: string): boolean {
+  return log.session(OPERATOR)?.sessionId === instanceId;
 }
 
 /** The nudge body. Deliberately tells the agent what to do next, not merely that it stopped. */

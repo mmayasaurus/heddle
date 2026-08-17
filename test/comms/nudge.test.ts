@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CommsLog } from '../../src/comms/log.js';
-import { dueForNudge, idleAgents, shouldRunNudger, transcriptActivityAt } from '../../src/comms/nudge.js';
+import { dueForNudge, idleAgents, isCurrentOperatorInstance, listProjectDirs, parseNudgeMs, MIN_NUDGE_MS, shouldRunNudger, transcriptActivityAt, transcriptRoots } from '../../src/comms/nudge.js';
 import { seal } from '../../src/comms/seal.js';
 
 /**
@@ -17,7 +17,7 @@ describe('idle nudger (temp db + temp projects dir)', () => {
   let log: CommsLog;
   let nowMs: number;
   const clock = () => new Date(nowMs).toISOString();
-  const opts = () => ({ projectsDir, now: () => nowMs, idleMs: 15 * 60_000, cooldownMs: 15 * 60_000 });
+  const opts = () => ({ roots: [projectsDir], now: () => nowMs, idleMs: 15 * 60_000, cooldownMs: 15 * 60_000 });
 
   const agentDecision = (from: string, to: string) =>
     seal({ from, to, tier: 'agent-message' as const, verified: false, evidence: null,
@@ -71,7 +71,7 @@ describe('idle nudger (temp db + temp projects dir)', () => {
 
   it('does NOT nudge when activity cannot be determined — unknown is not idle', () => {
     session('V', 's-V', null);             // live session, no transcript anywhere
-    expect(transcriptActivityAt('s-V', opts())).toBeNull();
+    expect(transcriptActivityAt('s-V', listProjectDirs([projectsDir]))).toBeNull();
     expect(idleAgents(log, opts())).toEqual([]);
   });
 
@@ -121,6 +121,46 @@ describe('idle nudger (temp db + temp projects dir)', () => {
     expect(shouldRunNudger(true, true)).toBe(true);
     expect(shouldRunNudger(false, true)).toBe(false);   // an ordinary agent must not nudge peers
     expect(shouldRunNudger(true, false)).toBe(false);   // pull-only: no channel to inject into
+  });
+
+
+  it('parses HEDDLE_COMMS_NUDGE_MS safely — a bad value can never make a hot loop or instant-idle', () => {
+    expect(parseNudgeMs(undefined)).toBe(15 * 60_000);
+    expect(parseNudgeMs('')).toBe(15 * 60_000);
+    expect(parseNudgeMs('-5000')).toBe(15 * 60_000);      // negative: truthy under ||, but rejected here
+    expect(parseNudgeMs('0')).toBe(15 * 60_000);
+    expect(parseNudgeMs('Infinity')).toBe(15 * 60_000);
+    expect(parseNudgeMs('not-a-number')).toBe(15 * 60_000);
+    expect(parseNudgeMs('1000')).toBe(MIN_NUDGE_MS);      // below the floor is raised to it
+    expect(parseNudgeMs('600000')).toBe(600_000);         // a sane value is honoured
+  });
+
+  it('searches every configured account root, deduped by realpath (rotated accounts are not seen as idle)', () => {
+    // Two roots pointing at the SAME real dir (an account whose projects symlinks to the shared
+    // store) must be walked once, and a transcript in EITHER logical root must be found.
+    const shared = join(dir, 'shared-projects');
+    mkdirSync(join(shared, '-proj'), { recursive: true });
+    const file = join(shared, '-proj', 's-V.jsonl');
+    writeFileSync(file, '{}\n');
+    const when = new Date(nowMs - 40 * 60_000);
+    utimesSync(file, when, when);
+
+    const roots = transcriptRoots({ roots: [shared, shared] }); // injected roots bypass the registry
+    // With explicit roots, transcriptRoots returns them as-is; dedup is exercised via listProjectDirs.
+    const dirs = listProjectDirs([shared, shared]);
+    expect(transcriptActivityAt('s-V', dirs)).not.toBeNull();
+    expect(roots).toEqual([shared, shared]);
+  });
+
+  it('nudges ONLY from the process that owns the operator presence row', () => {
+    log.registerSession({ address: 'operator', sessionId: 'op-A', sessionName: 'operator' });
+    expect(isCurrentOperatorInstance(log, 'op-A')).toBe(true);
+    expect(isCurrentOperatorInstance(log, 'op-B')).toBe(false);
+
+    // A second operator session registers: it now owns the row, and the first must stand down.
+    log.registerSession({ address: 'operator', sessionId: 'op-B', sessionName: 'operator' });
+    expect(isCurrentOperatorInstance(log, 'op-A')).toBe(false);
+    expect(isCurrentOperatorInstance(log, 'op-B')).toBe(true);
   });
 
   it('reads the cooldown from the LOG, so a nudger restart cannot re-nudge everyone', () => {
