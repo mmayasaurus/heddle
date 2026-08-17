@@ -1,4 +1,4 @@
-import { statSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { CommsLog, DEFAULT_COMMS_PATH } from './comms/log.js';
 
 /**
@@ -48,15 +48,15 @@ export function fleetPauseStatus(opts: {
   commsPath?: string;
   logFactory?: (path: string) => Pick<CommsLog, 'fleetPauseInForce' | 'close'>;
 } = {}): FleetPauseStatus {
-  const path = opts.commsPath ?? process.env.HEDDLE_COMMS_DB ?? DEFAULT_COMMS_PATH;
-  // No comms DB → no broker here → nobody can have paused this fleet. An empty file counts as
-  // absent too: the comms server treats a 0-byte HEDDLE_COMMS_DB as a fresh db to initialise (the
-  // SCHEMA exec is idempotent), and a fresh db has no pause rows — so failing open is the same
-  // answer, without the constructor cost (codex-connector).
-  if (!opts.logFactory && path !== ':memory:') {
-    let stat; try { stat = statSync(path); } catch { stat = null; }
-    if (!stat || stat.size === 0) return NOT_PAUSED;
-  }
+  // An EMPTY env value must not select DEFAULT_COMMS_PATH — nullish-coalescing keeps '' (qodo), so
+  // an intentionally-blank HEDDLE_COMMS_DB would otherwise fall through to the real comms.db.
+  const envPath = process.env.HEDDLE_COMMS_DB?.trim();
+  const path = opts.commsPath ?? (envPath || DEFAULT_COMMS_PATH);
+  // Absent file → no broker here → nobody can have paused this fleet. We do NOT shortcut on file
+  // SIZE: SQLite WAL mode can hold real rows (including an active pause) in the -wal sidecar while
+  // the main .db is still tiny, so a size check could fail-open on a LIVE db (gitar). Existence is
+  // safe — a file that does not exist has no pause — and the open below is microseconds.
+  if (!opts.logFactory && path !== ':memory:' && !existsSync(path)) return NOT_PAUSED;
 
   let log: Pick<CommsLog, 'fleetPauseInForce' | 'close'> | null = null;
   try {
