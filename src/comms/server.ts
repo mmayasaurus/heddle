@@ -188,6 +188,47 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
     if (restored) warn(`restored ${restored} held message(s) posted by ${me}`);
   }
 
+
+  /**
+   * Ask the whole fleet to pause and park its work (HED-119). OPERATOR ONLY by design: a
+   * halt-the-fleet signal any agent could raise would be a denial of service on the fleet, and the
+   * only thing that proves "the human" is the token-verified operator binding.
+   */
+  async function requestFleetPause(reason: string | undefined): Promise<ReturnType<typeof text> | ReturnType<typeof errorText>> {
+    const who = requireMe();
+    if (!(isOperator && operatorStillValid())) {
+      return errorText('refused: only the operator can request a fleet pause (bind HEDDLE_COMMS_ROLE=operator + the token)');
+    }
+    const why = reason ?? 'account rotation';
+    const posted = await broker.post({
+      from: who, to: BROADCAST, kind: 'status',
+      body: `FLEET PAUSE REQUESTED — ${why}. Park your work now: commit or push anything uncommitted, stop starting new dispatches, then call ack_pause with work_parked=true. Do not resume until the operator says so.`,
+      // No timestamp in meta: the broker stamps ts on the row, and pause_status reads it back.
+      meta: { fleetPause: { reason: why } },
+    });
+    return text({ ...posted, readiness: pauseReadiness(log, inFlightSource) });
+  }
+
+  /** Answer the operator's pause. `workParked` is the agent's own assertion — see quiesce.ts. */
+  async function ackFleetPause(workParkedArg: unknown, note: string | undefined): Promise<ReturnType<typeof text> | ReturnType<typeof errorText>> {
+    const who = requireMe();
+    const pause = log.latestFleetPause();
+    if (!pause) return errorText('refused: no fleet pause has been requested');
+    if (typeof workParkedArg !== 'boolean') {
+      return errorText('refused: work_parked must be a boolean — say true only once your work is committed or parked');
+    }
+    const workParked = workParkedArg;
+    // Bind the ack to THIS session instance: if the process is replaced under the same address
+    // before rotation, readiness must not honour its predecessor's answer.
+    const ackSessionId = log.session(who)?.sessionId ?? null;
+    const posted = await broker.post({
+      from: who, to: OPERATOR, kind: 'status', replyTo: pause.id,
+      body: note ?? (workParked ? 'paused; work parked' : 'paused; work NOT parked'),
+      meta: { pauseAck: true, workParked, ackSessionId },
+    });
+    return text({ ...posted, pauseId: pause.id, workParked });
+  }
+
   /** The bound identity, re-verified for the operator on every call so a token rotation bites immediately. */
   let revoked = false;
   const operatorStillValid = (): boolean => !isOperator || operatorTokenMatches(env, tokenPath);
@@ -255,41 +296,8 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
         }
         case 'acquire_floor': return text(broker.acquireFloor(requireMe(), requireStr(a.room, 'room'), num(a.lease_ms)));
         case 'release_floor': return text(broker.releaseFloor(requireMe(), requireStr(a.room, 'room')));
-        case 'request_pause': {
-          const who = requireMe();
-          // Operator-only by design: a halt-the-fleet signal any agent could raise would be a
-          // denial-of-service on the whole fleet, and the tier that proves "the human" is the
-          // token-verified operator binding.
-          if (!(isOperator && operatorStillValid())) {
-            return errorText('refused: only the operator can request a fleet pause (bind HEDDLE_COMMS_ROLE=operator + the token)');
-          }
-          const reason = str(a.reason) ?? 'account rotation';
-          const posted = await broker.post({
-            from: who, to: BROADCAST, kind: 'status',
-            body: `FLEET PAUSE REQUESTED — ${reason}. Park your work now: commit or push anything uncommitted, stop starting new dispatches, then call ack_pause with work_parked=true. Do not resume until the operator says so.`,
-            // No timestamp here: the broker stamps ts on the row, and pause_status reads it back.
-            meta: { fleetPause: { reason } },
-          });
-          return text({ ...posted, readiness: pauseReadiness(log, inFlightSource) });
-        }
-        case 'ack_pause': {
-          const who = requireMe();
-          const pause = log.latestFleetPause();
-          if (!pause) return errorText('refused: no fleet pause has been requested');
-          if (typeof a.work_parked !== 'boolean') {
-            return errorText('refused: work_parked must be a boolean — say true only once your work is committed or parked');
-          }
-          const workParked = a.work_parked;
-          // Bind the ack to THIS session instance: if the process is replaced under the same
-          // address before rotation, readiness must not honour its predecessor's answer.
-          const ackSessionId = log.session(who)?.sessionId ?? null;
-          const posted = await broker.post({
-            from: who, to: OPERATOR, kind: 'status', replyTo: pause.id,
-            body: str(a.note) ?? (workParked ? 'paused; work parked' : 'paused; work NOT parked'),
-            meta: { pauseAck: true, workParked, ackSessionId },
-          });
-          return text({ ...posted, pauseId: pause.id, workParked });
-        }
+        case 'request_pause': return requestFleetPause(str(a.reason));
+        case 'ack_pause': return ackFleetPause(a.work_parked, str(a.note));
         case 'pause_status': {
           requireMe();
           const staleMs = num(a.stale_ms);
