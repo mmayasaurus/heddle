@@ -146,7 +146,15 @@ for m in $MERGES; do
   done
 done
 echo "commits in range: $TOTAL_ALL (scanned-volume lower bound: $LOWERBOUND; merge-delta blobs: $DELTA_COUNT)"
-S="${RUNNER_TEMP:-/tmp}/gitleaks-base"; mkdir -p "$S/ignore"
+# mktemp -d, NOT a fixed path — same reasoning as the merge-delta dir below, and
+# the same hole: on a self-hosted runner (or the /tmp fallback) a persisted
+# ${RUNNER_TEMP}/gitleaks-base from an earlier job would supply a STALE
+# .gitleaksignore whenever the current base branch has none, silently suppressing
+# real findings. Caught by codacy on the HED-113 PR after HED-109 fixed only the
+# delta dir. A fresh dir per run cannot inherit another run's suppressions.
+S=$(mktemp -d "${RUNNER_TEMP:-/tmp}/gitleaks-base.XXXXXX") \
+  || { echo "::error::mktemp for the gitleaks suppression dir failed — NOT a clean pass"; exit 1; }
+mkdir -p "$S/ignore"
 if git cat-file -e "$BASE:.gitleaks.toml" 2>/dev/null; then
   git show "$BASE:.gitleaks.toml" > "$S/gitleaks.toml"
   echo "using .gitleaks.toml from the base branch"
