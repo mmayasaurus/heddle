@@ -74,6 +74,9 @@ export interface CommsServer {
 
 const IDENTIFIER = /^[a-z0-9_]+$/;
 
+/** The instruction every resume carries; an operator note is appended to it, never swapped for it. */
+const RESUME_DIRECTIVE = 'FLEET RESUMED — the pause is lifted; carry on.';
+
 /** The operator trust root. Fixed on purpose — no env var may move it (see CommsServerOptions.operatorTokenPath). */
 export const OPERATOR_TOKEN_PATH = join(homedir(), '.heddle', 'operator.token');
 
@@ -209,6 +212,34 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
     return text({ ...posted, readiness: pauseReadiness(log, inFlightSource) });
   }
 
+  /**
+   * Lift the pause in force (HED-134). OPERATOR ONLY, for the same reason as requesting one: if an
+   * agent could lift a pause, it could resume a fleet the human deliberately stopped.
+   */
+  async function resumeFleetPause(note: string | undefined): Promise<ReturnType<typeof text> | ReturnType<typeof errorText>> {
+    const who = requireMe();
+    if (!(isOperator && operatorStillValid())) {
+      return errorText('refused: only the operator can lift a fleet pause (bind HEDDLE_COMMS_ROLE=operator + the token)');
+    }
+    const pause = log.latestFleetPause();
+    if (!pause) return errorText('refused: no fleet pause has been requested');
+    const already = log.fleetPauseResumedAt(pause.id);
+    if (already) return errorText(`refused: that pause was already lifted at ${already}`);
+    // The directive is the point of the broadcast — a note ADDS to it rather than replacing it, so
+    // a resume never reaches the fleet as bare prose with no instruction to carry on.
+    const body = note ? `${RESUME_DIRECTIVE} ${note}` : RESUME_DIRECTIVE;
+    const posted = await broker.post({
+      from: who, to: BROADCAST, kind: 'status', replyTo: pause.id, body,
+      meta: { fleetResume: { pauseId: pause.id } },
+    });
+    // A refused post appends no row, so the pause is still in force: say so instead of reporting a
+    // lift that did not happen (an over-long note or an exhausted rate limit both land here).
+    if (posted.outcome === 'refused') {
+      return errorText(`refused: the resume broadcast was not accepted (${posted.code}) — the pause is STILL in force`);
+    }
+    return text({ ...posted, liftedPauseId: pause.id, readiness: pauseReadiness(log, inFlightSource) });
+  }
+
   /** Answer the operator's pause. `workParked` is the agent's own assertion — see quiesce.ts. */
   async function ackFleetPause(workParkedArg: unknown, note: string | undefined): Promise<ReturnType<typeof text> | ReturnType<typeof errorText>> {
     const who = requireMe();
@@ -298,6 +329,7 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
         case 'release_floor': return text(broker.releaseFloor(requireMe(), requireStr(a.room, 'room')));
         case 'request_pause': return requestFleetPause(str(a.reason));
         case 'ack_pause': return ackFleetPause(a.work_parked, str(a.note));
+        case 'resume_pause': return resumeFleetPause(str(a.note));
         case 'pause_status': {
           requireMe();
           const staleMs = num(a.stale_ms);
@@ -517,6 +549,11 @@ export const TOOLS = [
     name: 'ack_pause',
     description: "Answer the operator's pause request. Set work_parked=true ONLY once your work is committed, pushed, or otherwise safe to lose from memory — the fleet is relaunched once everyone acks, and anything you are still holding goes with it.",
     inputSchema: { type: 'object', properties: { work_parked: { type: 'boolean' }, note: { type: 'string' } }, required: ['work_parked'] },
+  },
+  {
+    name: 'resume_pause',
+    description: 'OPERATOR ONLY. Lift the fleet pause in force — call this after the rotation (or after deciding not to rotate). Until it is called the pause stays in force, and anything gating on it keeps refusing.',
+    inputSchema: { type: 'object', properties: { note: { type: 'string' } } },
   },
   {
     name: 'pause_status',

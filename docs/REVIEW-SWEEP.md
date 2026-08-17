@@ -75,7 +75,7 @@ Read these notices to confirm their status, then move on without treating them a
 
 ## Address every item
 
-For every finding identified across all channels, either fix it or reply with clear technical rationale — and for inline threads (channel c) resolve the thread; issue comments (a) get a fix or a reply; review bodies (b) get a fix or a reply plus a disposition receipt. When disputing automated bot findings, always provide concrete evidence such as a green run link, a documentation quote, or a measured runtime value. Never rubber-stamp and never resolve a thread silently.
+For every finding identified across all channels, either fix it or reply with clear technical rationale — and for inline threads (channel c) resolve the thread; issue comments (a) get a fix or a reply; review bodies (b) get a fix or a reply plus a disposition receipt. When disputing automated bot findings, always provide concrete evidence such as a green run link, a documentation quote, or a measured runtime value. **A negative claim is only as strong as its search boundary** — "this appears nowhere else", "nothing else calls it", "no other path reaches this" only counts if you state the scope you searched, and that scope is wide enough to be worth trusting. A grep over three plausible directories that silently excluded the repo-root config file produced a confidently wrong "the content survives nowhere" during the 2026-08-17 workspace triage; the content was in the root file. State the boundary, or don't make the claim. Never rubber-stamp and never resolve a thread silently.
 
 Bots are frequently wrong. Three real examples from the first CI PRs on the two heddle repos (heddle#2, heddle-dashboard#5) demonstrate valid refutations:
 
@@ -140,7 +140,7 @@ The authoritative wording lives in [CI.md](CI.md#standing-rules-maya-2026-08-15-
 
 - Merge commits only, pinned to the commit you swept: `gh pr merge $N --merge --match-head-commit <swept-sha>` (a push landing between sweep #2 and the merge must not slip through unswept).
 - Never squash, never force-push.
-- Ensure the branch is up to date with the base repository's `main` (merge it into the branch if behind — from a fork that means the base repo's remote, not the fork's `origin/main`). Exception for config-text-only PRs: see `.claude/rules/pr-discipline.md` (a non-overlapping `main` advance does not force a re-merge).
+- Ensure the branch is **not conflicting** — `gh pr view $N --json mergeable` must read `MERGEABLE` (`UNKNOWN` only means GitHub is still computing; poll again). Merge the base repository's `main` into the branch **only** when it reads `CONFLICTING` — from a fork that means the base repo's remote, not the fork's `origin/main`. A branch that is merely **behind** merges as-is, however far behind: being behind is not a defect, and force-marching every PR forward on each `main` advance does not converge on a busy repo (each forward-merge is a new HEAD, restarting CI and the 15-minute sweep clock while `main` moves again). `mergeable` is the decision; `mergeStateStatus` (`BEHIND` / `UNSTABLE` / `CLEAN` / `BLOCKED`) is informational if you want to see *how* far off you are — it is not what the rule keys on. Full rationale, including the measured basis: `.claude/rules/pr-discipline.md` condition 5.
 - PR description body carries `Fixes <ticket>`.
 - Keep the branch after merging (branches are history).
 - Who may merge is a maintainer policy outside this document.

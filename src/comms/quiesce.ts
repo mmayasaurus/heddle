@@ -30,9 +30,11 @@ export interface InFlightSource {
  * as a named blocker rather than silently averaged away.
  */
 export interface PauseReadiness {
-  /** Message id of the pause request in force, or null when the fleet was never asked to pause. */
+  /** Message id of the pause IN FORCE, or null when none is (never requested, or already lifted). */
   pauseId: number | null;
   requestedAt: string | null;
+  /** When the most recent pause was lifted, if it was — `pauseId` is null in that case (HED-134). */
+  resumedAt: string | null;
   reason: string | null;
   /** Live agent addresses owing an ack (the operator is excluded — the human does not ack). */
   live: string[];
@@ -132,12 +134,17 @@ export function pauseReadiness(
   const ledgerConsulted = typeof ledger?.inFlight === 'function';
   const inFlightDispatches = ledgerConsulted ? (ledger as { inFlight: () => unknown[] }).inFlight().length : 0;
 
-  if (!pause) {
+  // A lifted pause is spent, not current: the fleet was paused, served, and resumed. Reporting it
+  // as still in force would make an admission gate refuse dispatches forever after a rotation.
+  const resumedAt = pause ? log.fleetPauseResumedAt(pause.id) : null;
+  if (!pause || resumedAt) {
     return {
-      pauseId: null, requestedAt: null, reason: null,
+      pauseId: null, requestedAt: null, reason: null, resumedAt,
       live, acked: [], pending: live, notParked: [], restarted: [], joinedAfterPause: [],
       inFlightDispatches, ledgerConsulted, ready: false,
-      blockers: ['no pause has been requested — call request_pause first'],
+      blockers: [resumedAt
+        ? `no pause in force — the last one was lifted at ${resumedAt}; call request_pause to start another`
+        : 'no pause has been requested — call request_pause first'],
     };
   }
 
@@ -169,6 +176,7 @@ export function pauseReadiness(
   return {
     pauseId: pause.id,
     requestedAt: pause.ts,
+    resumedAt: null,
     reason: typeof fleetPause?.reason === 'string' ? fleetPause.reason : null,
     live, acked, pending, notParked, restarted, joinedAfterPause,
     inFlightDispatches, ledgerConsulted,

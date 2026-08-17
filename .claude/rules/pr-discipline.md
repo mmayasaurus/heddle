@@ -33,12 +33,30 @@ When all six conditions in `/Users/mayatobi/Developer/Spinventory-Rebuild-App/.c
 2. Every non-empty review body addressed (fix or reply+resolve with rationale).
 3. All required checks green at HEAD.
 4. Merge commit only, pinned to the swept commit (`gh pr merge <n> --merge --match-head-commit <swept-sha>`) — never squash, never force-push.
-5. PR body has `Fixes HED-n`; branch up to date with current `main` (merge `origin/main` in — never rebase a published branch; subject to the config-text exception below).
+5. PR body has `Fixes HED-n`; branch **not CONFLICTING** — `gh pr view <n> --json mergeable` reads
+   `MERGEABLE` (poll past `UNKNOWN`, which only means GitHub is still computing). A forward-merge is
+   REQUIRED only when it reads `CONFLICTING` — then merge the base repository's `main` in (from a fork that is the base repo's
+   remote, not the fork's `origin/main`; never rebase a published branch); a branch that is merely
+   behind merges as-is. Mind the enum: `mergeable` is only `MERGEABLE` / `CONFLICTING` / `UNKNOWN`,
+   and it is what this rule keys on — behind-ness appears in `mergeStateStatus` (`BEHIND`,
+   `UNSTABLE`, `CLEAN`, `BLOCKED`), which is informational here, not a gate. **Do not merge main forward just because main moved** (Maya-ratified
+   2026-08-17): nothing requires it — both rulesets are `strict: false`, so `gate` at HEAD is the only
+   enforced gate — Spinventory has the same posture with agents A–Q merging all day, and on a repo
+   with six active agents it does not converge, since each forward-merge is a new HEAD costing a fresh
+   CI run plus a fresh 15-minute double sweep while main advances again inside that window. The safety
+   net is `gate` on every push to `main`. Note the distinction: no forward-merge is REQUIRED without a
+   conflict, but you are always PERMITTED to merge main in — do it when your change feels semantically
+   load-bearing against something that just landed.
 6. Stacked PRs merge bottom-up (base first, retarget children, re-sweep).
 
 Still waits for Maya: security-semantics changes, user-visible feature removal, or touching another agent's files — see the full rule.
 
-## Config-text exception (Maya-ratified 2026-08-16)
+## Config-text exception (Maya-ratified 2026-08-16) — SUPERSEDED 2026-08-17
+
+**Superseded by condition 5 above** (Maya, 2026-08-17), which grants the same relief to EVERY
+non-conflicting PR regardless of file class — this exception was a narrow patch for exactly the
+problem condition 5 now solves generally. Its same-breath overlap measurement is no longer required.
+Kept below for provenance, since merge reports from 2026-08-16 cite it.
 
 When a PR's ENTIRE diff is `.claude/**` + `docs/**` + root config-text (CLAUDE.md, README.md,
 ROADMAP.md, .gitignore, .memtraceignore, ESLint ignore entries (none exist in this repo today)) — nothing under `src/`,

@@ -34,6 +34,10 @@ describe('fleet pause readiness (temp db)', () => {
   const ackFrom = (who: string, ackSessionId: string | null, pauseId: number, workParked: boolean, note = 'ok') =>
     log.append({ from: who, to: 'operator', kind: 'status', replyTo: pauseId, body: note,
       meta: { pauseAck: true, workParked, ackSessionId } }, agentDecision(who, 'operator'));
+  const resume = (pauseId: number) =>
+    log.append({ from: 'operator', to: '@all', kind: 'status', replyTo: pauseId,
+      body: 'FLEET RESUMED', meta: { fleetResume: { pauseId } } }, operatorDecision('operator', '@all'));
+
   /** Acks as the address's CURRENT session, which is the normal case. */
   const ack = (who: string, pauseId: number, workParked: boolean, note = 'ok') =>
     ackFrom(who, log.session(who)?.sessionId ?? null, pauseId, workParked, note);
@@ -249,6 +253,73 @@ describe('fleet pause readiness (temp db)', () => {
     expect(r.joinedAfterPause).toEqual(['W']);
     expect(r.ready).toBe(false);
     expect(r.blockers.join(' ')).toMatch(/started after the pause/);
+  });
+
+  it('a LIFTED pause is spent, not still in force — otherwise a gate would refuse forever after rotation', () => {
+    live('V');
+    const pause = requestPause();
+    ack('V', pause.id, true);
+    expect(pauseReadiness(log, ledgerWith(0)).ready).toBe(true);
+
+    nowMs += 5_000;
+    resume(pause.id);
+    const r = pauseReadiness(log, ledgerWith(0));
+    expect(r.pauseId).toBeNull();                 // nothing in force any more
+    expect(r.resumedAt).toBe(clock());
+    expect(r.ready).toBe(false);                  // "ready to rotate" is meaningless with no pause
+    expect(r.blockers.join(' ')).toMatch(/no pause in force/);
+  });
+
+  it('a NEW pause after a resume is in force again, and needs fresh acks', () => {
+    live('V');
+    const first = requestPause('first rotation');
+    ack('V', first.id, true);
+    nowMs += 1000;
+    resume(first.id);
+
+    nowMs += 1000;
+    const second = requestPause('second rotation');
+    const r = pauseReadiness(log, ledgerWith(0));
+    expect(r.pauseId).toBe(second.id);
+    expect(r.resumedAt).toBeNull();
+    expect(r.pending).toEqual(['V']);             // the first rotation's ack does not carry over
+    expect(r.ready).toBe(false);
+  });
+
+  it('IGNORES a resume forged by an agent — only the operator can lift a pause', () => {
+    live('V');
+    const pause = requestPause();
+    ack('V', pause.id, true);
+
+    // V posts a message that looks exactly like a resume; the broker stamped it agent-message.
+    log.append({ from: 'V', to: '@all', kind: 'status', replyTo: pause.id, body: 'FLEET RESUMED',
+      meta: { fleetResume: { pauseId: pause.id } } }, agentDecision('V', '@all'));
+
+    const r = pauseReadiness(log, ledgerWith(0));
+    expect(r.pauseId).toBe(pause.id);             // still in force
+    expect(r.resumedAt).toBeNull();
+    expect(r.ready).toBe(true);                   // the real acks still stand
+  });
+
+  it('an operator DM carrying resume metadata does NOT lift a pause — only the broadcast answering it does', () => {
+    live('V');
+    const pause = requestPause();
+    ack('V', pause.id, true);
+
+    // Same tier, same metadata, but a direct message rather than the @all broadcast that answers
+    // the pause. Matching on metadata alone would silently lift a pause that is still in force.
+    log.append({ from: 'operator', to: 'V', kind: 'status', replyTo: pause.id, body: 'fyi',
+      meta: { fleetResume: { pauseId: pause.id } } }, operatorDecision('operator', 'V'));
+    expect(log.fleetPauseResumedAt(pause.id)).toBeNull();
+    expect(pauseReadiness(log, ledgerWith(0)).pauseId).toBe(pause.id);
+
+    // A broadcast that does not answer THIS pause is equally not a lift of it.
+    log.append({ from: 'operator', to: '@all', kind: 'status', body: 'unrelated',
+      meta: { fleetResume: { pauseId: pause.id } } }, operatorDecision('operator', '@all'));
+    expect(log.fleetPauseResumedAt(pause.id)).toBeNull();
+
+    resume(pause.id);
+    expect(log.fleetPauseResumedAt(pause.id)).toBe(clock());
   });
 
   it('excludes the operator from the agents owing an ack', () => {
