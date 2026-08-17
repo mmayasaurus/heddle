@@ -26,10 +26,12 @@ from upstream — one that reproduces on unmodified VelaTerm — should go to up
 
 ## What to expect
 
-heddle is maintained by one person, so please allow a few working days for a first reply. The aim
-is to acknowledge a report within five working days, say whether it is considered a vulnerability
-and why, and keep you informed while a fix is prepared. Once a fix ships, the commit or release
-notes describe the issue, and we are happy to credit you by the name or handle you prefer.
+heddle is maintained by one person alongside other work, so replies here are best effort rather
+than a schedule — expect a first response in days rather than hours. If a week passes with no reply,
+please add a note to the report rather than assuming it was ignored; that is far more likely to be a
+missed notification than a decision. When I do reply I will say whether it is considered a
+vulnerability and why, and keep you posted while a fix is prepared. Once a fix ships, the commit or
+release notes describe the issue, and I am happy to credit you by the name or handle you prefer.
 
 ## Areas worth a closer look
 
