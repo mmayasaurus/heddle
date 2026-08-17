@@ -32,6 +32,15 @@ branch off fresh `origin/main` in the SAME folder. Do not create a new worktree 
    dispatch, not only workers you expect to write files: a "read-only" worker still has a shell,
    and deciding per dispatch which workers are safe is the judgment call this rule exists to
    remove.
+   **Dispatch cwd = YOUR OWN worktree.** Point workers at the worktree you are working in, or at a
+   scratch dir outside any repo for repo-less tasks — never a main checkout, never another agent's
+   worktree (R-codified 2026-08-17 under Maya's every-agent-in-their-own-worktree directive; it had
+   been only the SPEC §5 default plus incident history until V's citation challenge exposed that it
+   was unwritten). A shared checkout exposes whatever untracked files happen to sit there to the
+   worker's shell — which is the same blast radius as the rule above — and it muddles attribution when
+   a worker leaves output behind: a stray `replies-r2.json` in the dashboard root on 2026-08-17 was
+   first attributed to the wrong agent. A cross-repo need means create or reuse YOUR worktree in that
+   repo, not borrow the shared root.
 3. PR → full sweep (see `pr-discipline.md`) → merge promptly. **Branches are kept after merge.**
 4. **Removal (standing authorization, Maya 2026-08-15):** a worktree may be removed WITHOUT a
    further per-item ask only when ALL hold — its branches are fully merged to `origin/main`,
