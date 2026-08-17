@@ -443,6 +443,22 @@ export class CommsLog {
     ).get(BROADCAST, pauseId, pauseId) as { ts: string } | undefined;
     return row ? String(row.ts) : null;
   }
+  /**
+   * The single bit an ADMISSION GATE needs (HED-124): is a fleet pause in force RIGHT NOW? — the
+   * latest operator pause with no matching operator resume. Returns `{ pauseId, reason, requestedAt }`
+   * or null. This is deliberately lighter than `pauseReadiness`, which also computes ack/quiescence
+   * state a rotator needs but an admission gate does not: the gate only asks "should I refuse new
+   * work", and that is exactly `pause AND NOT resumed`.
+   */
+  fleetPauseInForce(): { pauseId: number; reason: string | null; requestedAt: string } | null {
+    const pause = this.latestFleetPause();
+    if (!pause) return null;
+    if (this.fleetPauseResumedAt(pause.id) !== null) return null; // paused then resumed = spent
+    // meta is already a parsed object on MessageRecord; latestFleetPause() guarantees fleetPause exists.
+    const fp = (pause.meta?.fleetPause ?? {}) as { reason?: unknown };
+    const reason = typeof fp.reason === 'string' ? fp.reason : null;
+    return { pauseId: pause.id, reason, requestedAt: pause.ts };
+  }
 
   /**
    * Acks answering a pause request — newest per sender, so a re-ack supersedes (HED-119).
