@@ -62,12 +62,12 @@ as scaffolding underneath a behavioral test; SUPERFICIAL never lands as the *onl
    world looks like when the guard is broken, then name the test that goes red in that world. If you
    cannot name it, the property is unverified no matter how green the run is.
 10. **A harness that invokes the thing differently from production** — a local test rig must invoke the
-   code under test EXACTLY as CI does, byte for byte; otherwise its green is testing a different program.
-   Measured case (HED-113, 2026-08-17): the gitleaks-guard fixture rig ran the script as `sh -e <script>`,
-   supplying the very `-e` flag that the extraction had silently dropped — so 12/12 passed green while the
-   regression was live in the shipped workflow. The rig now invokes it the way the workflow does.
-   Ask of any harness: does it add a flag, an env var, a shell, or a working directory that production
-   does not? Each difference is a class of bug the suite cannot see.
+    code under test EXACTLY as CI does, byte for byte; otherwise its green is testing a different program.
+    Measured case (HED-113, 2026-08-17): the gitleaks-guard fixture rig ran the script as `sh -e <script>`,
+    supplying the very `-e` flag that the extraction had silently dropped — so 12/12 passed green while the
+    regression was live in the shipped workflow. The rig now invokes it the way the workflow does.
+    Ask of any harness: does it add a flag, an env var, a shell, or a working directory that production
+    does not? Each difference is a class of bug the suite cannot see.
 
 ## 3. Before → after — three examples from the dashboard suite
 
