@@ -1,6 +1,7 @@
 import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { join } from 'node:path';
 import { Ledger } from '../src/ledger.js';
+import { useTempResources } from './helpers.js';
 import { ensureBuilt, withTempHome } from './helpers/cli.js';
 import { startMcp, type McpHarness } from './helpers/mcp.js';
 
@@ -20,6 +21,7 @@ function textResult(result: Awaited<ReturnType<McpHarness['callTool']>>): unknow
 
 describe('heddle MCP tools', () => {
   let mcp: McpHarness | undefined;
+  const { trackLedger } = useTempResources('heddle-mcp-tools-test-');
 
   beforeAll(async () => {
     await ensureBuilt();
@@ -39,7 +41,7 @@ describe('heddle MCP tools', () => {
 
   it('returns a seeded dispatch and reports an unknown dispatch as an error', async () => {
     const home = withTempHome();
-    const ledger = new Ledger(join(home, '.heddle', 'ledger.db'));
+    const ledger = trackLedger(new Ledger(join(home, '.heddle', 'ledger.db')));
     const id = ledger.start(dispatchRecord());
     ledger.finish(id, { ok: true, output: 'MCP-visible output' });
     ledger.close();
@@ -57,7 +59,7 @@ describe('heddle MCP tools', () => {
 
   it.each([-100, 1.5])('rejects invalid report_in_session input_tokens (%s) without changing the refusal', async (inputTokens) => {
     const home = withTempHome();
-    const ledger = new Ledger(join(home, '.heddle', 'ledger.db'));
+    const ledger = trackLedger(new Ledger(join(home, '.heddle', 'ledger.db')));
     const id = ledger.refuse(dispatchRecord(), 'claude-in-session', 'run this yourself', 'in-session');
     mcp = await startMcp({ home });
 
@@ -69,7 +71,7 @@ describe('heddle MCP tools', () => {
 
   it('does not report another orchestrator’s in-session handoff', async () => {
     const home = withTempHome();
-    const ledger = new Ledger(join(home, '.heddle', 'ledger.db'));
+    const ledger = trackLedger(new Ledger(join(home, '.heddle', 'ledger.db')));
     const id = ledger.refuse(dispatchRecord('OTHER'), 'claude-in-session', 'run this yourself', 'in-session');
     mcp = await startMcp({ home, env: { HEDDLE_AGENT: 'U' } });
 

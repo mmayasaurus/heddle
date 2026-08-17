@@ -1,7 +1,8 @@
 import { beforeAll, describe, expect, it } from 'vitest';
 import { join } from 'node:path';
 import { Ledger } from '../src/ledger.js';
-import { ensureBuilt, runCli, withTempHome } from './helpers/cli.js';
+import { useTempResources } from './helpers.js';
+import { childEnv, ensureBuilt, runCli, withTempHome } from './helpers/cli.js';
 
 function dispatchRecord(overrides: Partial<Parameters<Ledger['start']>[0]> = {}) {
   return {
@@ -12,6 +13,8 @@ function dispatchRecord(overrides: Partial<Parameters<Ledger['start']>[0]> = {})
 }
 
 describe('heddle ledger CLI', () => {
+  const { trackLedger } = useTempResources('heddle-cli-ledger-test-');
+
   beforeAll(async () => {
     await ensureBuilt();
   }, 120_000);
@@ -22,6 +25,11 @@ describe('heddle ledger CLI', () => {
     expect(result.stdout).toContain('heddle — cross-provider orchestration');
   }, 30_000);
 
+  it('sets every platform home variable to the temporary home', () => {
+    const home = withTempHome();
+    expect(childEnv({ home }).env).toMatchObject({ HOME: home, USERPROFILE: home });
+  });
+
   it('prints usage and exits two for an unknown command', async () => {
     const result = await runCli(['not-a-command']);
     expect(result).toMatchObject({ code: 2, stderr: '' });
@@ -30,7 +38,7 @@ describe('heddle ledger CLI', () => {
 
   it('shows a seeded finished dispatch output', async () => {
     const home = withTempHome();
-    const ledger = new Ledger(join(home, '.heddle', 'ledger.db'));
+    const ledger = trackLedger(new Ledger(join(home, '.heddle', 'ledger.db')));
     const id = ledger.start(dispatchRecord());
     ledger.finish(id, { ok: true, output: 'the recorded worker output' });
     ledger.close();
@@ -49,7 +57,7 @@ describe('heddle ledger CLI', () => {
 
   it('renders a seeded dispatch as JSON', async () => {
     const home = withTempHome();
-    const ledger = new Ledger(join(home, '.heddle', 'ledger.db'));
+    const ledger = trackLedger(new Ledger(join(home, '.heddle', 'ledger.db')));
     const id = ledger.start(dispatchRecord());
     ledger.finish(id, { ok: true, output: 'json output' });
     ledger.close();
@@ -76,7 +84,7 @@ describe('heddle ledger CLI', () => {
 
   it('records an in-session report once and exposes its usage', async () => {
     const home = withTempHome();
-    const ledger = new Ledger(join(home, '.heddle', 'ledger.db'));
+    const ledger = trackLedger(new Ledger(join(home, '.heddle', 'ledger.db')));
     const id = ledger.refuse(dispatchRecord(), 'claude-in-session', 'run this yourself', 'in-session');
     ledger.close();
 

@@ -1,15 +1,13 @@
 import { afterAll, afterEach } from 'vitest';
-import { ChildProcess, execFile, spawn } from 'node:child_process';
-import { readdir, stat } from 'node:fs/promises';
+import { ChildProcess, spawn } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
+import { ensureBuilt, PROJECT_ROOT } from './build.js';
 
-export const PROJECT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
+export { ensureBuilt, PROJECT_ROOT } from './build.js';
 const tempHomes = new Set<string>();
 const children = new Set<ChildProcess>();
-let build: Promise<void> | undefined;
 
 export interface ChildOptions {
   home?: string;
@@ -22,8 +20,9 @@ export interface CliOptions extends ChildOptions {
 
 function cleanEnv(home: string, extra: Record<string, string> = {}): Record<string, string> {
   // Child commands open the default ledger, so inheriting HOME would make a test capable of changing
-  // the operator's real history. Keep the environment deliberately narrow for repeatable results.
-  return { PATH: process.env.PATH ?? '', HOME: home, ...extra };
+  // the operator's real history. USERPROFILE is Windows' home source, so both must point at the
+  // temp home or startup's orphan sweep could mutate the operator's real ledger.
+  return { PATH: process.env.PATH ?? '', HOME: home, USERPROFILE: home, ...extra };
 }
 
 export function withTempHome(): string {
@@ -35,58 +34,6 @@ export function withTempHome(): string {
 export function childEnv(opts: ChildOptions = {}): { home: string; env: Record<string, string> } {
   const home = opts.home ?? withTempHome();
   return { home, env: cleanEnv(home, opts.env) };
-}
-
-async function sourceIsNewerThan(path: string, builtAt: number): Promise<boolean> {
-  for (const entry of await readdir(path, { withFileTypes: true })) {
-    const entryPath = join(path, entry.name);
-    if (entry.isDirectory()) {
-      if (await sourceIsNewerThan(entryPath, builtAt)) return true;
-    } else if (entry.isFile() && entry.name.endsWith('.ts') && (await stat(entryPath)).mtimeMs > builtAt) {
-      return true;
-    }
-  }
-  return false;
-}
-
-async function needsBuild(): Promise<boolean> {
-  const cli = join(PROJECT_ROOT, 'dist', 'cli.js');
-  try {
-    const builtAt = (await stat(cli)).mtimeMs;
-    return sourceIsNewerThan(join(PROJECT_ROOT, 'src'), builtAt);
-  } catch {
-    return true;
-  }
-}
-
-function runTsc(): Promise<void> {
-  const { env } = childEnv();
-  return new Promise((resolveBuild, rejectBuild) => {
-    const child = execFile(
-      process.execPath,
-      [join(PROJECT_ROOT, 'node_modules', 'typescript', 'bin', 'tsc')],
-      { cwd: PROJECT_ROOT, env },
-      (error, stdout, stderr) => {
-        children.delete(child);
-        if (error) {
-          rejectBuild(new Error(
-            `heddle test harness build failed (tsc):\n${stdout}\n${stderr}\n${error.message}`,
-          ));
-          return;
-        }
-        resolveBuild();
-      },
-    );
-    children.add(child);
-  });
-}
-
-export function ensureBuilt(): Promise<void> {
-  // CI executes tests before its build step; checking every source avoids silently exercising an
-  // old dist/ after an entrypoint change, while one promise prevents concurrent test files rebuilding.
-  return (build ??= (async () => {
-    if (await needsBuild()) await runTsc();
-  })());
 }
 
 export async function runCli(
@@ -104,15 +51,19 @@ export async function runCli(
     children.add(child);
     let stdout = '';
     let stderr = '';
+    let settled = false;
+    const finish = (code: number): void => {
+      if (settled) return;
+      settled = true;
+      children.delete(child);
+      resolveRun({ stdout, stderr, code });
+    };
     child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');
     child.stdout.on('data', (chunk: string) => { stdout += chunk; });
     child.stderr.on('data', (chunk: string) => { stderr += chunk; });
-    child.once('error', (error) => { stderr += error.message; });
-    child.once('close', (code) => {
-      children.delete(child);
-      resolveRun({ stdout, stderr, code: code ?? 1 });
-    });
+    child.once('error', (error) => { stderr += error.message; finish(1); });
+    child.once('close', (code) => finish(code ?? 1));
     child.stdin.end(opts.stdin);
   });
 }

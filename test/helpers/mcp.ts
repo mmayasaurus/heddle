@@ -7,10 +7,11 @@ import { childEnv, ensureBuilt, withTempHome, PROJECT_ROOT, type ChildOptions } 
 export interface McpHarness {
   callTool(name: string, args: Record<string, unknown>): Promise<CallToolResult>;
   listTools(): Promise<string[]>;
+  stderr(): string;
   close(): Promise<void>;
 }
 
-export interface McpOptions extends ChildOptions {}
+export type McpOptions = ChildOptions;
 
 const closers = new Set<() => Promise<void>>();
 
@@ -35,6 +36,13 @@ export async function startMcp(opts: McpOptions = {}): Promise<McpHarness> {
     stderr: 'pipe',
   });
   const client = new Client({ name: 'heddle-test-client', version: '0.0.1' });
+  let serverStderr = '';
+  const stderr = transport.stderr;
+  stderr?.on('data', (chunk: Buffer | string) => {
+    // The server logs its orphan sweep to stderr. Drain it to prevent pipe backpressure, while
+    // retaining enough recent context for failures without allowing an unbounded test buffer.
+    serverStderr = `${serverStderr}${chunk.toString()}`.slice(-8 * 1024);
+  });
   let closed = false;
   const close = async (): Promise<void> => {
     if (closed) return;
@@ -64,6 +72,7 @@ export async function startMcp(opts: McpOptions = {}): Promise<McpHarness> {
     async listTools() {
       return (await client.listTools()).tools.map((tool) => tool.name);
     },
+    stderr: () => serverStderr,
     close,
   };
 }
