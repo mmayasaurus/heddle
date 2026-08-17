@@ -26,7 +26,20 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    # NO base-branch filter, and `edited` included — both halves of HED-91,
+    # found live on heddle#9:
+    #   * `branches: [main]` meant a STACKED PR (base = another agent's branch)
+    #     never ran this workflow at all. The required check `gate` was then
+    #     permanently absent, so the PR could not satisfy the ruleset — an
+    #     unrunnable gate, not a failing one.
+    #   * RETARGETING a PR's base (the normal move once the parent merges) fires
+    #     ONLY `pull_request: edited` — no synchronize, no new commit. Without
+    #     `edited` the retargeted PR silently kept the verdict it earned against
+    #     the OLD base, which is a different merge result.
+    # `edited` also fires on title/body edits (reviewer bots edit bodies often),
+    # so those re-run the gate too. That is deliberate — see the note on the job
+    # below for why this workflow does NOT skip them.
+    types: [opened, synchronize, reopened, edited]
   # Break-glass manual run, e.g. to re-check main after a runner-side outage.
   workflow_dispatch: {}
 
@@ -35,13 +48,34 @@ permissions: {}
 # A superseded run is dead weight: cancel it and let the newest commit's run
 # report. The gate is a per-commit required check, so a cancelled stale run
 # never reds the PR verdict — only the latest commit's run counts.
+#
+# TWO SLOTS, measured on heddle#27/#31: commit-driven events (opened,
+# synchronize, reopened) and `edited` events get separate groups. With one
+# shared group a reviewer bot editing the PR body CANCELLED the in-flight real
+# run, and a cancelled required check reds the PR (on the dashboard the
+# always() aggregator saw cancelled needs and published `gate: FAILURE`) until
+# the replacement run finished — thrash, not safety. Separated, an edit still
+# re-runs the gate (nothing is skipped, so no `skipped` check-run can ever
+# supersede a red one) but cannot kill the run that matters.
 concurrency:
-  group: gate-${{ github.event.pull_request.number || github.ref }}
+  group: gate-${{ github.event.pull_request.number || github.ref }}-${{ github.event.action == 'edited' && 'edit' || 'run' }}
   cancel-in-progress: true
 
 jobs:
   gate:
     # Required-check context string — do not rename (see header).
+    #
+    # This job deliberately has NO event guard, even though a PR title/body edit
+    # carries no new commit. Skipping was tried and MEASURED on heddle#30, and
+    # it is unsafe: a skipped job still publishes a check-run under its name,
+    # GitHub's required-check evaluation takes the NEWEST run of a given name,
+    # and it treats `skipped` as passing — so a reviewer bot editing the PR body
+    # would have superseded a RED gate with a passing one. Making the name an
+    # expression avoided that (a skipped job publishes the raw expression text
+    # rather than `gate`, also measured), but left an unreadable check name.
+    # Re-running is the honest option: the run evaluates the same merge ref and
+    # publishes the same verdict it would otherwise have had. Public-repo
+    # runner minutes are free; a maskable required check is not.
     name: gate
     runs-on: ubuntu-24.04
     timeout-minutes: 15
