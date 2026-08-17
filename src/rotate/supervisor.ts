@@ -92,6 +92,30 @@ export interface RotatorDeps {
  * an operational failure — a relaunch/verify problem becomes a `blocked` needs-human, because a
  * half-rotated fleet must surface to the human, not crash the supervisor into an unknown state.
  */
+/**
+ * Kill then relaunch each still-un-moved session onto the target, in order. Stops at the first
+ * failure — a refused kill (the old session may still be live) or a failed relaunch (a half-rotated
+ * fleet) — with a needs-human, never a blind march. Extracted from `tick` so each is one procedure.
+ */
+async function killAndRelaunch(deps: RotatorDeps, members: string[], intent: RotationIntent): Promise<RotatorStep> {
+  for (const address of members) {
+    const k = await deps.killSession(address);
+    if (!k.ok) {
+      // A refused kill means the old session may still be live — relaunching over it would put two
+      // processes on one conversation. Stop before that, don't retry blindly.
+      await deps.needsHuman(`Rotation to ${intent.target} could NOT kill ${address} (${k.code}) — the old session may still be live. Resolve manually, then resume_pause.`);
+      return { phase: 'blocked', reason: `kill of ${address} refused: ${k.code}`, target: intent.target };
+    }
+    const r = await deps.relaunch(address, intent.target);
+    if (!r.ok) {
+      // A half-relaunched fleet is the dangerous state — stop and surface it, never retry blindly.
+      await deps.needsHuman(`Rotation to ${intent.target} FAILED relaunching ${address} (${r.code}). Fleet is half-rotated — resolve manually, then resume_pause.`);
+      return { phase: 'blocked', reason: `relaunch of ${address} failed: ${r.code}`, target: intent.target };
+    }
+  }
+  return { phase: 'relaunching', reason: `killed + relaunched ${members.length} session(s) onto ${intent.target}`, target: intent.target };
+}
+
 export async function tick(deps: RotatorDeps): Promise<RotatorStep> {
   const readiness = deps.readiness();
   const inForce = readiness.pauseId !== null;
@@ -138,22 +162,7 @@ export async function tick(deps: RotatorDeps): Promise<RotatorStep> {
     if (!readiness.ready) {
       return { phase: 'quiescing', reason: 'waiting for the fleet to go quiet', blockers: readiness.blockers };
     }
-    for (const address of sourceRemaining) {
-      const k = await deps.killSession(address);
-      if (!k.ok) {
-        // A refused kill means the old session may still be live — relaunching over it would put
-        // two processes on one conversation. Stop before that, don't retry blindly.
-        await deps.needsHuman(`Rotation to ${intent.target} could NOT kill ${address} (${k.code}) — the old session may still be live. Resolve manually, then resume_pause.`);
-        return { phase: 'blocked', reason: `kill of ${address} refused: ${k.code}`, target: intent.target };
-      }
-      const r = await deps.relaunch(address, intent.target);
-      if (!r.ok) {
-        // A half-relaunched fleet is the dangerous state — stop and surface it, never retry blindly.
-        await deps.needsHuman(`Rotation to ${intent.target} FAILED relaunching ${address} (${r.code}). Fleet is half-rotated — resolve manually, then resume_pause.`);
-        return { phase: 'blocked', reason: `relaunch of ${address} failed: ${r.code}`, target: intent.target };
-      }
-    }
-    return { phase: 'relaunching', reason: `killed + relaunched ${sourceRemaining.length} session(s) onto ${intent.target}`, target: intent.target };
+    return killAndRelaunch(deps, sourceRemaining, intent);
   }
 
   // No roster member left on the old session ⇒ the relaunch is done. VERIFY every roster member is
