@@ -68,9 +68,16 @@ scope creep) — the dispatcher unions it in unconditionally.
 | `worker-role` | all classes | Worker is not a lettered agent. No `lin.sh`, no PR-own, no drive-by fixes. |
 | `code-discovery` | `implementation`, `deep-implementation` (any worker with memtrace attached) | Graph/symbol first; a zero-hit is not "code absent". Blind grep is the failure mode these classes exist to avoid. |
 | `quality-gate` | any class that **edits code** | Forces `npm run gate` / honest verification. Skip on research/docs/second-opinion. |
-| `spinventory-core` | Spinventory UI/product edits | Non-negotiable product rules (scroll, tokens, FormSheet, no copy changes). Irrelevant to heddle-internal or pure-docs tasks. |
+| `worker-hygiene` | **all classes (mandatory)** | Never reset the worktree you were given, verification as its own exit-checked step, never commit unless told, report honestly (incl. what you did NOT do). Every line traces to a real incident. |
+| `repo-heddle-core` / `repo-heddle-dashboard` | work inside that repo | Verified build/test/typecheck invocations, test conventions, worktree layout — so a worker stops re-deriving them. |
+| `family-codex` / `family-gemini` / `family-cursor` / `family-claude` | **auto-injected by target provider** | Per-family instruction style + known failure modes. Never name these yourself: the dispatcher picks the one matching the target, and a caller-supplied family pack is dropped so a fallback cannot carry two styles. |
 | `worktree-discipline` | shared-worktree workers; **required** for race-and-merge | Lane discipline + "report don't fix". Keeps parallel workers from colliding. |
-| `supabase-dev` | DB / migration / edge-function tasks only | Prod is forbidden; schema is frozen without Maya. Do not attach "just in case". |
+
+CONSUMER packs (a project's own conventions — e.g. Spinventory's `spinventory-core`,
+`supabase-dev`) live in that project's repo, not here: put them in `<project>/.heddle/packs` and
+point `HEDDLE_PACKS` at it. It is a colon-separated SEARCH PATH (`;` on Windows) whose entries are
+searched BEFORE heddle's built-ins, which are always searched last — so a consumer gets its own
+packs PLUS the generic ones, and may shadow a built-in by using the same name.
 
 Claude workers get packs via agent-definition frontmatter; Codex/agy/Cursor
 get a temporary `AGENTS.md` block (restored after dispatch).

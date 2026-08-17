@@ -1,6 +1,6 @@
 import { readFileSync, existsSync, writeFileSync, unlinkSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
+import { delimiter, dirname, join } from 'node:path';
 import { withFileLock } from './matlock.js';
 
 /**
@@ -41,8 +41,10 @@ export function builtinPacksDir(): string {
  * e.g. `quality-gate` without forking heddle.
  */
 export function packDirs(): string[] {
+  // node:path's `delimiter` — ':' on POSIX, ';' on Windows. A literal ':' would split a Windows
+  // drive-letter path (C:\project\.heddle\packs) into two invalid directories (PR #34, 5 reviewers).
   const consumer = (process.env.HEDDLE_PACKS ?? '')
-    .split(':').map((d) => d.trim()).filter(Boolean);
+    .split(delimiter).map((d) => d.trim()).filter(Boolean);
   return [...consumer, builtinPacksDir()];
 }
 
@@ -93,6 +95,11 @@ export const MODEL_FAMILY_PACKS: Record<string, string> = {
   cursor: 'family-cursor',
   claude: 'family-claude',
 };
+
+/** Every family pack name — used to keep a caller from pinning a family that contradicts the one
+ *  the dispatcher injects for the target (e.g. an explicit family-codex on a route that falls back
+ *  to cursor would hand the worker two conflicting styles). */
+export const ALL_FAMILY_PACKS: ReadonlySet<string> = new Set(Object.values(MODEL_FAMILY_PACKS));
 
 /** The family pack for a provider, when one exists AND is installed in the active packs dir. */
 export function modelFamilyPack(provider: string): string | null {

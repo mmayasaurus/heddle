@@ -93,9 +93,12 @@ All live-tested this session unless noted. Commits on `main`.
   ledger|usage`, all `--json`. Fallback chains verified (bad primary → fallback ran, both recorded).
 - **SQLite ledger** (`src/ledger.ts`, `node:sqlite`, `~/.heddle/ledger.db`): records decision +
   outcome (provider/model/skills/issue/tokens/duration/success/fell_back_from) per dispatch.
-- **Skill packs** (`skills/`): spinventory-core, quality-gate, worktree-discipline, supabase-dev,
-  code-discovery. Materialized per-dispatch into the worker's `AGENTS.md`, restored after (never
-  leaves a worktree mutated).
+- **Skill packs** (`skills/` + consumer dirs on `HEDDLE_PACKS`): worker-role and worker-hygiene are
+  mandatory on every dispatch; quality-gate, code-discovery, worktree-discipline, adversarial-review
+  and the repo packs are task-fit; the family-* packs are auto-injected from the target provider.
+  A consumer project keeps its own packs in its own repo (`<project>/.heddle/packs`). Materialized
+  per-dispatch into the worker's `AGENTS.md` (Claude: `--append-system-prompt`), restored after —
+  never leaves a worktree mutated.
 - **Worker MCP attachment** (`src/mcp.ts`): memtrace verified working for BOTH codex and cursor
   workers (returned correct symbol paths live); serena verified callable for codex. Codex fix was
   per-server `default_tools_approval_mode="approve"`; cursor needs `--approve-mcps --force`.

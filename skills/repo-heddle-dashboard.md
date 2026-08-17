@@ -1,6 +1,8 @@
 # Heddle Dashboard Repo Skill Pack
 
-Instructions for working inside the `heddle-dashboard` repository (`/Users/mayatobi/Developer/heddle-dashboard`).
+Instructions for working inside the `heddle-dashboard` repository — the Tauri/React dashboard,
+typically checked out as a sibling of `heddle`. Use the path your dispatch gave you; never assume
+an absolute location.
 
 ## Exact Gate Invocations
 - **Web Build**: `pnpm build` (`tsc && vite build`) (`package.json`, `.github/workflows/gate.yml`)

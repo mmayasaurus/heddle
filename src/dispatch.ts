@@ -7,7 +7,23 @@ import {
   loadRouting, resolveRoute, directRoute, providerExecution, structuralCaps,
   type Route, type RouteTarget, type RoutingTable, type StructuralCaps,
 } from './routing.js';
-import { materializeAgentsMd, readPack, withMandatoryPacks, composePacks, modelFamilyPack } from './skillpacks.js';
+import { materializeAgentsMd, readPack, withMandatoryPacks, composePacks, modelFamilyPack, ALL_FAMILY_PACKS } from './skillpacks.js';
+
+/**
+ * The exact pack list a dispatch to `provider` materializes (HED-93). Shared by runTarget AND
+ * planDispatch so refusal instructions and dry runs never advertise a different set than the worker
+ * actually receives (PR #34, four reviewers).
+ *
+ * Caller-supplied family packs are DROPPED: the family pack is chosen from the TARGET, so an
+ * explicit family-codex on a route that falls back to cursor would hand the worker two conflicting
+ * instruction styles. The dispatcher's choice wins.
+ */
+export function packsFor(provider: string, requested: readonly string[]): string[] {
+  const withoutForeignFamilies = requested.filter((p) => !ALL_FAMILY_PACKS.has(p));
+  const base = withMandatoryPacks(withoutForeignFamilies);
+  const family = modelFamilyPack(provider);
+  return family && !base.includes(family) ? [...base, family] : base;
+}
 import { materializeWorkerMcp, validateWorkerMcp, codexMcpFlags, claudeMcpConfigFile } from './mcp.js';
 import { classifyEffort, assessResult, type ResultAssessment } from './classify.js';
 import { pickReviewer, snapshotWorktree, sameSnapshot, diffInstruction, embeddedDiff, normalizeProvider, type ReviewerPick } from './review.js';
@@ -244,14 +260,10 @@ async function runTarget(
   // into whichever applies (see skillpacks.ts) — the ledger records the result, so it is auditable.
   // Review classes: the class packs carry the find-only MANDATE — an explicit skills list may add
   // packs but can never drop them (same posture as the worker-role union).
-  // Model-family prompting pack (HED-93): appended from the TARGET's provider, so the same task
-  // routed to a different family is automatically restyled for it — including on a fallback into
-  // another family. Never caller-named; absent for providers heddle has learned nothing about yet.
-  const family = modelFamilyPack(target.provider);
-  const requested = route.reviewerPool
-    ? withMandatoryPacks([...new Set([...(target.skills ?? []), ...(req.skills ?? [])])])
-    : withMandatoryPacks(req.skills ?? target.skills ?? []);
-  const skills = family && !requested.includes(family) ? [...requested, family] : requested;
+  const asked = route.reviewerPool
+    ? [...new Set([...(target.skills ?? []), ...(req.skills ?? [])])]
+    : (req.skills ?? target.skills ?? []);
+  const skills = packsFor(target.provider, asked);
   const mcp = req.mcp ?? target.mcp ?? [];
 
   // Capabilities are decided per TARGET provider (a fallback may enforce a different set).
@@ -751,7 +763,9 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
   const execution = target.provider === 'claude'
     ? (req.inSession ? 'in-session-subagent' : 'headless')
     : providerExecution(table, target.provider);
-  const skillsForRefusal = withMandatoryPacks(req.skills ?? target.skills ?? []);
+  // Same list the worker would actually get, family pack included — a refusal or dry run that
+  // advertises a different set than runTarget materializes is a lie the operator acts on (PR #34).
+  const skillsForRefusal = packsFor(target.provider, req.skills ?? target.skills ?? []);
 
   // Account (HED-68/78): codex → the CODEX_HOME the caller selected; claude → the registry account
   // with the most 5h headroom (headless worker) — or advice only when the caller wants in-session.
