@@ -294,5 +294,20 @@ server.tool(
   async (a) => text(ledger().recent(a.limit ?? 20, a.issue)),
 );
 
+// Orphan hygiene (HED-90): close provably-dead in-flight rows at start and every 30 minutes —
+// this server is long-lived, and rows orphaned by OTHER processes dying keep appearing while it
+// runs. Best-effort; stderr only (stdout is the MCP protocol), and failures are logged, not
+// swallowed — a broken sweep looks exactly like a healthy empty one otherwise.
+function sweepBestEffort(when: string): void {
+  try {
+    const { closed } = ledger().sweepOrphans();
+    if (closed > 0) console.error(`heddle-mcp: closed ${closed} orphaned in-flight dispatch row(s) (${when})`);
+  } catch (err) {
+    console.error(`heddle-mcp: orphan sweep failed (${when}): ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+sweepBestEffort('startup');
+setInterval(() => sweepBestEffort('periodic'), 30 * 60 * 1000).unref();
+
 const transport = new StdioServerTransport();
 await server.connect(transport);

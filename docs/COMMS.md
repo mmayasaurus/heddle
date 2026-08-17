@@ -45,12 +45,19 @@ Addresses identify senders and receivers. Five forms exist (`src/comms/address.t
 
 ## Schema
 
-The database uses `PRAGMA user_version = 1` (`COMMS_SCHEMA_VERSION`), WAL journal mode,
-`PRAGMA foreign_keys = ON`, and `PRAGMA busy_timeout = 5000` because multiple agent processes
-share the file and write concurrently. On open the constructor READS `user_version` first: `0`
-⇒ fresh file, create schema and stamp the version; equal ⇒ open; anything else ⇒ throw (a newer
-heddle may have migrated the shared file — never relabel it; an older shape needs an explicit
-migration). `PRAGMA user_version` is written only when initialising a fresh database.
+The database uses `PRAGMA user_version = 2` (`COMMS_SCHEMA_VERSION`; v2 added `message_mentions`
+for HED-94), WAL journal mode, `PRAGMA foreign_keys = ON`, and `PRAGMA busy_timeout = 5000`
+because multiple agent processes share the file and write concurrently. On open the constructor
+READS `user_version` first: `0` ⇒ fresh file, create schema and stamp the version; equal ⇒ open;
+a version in `MIGRATABLE_VERSIONS` (today `{1}`) ⇒ apply the schema and re-stamp, in place;
+anything else ⇒ throw (a NEWER heddle may have migrated the shared file — never relabel it).
+
+Upgrading is therefore one-way for older binaries, by design: once a v2 process opens the shared
+file, a pre-v2 heddle refuses it with `comms db … is schema v2; this heddle understands v1 —
+upgrade heddle` rather than reading it half-blind. A process that is ALREADY RUNNING is not
+disturbed — it holds its connection and never re-checks the version, and v2 is purely additive
+(a new table; `messages` is untouched), so old and new binaries coexist on a migrated file until
+the old ones restart. Both properties were verified live on 2026-08-16 when the fleet migrated.
 
 ### `messages` table
 
@@ -535,19 +542,84 @@ refuse a v2 file loudly instead of silently missing targeted posts.
 tools (`post_message`, `check_inbox`, `read_transcript`, rooms, …) with the same identity rules
 (`HEDDLE_AGENT` in the server's env). What they cannot get is **push**: `notifications/claude/channel`
 is a Claude Code channel — other CLIs read their inbox when they want to (`check_inbox`), which
-is the room's pull model anyway. Verified from each CLI's own `--help` on 2026-08-15:
+is the room's pull model anyway. Verified from each CLI's own `--help` on 2026-08-15; the Codex
+path re-verified live on 2026-08-16 (receipt below).
 
-- **Codex CLI**: `codex mcp add heddle-comms --env HEDDLE_AGENT=codex-B -- heddle-comms`
-  (stdio; `--env` sets the server's environment; `codex mcp list` / `remove`).
-- **cursor-agent**: declare the server in `.cursor/mcp.json` (project) or `~/.cursor/mcp.json`
+### Registering the server
+
+Scoping is a decision, not just a command — but the exposure differs per provider, so check the
+adapter before assuming a shared config reaches workers:
+
+- **Codex CLI** — *session-scoped (recommended)*. `-c key=value` overrides config for one
+  invocation only (dotted TOML paths, per `codex --help`):
+
+  ```sh
+  codex exec \
+    -c 'mcp_servers.heddle-comms.command="node"' \
+    -c 'mcp_servers.heddle-comms.args=["/path/to/heddle/dist/comms/channel-server.js"]' \
+    -c 'mcp_servers.heddle-comms.env={HEDDLE_AGENT="codex-B"}' \
+    -c 'mcp_servers.heddle-comms.default_tools_approval_mode="approve"'
+  ```
+
+  Keep the approval line. `codexMcpFlags` (`src/mcp.ts`) sets it for every worker server because
+  headless codex otherwise cancels each tool call with "user cancelled MCP tool call" (no TTY) —
+  see `docs/SPEC.md`. The 2026-08-16 live run below happened to succeed without it on a host whose
+  `~/.codex/config.toml` marks its projects `trust_level = "trusted"`; do not rely on that.
+
+  `heddle-comms` is a package bin (`package.json` → `dist/comms/channel-server.js`), so
+  `command="heddle-comms"` works wherever the package is installed on `PATH`; the explicit path is
+  the portable form when it is not (a plain checkout does not put it on `PATH`).
+
+  `codex mcp add heddle-comms --env HEDDLE_AGENT=codex-B -- heddle-comms` also works and WRITES
+  `~/.codex/config.toml`. That does **not** reach heddle-dispatched codex workers: `CodexAdapter`
+  passes `--ignore-user-config` (`ignoreUserConfig` defaults to true, `src/adapters/codex.ts`), so
+  those workers never read the user config. It does affect every *manual* `codex` invocation, and
+  any adapter constructed with `ignoreUserConfig=false`.
+- **cursor-agent** — declare the server in `.cursor/mcp.json` (project) or `~/.cursor/mcp.json`
+  (global)
   (`{ "mcpServers": { "heddle-comms": { "command": "heddle-comms", "env": { "HEDDLE_AGENT": "…" } } } }`),
   then `agent mcp enable heddle-comms` (approved list); `agent mcp list` / `list-tools heddle-comms`.
-- **agy (Antigravity)**: no MCP flag in `agy --help`; heddle's own worker MCP attachment for agy
-  is unimplemented for the same reason (`.agents/mcp_config.json` schema unverified against the
-  Antigravity docs) — not documented here until verified.
 
-Live verification with a Codex session as orchestrator is pending (HED-72). Identity/env for
-dispatched workers (`HEDDLE_COMMS_ADDRESS`, `HEDDLE_WORKER`) is U's HED-2.
+  **Neither location isolates comms from cursor workers, and the project file is the worse of the
+  two.** `materializeWorkerMcp` writes worker MCP config to exactly `<cwd>/.cursor/mcp.json`
+  (`src/mcp.ts`) and `CursorAdapter` runs each worker with the target project as its cwd
+  (`src/adapters/cursor.ts`), so a cursor worker dispatched into that worktree can inherit the
+  orchestrator's registration — including its fixed `HEDDLE_AGENT` — and workers run with
+  `--approve-mcps --force` when their route requests MCP servers (`src/dispatch.ts`). Register
+  comms for cursor only where you accept that workers in that project may reach it.
+- **agy (Antigravity)** — still NOT documented, and now with evidence rather than absence of it:
+  `agy --help` exposes no MCP or per-invocation config flag (only `--add-dir`, `--agent`,
+  `--project`, …), so any registration would be global and would reach every agy worker. The
+  `mcpServers` map in `~/.gemini/settings.json` belongs to the **Gemini CLI**, not to agy: asked to
+  list its MCP servers on 2026-08-16, agy answered "None" while that file held two. Treat agy as
+  pull-model-capable only once someone confirms a mechanism against Antigravity's own docs.
+
+### Identity binding
+
+The fleet launchers already work. `resolveCommsIdentity` (`src/comms/server.ts`)
+binds the first of `HEDDLE_AGENT`, `FLEET_AGENT`, `HEDDLE_COMMS_ADDRESS` (the worker address), then
+walks parent directories for a `.fleet-agent` file, then stays unbound. The operator identity is
+never bindable this way — it needs `HEDDLE_COMMS_ROLE=operator` plus the token.
+`~/.local/bin/codex-a…e` export
+`FLEET_AGENT=codex-A…E`, so a Codex orchestrator launched that way binds as `codex-A` with no
+change; `HEDDLE_AGENT` wins when both are set and disagree. Verified 2026-08-16 against
+`createCommsServer` for all four combinations (FLEET only → `codex-A`; HEDDLE only → `codex-B`;
+both → `codex-B`; neither → unbound). Do NOT add `HEDDLE_AGENT` to those launchers as duplicate
+config — two identity vars that can drift is worse than one fallback that works.
+
+### Live receipt
+
+2026-08-16, Codex CLI 0.147.0 as orchestrator, against the live `~/.heddle/comms.db`.
+`comms_whoami` bound `codex-B` from the server env; `post_message` → R landed
+`sent / queued-for-channel` then `sent / channel-written` (R's Claude session rendered the channel
+event); replies from R and V to `codex-B` recorded `failed / no-live-session` — correct, because a
+`codex exec` run holds no live session — and `check_inbox` on the next run pulled both. `codex-B`
+auto-registered as `participants(kind=agent)`; every message carried `tier=agent-message`
+(`codex-B` is nobody's child), which is the tier logic being provider-blind. So: push stays
+Claude-only, the ledger says `no-live-session` honestly instead of pretending, and the pull path
+delivers.
+
+Identity/env for dispatched workers (`HEDDLE_COMMS_ADDRESS`, `HEDDLE_WORKER`) is U's HED-2.
 
 ## Roadmap
 
