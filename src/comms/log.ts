@@ -422,6 +422,23 @@ export class CommsLog {
   }
 
   /**
+   * When was this pause LIFTED, or null if it is still in force (HED-134)?
+   *
+   * A resume is an operator-tier message carrying `meta.fleetResume.pauseId`. Same trust story as
+   * the pause itself: the broker stamps the tier, so an agent cannot lift a pause any more than it
+   * can raise one. Without this a pause stayed in force forever — after the rotator relaunched the
+   * fleet, `latestFleetPause` would still return the pause it had already served, and any
+   * admission gate built on it would refuse dispatches indefinitely.
+   */
+  fleetPauseResumedAt(pauseId: number): string | null {
+    const row = this.db.prepare(
+      `SELECT m.ts FROM messages m WHERE m.tier = 'operator'
+       AND json_extract(m.meta, '$.fleetResume.pauseId') = ? ORDER BY m.id ASC LIMIT 1`,
+    ).get(pauseId) as { ts: string } | undefined;
+    return row ? String(row.ts) : null;
+  }
+
+  /**
    * Acks answering a pause request — newest per sender, so a re-ack supersedes (HED-119).
    *
    * `workParked` is the agent's own assertion that it committed or parked its work, not something
