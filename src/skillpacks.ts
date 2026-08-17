@@ -1,6 +1,6 @@
 import { readFileSync, existsSync, writeFileSync, unlinkSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
+import { delimiter, dirname, join } from 'node:path';
 import { withFileLock } from './matlock.js';
 
 /**
@@ -20,14 +20,54 @@ import { withFileLock } from './matlock.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
-export function packsDir(): string {
-  return process.env.HEDDLE_PACKS ?? join(here, '..', 'skills');
+/** heddle's own packs — the generic ones every consumer inherits. */
+export function builtinPacksDir(): string {
+  return join(here, '..', 'skills');
 }
 
+/**
+ * Pack SEARCH PATH, consumer dirs first (HED-33/HED-93).
+ *
+ * `HEDDLE_PACKS` is a colon-separated list of CONSUMER pack directories — a project keeps its own
+ * conventions in its own repo (e.g. `<project>/.heddle/packs`) instead of shipping them inside
+ * heddle. heddle's built-in dir is ALWAYS searched last, so a consumer gets its own packs PLUS the
+ * generic ones (worker-role, worker-hygiene, family-*) rather than replacing them.
+ *
+ * This layering is the whole point: the earlier shape treated HEDDLE_PACKS as a REPLACEMENT, so
+ * pointing it at a consumer dir silently removed the mandatory packs and every dispatch died with
+ * "skill pack not found" (found by pointing it at a real consumer dir, 2026-08-17).
+ *
+ * A consumer pack SHADOWS a built-in of the same name — deliberate, so a project can specialize
+ * e.g. `quality-gate` without forking heddle.
+ */
+export function packDirs(): string[] {
+  // node:path's `delimiter` — ':' on POSIX, ';' on Windows. A literal ':' would split a Windows
+  // drive-letter path (C:\project\.heddle\packs) into two invalid directories (PR #34, 5 reviewers).
+  const consumer = (process.env.HEDDLE_PACKS ?? '')
+    .split(delimiter).map((d) => d.trim()).filter(Boolean);
+  return [...consumer, builtinPacksDir()];
+}
+
+/** First directory on the search path that holds this pack, or null. */
+export function packDirFor(name: string): string | null {
+  return packDirs().find((d) => existsSync(join(d, `${name}.md`))) ?? null;
+}
+
+/** Back-compat: the directory a bare pack lookup starts from. Prefer packDirs(). */
+export function packsDir(): string {
+  return packDirs()[0];
+}
+
+/** Every pack reachable on the search path, consumer packs shadowing built-ins of the same name. */
 export function listPacks(): string[] {
-  const dir = packsDir();
-  if (!existsSync(dir)) return [];
-  return readdirSync(dir).filter((f) => f.endsWith('.md')).map((f) => f.replace(/\.md$/, ''));
+  const seen = new Set<string>();
+  for (const dir of packDirs()) {
+    if (!existsSync(dir)) continue;
+    for (const f of readdirSync(dir)) {
+      if (f.endsWith('.md')) seen.add(f.replace(/\.md$/, ''));
+    }
+  }
+  return [...seen].sort();
 }
 
 /**
@@ -37,7 +77,36 @@ export function listPacks(): string[] {
  * without it a worker may also claim issues / own PRs it must not. Decided 2026-08-15 (Maya via
  * Agent R): an explicit `skills` list ADDS to policy, it never removes worker-role.
  */
-export const MANDATORY_PACKS = ['worker-role'] as const;
+export const MANDATORY_PACKS = ['worker-role', 'worker-hygiene'] as const;
+
+/**
+ * MODEL-FAMILY prompting packs (HED-93, Maya's idea): each provider family responds to a different
+ * instruction STYLE, so routing the same task to a different model should restyle the instructions
+ * automatically rather than making every orchestrator remember the differences. Injected by the
+ * dispatcher from the target's provider — never named by the caller, so a class that falls back to
+ * another family picks up that family's pack on the way.
+ *
+ * A provider with no entry contributes nothing (absence is not an error): heddle only ships a pack
+ * where the fleet has actually learned the family's quirks.
+ */
+export const MODEL_FAMILY_PACKS: Record<string, string> = {
+  codex: 'family-codex',
+  gemini: 'family-gemini',
+  cursor: 'family-cursor',
+  claude: 'family-claude',
+};
+
+/** Every family pack name — used to keep a caller from pinning a family that contradicts the one
+ *  the dispatcher injects for the target (e.g. an explicit family-codex on a route that falls back
+ *  to cursor would hand the worker two conflicting styles). */
+export const ALL_FAMILY_PACKS: ReadonlySet<string> = new Set(Object.values(MODEL_FAMILY_PACKS));
+
+/** The family pack for a provider, when one exists AND is installed in the active packs dir. */
+export function modelFamilyPack(provider: string): string | null {
+  const name = MODEL_FAMILY_PACKS[provider];
+  if (!name) return null;
+  return packDirFor(name) ? name : null;
+}
 
 /**
  * The dispatcher's union rule: mandatory packs first, then the requested packs in their given
@@ -54,11 +123,11 @@ export function withMandatoryPacks(skills: readonly string[] | undefined): strin
 }
 
 export function readPack(name: string): string {
-  const p = join(packsDir(), `${name}.md`);
-  if (!existsSync(p)) {
-    throw new Error(`skill pack "${name}" not found (looked in ${packsDir()})`);
+  const dir = packDirFor(name);
+  if (!dir) {
+    throw new Error(`skill pack "${name}" not found (searched: ${packDirs().join(', ')})`);
   }
-  return readFileSync(p, 'utf8').trim();
+  return readFileSync(join(dir, `${name}.md`), 'utf8').trim();
 }
 
 /**

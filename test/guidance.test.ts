@@ -24,7 +24,7 @@ describe('dispatchGuidance', () => {
     expect(warnings[0].task_class).toBe('edit-with-defaults');
     expect(warnings[0].message).toContain('EDITS CODE');
     expect(warnings[0].message).toContain('quality-gate, code-discovery');
-    expect(warnings[0].message).toContain('[worker-role, quality-gate, code-discovery]');
+    expect(warnings[0].message).toContain('[worker-role, worker-hygiene, quality-gate, code-discovery]');
   });
 
   it('stays silent when an editing class receives its omitted default skills', () => {

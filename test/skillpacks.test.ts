@@ -8,20 +8,20 @@ import type { WorkerAdapter } from '../src/types.js';
 
 describe('skill packs — mandatory union rule', () => {
   it('adds worker-role when skills are omitted or explicitly empty', () => {
-    expect(withMandatoryPacks(undefined)).toEqual(['worker-role']);
-    expect(withMandatoryPacks([])).toEqual(['worker-role']);
+    expect(withMandatoryPacks(undefined)).toEqual(['worker-role', 'worker-hygiene']);
+    expect(withMandatoryPacks([])).toEqual(['worker-role', 'worker-hygiene']);
   });
 
   it('places worker-role first before a requested task-fit pack', () => {
-    expect(withMandatoryPacks(['quality-gate'])).toEqual(['worker-role', 'quality-gate']);
+    expect(withMandatoryPacks(['quality-gate'])).toEqual(['worker-role', 'worker-hygiene', 'quality-gate']);
   });
 
   it('moves a requested worker-role to the front without duplicating it', () => {
-    expect(withMandatoryPacks(['quality-gate', 'worker-role'])).toEqual(['worker-role', 'quality-gate']);
+    expect(withMandatoryPacks(['quality-gate', 'worker-role'])).toEqual(['worker-role', 'worker-hygiene', 'quality-gate']);
   });
 
   it('preserves the first requested occurrence order while de-duplicating packs', () => {
-    expect(withMandatoryPacks(['b', 'a', 'b'])).toEqual(['worker-role', 'b', 'a']);
+    expect(withMandatoryPacks(['b', 'a', 'b'])).toEqual(['worker-role', 'worker-hygiene', 'b', 'a']);
   });
 
   it('does not mutate the caller array while constructing the mandatory union', () => {
@@ -31,7 +31,7 @@ describe('skill packs — mandatory union rule', () => {
   });
 
   it('declares worker-role as the mandatory pack and ships a file for every mandatory pack', () => {
-    expect(MANDATORY_PACKS).toEqual(['worker-role']);
+    expect(MANDATORY_PACKS).toEqual(['worker-role', 'worker-hygiene']);
     const packs = listPacks();
     for (const mandatory of MANDATORY_PACKS) expect(packs).toContain(mandatory);
   });
@@ -56,10 +56,10 @@ describe('dispatch — mandatory skill materialization', () => {
     expect(fake.calls[0].agents).toContain('### quality-gate');
     expect(existsSync(join(cwd, 'AGENTS.md'))).toBe(false);
     const [row] = ledger.recent(1);
-    expect(row.skills).toBe('worker-role,quality-gate');
+    expect(row.skills).toBe('worker-role,worker-hygiene,quality-gate,family-codex');
     expect(row.task_class).toBe('direct:codex/gpt-5.6-luna');
     expect(row.ok).toBe(1);
-    expect(outcome.skills).toEqual(['worker-role', 'quality-gate']);
+    expect(outcome.skills).toEqual(['worker-role', 'worker-hygiene', 'quality-gate', 'family-codex']);
   });
 
   it('unions worker-role into routing defaults before materializing a bulk-mechanical dispatch', async () => {
@@ -73,7 +73,7 @@ describe('dispatch — mandatory skill materialization', () => {
     expect(fake.calls[0].agents).toContain('### worker-role');
     expect(fake.calls[0].agents).toContain('### quality-gate');
     const [row] = ledger.recent(1);
-    expect(row.skills).toBe('worker-role,quality-gate');
+    expect(row.skills).toBe('worker-role,worker-hygiene,quality-gate,family-codex');
     expect(row.task_class).toBe('bulk-mechanical');
   });
 });
@@ -102,7 +102,7 @@ describe('dispatch — fallback carries the class packs', () => {
     expect(calls[1].agents).toContain('### quality-gate');
     expect(calls[1].agents).toContain('### worker-role');
     expect(outcome.usedFallback).toBe(true);
-    expect(outcome.skills).toEqual(['worker-role', 'quality-gate']);
-    expect(ledger.recent(2)[0]).toMatchObject({ fell_back_from: 'codex/gpt-5.6-luna', skills: 'worker-role,quality-gate' });
+    expect(outcome.skills).toEqual(['worker-role', 'worker-hygiene', 'quality-gate', 'family-cursor']);
+    expect(ledger.recent(2)[0]).toMatchObject({ fell_back_from: 'codex/gpt-5.6-luna', skills: 'worker-role,worker-hygiene,quality-gate,family-cursor' });
   });
 });
