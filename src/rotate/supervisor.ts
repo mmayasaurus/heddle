@@ -58,8 +58,15 @@ export interface RotatorDeps {
   pauseIntent(): RotationIntent | null;
   /** Live agent addresses (fleet sessions), operator excluded. */
   liveAddresses(): string[];
-  /** Which account a live session is currently running on, or null if unknown. */
-  accountOf(address: string): string | null;
+  /**
+   * Has the live session at `address` already been relaunched onto the target this rotation?
+   *
+   * The prod adapter derives this durably from process start time vs the pause time (a session
+   * whose procStart post-dates the in-force pause is the post-rotation one), NOT from a per-session
+   * account lookup — which the session registry does not carry. Crash-safe: it reads the same two
+   * durable facts (the registry's procStart, the pause's timestamp) on every tick and after a restart.
+   */
+  isRelaunched(address: string): boolean;
 
   /** OPERATOR-tier broadcast that begins a rotation; stamps `intent` into the pause meta. */
   requestPause(reason: string, intent: RotationIntent): void;
@@ -68,10 +75,12 @@ export interface RotatorDeps {
   /**
    * Terminate one old session AND remove its presence row, so it immediately leaves the live set.
    * Irreversible — only called after readiness.ready. Un-registering here (not waiting for the
-   * heartbeat to go stale) is what makes a re-entrant tick act only on sessions STILL on the source
-   * account, never re-killing one it already moved.
+   * heartbeat to go stale) is what makes a re-entrant tick act only on sessions STILL un-moved,
+   * never re-killing one it already moved. Returns an outcome: a REFUSED kill (fleet-kill exit 2 —
+   * ambiguous pid) must stop the rotation, because relaunching over a still-live old session would
+   * put two processes on one conversation. "Already dead" (exit 3) is `ok` — idempotent.
    */
-  killSession(address: string): Promise<void>;
+  killSession(address: string): Promise<{ ok: boolean; code: string }>;
   /** Launch one session on `account` (R's fleet-relaunch.sh). Returns its exit outcome. */
   relaunch(address: string, account: string): Promise<{ ok: boolean; code: string }>;
   /** Post a needs-human to the operator (rotation cannot proceed unattended). */
@@ -117,10 +126,11 @@ export async function tick(deps: RotatorDeps): Promise<RotatorStep> {
   }
 
   const live = deps.liveAddresses();
-  // Roster members STILL running on the source account. killSession unregisters, so a member we
-  // already moved is not live here — a re-entrant tick relaunches only what is genuinely un-moved,
+  // Roster members STILL on the OLD (source) session: live, and not yet relaunched. killSession
+  // unregisters, so a member we already moved is not live here — and isRelaunched excludes any that
+  // came back post-pause. A re-entrant tick therefore relaunches only what is genuinely un-moved,
   // never re-killing progress made before a crash or in an earlier tick.
-  const sourceRemaining = intent.roster.filter((a) => live.includes(a) && deps.accountOf(a) === intent.from);
+  const sourceRemaining = intent.roster.filter((a) => live.includes(a) && !deps.isRelaunched(a));
 
   if (sourceRemaining.length > 0) {
     // Not yet (fully) relaunched. Hold until the fleet is genuinely quiet, THEN do the irreversible
@@ -129,7 +139,13 @@ export async function tick(deps: RotatorDeps): Promise<RotatorStep> {
       return { phase: 'quiescing', reason: 'waiting for the fleet to go quiet', blockers: readiness.blockers };
     }
     for (const address of sourceRemaining) {
-      await deps.killSession(address);
+      const k = await deps.killSession(address);
+      if (!k.ok) {
+        // A refused kill means the old session may still be live — relaunching over it would put
+        // two processes on one conversation. Stop before that, don't retry blindly.
+        deps.needsHuman(`Rotation to ${intent.target} could NOT kill ${address} (${k.code}) — the old session may still be live. Resolve manually, then resume_pause.`);
+        return { phase: 'blocked', reason: `kill of ${address} refused: ${k.code}`, target: intent.target };
+      }
       const r = await deps.relaunch(address, intent.target);
       if (!r.ok) {
         // A half-relaunched fleet is the dangerous state — stop and surface it, never retry blindly.
@@ -140,10 +156,10 @@ export async function tick(deps: RotatorDeps): Promise<RotatorStep> {
     return { phase: 'relaunching', reason: `killed + relaunched ${sourceRemaining.length} session(s) onto ${intent.target}`, target: intent.target };
   }
 
-  // No roster member left on the source account ⇒ the relaunch is done. VERIFY every roster member
-  // is live again on the target before lifting the pause — a session that never came back is a
-  // needs-human, not a silent drop.
-  const pending = intent.roster.filter((a) => !(live.includes(a) && deps.accountOf(a) === intent.target));
+  // No roster member left on the old session ⇒ the relaunch is done. VERIFY every roster member is
+  // live again as its NEW (relaunched) session before lifting the pause — a session that never came
+  // back is a needs-human, not a silent drop.
+  const pending = intent.roster.filter((a) => !(live.includes(a) && deps.isRelaunched(a)));
   if (pending.length > 0) {
     return { phase: 'verifying', reason: `waiting for ${pending.join(', ')} to re-register on ${intent.target}`, pending };
   }

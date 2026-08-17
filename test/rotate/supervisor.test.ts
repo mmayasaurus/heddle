@@ -21,9 +21,10 @@ describe('rotator supervisor tick', () => {
     readinessLive: string[] = [];
     blockers: string[] = [];
     live: string[] = [];
-    account = new Map<string, string>();
+    relaunched_set = new Set<string>();  // addresses whose live session is the post-rotation one
     decision: RotateAction = { action: 'idle', current: 'acct1', usedPct: 10, reason: 'idle' };
     relaunchOk: (address: string) => { ok: boolean; code: string } = () => ({ ok: true, code: 'launched' });
+    killOk: (address: string) => { ok: boolean; code: string } = () => ({ ok: true, code: 'killed' });
     // recorders
     killed: string[] = [];
     relaunched: { address: string; account: string }[] = [];
@@ -43,24 +44,23 @@ describe('rotator supervisor tick', () => {
     readiness: () => readinessOf(w),
     pauseIntent: () => w.intent,
     liveAddresses: () => [...w.live],
-    accountOf: (a) => w.account.get(a) ?? null,
+    isRelaunched: (a) => w.relaunched_set.has(a),
     requestPause: (reason, intent) => { w.paused.push({ reason, intent }); w.pauseId = 1; w.intent = intent; },
     resumePause: (reason) => { w.resumed.push(reason); w.pauseId = null; w.intent = null; },
-    killSession: async (a) => { w.killed.push(a); w.live = w.live.filter((x) => x !== a); w.account.delete(a); },
+    killSession: async (a) => { w.killed.push(a); const r = w.killOk(a); if (r.ok) { w.live = w.live.filter((x) => x !== a); w.relaunched_set.delete(a); } return r; },
     relaunch: async (a, account) => {
       const r = w.relaunchOk(a);
       w.relaunched.push({ address: a, account });
-      if (r.ok) { w.live.push(a); w.account.set(a, account); }
+      if (r.ok) { w.live.push(a); w.relaunched_set.add(a); }
       return r;
     },
     needsHuman: (m) => w.needsHumanMsgs.push(m),
   });
 
   /** A world with a fleet of `addrs` all live on the source account and NO pause in force. */
-  const fleetOn = (source: string, ...addrs: string[]): World => {
+  const fleetOn = (_source: string, ...addrs: string[]): World => {
     const w = new World();
-    w.live = [...addrs];
-    for (const a of addrs) w.account.set(a, source);
+    w.live = [...addrs];        // all live on the old (source) session; none relaunched yet
     return w;
   };
 
@@ -134,12 +134,23 @@ describe('rotator supervisor tick', () => {
     expect(w.killed).not.toContain('V');
   });
 
+  it('a REFUSED kill (ambiguous pid) stops before relaunch — never two processes on one conversation', async () => {
+    w.pauseId = 1;
+    w.intent = { target: 'acct2', from: 'acct1', roster: ['R', 'S', 'V'] };
+    w.ready = true;
+    w.killOk = (a) => (a === 'R' ? { ok: false, code: 'exit-2' } : { ok: true, code: 'killed' });
+    const step = await tick(deps(w));
+    expect(step.phase).toBe('blocked');
+    expect(w.needsHumanMsgs.join(' ')).toMatch(/could NOT kill R/);
+    expect(w.relaunched).toEqual([]); // never relaunched over a possibly-live old session
+  });
+
   it('VERIFY: relaunched but not all roster back on target yet → waits, does not resume', async () => {
     w.pauseId = 1;
     w.intent = { target: 'acct2', from: 'acct1', roster: ['R', 'S', 'V'] };
     w.ready = true;
-    // R and S came back on acct2; V has not re-registered yet (not live).
-    w.live = ['R', 'S']; w.account = new Map([['R', 'acct2'], ['S', 'acct2']]);
+    // R and S came back relaunched; V has not re-registered yet (not live).
+    w.live = ['R', 'S']; w.relaunched_set = new Set(['R', 'S']);
     const step = await tick(deps(w));
     expect(step.phase).toBe('verifying');
     expect(w.resumed).toEqual([]);
@@ -149,7 +160,7 @@ describe('rotator supervisor tick', () => {
     w.pauseId = 1;
     w.intent = { target: 'acct2', from: 'acct1', roster: ['R', 'S', 'V'] };
     w.ready = true;
-    w.live = ['R', 'S', 'V']; w.account = new Map([['R', 'acct2'], ['S', 'acct2'], ['V', 'acct2']]);
+    w.live = ['R', 'S', 'V']; w.relaunched_set = new Set(['R', 'S', 'V']);
     const step = await tick(deps(w));
     expect(step.phase).toBe('resumed');
     expect(w.resumed).toHaveLength(1);
@@ -163,7 +174,7 @@ describe('rotator supervisor tick', () => {
     w.intent = { target: 'acct2', from: 'acct1', roster: ['R', 'S', 'V'] };
     w.ready = true;
     w.live = ['R', 'S', 'V'];
-    w.account = new Map([['R', 'acct2'], ['S', 'acct1'], ['V', 'acct1']]); // R already moved
+    w.relaunched_set = new Set(['R']); // R already relaunched; S,V still the old sessions
     const step = await tick(deps(w));
     expect(step.phase).toBe('relaunching');
     expect(w.killed.sort()).toEqual(['S', 'V']);   // R is NOT re-killed
