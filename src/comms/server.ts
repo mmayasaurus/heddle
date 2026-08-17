@@ -74,6 +74,9 @@ export interface CommsServer {
 
 const IDENTIFIER = /^[a-z0-9_]+$/;
 
+/** The instruction every resume carries; an operator note is appended to it, never swapped for it. */
+const RESUME_DIRECTIVE = 'FLEET RESUMED — the pause is lifted; carry on.';
+
 /** The operator trust root. Fixed on purpose — no env var may move it (see CommsServerOptions.operatorTokenPath). */
 export const OPERATOR_TOKEN_PATH = join(homedir(), '.heddle', 'operator.token');
 
@@ -222,11 +225,18 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
     if (!pause) return errorText('refused: no fleet pause has been requested');
     const already = log.fleetPauseResumedAt(pause.id);
     if (already) return errorText(`refused: that pause was already lifted at ${already}`);
+    // The directive is the point of the broadcast — a note ADDS to it rather than replacing it, so
+    // a resume never reaches the fleet as bare prose with no instruction to carry on.
+    const body = note ? `${RESUME_DIRECTIVE} ${note}` : RESUME_DIRECTIVE;
     const posted = await broker.post({
-      from: who, to: BROADCAST, kind: 'status', replyTo: pause.id,
-      body: note ?? 'FLEET RESUMED — the pause is lifted; carry on.',
+      from: who, to: BROADCAST, kind: 'status', replyTo: pause.id, body,
       meta: { fleetResume: { pauseId: pause.id } },
     });
+    // A refused post appends no row, so the pause is still in force: say so instead of reporting a
+    // lift that did not happen (an over-long note or an exhausted rate limit both land here).
+    if (posted.outcome === 'refused') {
+      return errorText(`refused: the resume broadcast was not accepted (${posted.code}) — the pause is STILL in force`);
+    }
     return text({ ...posted, liftedPauseId: pause.id, readiness: pauseReadiness(log, inFlightSource) });
   }
 

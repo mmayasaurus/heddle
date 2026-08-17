@@ -424,17 +424,23 @@ export class CommsLog {
   /**
    * When was this pause LIFTED, or null if it is still in force (HED-134)?
    *
-   * A resume is an operator-tier message carrying `meta.fleetResume.pauseId`. Same trust story as
-   * the pause itself: the broker stamps the tier, so an agent cannot lift a pause any more than it
-   * can raise one. Without this a pause stayed in force forever — after the rotator relaunched the
-   * fleet, `latestFleetPause` would still return the pause it had already served, and any
-   * admission gate built on it would refuse dispatches indefinitely.
+   * A resume is the operator's BROADCAST answering the pause it lifts: operator tier, target
+   * `@all`, `reply_to` the pause, carrying `meta.fleetResume.pauseId`. Every one of those is
+   * required — matching on the metadata alone would let an unrelated operator message (a DM, a
+   * different pause's resume) silently lift a pause that is still in force. The shape mirrors
+   * `latestFleetPause`, which likewise pins the target, so the pair cannot drift apart.
+   *
+   * The tier is the trust story: the broker stamps it and a sender can never request it, so an
+   * agent cannot lift a pause any more than it can raise one. Without a lift at all, a pause stayed
+   * in force forever — after the rotator relaunched the fleet `latestFleetPause` would still return
+   * the pause it had already served, and an admission gate built on it would refuse dispatches
+   * indefinitely.
    */
   fleetPauseResumedAt(pauseId: number): string | null {
     const row = this.db.prepare(
-      `SELECT m.ts FROM messages m WHERE m.tier = 'operator'
+      `SELECT m.ts FROM messages m WHERE m.tier = 'operator' AND m.target = ? AND m.reply_to = ?
        AND json_extract(m.meta, '$.fleetResume.pauseId') = ? ORDER BY m.id ASC LIMIT 1`,
-    ).get(pauseId) as { ts: string } | undefined;
+    ).get(BROADCAST, pauseId, pauseId) as { ts: string } | undefined;
     return row ? String(row.ts) : null;
   }
 

@@ -301,6 +301,27 @@ describe('fleet pause readiness (temp db)', () => {
     expect(r.ready).toBe(true);                   // the real acks still stand
   });
 
+  it('an operator DM carrying resume metadata does NOT lift a pause — only the broadcast answering it does', () => {
+    live('V');
+    const pause = requestPause();
+    ack('V', pause.id, true);
+
+    // Same tier, same metadata, but a direct message rather than the @all broadcast that answers
+    // the pause. Matching on metadata alone would silently lift a pause that is still in force.
+    log.append({ from: 'operator', to: 'V', kind: 'status', replyTo: pause.id, body: 'fyi',
+      meta: { fleetResume: { pauseId: pause.id } } }, operatorDecision('operator', 'V'));
+    expect(log.fleetPauseResumedAt(pause.id)).toBeNull();
+    expect(pauseReadiness(log, ledgerWith(0)).pauseId).toBe(pause.id);
+
+    // A broadcast that does not answer THIS pause is equally not a lift of it.
+    log.append({ from: 'operator', to: '@all', kind: 'status', body: 'unrelated',
+      meta: { fleetResume: { pauseId: pause.id } } }, operatorDecision('operator', '@all'));
+    expect(log.fleetPauseResumedAt(pause.id)).toBeNull();
+
+    resume(pause.id);
+    expect(log.fleetPauseResumedAt(pause.id)).toBe(clock());
+  });
+
   it('excludes the operator from the agents owing an ack', () => {
     live('V');
     log.registerSession({ address: 'operator', sessionId: 's-op', sessionName: 'operator' });
