@@ -50,8 +50,11 @@ Execute in order. Do not skip a step because you believe it is empty — verify 
 ## 4. Linear reflects reality
 
 8. Issues you finished: `LIN_TEAM=HED lin.sh resolve HED-n "<what landed + merge sha + what was NOT done>"`.
-9. Issues you claimed but did not start: say so on the ticket, or release the claim. A claim nobody is
-   working is worse than an unclaimed issue, because it looks handled.
+9. Issues you claimed but are not finishing — whether unstarted OR started and being handed off:
+   release the claim (`LIN_TEAM=HED lin.sh unclaim HED-n`) or, if a specific teammate is taking it,
+   name them on the ticket. Same reasoning as releasing a PR you won't drive (step 7): a claim on an
+   absent agent looks handled and strands the work; "I started it" is not a reason to keep the claim
+   while walking away from it.
 10. Anything you discovered but did not fix: file it (`LIN_TEAM=HED lin.sh create …`) before you forget
     it. A finding that lives only in a session transcript is lost at compaction.
 
