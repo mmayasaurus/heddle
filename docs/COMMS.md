@@ -655,9 +655,24 @@ either way. A re-ack supersedes the previous one, so an agent can ack `false`, c
 `true` without the operator chasing it.
 
 **`ledgerConsulted`** distinguishes "no dispatches are running" from "no ledger was available to
-ask". A rotator must never read a zero out of an absent ledger as permission to relaunch. Stale
-sessions (heartbeat older than `stale_ms`) drop out of `live`, so one dead terminal window cannot
-block a rotation forever.
+ask", and an unverifiable dispatch status is itself a blocker — `ready` is never true on an
+unconsulted ledger, because a rotator must not read a zero out of an absent ledger as permission to
+relaunch.
+
+**Acks are bound to a session instance**, not just an address. If a process is replaced under the
+same address after acking, it never answered the current pause, so its predecessor's ack does not
+carry over — the address reappears in `pending` and is named in `restarted`.
+
+Stale sessions (heartbeat older than `stale_ms`) drop out of `live`, so one dead terminal cannot
+block a rotation forever — and that applies to `notParked` too: a dead session's "not parked" is
+not something anyone can clear. `stale_ms` is **clamped to at least the broker default**: widening
+the window only makes more agents owe an ack, but shrinking it could age live agents out and
+manufacture `ready: true` from a fleet that never answered.
+
+`joinedAfterPause` names sessions that started after the broadcast. The inbound pump starts a
+first-time session at the current tail, so such a session may never have been shown the pause; it
+is named (and blocks) rather than being silently blamed for ignoring the operator. Re-issue
+`request_pause` to include it.
 
 No schema change was needed: a pause is an ordinary message, an ack is an ordinary reply, and the
 protocol is a query over both.

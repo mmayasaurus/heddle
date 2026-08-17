@@ -216,6 +216,11 @@ export interface FleetPauseAck {
   at: string;
   /** The agent's OWN assertion that its work is committed or parked — unverifiable by the broker. */
   workParked: boolean;
+  /**
+   * The session instance that acked. Readiness compares it with the address's CURRENT session, so a
+   * process replaced under the same address after acking does not inherit the old answer.
+   */
+  sessionId: string | null;
   note: string | null;
 }
 
@@ -425,18 +430,20 @@ export class CommsLog {
    */
   fleetPauseAcks(pauseId: number): FleetPauseAck[] {
     const rows = this.db.prepare(
-      `SELECT m.sender, m.id, m.ts, json_extract(m.meta, '$.workParked') AS parked, m.body
+      `SELECT m.sender, m.id, m.ts, json_extract(m.meta, '$.workParked') AS parked,
+              json_extract(m.meta, '$.ackSessionId') AS ack_session, m.body
        FROM messages m WHERE m.reply_to = ? AND json_extract(m.meta, '$.pauseAck') IS NOT NULL
        AND m.id = (SELECT MAX(i.id) FROM messages i WHERE i.sender = m.sender
                    AND i.reply_to = m.reply_to AND json_extract(i.meta, '$.pauseAck') IS NOT NULL)
        ORDER BY m.id ASC`,
-    ).all(pauseId) as { sender: string; id: number; ts: string; parked: unknown; body: string }[];
+    ).all(pauseId) as { sender: string; id: number; ts: string; parked: unknown; ack_session: unknown; body: string }[];
     return rows.map((r) => ({
       sender: String(r.sender),
       messageId: Number(r.id),
       at: String(r.ts),
       // json_extract yields 1/0 for booleans; anything not truthy is "not parked".
       workParked: r.parked === 1 || r.parked === true || r.parked === 'true',
+      sessionId: r.ack_session == null ? null : String(r.ack_session),
       note: r.body ? String(r.body) : null,
     }));
   }

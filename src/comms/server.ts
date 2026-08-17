@@ -264,7 +264,7 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
             return errorText('refused: only the operator can request a fleet pause (bind HEDDLE_COMMS_ROLE=operator + the token)');
           }
           const reason = str(a.reason) ?? 'account rotation';
-          const posted = broker.post({
+          const posted = await broker.post({
             from: who, to: BROADCAST, kind: 'status',
             body: `FLEET PAUSE REQUESTED — ${reason}. Park your work now: commit or push anything uncommitted, stop starting new dispatches, then call ack_pause with work_parked=true. Do not resume until the operator says so.`,
             // No timestamp here: the broker stamps ts on the row, and pause_status reads it back.
@@ -276,15 +276,21 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
           const who = requireMe();
           const pause = log.latestFleetPause();
           if (!pause) return errorText('refused: no fleet pause has been requested');
-          const workParked = a.work_parked === true;
-          const posted = broker.post({
+          if (typeof a.work_parked !== 'boolean') {
+            return errorText('refused: work_parked must be a boolean — say true only once your work is committed or parked');
+          }
+          const workParked = a.work_parked;
+          // Bind the ack to THIS session instance: if the process is replaced under the same
+          // address before rotation, readiness must not honour its predecessor's answer.
+          const ackSessionId = log.session(who)?.sessionId ?? null;
+          const posted = await broker.post({
             from: who, to: OPERATOR, kind: 'status', replyTo: pause.id,
             body: str(a.note) ?? (workParked ? 'paused; work parked' : 'paused; work NOT parked'),
-            meta: { pauseAck: true, workParked },
+            meta: { pauseAck: true, workParked, ackSessionId },
           });
           return text({ ...posted, pauseId: pause.id, workParked });
         }
-        case 'pause_status': return text(pauseReadiness(log, inFlightSource, { ...(num(a.stale_ms) === undefined ? {} : { staleMs: num(a.stale_ms) as number }) }));
+        case 'pause_status': { requireMe(); return text(pauseReadiness(log, inFlightSource, { ...(num(a.stale_ms) === undefined ? {} : { staleMs: num(a.stale_ms) as number }) })); }
         case 'comms_whoami': return text({
           identity: operatorStillValid() ? me : null, revoked: !operatorStillValid(), sessionName, worker: isWorker, operator: isOperator && operatorStillValid(), pushEnabled, session: me ? log.session(me) : null,
           rooms: me ? log.roomsFor(me).map((r) => r.name) : [], liveSessions: log.liveSessions(), sendMessageLimits: SENDMESSAGE_LIMITS,
@@ -502,7 +508,7 @@ export const TOOLS = [
   },
   {
     name: 'pause_status',
-    description: 'Who has acked the pause, who is still pending, who acked with work NOT parked, and how many dispatches are still in flight. ready=true means the fleet is safe to relaunch.',
+    description: 'Who has acked the pause, who is still pending, who acked with work NOT parked, whose ack came from a replaced session, and how many dispatches are in flight. ready=true means every check passed INCLUDING a consulted dispatch ledger — it is never true on unverified in-flight status. stale_ms can only WIDEN the live-session window (it is clamped to the broker default).',
     inputSchema: { type: 'object', properties: { stale_ms: { type: 'number' } } },
   },
 ];

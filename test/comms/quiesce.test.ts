@@ -31,9 +31,12 @@ describe('fleet pause readiness (temp db)', () => {
     log.append({ from: 'operator', to: '@all', kind: 'status', body: `FLEET PAUSE — ${reason}`,
       meta: { fleetPause: { reason } } }, operatorDecision('operator', '@all'));
 
-  const ack = (who: string, pauseId: number, workParked: boolean, note = 'ok') =>
+  const ackFrom = (who: string, ackSessionId: string | null, pauseId: number, workParked: boolean, note = 'ok') =>
     log.append({ from: who, to: 'operator', kind: 'status', replyTo: pauseId, body: note,
-      meta: { pauseAck: true, workParked } }, agentDecision(who, 'operator'));
+      meta: { pauseAck: true, workParked, ackSessionId } }, agentDecision(who, 'operator'));
+  /** Acks as the address's CURRENT session, which is the normal case. */
+  const ack = (who: string, pauseId: number, workParked: boolean, note = 'ok') =>
+    ackFrom(who, log.session(who)?.sessionId ?? null, pauseId, workParked, note);
 
   const live = (...addresses: string[]) => {
     for (const a of addresses) {
@@ -125,8 +128,13 @@ describe('fleet pause readiness (temp db)', () => {
     const noLedger = pauseReadiness(log, null);
     expect(noLedger.ledgerConsulted).toBe(false);
     expect(noLedger.inFlightDispatches).toBe(0);
+    // …and an unverifiable dispatch status must BLOCK, or the doc ("zero proves nothing") and the
+    // behaviour would disagree in the dangerous direction.
+    expect(noLedger.ready).toBe(false);
+    expect(noLedger.blockers.join(' ')).toMatch(/could not be verified/);
     const lineageOnly = pauseReadiness(log, {} as InFlightSource);   // a lineage-only stub
     expect(lineageOnly.ledgerConsulted).toBe(false);
+    expect(lineageOnly.ready).toBe(false);
     expect(pauseReadiness(log, ledgerWith(0)).ledgerConsulted).toBe(true);
   });
 
@@ -170,6 +178,72 @@ describe('fleet pause readiness (temp db)', () => {
     expect(r.live).toEqual(['V']);
     expect(r.pending).toEqual([]);
     expect(r.ready).toBe(true);
+  });
+
+
+  it('a DEAD session that acked work_parked=false does not wedge rotation forever', () => {
+    live('V', 'R');
+    const pause = requestPause();
+    ack('V', pause.id, true);
+    ack('R', pause.id, false, 'holding an edit');
+    expect(pauseReadiness(log, ledgerWith(0)).ready).toBe(false);
+
+    // R's window dies; V keeps heartbeating. R's negative ack must not outlive its session, or no
+    // rotation could ever proceed without a human hunting down a terminal that no longer exists.
+    nowMs += 120_000;
+    log.registerSession({ address: 'V', sessionId: 's-V', sessionName: 'V' });
+    const r = pauseReadiness(log, ledgerWith(0));
+    expect(r.live).toEqual(['V']);
+    expect(r.notParked).toEqual([]);
+    expect(r.ready).toBe(true);
+  });
+
+  it('an ack does NOT carry over when the process at that address is replaced', () => {
+    live('V');
+    const pause = requestPause();
+    ackFrom('V', 's-V', pause.id, true);
+    expect(pauseReadiness(log, ledgerWith(0)).ready).toBe(true);
+
+    // V restarts: same address, new session instance. It never answered THIS pause.
+    nowMs += 1000;
+    log.registerSession({ address: 'V', sessionId: 's-V-2', sessionName: 'V' });
+    const r = pauseReadiness(log, ledgerWith(0));
+    expect(r.restarted).toEqual(['V']);
+    expect(r.pending).toEqual(['V']);
+    expect(r.ready).toBe(false);
+    expect(r.blockers.join(' ')).toMatch(/session that has since been replaced/);
+
+    ackFrom('V', 's-V-2', pause.id, true);
+    expect(pauseReadiness(log, ledgerWith(0)).ready).toBe(true);
+  });
+
+  it('a caller cannot SHRINK the stale window to fake an empty fleet', () => {
+    live('V');
+    requestPause();   // V never acks
+    // staleMs=1 would age V out and leave `live` empty — ready:true out of a fleet that never
+    // answered. The clamp refuses the narrowing direction.
+    const shrunk = pauseReadiness(log, ledgerWith(0), { staleMs: 1 });
+    expect(shrunk.live).toEqual(['V']);
+    expect(shrunk.ready).toBe(false);
+    // Widening stays allowed: it can only make MORE agents owe an ack.
+    nowMs += 120_000;
+    expect(pauseReadiness(log, ledgerWith(0), { staleMs: 600_000 }).live).toEqual(['V']);
+  });
+
+  it('names sessions that started after the pause instead of counting them as ignoring it', () => {
+    live('V');
+    const pause = requestPause();
+    ack('V', pause.id, true);
+    expect(pauseReadiness(log, ledgerWith(0)).ready).toBe(true);
+
+    // A window opened after the broadcast may never have been shown it (the pump starts a
+    // first-time session at the current tail), so it is named, not silently blamed.
+    nowMs += 1000;
+    live('W');
+    const r = pauseReadiness(log, ledgerWith(0));
+    expect(r.joinedAfterPause).toEqual(['W']);
+    expect(r.ready).toBe(false);
+    expect(r.blockers.join(' ')).toMatch(/started after the pause/);
   });
 
   it('excludes the operator from the agents owing an ack', () => {
