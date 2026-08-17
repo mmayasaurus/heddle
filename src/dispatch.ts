@@ -28,6 +28,7 @@ import { materializeWorkerMcp, validateWorkerMcp, codexMcpFlags, claudeMcpConfig
 import { classifyEffort, assessResult, type ResultAssessment } from './classify.js';
 import { pickReviewer, snapshotWorktree, sameSnapshot, diffInstruction, embeddedDiff, normalizeProvider, type ReviewerPick } from './review.js';
 import { parentCheckoutOf, checkoutFingerprint, escapedPaths, destroyedWork } from './worktree.js';
+import { fleetPauseStatus } from './fleet-pause.js';
 import { decideCapabilities, capabilityPolicy } from './capabilities.js';
 import { resolveIdentity, attributeDispatch, WORKER_ENV, type BoundIdentity } from './identity.js';
 import { readProviderCaps, type CapsByProvider } from './usage.js';
@@ -132,7 +133,7 @@ export interface DispatchRequest {
  * `refusal` column.
  */
 export interface DispatchRefusal {
-  code: 'claude-in-session' | 'not-dispatchable' | 'depth-1' | 'max-children' | 'capability-denied' | 'metered-pool-exhausted' | 'same-provider-review' | 'override-reason-required';
+  code: 'claude-in-session' | 'not-dispatchable' | 'depth-1' | 'max-children' | 'capability-denied' | 'metered-pool-exhausted' | 'same-provider-review' | 'override-reason-required' | 'fleet-paused';
   reason: string;
   /** What to do instead, when there is a clear alternative. */
   instruction?: string;
@@ -564,6 +565,33 @@ export async function dispatch(
   // A worker dispatching an opt-in class (or a malformed request) still gets a ledgered, attributed
   // depth-1 refusal, never a bare throw, and never costs a classifier spawn.
   if (identity.worker) return refuseDepth1(req, ctx, table);
+
+  // ---- HED-124: fleet-pause admission gate ----------------------------------------------------
+  // While an operator pause is in force, refuse to ADMIT new work: a dispatch started now would be
+  // orphaned by the imminent relaunch the pause exists to prepare for. Ledgered like every refusal.
+  // Fail-open (see src/fleet-pause.ts): no comms broker → nobody could have paused this fleet.
+  // The depth-1 check above runs FIRST on purpose — a worker's nested attempt is a depth-1 problem
+  // regardless of any pause, and stays attributed as one.
+  //
+  // NOT atomic with the pause, and cannot be (PR #42, codeant/codex-connector): a pause recorded in
+  // the microseconds between this read and startUnderCap() admits ONE dispatch it "should" have
+  // stopped. That residual is by design — it is exactly what quiescence's in-flight count is for: a
+  // rotator does not relaunch on a green admission gate, it relaunches on pauseReadiness reporting
+  // zero in-flight dispatches, so a worker that slipped through here still blocks the rotation until
+  // it finishes. The gate reduces the window from "unbounded" to "one sub-millisecond dispatch";
+  // closing it fully would need a pause/dispatch lock across every heddle process, whose cost is not
+  // worth removing a race the downstream in-flight check already absorbs.
+  const pause = fleetPauseStatus();
+  if (pause.paused) {
+    const taskClass = req.taskClass ?? (req.provider && req.model ? `direct:${req.provider}/${req.model}` : 'dispatch');
+    const target: RouteTarget = { provider: req.provider ?? '?', model: req.model ?? '?', skills: req.skills, mcp: req.mcp };
+    return refusalOutcome(ctx, req, taskClass, target, withMandatoryPacks(req.skills ?? []), {
+      code: 'fleet-paused',
+      reason: `the fleet is paused${pause.reason ? ` (${pause.reason})` : ''} since ${pause.requestedAt} — new dispatches are refused until the operator resumes`,
+      instruction: `An operator paused the fleet (pause #${pause.pauseId}), usually to rotate accounts or quiesce for a relaunch. ` +
+        `Starting a worker now would orphan it. Wait for the operator's resume (request_pause/resume_pause are operator-only), then dispatch again.`,
+    });
+  }
 
   // ---- HED-95: the DIRECT path must say WHY it bypasses the routing table --------------------
   // Not model police: an override is one field away, and benches/probes/judgment calls are all
