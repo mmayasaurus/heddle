@@ -303,7 +303,10 @@ try {
         const id = Number(process.argv[4]);
         const ok = has('--ok');
         const failed = has('--failed');
-        if (!Number.isInteger(id) || ok === failed) {
+        // `id <= 0` belongs here, not only in the ledger: reportInSession THROWS on a bad id (a
+        // caller bug, deliberately not a `false` return), and an operator who typed `0` should get
+        // the usage line and exit 2 like every other bad argument — not a stack trace.
+        if (!Number.isInteger(id) || id <= 0 || ok === failed) {
           console.error(usage);
           process.exit(2);
         }

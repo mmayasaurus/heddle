@@ -143,6 +143,26 @@ CREATE INDEX IF NOT EXISTS idx_dispatches_finished ON dispatches(finished_at);
 `;
 
 /**
+ * Guard the values a caller may put into a reported in-session outcome. These land in columns that
+ * `usageByProvider` SUMs, so one NaN or negative silently corrupts every aggregate read afterwards —
+ * a report is rejected loudly rather than persisted. THROWS rather than returning false: `false` is
+ * reserved for "no matching row", a normal outcome callers branch on, while a malformed number is a
+ * caller bug that must not be disguised as one.
+ */
+function assertReportable(id: number, outcome: {
+  durationMs?: number; inputTokens?: number; cachedInputTokens?: number;
+  outputTokens?: number; reasoningTokens?: number;
+}): void {
+  if (!Number.isInteger(id) || id <= 0) throw new TypeError(`id must be a positive integer (got ${id})`);
+  for (const [field, value] of Object.entries(outcome)) {
+    if (typeof value !== 'number') continue; // ok/error are validated by their own types
+    if (!Number.isInteger(value) || value < 0) {
+      throw new TypeError(`${field} must be a non-negative integer (got ${value})`);
+    }
+  }
+}
+
+/**
  * Add every missing column. `existing` is the column set observed BEFORE the ALTERs — several heddle
  * processes may open a pre-migration ledger at once (MCP servers, CLIs, the dashboard); if another
  * one added a column between our check and our ALTER, SQLite says "duplicate column name" — that is
@@ -379,21 +399,7 @@ export class Ledger {
     ok: boolean; error?: string; durationMs?: number;
     inputTokens?: number; cachedInputTokens?: number; outputTokens?: number; reasoningTokens?: number;
   }, orchestrator?: string): boolean {
-    if (!Number.isInteger(id) || id <= 0) {
-      throw new TypeError(`id must be a positive integer (got ${id})`);
-    }
-    for (const [field, value] of Object.entries({
-      durationMs: outcome.durationMs,
-      inputTokens: outcome.inputTokens,
-      cachedInputTokens: outcome.cachedInputTokens,
-      outputTokens: outcome.outputTokens,
-      reasoningTokens: outcome.reasoningTokens,
-    })) {
-      if (value !== undefined && (!Number.isInteger(value) || value < 0)) {
-        // false means no matching row, a normal outcome callers act on; malformed values are caller bugs.
-        throw new TypeError(`${field} must be a non-negative integer (got ${value})`);
-      }
-    }
+    assertReportable(id, outcome);
     const sql = `
       UPDATE dispatches SET refusal = NULL, ok = ?, error = ?, duration_ms = ?, input_tokens = ?,
         cached_input_tokens = ?, output_tokens = ?, reasoning_tokens = ?, finished_at = ?
