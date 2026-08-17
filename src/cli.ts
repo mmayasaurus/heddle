@@ -169,7 +169,7 @@ try {
         taskClass, provider, model, prompt: '(dry run)', cwd: arg('--cwd') ?? process.cwd(),
         optIn: has('--opt-in'), env: Object.keys(env).length ? env : undefined,
         inSession: has('--in-session'), accountPin: arg('--account'),
-        authorProvider: arg('--author-provider'),
+        authorProvider: arg('--author-provider'), overrideReason: arg('--override-reason'),
       });
       const summary = summarizePlan(plan) as any;
       out(json, summary, () =>

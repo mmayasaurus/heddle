@@ -17,7 +17,7 @@ describe('dispatch — direct override reasons', () => {
     expect(outcome.refusal?.instruction).toContain('implementation');
     expect(outcome.refusal?.instruction).toContain('bulk-mechanical');
     expect(fake.calls).toHaveLength(0);
-    expect(ledger.recent(1)).toEqual([expect.objectContaining({ refusal: 'override-reason-required', task_class: 'direct' })]);
+    expect(ledger.recent(1)).toEqual([expect.objectContaining({ refusal: 'override-reason-required', task_class: 'direct:codex/gpt-5.6-terra' })]);
   });
 
   it('treats a whitespace-only direct override reason as missing and refuses before calling the adapter', async () => {
@@ -26,7 +26,7 @@ describe('dispatch — direct override reasons', () => {
 
     expect(outcome.refusal?.code).toBe('override-reason-required');
     expect(fake.calls).toHaveLength(0);
-    expect(ledger.recent(1)[0]).toMatchObject({ refusal: 'override-reason-required', task_class: 'direct' });
+    expect(ledger.recent(1)[0]).toMatchObject({ refusal: 'override-reason-required', task_class: 'direct:codex/gpt-5.6-terra' });
   });
 
   it('runs an explained direct override and records its exact reason on the completed ledger row', async () => {
@@ -78,7 +78,7 @@ describe('dispatch — direct override reasons', () => {
     const outcome = await dispatch({ provider: 'codex', model: 'gpt-5.6-terra', prompt: 'x', cwd: tempDir(), identity: unbound }, ledger, () => fake.adapter);
 
     expect(outcome.refusal?.code).toBe('override-reason-required');
-    expect(ledger.recent(1)[0]).toMatchObject({ refusal: 'override-reason-required', task_class: 'direct', finished_at: expect.any(String) });
+    expect(ledger.recent(1)[0]).toMatchObject({ refusal: 'override-reason-required', task_class: 'direct:codex/gpt-5.6-terra', finished_at: expect.any(String) });
   });
 
   it('reopens an already migrated ledger and safely reapplies migrations while preserving override reasons', () => {
@@ -94,12 +94,12 @@ describe('dispatch — direct override reasons', () => {
 
     const second = trackLedger(new Ledger(path));
     const id = second.start({
-      orchestrator: null, taskClass: 'direct', provider: 'codex', model: 'gpt-5.6-terra', skills: null,
+      orchestrator: null, taskClass: 'direct:codex/gpt-5.6-terra', provider: 'codex', model: 'gpt-5.6-terra', skills: null,
       issue: null, pr: null, cwd: '/tmp/x', promptPreview: 'x', sessionId: null, fellBackFrom: null,
       overrideReason: 'survives reopen',
     });
 
     expect(id).toBeTypeOf('number');
-    expect(second.recent(1)[0]).toMatchObject({ task_class: 'direct', override_reason: 'survives reopen' });
+    expect(second.recent(1)[0]).toMatchObject({ task_class: 'direct:codex/gpt-5.6-terra', override_reason: 'survives reopen' });
   });
 });

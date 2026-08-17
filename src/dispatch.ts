@@ -471,17 +471,10 @@ export async function dispatch(
   // legitimate. The point is that the REASON lands in the ledger, so the routing retune (HED-79)
   // can see the distribution of why humans route around the table instead of only that they did.
   // Refused as a ledgered row (never a bare throw) so the bypass attempt is itself evidence.
-  if (!req.taskClass && req.provider && req.model && !req.overrideReason?.trim()) {
-    const classes = listTaskClasses(table);
-    const target: RouteTarget = { taskClass: 'direct', provider: req.provider, model: req.model, skills: req.skills ?? [], mcp: req.mcp ?? [] } as RouteTarget;
-    return refusalOutcome(ctx, req, 'direct', target, withMandatoryPacks(req.skills ?? []), {
-      code: 'override-reason-required',
-      reason: `a direct provider+model dispatch (${req.provider}/${req.model}) must say why it bypasses the routing table`,
-      instruction: `Pass a task_class instead (${classes.join(', ')}) — the table carries the policy: ` +
-        `default skills/MCP, opt-in gates, fallbacks and cap-aware routing. If bypassing IS the intent ` +
-        `(a bench, a probe, a judgment call), pass override_reason: "<why>" and it will run — the reason ` +
-        `is recorded on the ledger row so routing can be tuned from evidence.`,
-    });
+  const overrideGate = overrideReasonGate(req);
+  if (overrideGate) {
+    return refusalOutcome(ctx, req, overrideGate.taskClass, overrideGate.target,
+      withMandatoryPacks(req.skills ?? []), overrideGate.refusal(listTaskClasses(table)));
   }
 
   // Resume affinity (HED-78): a claude session is persisted under ONE config dir — resuming it on a
@@ -620,6 +613,38 @@ export async function dispatch(
   return runTarget(fallback, req, ctx, route, `${route.provider}/${route.model}`);
 }
 
+/**
+ * HED-95 override gate, shared by dispatch() and planDispatch() so the DRY RUN cannot claim a route
+ * is runnable that the real dispatch would refuse (PR #32: three reviewers — `heddle route` and
+ * `plan_dispatch` previously reported a bare provider+model as would_run).
+ *
+ * Returns null when the request is fine: it carries a task class, or it is a direct route WITH a
+ * stated reason.
+ */
+export function overrideReasonGate(
+  req: Pick<DispatchRequest, 'taskClass' | 'provider' | 'model' | 'skills' | 'mcp' | 'overrideReason'>,
+): { taskClass: string; target: RouteTarget; refusal: (classes: string[]) => DispatchRefusal } | null {
+  if (req.taskClass || !req.provider || !req.model || req.overrideReason?.trim()) return null;
+  // The same task_class shape directRoute() produces, so bypass rows sort with every other direct
+  // row instead of needing a special case in the retune query (PR #32, copilot).
+  const taskClass = `direct:${req.provider}/${req.model}`;
+  const target = { taskClass, provider: req.provider, model: req.model, skills: req.skills, mcp: req.mcp } as unknown as RouteTarget;
+  return {
+    taskClass,
+    target,
+    refusal: (classes: string[]) => ({
+      code: 'override-reason-required' as const,
+      reason: `a direct provider+model dispatch (${req.provider}/${req.model}) must say why it bypasses the routing table`,
+      // Field names differ per surface — name all three rather than assuming an MCP caller.
+      instruction: `Pass a task class instead (${classes.join(', ')}) — the table carries the policy: ` +
+        `default skills/MCP, opt-in gates, fallbacks and cap-aware routing. If bypassing IS the intent ` +
+        `(a bench, a probe, a judgment call), say why and it runs: override_reason (MCP), ` +
+        `--override-reason (CLI), overrideReason (JS API). The reason is recorded on the ledger row so ` +
+        `routing can be tuned from evidence.`,
+    }),
+  };
+}
+
 /** Everything a dispatch decides BEFORE any ledger row or worker: route, policy, caps, accounts. */
 export interface DispatchPlan {
   route: Route;
@@ -642,6 +667,9 @@ export interface DispatchPlan {
   reviewerPick?: ReviewerPick | null;
   /** HED-3: the caller named the author's own provider as the explicit route — refused. */
   sameProviderReview?: string;
+  /** HED-95: set when a bare direct route would be refused for lacking an override_reason —
+   *  so `heddle route` / `plan_dispatch` never claim a route the real dispatch would refuse. */
+  overrideReasonRequired?: string;
 }
 
 /**
@@ -790,7 +818,10 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
       account = accountAdvice.best?.id ?? null;
     }
   }
-  return { route, target, fallback, origin, execution, decision, skillsForRefusal, account, accountAdvice, accountPick, notDispatchable, reviewerPick, sameProviderReview };
+  // The dry run must mirror what dispatch() would do — including refusing a bare direct route.
+  const gate = overrideReasonGate(req);
+  const overrideReasonRequired = gate ? gate.refusal(listTaskClasses(table)).reason : undefined;
+  return { route, target, fallback, origin, execution, decision, skillsForRefusal, account, accountAdvice, accountPick, notDispatchable, reviewerPick, sameProviderReview, overrideReasonRequired };
 }
 
 /** One shared dry-run summary for `heddle route` and the `plan_dispatch` MCP tool (identical fields). */
@@ -798,7 +829,7 @@ export function summarizePlan(plan: DispatchPlan): Record<string, unknown> {
   const notDispatchable = plan.notDispatchable;
   return {
     task_class: plan.route.taskClass,
-    would_run: notDispatchable || plan.decision.refusal || plan.sameProviderReview ? null : `${plan.target.provider}/${plan.target.model}`,
+    would_run: notDispatchable || plan.decision.refusal || plan.sameProviderReview || plan.overrideReasonRequired ? null : `${plan.target.provider}/${plan.target.model}`,
     execution: plan.execution ?? null,
     in_session: plan.execution === 'in-session-subagent',
     routed_away_for_cap: plan.decision.routedAwayForCap,
@@ -806,6 +837,8 @@ export function summarizePlan(plan: DispatchPlan): Record<string, unknown> {
     route_reason: plan.decision.routeReason,
     refusal: notDispatchable
       ? { code: 'not-dispatchable', reason: `task class "${plan.route.taskClass}" is not dispatchable (dispatchable: false) — the orchestrator's own in-session work` }
+      : plan.overrideReasonRequired
+      ? { code: 'override-reason-required', reason: plan.overrideReasonRequired }
       : plan.sameProviderReview
       ? { code: 'same-provider-review', reason: plan.sameProviderReview }
       : plan.decision.refusal ?? null,
