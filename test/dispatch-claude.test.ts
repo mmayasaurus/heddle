@@ -41,6 +41,21 @@ describe('dispatch — headless Claude workers', () => {
     expect(outcome.refusal?.code).toBe('claude-in-session'); expect(outcome.refusal?.instruction).toContain('Claude accounts:'); expect(fake.calls).toHaveLength(0); expect(ledger.recent(1)[0].refusal).toBe('claude-in-session');
   });
 
+  it('records the current Claude account and names the reportable ledger id in an in-session instruction', async () => {
+    const previousConfigDir = process.env.CLAUDE_CONFIG_DIR;
+    delete process.env.CLAUDE_CONFIG_DIR;
+    try {
+      const fake = fakeAdapter(undefined, { readAgents: false }); const ledger = tempLedger();
+      const outcome = await dispatch({ taskClass: 'research-summarize', prompt: 'x', cwd: tempDir(), identity: unbound, inSession: true, accounts, caps: { claude: claudeCaps([{ id: 'acct1', used: 68 }, { id: 'acct2', used: 1 }]) } }, ledger, () => fake.adapter);
+      expect(ledger.recent(1)[0]).toMatchObject({ account: 'acct1', refusal: 'claude-in-session' });
+      expect(outcome.refusal?.instruction).toContain(`report_in_session(id=${outcome.ledgerId}`);
+      expect(outcome.refusal?.instruction).toContain(`report-in-session ${outcome.ledgerId} --ok`);
+    } finally {
+      if (previousConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+      else process.env.CLAUDE_CONFIG_DIR = previousConfigDir;
+    }
+  });
+
   it('passes Claude MCP through a temporary config file and composes the implementation skill packs', async () => {
     const fake = fakeAdapter(undefined, { readAgents: false }); let mcpDuringCall: unknown;
     const adapter = { ...fake.adapter, dispatch: async (prompt: string, opts: Parameters<typeof fake.adapter.dispatch>[1]) => { expect(opts.mcpConfigPath).toBeDefined(); expect(existsSync(opts.mcpConfigPath!)).toBe(true); mcpDuringCall = JSON.parse(readFileSync(opts.mcpConfigPath!, 'utf8')); return fake.adapter.dispatch(prompt, opts); } };
