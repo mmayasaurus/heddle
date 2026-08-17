@@ -21,7 +21,7 @@ helps but is not required.
 
 This repository is the orchestration layer. The desktop dashboard lives in
 [heddle-dashboard](https://github.com/mmayasaurus/heddle-dashboard) and has its own policy; that
-project is a fork of [VelaTerm](https://github.com/vlinx-io/heddle), so a vulnerability inherited
+project is a fork of [VelaTerm](https://github.com/vlinx-io/VelaTerm), so a vulnerability inherited
 from upstream — one that reproduces on unmodified VelaTerm — should go to upstream as well.
 
 ## What to expect
