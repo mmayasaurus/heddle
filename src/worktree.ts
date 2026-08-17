@@ -81,10 +81,21 @@ export function checkoutFingerprint(root: string): CheckoutFingerprint | null {
     // -z: NUL-separated records, so paths with spaces/newlines/quotes parse correctly.
     const raw = git(root, ['status', '--porcelain', '-z']);
     const entries = new Map<string, string>();
-    for (const rec of raw.split('\0')) {
+    const records = raw.split('\0');
+    for (let i = 0; i < records.length; i++) {
+      const rec = records[i];
       if (rec.length < 4) continue; // "XY path" is at least 4 chars; trailing empty record
       const status = rec.slice(0, 2);
       const path = rec.slice(3);
+      // A rename/copy is ONE entry spanning TWO NUL-separated fields: "R  <new>\0<old>\0". The old
+      // path has no XY prefix, so parsing it as its own record yields a garbage entry (PR #28,
+      // gitar — verified: `git mv a.txt b.txt` emits `R  b.txt\0a.txt\0`). Consume it here.
+      if (status[0] === 'R' || status[0] === 'C') {
+        const from = records[i + 1];
+        i += 1;
+        entries.set(path, `${status}:from=${from ?? '?'}`);
+        continue;
+      }
       let digest = '<missing>';
       try { digest = createHash('sha256').update(readFileSync(join(root, path))).digest('hex').slice(0, 16); }
       catch { /* deleted, or a directory — the status letters still carry the change */ }
