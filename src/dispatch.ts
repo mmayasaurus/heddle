@@ -832,7 +832,9 @@ function refuseDepth1(req: DispatchRequest, ctx: DispatchContext, table: Routing
       const route = resolveRoute(table, req.taskClass);
       taskClass = route.taskClass;
       target = req.provider && req.model ? { ...route, provider: req.provider, model: req.model } : route;
-      skills = route.dispatchable ? withMandatoryPacks(req.skills ?? route.skills ?? []) : (req.skills ?? route.skills ?? []);
+      // Same list a real dispatch would materialize (packsFor), not just the mandatory union —
+      // a refusal that names a different set is the dry-run-lies bug in another costume (PR #34).
+      skills = route.dispatchable ? packsFor(target.provider, req.skills ?? route.skills ?? []) : (req.skills ?? route.skills ?? []);
     }
   } catch (err) {
     // Best-effort — the refusal stands regardless; but the enrichment failure is visible, not silent.
@@ -859,7 +861,9 @@ function refuseInSession(
   fellBackFrom: string | null = null, adviceLine?: string,
 ): DispatchOutcome {
   // (Non-dispatchable classes never reach here — refuseNotDispatchable handles them earlier.)
-  const skills = withMandatoryPacks(req.skills ?? route.skills ?? []);
+  // This instruction tells the orchestrator which packs to hand its OWN subagent, so it must name
+  // exactly what a dispatch to that provider would materialize — family pack included (PR #34).
+  const skills = packsFor(route.provider, req.skills ?? route.skills ?? []);
   const mcp = req.mcp ?? route.mcp ?? []; // the caller's override wins, exactly as it would on a run
   const alt = route.fallback ? ` To run it as a subprocess instead, name provider+model explicitly ` +
     `(e.g. provider="${route.fallback.provider}", model="${route.fallback.model}" — the class's ` +

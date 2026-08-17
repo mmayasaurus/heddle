@@ -80,9 +80,11 @@ describe('dispatch — class + explicit route, and in-session refusal', () => {
     expect(outcome.refusal?.reason).toContain('implementation');
     expect(outcome.refusal?.reason).toContain('claude/sonnet');
     for (const text of ['Agent tool', 'sonnet', 'worker-role', 'code-discovery', 'quality-gate', 'memtrace', 'gpt-5.6-terra']) expect(outcome.refusal?.instruction).toContain(text);
-    expect(outcome.skills).toEqual(['worker-role', 'worker-hygiene', 'code-discovery', 'quality-gate']);
+    // family-claude included: an in-session refusal names the packs a REAL dispatch to that
+    // provider would materialize, so the orchestrator hands its subagent the same set (PR #34).
+    expect(outcome.skills).toEqual(['worker-role', 'worker-hygiene', 'code-discovery', 'quality-gate', 'family-claude']);
     expect(fake.calls).toHaveLength(0);
-    expect(ledger.recent(1)[0]).toMatchObject({ refusal: 'claude-in-session', ok: 0, task_class: 'implementation', provider: 'claude', model: 'sonnet', orchestrator: 'U', issue: 'HED-1', skills: 'worker-role,worker-hygiene,code-discovery,quality-gate' });
+    expect(ledger.recent(1)[0]).toMatchObject({ refusal: 'claude-in-session', ok: 0, task_class: 'implementation', provider: 'claude', model: 'sonnet', orchestrator: 'U', issue: 'HED-1', skills: 'worker-role,worker-hygiene,code-discovery,quality-gate,family-claude' });
     expect(ledger.recent(1)[0].finished_at).not.toBeNull();
     expect(ledger.inFlight()).toEqual([]);
   });
