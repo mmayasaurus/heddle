@@ -9,7 +9,7 @@ installs) are tracked in Linear **HED-13**.
 
 | Workflow | Trigger | Jobs | Posture |
 |---|---|---|---|
-| `gate.yml` | push `main`, PRs to `main`, manual | **`gate`** — `npm ci` → `npm run typecheck` (src + test) → `npm test` (vitest) → `npm run build` → smoke the built CLI (`classes`/`packs --json` must be non-empty arrays) | the **required** merge check (job name `gate` is the ruleset's context string — don't rename) |
+| `gate.yml` | push `main`, **PRs to any base** (stacked PRs included) incl. base retargets, manual | **`gate`** — `npm ci` → `npm run typecheck` (src + test) → `npm test` (vitest) → `npm run build` → smoke the built CLI (`classes`/`packs --json` must be non-empty arrays) | the **required** merge check (job name `gate` is the ruleset's context string — don't rename) |
 | `deterministic-review.yml` | PRs (incl. drafts for gitleaks; base-branch retargets), push `main` | **semgrep** (`p/typescript` + `p/nodejs`, diff-aware vs the PR base, full on `main`, SARIF → code scanning) · **gitleaks** (official CLI over exactly `base.sha..head.sha`) | semgrep report-only · gitleaks red on a hit (not required) |
 | `actions-hygiene.yml` | PRs / `main` pushes touching `.github/**` | **actionlint** · **zizmor** (SARIF → code scanning) | actionlint red on findings · zizmor report (same-repo) / red (forks) |
 | `.github/dependabot.yml` | weekly | grouped bumps of the hash-pinned actions, 7-day cooldown | — |

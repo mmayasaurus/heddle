@@ -423,6 +423,7 @@ async function runTarget(
     cachedInputTokens: result.usage?.cachedInputTokens,
     outputTokens: result.usage?.outputTokens,
     reasoningTokens: result.usage?.reasoningOutputTokens,
+    output: result.output,
   });
 
   return {
@@ -526,7 +527,7 @@ export async function dispatch(
     return refuseInSession(
       { ...target, taskClass: route.taskClass, dispatchable: route.dispatchable, fallback: route.fallback },
       req, ctx, plan.execution, origin, plan.decision.routedAwayForCap ? `${route.provider}/${route.model}` : null,
-      plan.accountAdvice?.line,
+      plan.accountAdvice,
     );
   }
 
@@ -571,7 +572,7 @@ export async function dispatch(
   if (fbExecution === 'in-session-subagent') {
     return refuseInSession(
       { ...fallback, taskClass: route.taskClass, dispatchable: route.dispatchable, fallback: undefined },
-      req, ctx, fbExecution, 'fallback', `${route.provider}/${route.model}`, plan.accountAdvice?.line,
+      req, ctx, fbExecution, 'fallback', `${route.provider}/${route.model}`, plan.accountAdvice,
     );
   }
   // The never-on-demand HARD guard applies to the runtime fallback too: a below-threshold primary
@@ -895,7 +896,7 @@ function refuseNotDispatchable(route: Route, req: DispatchRequest, ctx: Dispatch
 function refuseInSession(
   route: RouteTarget & { taskClass: string; dispatchable: boolean; fallback?: RouteTarget },
   req: DispatchRequest, ctx: DispatchContext, execution: string, origin: InSessionOrigin,
-  fellBackFrom: string | null = null, adviceLine?: string,
+  fellBackFrom: string | null = null, accountAdvice?: AccountAdvice,
 ): DispatchOutcome {
   // (Non-dispatchable classes never reach here — refuseNotDispatchable handles them earlier.)
   const skills = withMandatoryPacks(req.skills ?? route.skills ?? []);
@@ -910,13 +911,17 @@ function refuseInSession(
     fallback: `task class "${route.taskClass}" fell back to ${route.provider}/${route.model} (its declared fallback), which`,
   }[origin];
   const reason = `${head} runs as an in-session subagent of the orchestrator, not a subprocess heddle can spawn.`;
+  // This row describes what will actually run in the orchestrator's session, not the account that
+  // would have been best for a separate headless worker.
+  const record = { ...baseRecord(ctx, req, route.taskClass, route, skills, fellBackFrom), account: accountAdvice?.current?.id ?? null };
+  const id = ctx.ledger.refuse(
+    record, 'claude-in-session', reason, 'in-session',
+  );
   const instruction =
     `Use your own Agent tool with model "${route.model}" and skills [${skills.join(', ')}]` +
     (mcp.length ? ` and MCP [${mcp.join(', ')}]` : '') + `.` + alt +
-    (adviceLine ? ` ${adviceLine}` : '');
-  const id = ctx.ledger.refuse(
-    baseRecord(ctx, req, route.taskClass, route, skills, fellBackFrom), 'claude-in-session', reason,
-  );
+    (accountAdvice ? ` ${accountAdvice.line}` : '') +
+    ` When it finishes, report the outcome so it counts: report_in_session(id=${id}, ok=true|false, and the token counts if you have them) — or \`heddle ledger report-in-session ${id} --ok\`. Until it is reported this row stays a refusal and the work is not counted.`;
   return refusalOutcome(ctx, req, route.taskClass, route, skills,
     { code: 'claude-in-session', reason, instruction }, { extra: { execution, usedFallback: fellBackFrom !== null }, ledgerId: id });
 }
