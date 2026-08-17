@@ -15,9 +15,12 @@ Execute in order. Do not skip a step because you believe it is empty — verify 
 
 ## 1. Nothing uncommitted, in any worktree you touched
 
-1. `git status --porcelain` in each worktree you worked in (both repos if applicable), **and**
-   `git stash list` — stashed work leaves `git status` clean while still living only in your local
-   repo, so a closeout that checks only `status` will call a dirty session clean.
+1. In **your own** worktree(s) only — the one-per-agent model means the tree, its stashes and its
+   local branches are yours (`.claude/rules/worktree-discipline.md`): `git status --porcelain` **and**
+   `git stash list`. Stashed work leaves `git status` clean while living only in your local repo, so a
+   closeout that checks only `status` calls a dirty session clean. A stash or change you do NOT
+   recognise as this session's is not yours to commit — leave it and flag it to whoever owns the tree,
+   never blindly commit or apply it onto your branch.
 2. Anything uncommitted or stashed: commit it. If it is not ready for its real branch, that is what
    `wip/<letter>-<topic>` is for — a wip branch costs nothing and uncommitted work is the single
    easiest thing to lose. Never end a session with a dirty tree or a live stash you mean to keep.
@@ -27,12 +30,15 @@ Execute in order. Do not skip a step because you believe it is empty — verify 
 
 ## 2. Nothing unpushed
 
-4. One command finds every local commit not on a remote, across all branches, including branches with
-   **no upstream at all** (where `git log @{u}..HEAD` would error):
-   `git log --branches --not --remotes --oneline` — anything it prints is invisible to the fleet.
-5. Push each such branch **with tracking set** so it is not silently orphaned again next time:
-   `git push -u origin <branch>` (never force). A plain `git push origin HEAD` uploads the commits but
-   does not configure `@{u}`, so the branch keeps failing the check above.
+4. Find local commits not on any remote — this works even for a branch with **no upstream** (where
+   `git log @{u}..HEAD` errors): `git log --branches --not --remotes --oneline`. It scans ALL local
+   branches, so read the output as a CHECKLIST, not a push list — pick out the commits on branches
+   **you advanced this session**.
+5. Push **only your own** such branches, each with tracking set: `git push -u origin <your-branch>`
+   (never force; `-u` sets `@{u}` so it stops failing the check above — a plain `git push` does not).
+   Never push a branch you did not advance, and never push local `main`: in a shared or multi-branch
+   checkout the step-4 scan can surface another agent's commits, and pushing them is the cross-agent
+   clobber the worktree rules exist to prevent.
 
 ## 3. Truthful PR state
 
