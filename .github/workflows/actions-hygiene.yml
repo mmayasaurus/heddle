@@ -57,6 +57,11 @@ jobs:
         with:
           args: -color
 
+      - name: shellcheck (.github/scripts — actionlint no longer sees this shell inline)
+        run: |
+          set -eu
+          shellcheck --shell=sh .github/scripts/*.sh
+
   zizmor:
     name: zizmor
     runs-on: ubuntu-24.04
