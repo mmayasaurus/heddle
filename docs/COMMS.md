@@ -685,6 +685,34 @@ same reason raising is — an agent that could resume the fleet could undo a sto
 No schema change was needed: a pause is an ordinary message, an ack is an ordinary reply, a resume
 is an ordinary operator broadcast, and the protocol is a query over all three.
 
+## Idle nudger (HED-137)
+
+A pull-model session that ends its turn waits forever — nothing is wrong with it, nobody is talking
+to it. The nudger closes that loop: every cycle (default 15 min, `HEDDLE_COMMS_NUDGE_MS`) it finds
+live agent sessions that have been quiet past the threshold and posts one advisory nudge each.
+
+Three decisions worth knowing, because the obvious implementation of each is wrong:
+
+- **Idleness is read from the session TRANSCRIPT's mtime, never from the heartbeat.** `heartbeat_at`
+  is written by a fixed 30s timer in the channel server whether or not the agent is doing anything,
+  so it proves the process is alive, not that the agent is working — nudging on it would mean nobody
+  is ever idle. A session with no findable transcript is treated as NOT idle: an unknown activity
+  time must never read as "silent, go prod it".
+- **Exactly one nudger runs, elected by the operator binding.** The broker runs one server per
+  session, so a loop added the naive way would have every session nudging every other one. The
+  operator binding is already unique by construction (it needs the token, and workers can never hold
+  it), so `shouldRunNudger(isOperator, pushEnabled)` picks the single instance with no leader
+  protocol. Consequence: no operator session up means no nudging.
+- **A nudge never wears the operator's authority.** The loop lives in the operator's session, so its
+  posts would otherwise be stamped `operator` — a machine speaking as the human, which is exactly
+  the spoofing the tier system exists to prevent. Nudges request `agent-message` explicitly; the
+  envelope layer honours an explicit demotion unconditionally.
+
+The cooldown lives in the log (`lastNudgeAt`, from `meta.nudge` on the last message to that
+address), not in process memory, so a nudger that restarts cannot immediately re-nudge everyone it
+had just nudged. Stale sessions drop out with everything else — a dead terminal window is not an
+idle agent, and there is nobody there to read the nudge.
+
 ## Roadmap
 
 - **HED-4:** Comms log & address grammar — durable append-only storage and registry (built).

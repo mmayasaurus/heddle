@@ -422,6 +422,21 @@ export class CommsLog {
   }
 
   /**
+   * When this address was last NUDGED, or null (HED-137).
+   *
+   * The cooldown lives in the log rather than in process memory on purpose: the nudger runs inside
+   * a session that can restart, and a cooldown that resets on restart would let a restarted nudger
+   * immediately re-nudge everyone it had just nudged.
+   */
+  lastNudgeAt(address: string): string | null {
+    const row = this.db.prepare(
+      `SELECT m.ts FROM messages m WHERE m.target = ?
+       AND json_extract(m.meta, '$.nudge') IS NOT NULL ORDER BY m.id DESC LIMIT 1`,
+    ).get(address) as { ts: string } | undefined;
+    return row ? String(row.ts) : null;
+  }
+
+  /**
    * When was this pause LIFTED, or null if it is still in force (HED-134)?
    *
    * A resume is the operator's BROADCAST answering the pause it lifts: operator tier, target

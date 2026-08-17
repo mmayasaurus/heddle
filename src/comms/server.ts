@@ -14,6 +14,7 @@ import {
 } from './bridge.js';
 import { parseAddress, BROADCAST, OPERATOR } from './address.js';
 import { pauseReadiness, type InFlightSource } from './quiesce.js';
+import { dueForNudge, nudgeBody, shouldRunNudger, DEFAULT_IDLE_MS, type NudgeOptions } from './nudge.js';
 import { TIERS, MESSAGE_KINDS, type Tier, type MessageKind } from './types.js';
 
 /**
@@ -398,6 +399,7 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
   let timer: NodeJS.Timeout | null = null;
   let inbound: InboundPump | null = null;
   let heartbeat: NodeJS.Timeout | null = null;
+  let nudger: NodeJS.Timeout | null = null;
 
   async function start(transport: McpTransport): Promise<void> {
     await mcp.connect(transport);
@@ -416,6 +418,30 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
         try { log.heartbeatSession(me, instanceId); } catch (err) { warn(`heartbeat failed: ${errorMessage(err)}`); }
       }, 30_000);
       heartbeat.unref();
+
+      // Idle-nudger (HED-137): only in the operator's session, so exactly one instance runs.
+      if (shouldRunNudger(isOperator, pushEnabled)) {
+        const cycleMs = Number(env.HEDDLE_COMMS_NUDGE_MS) || DEFAULT_IDLE_MS;
+        const nudgeOpts: NudgeOptions = { idleMs: cycleMs, cooldownMs: cycleMs };
+        nudger = setInterval(() => {
+          if (!operatorStillValid()) { void revokeOperator(); return; }
+          void (async () => {
+            try {
+              for (const idle of dueForNudge(log, nudgeOpts)) {
+                await broker.post({
+                  from: OPERATOR, to: idle.address, kind: 'status', body: nudgeBody(idle),
+                  // An automated message must never wear the human's authority: the loop lives in
+                  // the operator's session, so without this demotion every nudge would be stamped
+                  // `operator` and read as Maya speaking.
+                  requestedTier: 'agent-message',
+                  meta: { nudge: { idleMs: idle.idleMs } },
+                });
+              }
+            } catch (err) { warn(`nudge cycle failed: ${errorMessage(err)}`); }
+          })();
+        }, cycleMs);
+        nudger.unref();
+      }
     } else {
       warn(`push disabled (HEDDLE_COMMS_PUSH is not 1): ${me} is pull-only — no presence row, no channel events`);
     }
@@ -436,6 +462,7 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
     stopping = true;
     if (timer) clearTimeout(timer);
     if (heartbeat) clearInterval(heartbeat);
+    if (nudger) clearInterval(nudger);
     try { if (me && pushEnabled) log.unregisterSession(me, instanceId); } catch (err) { warn(`unregister failed: ${errorMessage(err)}`); }
     try { await mcp.close(); } catch (err) { warn(`mcp close failed (transport likely already gone): ${errorMessage(err)}`); }
     try { log.close(); } catch (err) { warn(`log close failed: ${errorMessage(err)}`); }
