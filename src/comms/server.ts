@@ -14,6 +14,7 @@ import {
 } from './bridge.js';
 import { parseAddress, BROADCAST, OPERATOR } from './address.js';
 import { pauseReadiness, type InFlightSource } from './quiesce.js';
+import { dueForNudge, nudgeBody, shouldRunNudger, isElectedNudger, parseNudgeMs, type NudgeOptions } from './nudge.js';
 import { TIERS, MESSAGE_KINDS, type Tier, type MessageKind } from './types.js';
 
 /**
@@ -398,6 +399,7 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
   let timer: NodeJS.Timeout | null = null;
   let inbound: InboundPump | null = null;
   let heartbeat: NodeJS.Timeout | null = null;
+  let nudger: NodeJS.Timeout | null = null;
 
   async function start(transport: McpTransport): Promise<void> {
     await mcp.connect(transport);
@@ -416,6 +418,36 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
         try { log.heartbeatSession(me, instanceId); } catch (err) { warn(`heartbeat failed: ${errorMessage(err)}`); }
       }, 30_000);
       heartbeat.unref();
+
+      // Idle-nudger (HED-137): hosted only by an operator session (static gate), and only by the
+      // one that currently owns the operator presence row (dynamic check, each cycle).
+      if (shouldRunNudger(isOperator, pushEnabled)) {
+        const cycleMs = parseNudgeMs(env.HEDDLE_COMMS_NUDGE_MS);
+        const nudgeOpts: NudgeOptions = { idleMs: cycleMs, cooldownMs: cycleMs };
+        // Self-scheduling, never overlapping: the next cycle is armed only after this one's posts
+        // settle, so a slow `broker.post` cannot let two cycles run at once and double-nudge.
+        const nudgeCycle = async () => {
+          if (stopping) return;
+          if (!operatorStillValid()) { await revokeOperator(); return; }
+          try {
+            if (isElectedNudger(log, instanceId)) {
+              for (const idle of dueForNudge(log, nudgeOpts)) {
+                await broker.post({
+                  from: OPERATOR, to: idle.address, kind: 'status', body: nudgeBody(idle),
+                  // An automated message must never wear the human's authority: the loop lives in
+                  // the operator's session, so without this demotion every nudge would be stamped
+                  // `operator` and read as Maya speaking.
+                  requestedTier: 'agent-message',
+                  meta: { nudge: { idleMs: idle.idleMs } },
+                });
+              }
+            }
+          } catch (err) { warn(`nudge cycle failed: ${errorMessage(err)}`); }
+          if (!stopping) { nudger = setTimeout(() => void nudgeCycle(), cycleMs); nudger.unref(); }
+        };
+        nudger = setTimeout(() => void nudgeCycle(), cycleMs);
+        nudger.unref();
+      }
     } else {
       warn(`push disabled (HEDDLE_COMMS_PUSH is not 1): ${me} is pull-only — no presence row, no channel events`);
     }
@@ -436,6 +468,7 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
     stopping = true;
     if (timer) clearTimeout(timer);
     if (heartbeat) clearInterval(heartbeat);
+    if (nudger) clearTimeout(nudger);
     try { if (me && pushEnabled) log.unregisterSession(me, instanceId); } catch (err) { warn(`unregister failed: ${errorMessage(err)}`); }
     try { await mcp.close(); } catch (err) { warn(`mcp close failed (transport likely already gone): ${errorMessage(err)}`); }
     try { log.close(); } catch (err) { warn(`log close failed: ${errorMessage(err)}`); }
