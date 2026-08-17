@@ -247,7 +247,11 @@ describe('concurrent materialization', () => {
       expect(innerAgents).toContain('ALPHA-CONTENT');
       expect(innerAgents).toContain('BETA-CONTENT');
       expect((innerAgents.match(/heddle dispatch #/g) ?? [])).toHaveLength(2);
-      expect(ledger.recent(2).map((row) => row.skills).sort()).toEqual(['worker-role,alpha', 'worker-role,beta']);
+      // exact, incl. HED-93's mandatory worker-hygiene and the auto-injected family pack for the target
+      expect(ledger.recent(2).map((row) => row.skills).sort()).toEqual([
+        'worker-role,worker-hygiene,alpha,family-cursor',
+        'worker-role,worker-hygiene,beta,family-cursor',
+      ]);
       expect(existsSync(join(cwd, 'AGENTS.md'))).toBe(false);
     } finally {
       if (priorRouting === undefined) delete process.env.HEDDLE_ROUTING;

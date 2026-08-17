@@ -59,7 +59,7 @@ describe('adversarial review dispatch', () => {
       expect(fake.calls[0].agents).toContain('### adversarial-review'); expect(fake.calls[0].agents).toContain('### worker-role');
       expect(outcome.review).toMatchObject({ authorProvider: 'claude', reviewerProvider: 'cursor', reviewerModel: 'cursor-grok-4.6-high' });
       expect(ledger.getReview(outcome.ledgerId)).toMatchObject({ author_provider: 'claude', reviewer_provider: 'cursor' });
-      expect(ledger.recent(1)[0].skills).toBe('worker-role,adversarial-review');
+      expect(ledger.recent(1)[0].skills).toBe('worker-role,worker-hygiene,adversarial-review,family-cursor');
     } finally { restore(); }
   });
 

@@ -20,14 +20,52 @@ import { withFileLock } from './matlock.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
-export function packsDir(): string {
-  return process.env.HEDDLE_PACKS ?? join(here, '..', 'skills');
+/** heddle's own packs — the generic ones every consumer inherits. */
+export function builtinPacksDir(): string {
+  return join(here, '..', 'skills');
 }
 
+/**
+ * Pack SEARCH PATH, consumer dirs first (HED-33/HED-93).
+ *
+ * `HEDDLE_PACKS` is a colon-separated list of CONSUMER pack directories — a project keeps its own
+ * conventions in its own repo (e.g. `<project>/.heddle/packs`) instead of shipping them inside
+ * heddle. heddle's built-in dir is ALWAYS searched last, so a consumer gets its own packs PLUS the
+ * generic ones (worker-role, worker-hygiene, family-*) rather than replacing them.
+ *
+ * This layering is the whole point: the earlier shape treated HEDDLE_PACKS as a REPLACEMENT, so
+ * pointing it at a consumer dir silently removed the mandatory packs and every dispatch died with
+ * "skill pack not found" (found by pointing it at a real consumer dir, 2026-08-17).
+ *
+ * A consumer pack SHADOWS a built-in of the same name — deliberate, so a project can specialize
+ * e.g. `quality-gate` without forking heddle.
+ */
+export function packDirs(): string[] {
+  const consumer = (process.env.HEDDLE_PACKS ?? '')
+    .split(':').map((d) => d.trim()).filter(Boolean);
+  return [...consumer, builtinPacksDir()];
+}
+
+/** First directory on the search path that holds this pack, or null. */
+export function packDirFor(name: string): string | null {
+  return packDirs().find((d) => existsSync(join(d, `${name}.md`))) ?? null;
+}
+
+/** Back-compat: the directory a bare pack lookup starts from. Prefer packDirs(). */
+export function packsDir(): string {
+  return packDirs()[0];
+}
+
+/** Every pack reachable on the search path, consumer packs shadowing built-ins of the same name. */
 export function listPacks(): string[] {
-  const dir = packsDir();
-  if (!existsSync(dir)) return [];
-  return readdirSync(dir).filter((f) => f.endsWith('.md')).map((f) => f.replace(/\.md$/, ''));
+  const seen = new Set<string>();
+  for (const dir of packDirs()) {
+    if (!existsSync(dir)) continue;
+    for (const f of readdirSync(dir)) {
+      if (f.endsWith('.md')) seen.add(f.replace(/\.md$/, ''));
+    }
+  }
+  return [...seen].sort();
 }
 
 /**
@@ -60,7 +98,7 @@ export const MODEL_FAMILY_PACKS: Record<string, string> = {
 export function modelFamilyPack(provider: string): string | null {
   const name = MODEL_FAMILY_PACKS[provider];
   if (!name) return null;
-  return existsSync(join(packsDir(), `${name}.md`)) ? name : null;
+  return packDirFor(name) ? name : null;
 }
 
 /**
@@ -78,11 +116,11 @@ export function withMandatoryPacks(skills: readonly string[] | undefined): strin
 }
 
 export function readPack(name: string): string {
-  const p = join(packsDir(), `${name}.md`);
-  if (!existsSync(p)) {
-    throw new Error(`skill pack "${name}" not found (looked in ${packsDir()})`);
+  const dir = packDirFor(name);
+  if (!dir) {
+    throw new Error(`skill pack "${name}" not found (searched: ${packDirs().join(', ')})`);
   }
-  return readFileSync(p, 'utf8').trim();
+  return readFileSync(join(dir, `${name}.md`), 'utf8').trim();
 }
 
 /**

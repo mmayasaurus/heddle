@@ -48,7 +48,7 @@ describe('routing.v0.yaml — shipped dispatch guidance', () => {
     expect(descriptions.find((row) => row.task_class === 'implementation')).toMatchObject({
       provider: 'claude', model: 'sonnet', execution: 'headless', effort: null,
       fallback: 'codex/gpt-5.6-terra', opt_in_required: false, edits_code: true,
-      mcp: ['memtrace'], skills: ['worker-role', 'code-discovery', 'quality-gate'],
+      mcp: ['memtrace'], skills: ['worker-role', 'worker-hygiene', 'code-discovery', 'quality-gate'],
     });
     expect(descriptions.find((row) => row.task_class === 'implementation')!.why).toEqual(expect.any(String));
     expect(descriptions.find((row) => row.task_class === 'implementation')!.why!.length).toBeGreaterThan(0);
@@ -69,7 +69,7 @@ describe('routing.v0.yaml — shipped dispatch guidance', () => {
     const raw = describeTaskClasses(table).find((row) => row.task_class === 'documentation')!;
     const unioned = describeTaskClasses(table, withMandatoryPacks).find((row) => row.task_class === 'documentation')!;
     expect(raw.skills).toEqual(['worker-role']);
-    expect(unioned.skills).toEqual(['worker-role']);
+    expect(unioned.skills).toEqual(['worker-role', 'worker-hygiene']);
     // orchestration is dispatchable:false — never a worker, so no mandatory pack even with the union
     const orch = describeTaskClasses(table, withMandatoryPacks).find((row) => row.task_class === 'orchestration')!;
     expect(orch.dispatchable).toBe(false);

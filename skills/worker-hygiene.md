@@ -3,21 +3,27 @@ a real failure in this fleet.
 
 ## NEVER reset the working tree you were given
 
-Do not run `git checkout -- .`, `git restore`, `git stash`, `git clean`, `git reset --hard`, or
-anything else that discards working-tree state. The directory you were handed may contain your
-orchestrator's UNCOMMITTED work — a worker that "starts from a clean slate" destroys it silently,
-leaving no stash and no reflog entry to recover from.
+Do not run any git command that discards working-tree state. Specifically forbidden, for any reason:
 
-This happened: a worker reverted two modified files and deleted an unstaged file before starting
-its own task. Its output was good; the damage was still real. If the tree looks dirty, that is
-expected — work around it, and say so in your report.
+- `checkout --` / `restore` against a path (reverts modified files)
+- `clean` with force (deletes untracked files)
+- `reset` with the hard flag (throws away everything uncommitted)
+- `stash` in any form, including drop (moves work somewhere the orchestrator will not look)
+- `rm` on tracked files
+
+The directory you were handed may contain your orchestrator's UNCOMMITTED work. A worker that
+"starts from a clean slate" destroys it silently — no stash entry, no reflog entry, nothing to
+recover from.
+
+This happened: a worker reverted two modified files and deleted an unstaged file before starting its
+own task. Its output was good; the damage was still real, and unrecoverable except by hand. If the
+tree looks dirty, that is EXPECTED — work around it, and mention it in your report.
 
 ## Verify as its OWN step, with its own exit code
 
-Never chain a check onto other work with `&&` or a pipe and read the last line as the verdict:
+Never chain a check onto other work and read the last line as the verdict:
 
     npm test | grep -E "Tests"        # WRONG: grep's exit code hides a red suite
-    npm test && git push              # WRONG: a failing build short-circuits into silence
 
 Run the check alone, look at its exit status, and only then act:
 
@@ -34,10 +40,9 @@ you changed. If you believe a commit is needed, say so in your report instead of
 
 ## Never delete what you did not just create
 
-No `rm -rf`, no overwriting a file you have not read. If something seems like it should be removed,
-say so in your report and let the orchestrator or operator decide. A variable that is empty or wrong
-turns `rm -rf "$DIR"` into something far worse than a no-op — prefer `mktemp -d` over
-deleting-and-recreating a fixed path.
+If something seems like it should be removed, say so in your report and let the orchestrator or
+operator decide. A variable that is empty or wrong turns a recursive delete of "$DIR" into something
+far worse than a no-op — prefer a fresh temp directory over deleting and recreating a fixed path.
 
 ## Report honestly, including what you did NOT do
 
@@ -52,9 +57,9 @@ Reporting "case 12 fails because the source does X, not Y" is a useful result; s
 test destroys the signal your orchestrator asked for. Workers who did this correctly turned two
 findings into real source fixes.
 
-If you cannot verify a factual claim (a command, a convention) from a file you actually read, OMIT
-it and list it as unverified. A wrong command repeated in every future dispatch is worse than a
-missing one.
+If you cannot verify a factual claim (a command, a convention) from a file you actually read, OMIT it
+and list it as unverified. A wrong command repeated in every future dispatch is worse than a missing
+one.
 
 "Tests pass" is not "it works": mocked tests do not prove builds, real APIs, or end-to-end behavior.
 Say which is which.
