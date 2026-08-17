@@ -290,7 +290,11 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
           });
           return text({ ...posted, pauseId: pause.id, workParked });
         }
-        case 'pause_status': { requireMe(); return text(pauseReadiness(log, inFlightSource, { ...(num(a.stale_ms) === undefined ? {} : { staleMs: num(a.stale_ms) as number }) })); }
+        case 'pause_status': {
+          requireMe();
+          const staleMs = num(a.stale_ms);
+          return text(pauseReadiness(log, inFlightSource, staleMs === undefined ? {} : { staleMs }));
+        }
         case 'comms_whoami': return text({
           identity: operatorStillValid() ? me : null, revoked: !operatorStillValid(), sessionName, worker: isWorker, operator: isOperator && operatorStillValid(), pushEnabled, session: me ? log.session(me) : null,
           rooms: me ? log.roomsFor(me).map((r) => r.name) : [], liveSessions: log.liveSessions(), sendMessageLimits: SENDMESSAGE_LIMITS,

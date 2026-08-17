@@ -64,6 +64,54 @@ export interface QuiesceOptions {
 }
 
 /**
+ * Does this ack still speak for the address that gave it?
+ *
+ * Only when the session that acked is STILL the session at that address: a process replaced under
+ * the same address after acking never answered this pause, and inheriting its predecessor's answer
+ * would relaunch a session that is mid-work. An ack with no recorded session id (or a session with
+ * none) is honoured — the binding is an added guarantee, not a reason to reject an otherwise valid
+ * answer.
+ */
+function isCurrentAck(ack: FleetPauseAck, session: { sessionId?: string | null } | undefined): boolean {
+  if (!session) return false;                              // not live: judged under `live`, not here
+  if (!ack.sessionId || !session.sessionId) return true;
+  return ack.sessionId === session.sessionId;
+}
+
+interface BlockerInput {
+  pending: string[];
+  restarted: string[];
+  notParked: string[];
+  joinedAfterPause: string[];
+  inFlightDispatches: number;
+  ledgerConsulted: boolean;
+}
+
+/**
+ * The human-facing reasons the fleet is not ready.
+ *
+ * Each agent is chased under ONE reason. `pending`, `restarted` and `joinedAfterPause` overlap by
+ * construction — a process replaced under the same address is un-acked AND restarted AND newer than
+ * the pause — and three lines naming one agent read as three contradictory problems to whoever is
+ * clearing them. The arrays keep their plain meanings for callers; only this prose is attributed.
+ */
+function describeBlockers(x: BlockerInput): string[] {
+  const claimed = new Set([...x.restarted, ...x.joinedAfterPause]);
+  const stillPending = x.pending.filter((a) => !claimed.has(a));
+  const joinedOnly = x.joinedAfterPause.filter((a) => !x.restarted.includes(a));
+  const out: string[] = [];
+  if (stillPending.length) out.push(`${stillPending.length} live agent(s) have not acked: ${stillPending.join(', ')}`);
+  if (x.restarted.length) out.push(`${x.restarted.length} agent(s) acked from a session that has since been replaced: ${x.restarted.join(', ')}`);
+  if (x.notParked.length) out.push(`${x.notParked.length} agent(s) acked with work NOT parked: ${x.notParked.join(', ')}`);
+  if (x.inFlightDispatches) out.push(`${x.inFlightDispatches} dispatch(es) still in flight`);
+  // The documented contract is that a zero from an absent ledger proves nothing — so it must not be
+  // able to produce `ready`, or the doc and the behaviour disagree in the dangerous direction.
+  if (!x.ledgerConsulted) out.push('dispatch status could not be verified: no in-flight source available');
+  if (joinedOnly.length) out.push(`${joinedOnly.length} session(s) started after the pause and may not have seen it — re-issue request_pause: ${joinedOnly.join(', ')}`);
+  return out;
+}
+
+/**
  * Compute whether the fleet is safe to relaunch. Pure over its inputs so a rotator can poll it,
  * and so the blocking cases are testable without live sessions.
  */
@@ -96,15 +144,7 @@ export function pauseReadiness(
   const acked = log.fleetPauseAcks(pause.id);
   const sessionOf = new Map(sessions.map((s) => [s.address, s]));
 
-  // An ack counts only when the session that gave it is STILL the session at that address. A
-  // process replaced under the same address after acking never answered this pause, so inheriting
-  // its predecessor's ack would relaunch a session that is mid-work.
-  const currentAck = (a: FleetPauseAck): boolean => {
-    const session = sessionOf.get(a.sender);
-    if (!session) return false;                       // not live: judged under `live`, not here
-    if (!a.sessionId || !session.sessionId) return true;  // pre-binding ack, or a session with no id
-    return a.sessionId === session.sessionId;
-  };
+  const currentAck = (a: FleetPauseAck): boolean => isCurrentAck(a, sessionOf.get(a.sender));
   const liveAcks = acked.filter(currentAck);
   const ackedBy = new Set(liveAcks.map((a) => a.sender));
   const pending = live.filter((a) => !ackedBy.has(a));
@@ -121,22 +161,7 @@ export function pauseReadiness(
     .filter((s) => !ackedBy.has(s.address) && s.startedAt > pause.ts)
     .map((s) => s.address);
 
-  // Each agent is chased under ONE reason. `pending`, `restarted` and `joinedAfterPause` overlap by
-  // construction — a replaced process is un-acked AND restarted AND newer than the pause — and three
-  // blocker lines naming the same agent read as three contradictory problems to whoever is clearing
-  // them. The arrays keep their plain meanings for callers; only the human-facing lines are attributed.
-  const claimed = new Set([...restarted, ...joinedAfterPause]);
-  const stillPending = pending.filter((a) => !claimed.has(a));
-  const blockers: string[] = [];
-  if (stillPending.length) blockers.push(`${stillPending.length} live agent(s) have not acked: ${stillPending.join(', ')}`);
-  if (restarted.length) blockers.push(`${restarted.length} agent(s) acked from a session that has since been replaced: ${restarted.join(', ')}`);
-  if (notParked.length) blockers.push(`${notParked.length} agent(s) acked with work NOT parked: ${notParked.join(', ')}`);
-  if (inFlightDispatches) blockers.push(`${inFlightDispatches} dispatch(es) still in flight`);
-  // The documented contract is that a zero from an absent ledger proves nothing — so it must not
-  // be able to produce `ready`, or the doc and the behaviour disagree in the dangerous direction.
-  if (!ledgerConsulted) blockers.push('dispatch status could not be verified: no in-flight source available');
-  const joinedOnly = joinedAfterPause.filter((a) => !restarted.includes(a));
-  if (joinedOnly.length) blockers.push(`${joinedOnly.length} session(s) started after the pause and may not have seen it — re-issue request_pause: ${joinedOnly.join(', ')}`);
+  const blockers = describeBlockers({ pending, restarted, notParked, joinedAfterPause, inFlightDispatches, ledgerConsulted });
 
   const meta = (pause.meta ?? {}) as Record<string, unknown>;
   const fleetPause = meta.fleetPause as Record<string, unknown> | undefined;
