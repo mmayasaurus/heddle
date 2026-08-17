@@ -160,6 +160,24 @@ export function createRotatorDeps(o: LiveRotatorOptions): RotatorDeps {
       return code === 0 ? { ok: true, code: 'launched' } : { ok: false, code: `fleet-relaunch exit ${code}` };
     },
 
+    markRelaunched: async (address) => {
+      const p = o.log.latestFleetPause();
+      if (!p) return;
+      await o.broker.post({ from: OPERATOR, to: OPERATOR, kind: 'status',
+        body: `rotation ${p.id}: relaunched ${address} onto target`,
+        meta: { rotationRelaunched: { pauseId: p.id, address } } });
+    },
+
+    wasRelaunched: (address) => {
+      const p = o.log.latestFleetPause();
+      if (!p) return false;
+      // Per-rotation markers are few (one per fleet member); a bounded inbox scan finds them.
+      return o.log.transcript({ inbox: OPERATOR }, { limit: 500 }).some((m) => {
+        const rr = (m.meta as { rotationRelaunched?: { pauseId?: number; address?: string } } | null)?.rotationRelaunched;
+        return rr?.pauseId === p.id && rr?.address === address;
+      });
+    },
+
     needsHuman: async (message) => {
       // De-dupe: a persistent block (e.g. a kill that keeps refusing) re-enters this every tick.
       // fleet-kill REFUSES rather than guesses, so re-attempting is safe — but re-posting the same

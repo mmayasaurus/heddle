@@ -83,6 +83,15 @@ export interface RotatorDeps {
   killSession(address: string): Promise<{ ok: boolean; code: string }>;
   /** Launch one session on `account` (R's fleet-relaunch.sh). Returns its exit outcome. */
   relaunch(address: string, account: string): Promise<{ ok: boolean; code: string }>;
+  /**
+   * Record DURABLY that `address` has been relaunched this rotation — written AFTER a successful
+   * relaunch. This is what makes the crash between kill and relaunch recoverable: a member with no
+   * marker is (re)launched (kill is idempotent — fleet-kill exits 3 on an already-dead session),
+   * while a marked member is only waited on to boot, never relaunched again.
+   */
+  markRelaunched(address: string): Promise<void>;
+  /** Has `address` been marked relaunched for the pause in force? */
+  wasRelaunched(address: string): boolean;
   /** Post a needs-human to the operator (rotation cannot proceed unattended). */
   needsHuman(message: string): Promise<void>;
 }
@@ -101,12 +110,13 @@ export interface RotatorDeps {
  * failure — a refused kill (the old session may still be live) or a failed relaunch (a half-rotated
  * fleet) — with a needs-human, never a blind march. Extracted from `tick` so each is one procedure.
  */
-async function killAndRelaunch(deps: RotatorDeps, members: string[], intent: RotationIntent): Promise<RotatorStep> {
+async function killRelaunchMark(deps: RotatorDeps, members: string[], intent: RotationIntent): Promise<RotatorStep> {
   for (const address of members) {
     const k = await deps.killSession(address);
     if (!k.ok) {
       // A refused kill means the old session may still be live — relaunching over it would put two
-      // processes on one conversation. Stop before that, don't retry blindly.
+      // processes on one conversation. Stop before that, don't retry blindly. (An already-dead
+      // session is exit-3/ok, so this fires only on a genuine identity refusal.)
       await deps.needsHuman(`Rotation to ${intent.target} could NOT kill ${address} (${k.code}) — the old session may still be live. Resolve manually, then resume_pause.`);
       return { phase: 'blocked', reason: `kill of ${address} refused: ${k.code}`, target: intent.target };
     }
@@ -116,6 +126,8 @@ async function killAndRelaunch(deps: RotatorDeps, members: string[], intent: Rot
       await deps.needsHuman(`Rotation to ${intent.target} FAILED relaunching ${address} (${r.code}). Fleet is half-rotated — resolve manually, then resume_pause.`);
       return { phase: 'blocked', reason: `relaunch of ${address} failed: ${r.code}`, target: intent.target };
     }
+    // Durable: a crash after this point will not re-launch address into a duplicate.
+    await deps.markRelaunched(address);
   }
   return { phase: 'relaunching', reason: `killed + relaunched ${members.length} session(s) onto ${intent.target}`, target: intent.target };
 }
@@ -154,27 +166,26 @@ export async function tick(deps: RotatorDeps): Promise<RotatorStep> {
   }
 
   const live = deps.liveAddresses();
-  // Roster members STILL on the OLD (source) session: live, and not yet relaunched. killSession
-  // unregisters, so a member we already moved is not live here — and isRelaunched excludes any that
-  // came back post-pause. A re-entrant tick therefore relaunches only what is genuinely un-moved,
-  // never re-killing progress made before a crash or in an earlier tick.
-  const sourceRemaining = intent.roster.filter((a) => live.includes(a) && !deps.isRelaunched(a));
+  // A roster member still needs (kill+)relaunch until it carries a DURABLE relaunch marker. This is
+  // the source of truth, not the live set: a member killed-but-not-relaunched by a mid-rotation
+  // crash has no marker, so it is re-handled; a member already relaunched has a marker, so it is
+  // only waited on — never re-launched into a duplicate.
+  const needsRelaunch = intent.roster.filter((a) => !deps.wasRelaunched(a));
 
-  if (sourceRemaining.length > 0) {
-    // Not yet (fully) relaunched. Hold until the fleet is genuinely quiet, THEN do the irreversible
-    // half — kill + relaunch each remaining source session onto the target.
+  if (needsRelaunch.length > 0) {
+    // Hold until the fleet is genuinely quiet, THEN do the irreversible half.
     if (!readiness.ready) {
       return { phase: 'quiescing', reason: 'waiting for the fleet to go quiet', blockers: readiness.blockers };
     }
-    return killAndRelaunch(deps, sourceRemaining, intent);
+    return killRelaunchMark(deps, needsRelaunch, intent);
   }
 
-  // No roster member left on the old session ⇒ the relaunch is done. VERIFY every roster member is
-  // live again as its NEW (relaunched) session before lifting the pause — a session that never came
+  // Every roster member is marked relaunched ⇒ the launches are issued. VERIFY each has actually
+  // BOOTED (live again as its new session) before lifting the pause — a session that never came
   // back is a needs-human, not a silent drop.
   const pending = intent.roster.filter((a) => !(live.includes(a) && deps.isRelaunched(a)));
   if (pending.length > 0) {
-    return { phase: 'verifying', reason: `waiting for ${pending.join(', ')} to re-register on ${intent.target}`, pending };
+    return { phase: 'verifying', reason: `waiting for ${pending.join(', ')} to boot on ${intent.target}`, pending };
   }
   await deps.resumePause(`rotation complete: fleet on ${intent.target}`);
   return { phase: 'resumed', reason: `resumed on ${intent.target}` };

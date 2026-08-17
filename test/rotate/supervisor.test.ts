@@ -21,7 +21,8 @@ describe('rotator supervisor tick', () => {
     readinessLive: string[] = [];
     blockers: string[] = [];
     live: string[] = [];
-    relaunched_set = new Set<string>();  // addresses whose live session is the post-rotation one
+    relaunched_set = new Set<string>();  // addresses whose live session has BOOTED (isRelaunched)
+    marks = new Set<string>();           // addresses with a durable relaunch marker (wasRelaunched)
     decision: RotateAction = { action: 'idle', current: 'acct1', usedPct: 10, reason: 'idle' };
     relaunchOk: (address: string) => { ok: boolean; code: string } = () => ({ ok: true, code: 'launched' });
     killOk: (address: string) => { ok: boolean; code: string } = () => ({ ok: true, code: 'killed' });
@@ -45,6 +46,8 @@ describe('rotator supervisor tick', () => {
     pauseIntent: () => w.intent,
     liveAddresses: () => [...w.live],
     isRelaunched: (a) => w.relaunched_set.has(a),
+    markRelaunched: async (a) => { w.marks.add(a); },
+    wasRelaunched: (a) => w.marks.has(a),
     requestPause: async (reason, intent) => { w.paused.push({ reason, intent }); w.pauseId = 1; w.intent = intent; },
     resumePause: async (reason) => { w.resumed.push(reason); w.pauseId = null; w.intent = null; },
     killSession: async (a) => { w.killed.push(a); const r = w.killOk(a); if (r.ok) { w.live = w.live.filter((x) => x !== a); w.relaunched_set.delete(a); } return r; },
@@ -150,7 +153,7 @@ describe('rotator supervisor tick', () => {
     w.intent = { target: 'acct2', from: 'acct1', roster: ['R', 'S', 'V'] };
     w.ready = true;
     // R and S came back relaunched; V has not re-registered yet (not live).
-    w.live = ['R', 'S']; w.relaunched_set = new Set(['R', 'S']);
+    w.live = ['R', 'S']; w.relaunched_set = new Set(['R', 'S']); w.marks = new Set(['R', 'S', 'V']);
     const step = await tick(deps(w));
     expect(step.phase).toBe('verifying');
     expect(w.resumed).toEqual([]);
@@ -160,7 +163,7 @@ describe('rotator supervisor tick', () => {
     w.pauseId = 1;
     w.intent = { target: 'acct2', from: 'acct1', roster: ['R', 'S', 'V'] };
     w.ready = true;
-    w.live = ['R', 'S', 'V']; w.relaunched_set = new Set(['R', 'S', 'V']);
+    w.live = ['R', 'S', 'V']; w.relaunched_set = new Set(['R', 'S', 'V']); w.marks = new Set(['R', 'S', 'V']);
     const step = await tick(deps(w));
     expect(step.phase).toBe('resumed');
     expect(w.resumed).toHaveLength(1);
@@ -174,11 +177,41 @@ describe('rotator supervisor tick', () => {
     w.intent = { target: 'acct2', from: 'acct1', roster: ['R', 'S', 'V'] };
     w.ready = true;
     w.live = ['R', 'S', 'V'];
-    w.relaunched_set = new Set(['R']); // R already relaunched; S,V still the old sessions
+    w.relaunched_set = new Set(['R']); w.marks = new Set(['R']); // R done; S,V still un-relaunched
     const step = await tick(deps(w));
     expect(step.phase).toBe('relaunching');
     expect(w.killed.sort()).toEqual(['S', 'V']);   // R is NOT re-killed
     expect(w.relaunched.map((r) => r.address).sort()).toEqual(['S', 'V']);
+  });
+
+
+  it('CRASH GAP: a member killed but not yet marked is RE-relaunched, not deadlocked in verify', async () => {
+    // Simulate a crash between kill and relaunch of R: R was killed (not live, no mark); S,V are
+    // still the old sessions. Without markers this would deadlock — VERIFY would wait forever for R
+    // to boot, but nothing ever relaunched it.
+    w.pauseId = 1;
+    w.intent = { target: 'acct2', from: 'acct1', roster: ['R', 'S', 'V'] };
+    w.ready = true;
+    w.live = ['S', 'V'];          // R was killed in the crashed tick
+    w.marks = new Set<string>();  // …but never marked relaunched
+    const step = await tick(deps(w));
+    expect(step.phase).toBe('relaunching');
+    // All three (incl. the killed-but-unmarked R) are relaunched — R is recovered, not stranded.
+    expect(w.relaunched.map((r) => r.address).sort()).toEqual(['R', 'S', 'V']);
+    expect(w.marks.has('R')).toBe(true);
+  });
+
+  it('a MARKED member still booting is NOT re-launched (no duplicate) — verify just waits', async () => {
+    w.pauseId = 1;
+    w.intent = { target: 'acct2', from: 'acct1', roster: ['R', 'S', 'V'] };
+    w.ready = true;
+    // All marked relaunched; R and S have booted; V is marked but not yet live (booting).
+    w.marks = new Set(['R', 'S', 'V']);
+    w.live = ['R', 'S']; w.relaunched_set = new Set(['R', 'S']);
+    const step = await tick(deps(w));
+    expect(step.phase).toBe('verifying');
+    expect(w.relaunched).toEqual([]);   // V is NOT relaunched again while booting — no duplicate
+    expect(w.killed).toEqual([]);
   });
 
   it('leaves a NON-rotation operator pause alone (not the rotator\'s to resume)', async () => {
