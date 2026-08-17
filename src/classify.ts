@@ -1,5 +1,7 @@
 import { CodexAdapter } from './adapters/codex.js';
 import { CursorAdapter } from './adapters/cursor.js';
+import { Ledger } from './ledger.js';
+import { resolveIdentity, attributeDispatch } from './identity.js';
 import type { WorkerAdapter } from './types.js';
 
 /**
@@ -15,7 +17,14 @@ import type { WorkerAdapter } from './types.js';
  *   - assessResult    (POST-dispatch): a worker's result → done | needs-rework | needs-human.
  *
  * These call an adapter DIRECTLY (not the full dispatch pipeline) so a meta-classification never
- * materializes skill packs, attaches MCP, or records a worker row in the ledger.
+ * materializes skill packs or attaches MCP.
+ *
+ * They ARE ledgered, as `execution_mode='classification'` rows (HED-25, Maya-decided 2026-08-17).
+ * They previously were not, on the reasoning that a meta-classification should not look like a
+ * worker row — correct as far as it went, but the consequence was that every --auto-effort and every
+ * auto-assess spent real Codex tokens that `heddle usage`, the Fleet drawer and the savings
+ * analytics never saw. Marking the row keeps BOTH properties: the spend is visible, and every
+ * worker-facing aggregate excludes it by default.
  */
 
 export interface ClassifierConfig {
@@ -57,12 +66,33 @@ export async function classify(
   cwd: string = process.cwd(),
   cfg: ClassifierConfig = DEFAULT_CLASSIFIER,
   timeoutMs = 120_000,
+  /** Which classifier this is — recorded as the row's task_class so spend is attributable. */
+  kind = 'classification',
+  /** Injectable so tests never write to the operator's real ledger. */
+  ledger?: Ledger,
 ): Promise<ClassifyResult> {
   const prompt =
     `${instruction}\n\nReply with EXACTLY ONE of these labels and nothing else: ${labels.join(' | ')}.`;
+  const started = Date.now();
   const res = await adapterFor(cfg).dispatch(prompt, {
     model: cfg.model, cwd, extraFlags: cfg.extraFlags, timeoutMs,
   });
+  // Best-effort accounting: a ledger failure must never break the classification the caller asked
+  // for (and a classifier is advisory anyway — losing the ROW is far cheaper than losing the run).
+  try {
+    const identity = resolveIdentity();
+    const attribution = attributeDispatch(identity, undefined);
+    (ledger ?? new Ledger()).recordClassification({
+      orchestrator: attribution.orchestrator, identitySource: attribution.identitySource,
+      kind, provider: cfg.provider, model: cfg.model, cwd, promptPreview: instruction,
+      ok: res.ok, error: res.error,
+      inputTokens: res.usage?.inputTokens, cachedInputTokens: res.usage?.cachedInputTokens,
+      outputTokens: res.usage?.outputTokens, reasoningTokens: res.usage?.reasoningOutputTokens,
+      durationMs: res.durationMs ?? Date.now() - started,
+    });
+  } catch (err) {
+    process.stderr.write(`heddle: could not ledger the ${kind} classification (${err instanceof Error ? err.message : String(err)})\n`);
+  }
   const out = (res.output || '').toLowerCase();
   // Prefer a whole-word match (hyphen or space tolerant), else any substring occurrence.
   const wordMatch = labels.find((l) =>
@@ -74,12 +104,12 @@ export async function classify(
 export const EFFORT_LABELS = ['minimal', 'low', 'medium', 'high', 'xhigh'] as const;
 
 /** PRE-dispatch: pick a reasoning-effort level for a sub-task. */
-export async function classifyEffort(taskClass: string, task: string, cwd?: string): Promise<string> {
+export async function classifyEffort(taskClass: string, task: string, cwd?: string, ledger?: Ledger): Promise<string> {
   const r = await classify(
     `You are a reasoning-effort classifier for a coding sub-task in the "${taskClass}" class. ` +
     `Judge how much reasoning it needs: minimal (trivial/mechanical, e.g. a rename) up through ` +
     `xhigh (subtle, multi-step, cross-cutting, or high-stakes). Sub-task:\n${task}`,
-    [...EFFORT_LABELS], cwd);
+    [...EFFORT_LABELS], cwd, DEFAULT_CLASSIFIER, 120_000, 'classify-effort', ledger);
   return r.label;
 }
 
@@ -88,7 +118,7 @@ export type ResultAssessment = { label: string; matched: boolean };
 
 /** POST-dispatch: judge a worker's result. `needs-human` is the needs-human-queue trigger. */
 export async function assessResult(
-  task: string, output: string, workerOk: boolean, cwd?: string,
+  task: string, output: string, workerOk: boolean, cwd?: string, ledger?: Ledger,
 ): Promise<ResultAssessment> {
   const r = await classify(
     `You are a QA classifier deciding what to do with a worker's result. Classify as EXACTLY one:\n` +
@@ -100,6 +130,6 @@ export async function assessResult(
     `that ONLY the human operator can resolve (a retry would not fix it).\n` +
     `Default to "done" when the worker reports success with specifics and nothing indicates a problem.\n\n` +
     `Sub-task:\n${task}\n\nWorker reported success=${workerOk}. Worker result:\n${output.slice(0, 4000)}`,
-    [...RESULT_LABELS], cwd, ASSESS_CLASSIFIER);
+    [...RESULT_LABELS], cwd, ASSESS_CLASSIFIER, 120_000, 'assess-result', ledger);
   return { label: r.label, matched: r.matched };
 }

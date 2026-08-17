@@ -96,6 +96,10 @@ export type DispatchStartRecord =
     'executionMode' | 'outputPath' | 'ownerPid' | 'ownerComm' | 'ownerStartedAt' | 'outcome'> &
   Partial<Pick<DispatchRecord, 'capabilities' | 'routeReason' | 'account' | 'identitySource' | 'overrideReason'>>;
 
+/** Worker-facing aggregates exclude classifier rows by default (HED-25). NULL-safe: rows written
+ *  before the column existed have execution_mode NULL and must still count as worker dispatches. */
+const CLASSIFICATION_EXCLUDED = "(execution_mode IS NULL OR execution_mode <> 'classification')";
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS dispatches (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -501,6 +505,43 @@ export class Ledger {
     return row?.account ?? null;
   }
 
+  /**
+   * Record a completed CLASSIFIER run (HED-25, Maya-decided 2026-08-17: ledger rows marked
+   * `execution_mode='classification'`, not a separate table or a bare counter).
+   *
+   * `classifyEffort` / `assessResult` spend real Codex tokens on every auto-effort and every
+   * auto-assess, and previously bypassed the ledger entirely "so a meta-classification never records
+   * a worker row" — with the result that `heddle usage`, the Fleet drawer and the savings analytics
+   * never saw that spend at all. Recording it as its own execution_mode keeps the spend visible
+   * while every worker-facing aggregate excludes it by default, so worker stats stay honest.
+   *
+   * Written in ONE insert (already finished): a classifier is a single blocking call, so there is no
+   * in-flight window to orphan and nothing for the stale sweep to reconcile.
+   */
+  recordClassification(r: {
+    orchestrator: string | null; identitySource: string | null; kind: string; provider: string;
+    model: string; cwd: string; promptPreview: string; ok: boolean; error?: string;
+    inputTokens?: number; cachedInputTokens?: number; outputTokens?: number; reasoningTokens?: number;
+    durationMs?: number;
+  }): number {
+    const now = new Date().toISOString();
+    const info = this.db.prepare(`
+      INSERT INTO dispatches
+        (orchestrator, task_class, provider, model, skills, issue, pr, cwd, prompt_preview,
+         session_id, fell_back_from, identity_source, execution_mode, ok, error,
+         input_tokens, cached_input_tokens, output_tokens, reasoning_tokens, duration_ms,
+         started_at, finished_at)
+      VALUES (?, ?, ?, ?, NULL, NULL, NULL, ?, ?, NULL, NULL, ?, 'classification', ?, ?,
+              ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      r.orchestrator, r.kind, r.provider, r.model, r.cwd, r.promptPreview.slice(0, 500),
+      r.identitySource, r.ok ? 1 : 0, r.error ?? null,
+      r.inputTokens ?? null, r.cachedInputTokens ?? null, r.outputTokens ?? null,
+      r.reasoningTokens ?? null, r.durationMs ?? null, now, now,
+    );
+    return Number(info.lastInsertRowid);
+  }
+
   closeIfInFlight(id: number, error: string, opts: { outcome?: string; now?: Date } = {}): boolean {
     const info = this.db.prepare(`
       UPDATE dispatches SET ok = 0, error = ?, outcome = COALESCE(?, outcome), finished_at = ?
@@ -656,7 +697,12 @@ export class Ledger {
    * Claude runs in success rates or savings math.
    */
   usageByProvider(sinceIso?: string): Record<string, unknown>[] {
-    const where = sinceIso ? 'WHERE started_at >= ?' : '';
+    // HED-25: classifier rows are ledgered so their spend is visible, but they are NOT worker
+    // dispatches — counting them here would inflate dispatch counts and corrupt the savings math
+    // the stat exists for. `classificationUsage()` reports them separately.
+    const where = sinceIso
+      ? `WHERE started_at >= ? AND ${CLASSIFICATION_EXCLUDED}`
+      : `WHERE ${CLASSIFICATION_EXCLUDED}`;
     const stmt = this.db.prepare(`
       SELECT provider,
              SUM(CASE WHEN refusal IS NULL THEN 1 ELSE 0 END) AS dispatches,
@@ -668,6 +714,30 @@ export class Ledger {
              SUM(CASE WHEN refusal IS NULL THEN COALESCE(duration_ms,0) ELSE 0 END) AS duration_ms
       FROM dispatches ${where}
       GROUP BY provider ORDER BY dispatches DESC
+    `);
+    return (sinceIso ? stmt.all(sinceIso) : stmt.all()) as Record<string, unknown>[];
+  }
+
+  /**
+   * Classifier spend (HED-25), reported SEPARATELY from worker usage: every `--auto-effort` and
+   * every auto-assess is a real Codex call, and before this it was invisible to `heddle usage`, the
+   * Fleet drawer and the savings analytics. `task_class` here is the classifier KIND (effort /
+   * assess), so an expensive classifier is attributable rather than just a lump.
+   */
+  classificationUsage(sinceIso?: string): Record<string, unknown>[] {
+    const where = sinceIso
+      ? "WHERE execution_mode = 'classification' AND started_at >= ?"
+      : "WHERE execution_mode = 'classification'";
+    const stmt = this.db.prepare(`
+      SELECT provider, model, task_class AS kind,
+             COUNT(*) AS runs,
+             SUM(ok) AS succeeded,
+             SUM(COALESCE(input_tokens,0)) AS input_tokens,
+             SUM(COALESCE(cached_input_tokens,0)) AS cached_tokens,
+             SUM(COALESCE(output_tokens,0)) AS output_tokens,
+             SUM(COALESCE(duration_ms,0)) AS duration_ms
+      FROM dispatches ${where}
+      GROUP BY provider, model, task_class ORDER BY runs DESC
     `);
     return (sinceIso ? stmt.all(sinceIso) : stmt.all()) as Record<string, unknown>[];
   }

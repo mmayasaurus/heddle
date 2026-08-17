@@ -494,7 +494,7 @@ async function runTarget(
   // HED-3 auto-assess: judge the reviewer's output with the cheap classifier (best-effort).
   let assessment: ResultAssessment | undefined;
   if (route.autoAssess && result.output) {
-    try { assessment = await assessResult(req.prompt, result.output, result.ok, req.cwd); } catch (err) {
+    try { assessment = await assessResult(req.prompt, result.output, result.ok, req.cwd, ctx.ledger); } catch (err) {
       // Best-effort by design, but never SILENT: a classifier outage should be visible in the logs.
       process.stderr.write(`heddle: auto-assess failed (${err instanceof Error ? err.message : String(err)}) — outcome recorded without assessment\n`);
     }
@@ -627,7 +627,7 @@ export async function dispatch(
   // transactional inside runTarget). Best-effort; failures are noted, not fatal.
   if (req.autoEffort && !req.effort) {
     try {
-      req = { ...req, effort: await classifyEffort(route.taskClass, req.prompt, req.cwd) };
+      req = { ...req, effort: await classifyEffort(route.taskClass, req.prompt, req.cwd, ctx.ledger) };
     } catch (err) {
       process.stderr.write(`heddle: auto-effort classification failed (${err instanceof Error ? err.message : String(err)}) — using the route default\n`);
     }
