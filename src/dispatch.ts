@@ -7,7 +7,7 @@ import {
   loadRouting, resolveRoute, directRoute, providerExecution, structuralCaps,
   type Route, type RouteTarget, type RoutingTable, type StructuralCaps,
 } from './routing.js';
-import { materializeAgentsMd, readPack, withMandatoryPacks, composePacks } from './skillpacks.js';
+import { materializeAgentsMd, readPack, withMandatoryPacks, composePacks, modelFamilyPack } from './skillpacks.js';
 import { materializeWorkerMcp, validateWorkerMcp, codexMcpFlags, claudeMcpConfigFile } from './mcp.js';
 import { classifyEffort, assessResult, type ResultAssessment } from './classify.js';
 import { pickReviewer, snapshotWorktree, sameSnapshot, diffInstruction, embeddedDiff, normalizeProvider, type ReviewerPick } from './review.js';
@@ -244,9 +244,14 @@ async function runTarget(
   // into whichever applies (see skillpacks.ts) — the ledger records the result, so it is auditable.
   // Review classes: the class packs carry the find-only MANDATE — an explicit skills list may add
   // packs but can never drop them (same posture as the worker-role union).
-  const skills = route.reviewerPool
+  // Model-family prompting pack (HED-93): appended from the TARGET's provider, so the same task
+  // routed to a different family is automatically restyled for it — including on a fallback into
+  // another family. Never caller-named; absent for providers heddle has learned nothing about yet.
+  const family = modelFamilyPack(target.provider);
+  const requested = route.reviewerPool
     ? withMandatoryPacks([...new Set([...(target.skills ?? []), ...(req.skills ?? [])])])
     : withMandatoryPacks(req.skills ?? target.skills ?? []);
+  const skills = family && !requested.includes(family) ? [...requested, family] : requested;
   const mcp = req.mcp ?? target.mcp ?? [];
 
   // Capabilities are decided per TARGET provider (a fallback may enforce a different set).

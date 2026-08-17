@@ -37,7 +37,31 @@ export function listPacks(): string[] {
  * without it a worker may also claim issues / own PRs it must not. Decided 2026-08-15 (Maya via
  * Agent R): an explicit `skills` list ADDS to policy, it never removes worker-role.
  */
-export const MANDATORY_PACKS = ['worker-role'] as const;
+export const MANDATORY_PACKS = ['worker-role', 'worker-hygiene'] as const;
+
+/**
+ * MODEL-FAMILY prompting packs (HED-93, Maya's idea): each provider family responds to a different
+ * instruction STYLE, so routing the same task to a different model should restyle the instructions
+ * automatically rather than making every orchestrator remember the differences. Injected by the
+ * dispatcher from the target's provider — never named by the caller, so a class that falls back to
+ * another family picks up that family's pack on the way.
+ *
+ * A provider with no entry contributes nothing (absence is not an error): heddle only ships a pack
+ * where the fleet has actually learned the family's quirks.
+ */
+export const MODEL_FAMILY_PACKS: Record<string, string> = {
+  codex: 'family-codex',
+  gemini: 'family-gemini',
+  cursor: 'family-cursor',
+  claude: 'family-claude',
+};
+
+/** The family pack for a provider, when one exists AND is installed in the active packs dir. */
+export function modelFamilyPack(provider: string): string | null {
+  const name = MODEL_FAMILY_PACKS[provider];
+  if (!name) return null;
+  return existsSync(join(packsDir(), `${name}.md`)) ? name : null;
+}
 
 /**
  * The dispatcher's union rule: mandatory packs first, then the requested packs in their given
