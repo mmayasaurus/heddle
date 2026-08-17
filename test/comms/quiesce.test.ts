@@ -212,6 +212,11 @@ describe('fleet pause readiness (temp db)', () => {
     expect(r.pending).toEqual(['V']);
     expect(r.ready).toBe(false);
     expect(r.blockers.join(' ')).toMatch(/session that has since been replaced/);
+    // One agent, one reason to chase: a replaced process is also un-acked and also newer than the
+    // pause, but naming it three times reads as three separate problems.
+    expect(r.blockers).toHaveLength(1);
+    expect(r.blockers.join(' ')).not.toMatch(/have not acked/);
+    expect(r.blockers.join(' ')).not.toMatch(/started after the pause/);
 
     ackFrom('V', 's-V-2', pause.id, true);
     expect(pauseReadiness(log, ledgerWith(0)).ready).toBe(true);

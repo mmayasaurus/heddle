@@ -121,15 +121,22 @@ export function pauseReadiness(
     .filter((s) => !ackedBy.has(s.address) && s.startedAt > pause.ts)
     .map((s) => s.address);
 
+  // Each agent is chased under ONE reason. `pending`, `restarted` and `joinedAfterPause` overlap by
+  // construction — a replaced process is un-acked AND restarted AND newer than the pause — and three
+  // blocker lines naming the same agent read as three contradictory problems to whoever is clearing
+  // them. The arrays keep their plain meanings for callers; only the human-facing lines are attributed.
+  const claimed = new Set([...restarted, ...joinedAfterPause]);
+  const stillPending = pending.filter((a) => !claimed.has(a));
   const blockers: string[] = [];
-  if (pending.length) blockers.push(`${pending.length} live agent(s) have not acked: ${pending.join(', ')}`);
+  if (stillPending.length) blockers.push(`${stillPending.length} live agent(s) have not acked: ${stillPending.join(', ')}`);
   if (restarted.length) blockers.push(`${restarted.length} agent(s) acked from a session that has since been replaced: ${restarted.join(', ')}`);
   if (notParked.length) blockers.push(`${notParked.length} agent(s) acked with work NOT parked: ${notParked.join(', ')}`);
   if (inFlightDispatches) blockers.push(`${inFlightDispatches} dispatch(es) still in flight`);
   // The documented contract is that a zero from an absent ledger proves nothing — so it must not
   // be able to produce `ready`, or the doc and the behaviour disagree in the dangerous direction.
   if (!ledgerConsulted) blockers.push('dispatch status could not be verified: no in-flight source available');
-  if (joinedAfterPause.length) blockers.push(`${joinedAfterPause.length} session(s) started after the pause and may not have seen it — re-issue request_pause: ${joinedAfterPause.join(', ')}`);
+  const joinedOnly = joinedAfterPause.filter((a) => !restarted.includes(a));
+  if (joinedOnly.length) blockers.push(`${joinedOnly.length} session(s) started after the pause and may not have seen it — re-issue request_pause: ${joinedOnly.join(', ')}`);
 
   const meta = (pause.meta ?? {}) as Record<string, unknown>;
   const fleetPause = meta.fleetPause as Record<string, unknown> | undefined;
