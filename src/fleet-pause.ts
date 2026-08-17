@@ -48,10 +48,15 @@ export function fleetPauseStatus(opts: {
   commsPath?: string;
   logFactory?: (path: string) => Pick<CommsLog, 'fleetPauseInForce' | 'close'>;
 } = {}): FleetPauseStatus {
-  // An EMPTY env value must not select DEFAULT_COMMS_PATH — nullish-coalescing keeps '' (qodo), so
-  // an intentionally-blank HEDDLE_COMMS_DB would otherwise fall through to the real comms.db.
-  const envPath = process.env.HEDDLE_COMMS_DB?.trim();
-  const path = opts.commsPath ?? (envPath || DEFAULT_COMMS_PATH);
+  // Resolve the comms DB EXACTLY as the broker does at server.ts:165
+  // (`env.HEDDLE_COMMS_DB || DEFAULT_COMMS_PATH`): the gate must read the same file the broker
+  // WRITES pauses to, or a pause could be written to one db and read from another — silently
+  // unenforced, the precise failure this gate exists to prevent. So an empty OR whitespace-only
+  // HEDDLE_COMMS_DB falls back to DEFAULT_COMMS_PATH here just as it does there. Do NOT `.trim()`
+  // the value: trimming would map a whitespace path to DEFAULT while the broker opens the literal
+  // whitespace path — reintroducing the split-brain. This resolution MUST stay identical to
+  // server.ts:165; change both together or not at all.
+  const path = opts.commsPath ?? (process.env.HEDDLE_COMMS_DB || DEFAULT_COMMS_PATH);
   // Absent file → no broker here → nobody can have paused this fleet. We do NOT shortcut on file
   // SIZE: SQLite WAL mode can hold real rows (including an active pause) in the -wal sidecar while
   // the main .db is still tiny, so a size check could fail-open on a LIVE db (gitar). Existence is
