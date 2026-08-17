@@ -152,7 +152,7 @@ try {
           (res.sessionId ? `\n  resume: ${res.sessionId}` : '');
         // An escape warning must reach a HUMAN on the success path too — the whole point is that
         // ok:true and "your shared checkout was modified" are both true at once (PR #28).
-        const esc = res.escape ? `\n  ⚠ ${res.escape.note}` : '';
+        const esc = (res.escape ? `\n  ⚠ ${res.escape.note}` : '') + (res.destroyed ? `\n  ⚠ ${res.destroyed.note}` : '');
         return res.ok ? `${head}${esc}\n\n${res.output}` : `${head}\n  error: ${res.error}${esc}` + (res.output ? `\n\n${res.output}` : '');
       });
       process.exit(res.ok ? 0 : 1);
@@ -395,11 +395,24 @@ try {
     }
 
     case 'usage': {
-      const rows = new Ledger().usageByProvider(arg('--since'));
-      out(json, rows, () => rows.length
-        ? rows.map((r) => `${String(r.provider).padEnd(8)} ${r.dispatches} dispatches, ` +
-            `${r.succeeded} ok, in=${r.input_tokens} (cached ${r.cached_tokens}) out=${r.output_tokens}`).join('\n')
-        : '(no usage recorded yet)');
+      const ledger = new Ledger();
+      const rows = ledger.usageByProvider(arg('--since'));
+      // HED-25: classifier spend is REAL spend, reported separately so it is visible without
+      // inflating worker dispatch counts or the savings math.
+      const cls = ledger.classificationUsage(arg('--since'));
+      // JSON stays an ARRAY of provider rows — heddle-dashboard's heddle_stats parses this shape,
+      // and quietly turning it into an object would break a consumer for cosmetics. Classification
+      // spend rides the human-readable output, and `--classifications` gives it to JSON callers.
+      out(json, has('--classifications') ? cls : rows, () => {
+        const workers = rows.length
+          ? rows.map((r) => `${String(r.provider).padEnd(8)} ${r.dispatches} dispatches, ` +
+              `${r.succeeded} ok, in=${r.input_tokens} (cached ${r.cached_tokens}) out=${r.output_tokens}`).join('\n')
+          : '(no usage recorded yet)';
+        if (!cls.length) return workers;
+        const clsLines = cls.map((r) => `  ${String(r.kind).padEnd(16)} ${String(r.provider)}/${String(r.model)} ` +
+          `${r.runs} runs, in=${r.input_tokens} out=${r.output_tokens}`).join('\n');
+        return `${workers}\n\nclassifiers (not worker dispatches):\n${clsLines}`;
+      });
       break;
     }
 

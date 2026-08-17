@@ -27,7 +27,7 @@ export function packsFor(provider: string, requested: readonly string[]): string
 import { materializeWorkerMcp, validateWorkerMcp, codexMcpFlags, claudeMcpConfigFile } from './mcp.js';
 import { classifyEffort, assessResult, type ResultAssessment } from './classify.js';
 import { pickReviewer, snapshotWorktree, sameSnapshot, diffInstruction, embeddedDiff, normalizeProvider, type ReviewerPick } from './review.js';
-import { parentCheckoutOf, checkoutFingerprint, escapedPaths } from './worktree.js';
+import { parentCheckoutOf, checkoutFingerprint, escapedPaths, destroyedWork } from './worktree.js';
 import { fleetPauseStatus } from './fleet-pause.js';
 import { decideCapabilities, capabilityPolicy } from './capabilities.js';
 import { resolveIdentity, attributeDispatch, WORKER_ENV, type BoundIdentity } from './identity.js';
@@ -164,6 +164,12 @@ export interface DispatchOutcome extends WorkerResult {
    * that treat a non-empty `error` as failure would otherwise misread a warning as a failed run.
    */
   escape?: { available: boolean; parentRoot: string; paths: string[]; note: string };
+  /**
+   * HED-127: work that existed in the worker's OWN cwd before the dispatch and is gone after — the
+   * signature of a working-tree reset. Like `escape`, a warning rather than a failure, and never
+   * auto-reverted: heddle reports, the operator decides.
+   */
+  destroyed?: { paths: string[]; note: string };
   /** Why this route ran — the cap-aware decision, verbatim from the ledger's `route_reason` (HED-67). */
   routeReason?: string;
   /** Account the worker was billed to / advised (codex: CODEX_HOME basename; claude advisory: best acct id). */
@@ -357,6 +363,9 @@ async function runTarget(
   // fingerprint the parent checkout around the run and name whatever changed.
   const wt = parentCheckoutOf(req.cwd);
   const parentBefore = wt ? checkoutFingerprint(wt.parentRoot) : null;
+  // HED-127: the worker's OWN cwd, to catch it discarding pre-existing uncommitted work.
+  const cwdBefore = checkoutFingerprint(req.cwd);
+  let destroyedReport: DispatchOutcome['destroyed'];
   let escapeReport: DispatchOutcome['escape'];
   let result: WorkerResult;
   try {
@@ -456,6 +465,27 @@ async function runTarget(
     }
   }
 
+  // HED-127: did the worker discard work that was already in its cwd? Additions are the job and are
+  // not reported; only losses are. Warning, not failure — the deliverable may be fine, and the
+  // operator decides what to do about a tree that was reset under them.
+  const lost = destroyedWork(cwdBefore, checkoutFingerprint(req.cwd));
+  if (lost === null && cwdBefore !== null) {
+    // The BEFORE read worked and the AFTER one did not: silence here would be indistinguishable
+    // from "nothing was destroyed", which is the one thing a safety check must never imply
+    // (PR #40, codacy + codex-connector). Mirrors the escape check's available:false.
+    const note = `destroyed-work-warning: could NOT re-read ${req.cwd} after the dispatch — whether ` +
+      `pre-existing work survived is UNVERIFIED, not proven intact`;
+    destroyedReport = { paths: [], note };
+    process.stderr.write(`heddle: ${note}\n`);
+  } else if (lost && lost.length) {
+    const note = `destroyed-work-warning: uncommitted work present in ${req.cwd} before this dispatch is ` +
+      `gone — ${lost.length} item(s): ${lost.slice(0, 10).join(', ')}` +
+      (lost.length > 10 ? `, +${lost.length - 10} more` : '') +
+      ` (a worker must never reset the tree it was given — HED-127)`;
+    destroyedReport = { paths: lost, note };
+    process.stderr.write(`heddle: ${note}\n`);
+  }
+
   // HED-3 read-only mandate: the worktree must be exactly as it was. A violation is recorded and
   // surfaced — the reviewer's findings are still returned and nothing is reverted (operator's call).
   let mandateOk: boolean | null = null;
@@ -473,7 +503,7 @@ async function runTarget(
   // HED-3 auto-assess: judge the reviewer's output with the cheap classifier (best-effort).
   let assessment: ResultAssessment | undefined;
   if (route.autoAssess && result.output) {
-    try { assessment = await assessResult(req.prompt, result.output, result.ok, req.cwd); } catch (err) {
+    try { assessment = await assessResult(req.prompt, result.output, result.ok, req.cwd, ctx.ledger); } catch (err) {
       // Best-effort by design, but never SILENT: a classifier outage should be visible in the logs.
       process.stderr.write(`heddle: auto-assess failed (${err instanceof Error ? err.message : String(err)}) — outcome recorded without assessment\n`);
     }
@@ -483,7 +513,7 @@ async function runTarget(
     ok: result.ok,
     // The escape note is appended to the LEDGER's error column so the row is durably self-describing
     // (the outcome keeps it in its own `escape` field, so callers never mistake it for a failure).
-    error: escapeReport ? [result.error, escapeReport.note].filter(Boolean).join('; ') : result.error,
+    error: [result.error, escapeReport?.note, destroyedReport?.note].filter(Boolean).join('; ') || undefined,
     sessionId: result.sessionId,
     durationMs: result.durationMs,
     inputTokens: result.usage?.inputTokens,
@@ -509,6 +539,7 @@ async function runTarget(
     routeReason: ctx.routeReason,
     account: ctx.account ?? null,
     ...(escapeReport ? { escape: escapeReport } : {}),
+    ...(destroyedReport ? { destroyed: destroyedReport } : {}),
     ...(ctx.review ? { review: { authorProvider: ctx.review.authorProvider, reviewerProvider: target.provider, reviewerModel: target.model, mandateOk, reviewerPick: ctx.review.reviewerPick } } : {}),
     ...(assessment ? { assessment } : {}),
   };
@@ -632,7 +663,7 @@ export async function dispatch(
   // transactional inside runTarget). Best-effort; failures are noted, not fatal.
   if (req.autoEffort && !req.effort) {
     try {
-      req = { ...req, effort: await classifyEffort(route.taskClass, req.prompt, req.cwd) };
+      req = { ...req, effort: await classifyEffort(route.taskClass, req.prompt, req.cwd, ctx.ledger) };
     } catch (err) {
       process.stderr.write(`heddle: auto-effort classification failed (${err instanceof Error ? err.message : String(err)}) — using the route default\n`);
     }
@@ -706,9 +737,15 @@ export async function dispatch(
   // / 5h-headroom evidence the scoreboard is built on (PR #24, found by the dispatched test worker).
   ctx.routeReason = `${plan.decision.routeReason}; ${target.provider}/${target.model} failed → class fallback`
     + (ctx.claudeAccount ? `; ${ctx.claudeAccount.reason}` : '');
-  const fbOutcome = await runTarget(fallback, req, ctx, route, `${route.provider}/${route.model}`);
+  let fbOutcome = await runTarget(fallback, req, ctx, route, `${route.provider}/${route.model}`);
   // A PRIMARY that escaped its worktree and then FAILED must not have that warning discarded when
   // the fallback succeeds — the parent checkout is still dirty and someone has to know (PR #28).
+  // A primary that destroyed work and THEN failed must not have that warning discarded when the
+  // fallback succeeds — the tree is still wrecked and someone has to know (PR #40, 2 reviewers).
+  if (primary.destroyed && !fbOutcome.destroyed) fbOutcome = { ...fbOutcome, destroyed: primary.destroyed };
+  else if (primary.destroyed && fbOutcome.destroyed) {
+    fbOutcome = { ...fbOutcome, destroyed: { ...fbOutcome.destroyed, note: `${primary.destroyed.note}; then ${fbOutcome.destroyed.note}` } };
+  }
   if (primary.escape && !fbOutcome.escape) return { ...fbOutcome, escape: primary.escape };
   if (primary.escape && fbOutcome.escape) {
     return { ...fbOutcome, escape: { ...fbOutcome.escape, note: `${primary.escape.note}; then ${fbOutcome.escape.note}` } };

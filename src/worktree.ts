@@ -79,7 +79,11 @@ export function checkoutFingerprint(root: string): CheckoutFingerprint | null {
     let head = '(no HEAD)';
     try { head = git(root, ['rev-parse', 'HEAD']).trim(); } catch { /* fresh repo, no commits */ }
     // -z: NUL-separated records, so paths with spaces/newlines/quotes parse correctly.
-    const raw = git(root, ['status', '--porcelain', '-z']);
+    // -uall lists untracked FILES individually. Without it git collapses an untracked directory to
+    // a single `dir/` entry, so deleting one file inside pre-existing untracked work would leave the
+    // entry unchanged and the loss invisible (PR #40, codex-connector). Ignored paths are still
+    // excluded, so this does not walk node_modules.
+    const raw = git(root, ['status', '--porcelain', '-z', '-uall']);
     const entries = new Map<string, string>();
     const records = raw.split('\0');
     for (let i = 0; i < records.length; i++) {
@@ -125,4 +129,45 @@ export function escapedPaths(
     if (!after.entries.has(path)) out.push(`cleared ${path}`); // deleted, or reverted to clean
   }
   return out.sort();
+}
+
+/**
+ * Work that EXISTED in the worker's own cwd before the dispatch and is GONE afterwards (HED-127).
+ *
+ * A worker is free to create and modify inside its own worktree — that is the job — so this
+ * reports only DESTRUCTION: a path that was dirty (modified or untracked) before the run and is now
+ * clean or missing, or a HEAD that moved. That is the signature of a working-tree reset, which
+ * silently discards the orchestrator's uncommitted work with no stash and no reflog to recover from.
+ *
+ * Not hypothetical: 2026-08-17, ledger #98 — a docs worker reverted two modified files and deleted
+ * an untracked one before starting its own task, leaving no trace of what it ran.
+ *
+ * Additions and further edits are deliberately NOT reported; only losses.
+ */
+export function destroyedWork(
+  before: CheckoutFingerprint | null, after: CheckoutFingerprint | null,
+): string[] | null {
+  if (before === null || after === null) return null;
+  const lost: string[] = [];
+  for (const [path, state] of before.entries) {
+    const now = after.entries.get(path);
+    if (now === undefined) {
+      lost.push(`reverted-or-deleted ${path}`);
+    } else if (now.slice(0, 2).includes('D')) {
+      // The path is still listed, but as a DELETION — a tracked file the orchestrator had modified
+      // is now gone. Unambiguous destruction, and it survives the vanish check above because git
+      // still reports the path (PR #40, codacy + gitar).
+      lost.push(`deleted ${path}`);
+    } else if (state.startsWith('??') && !now.startsWith('??')) {
+      // An untracked file the orchestrator was holding is no longer untracked — the worker staged
+      // or committed it. Not destroyed on disk, but no longer the orchestrator's to discard freely.
+      lost.push(`untracked file taken over ${path}`);
+    }
+    // NOT reported: a still-dirty path whose CONTENT changed. A worker editing files in its own cwd
+    // is the job, and an edit is indistinguishable from an overwrite from out here — flagging it
+    // would fire on nearly every legitimate dispatch, and a warning that cries wolf gets ignored,
+    // which costs more than the case it catches. Stated as a known limit rather than papered over.
+  }
+  if (before.head !== after.head) lost.push(`HEAD moved ${before.head.slice(0, 8)} → ${after.head.slice(0, 8)}`);
+  return lost.sort();
 }
