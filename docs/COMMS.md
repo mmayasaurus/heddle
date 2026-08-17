@@ -685,6 +685,58 @@ same reason raising is — an agent that could resume the fleet could undo a sto
 No schema change was needed: a pause is an ordinary message, an ack is an ordinary reply, a resume
 is an ordinary operator broadcast, and the protocol is a query over all three.
 
+## Idle nudger (HED-137)
+
+A pull-model session that ends its turn waits forever — nothing is wrong with it, nobody is talking
+to it. The nudger closes that loop: every cycle (default 15 min, `HEDDLE_COMMS_NUDGE_MS`) it finds
+live agent sessions that have been quiet past the threshold and posts one advisory nudge each.
+
+Three decisions worth knowing, because the obvious implementation of each is wrong:
+
+- **Idleness is read from the session TRANSCRIPT's mtime, never from the heartbeat.** `heartbeat_at`
+  is written by a fixed 30s timer in the channel server whether or not the agent is doing anything,
+  so it proves the process is alive, not that the agent is working — nudging on it would mean nobody
+  is ever idle. A session with no findable transcript is treated as NOT idle: an unknown activity
+  time must never read as "silent, go prod it".
+- **Exactly one nudger runs, elected by the operator binding.** The broker runs one server per
+  session, so a loop added the naive way would have every session nudging every other one. The
+  operator binding is already unique by construction (it needs the token, and workers can never hold
+  it), so `shouldRunNudger(isOperator, pushEnabled)` picks the single instance with no leader
+  protocol. Consequence: no operator session up means no nudging.
+- **A nudge never wears the operator's authority.** The loop lives in the operator's session, so its
+  posts would otherwise be stamped `operator` — a machine speaking as the human, which is exactly
+  the spoofing the tier system exists to prevent. Nudges request `agent-message` explicitly; the
+  envelope layer honours an explicit demotion unconditionally.
+
+The cooldown lives in the log (`lastNudgeAt`, from `meta.nudge` on the last **operator-sent** message
+to that address), not in process memory, so a nudger that restarts cannot immediately re-nudge
+everyone it had just nudged. Stale sessions drop out with everything else — a dead terminal window is
+not an idle agent, and there is nobody there to read the nudge.
+
+Details that matter once accounts rotate (HED-68) and more than one operator session can exist:
+
+- **All configured account transcript roots are searched.** A session launched on a rotated Claude
+  account writes under its own `CLAUDE_CONFIG_DIR/projects`, so the nudger reads `~/.claude/projects`
+  plus every `<configDir>/projects` in `~/.heddle/accounts.json`. Searching only the default root
+  would report those sessions permanently idle and nudge them forever. Roots are de-duplicated by
+  real path (an account whose `projects` symlinks to the shared store is not walked twice), and
+  duplicate roots would be harmless anyway — newest-mtime-wins is idempotent to them.
+- **Exactly one process nudges, checked every cycle.** Being an operator session is the static gate;
+  *owning the operator presence row* (`sessions.session_id == this instance`) is the dynamic one. Two
+  operator sessions can share a token and both pass the gate, but the presence row is keyed by
+  address, so the later registrant owns it and the other stands down. The log-based cooldown is the
+  backstop: even a momentary double-owner cannot double-nudge.
+- **The interval is validated.** `HEDDLE_COMMS_NUDGE_MS` is rejected unless finite and positive
+  (a negative value is truthy — it would otherwise clamp the timer to ~1ms *and* mark every session
+  instantly idle) and is floored at 60s.
+- **The cycle never overlaps.** It self-schedules after each run's posts settle, like the delivery
+  pump, so a slow post cannot let two cycles run at once.
+
+Known limitation: an agent running a single tool for longer than the idle threshold has a stale
+transcript mtime and can draw one nudge. The nudge is advisory and rate-limited to one per window, so
+the cost is a single line ("still working") — deliberately preferred over the alternative of reading
+the always-on heartbeat, which would make no one ever look idle.
+
 ## Roadmap
 
 - **HED-4:** Comms log & address grammar — durable append-only storage and registry (built).
