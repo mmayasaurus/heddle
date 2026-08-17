@@ -147,7 +147,10 @@ try {
           (res.refusal ? ` [refused: ${res.refusal.code}]` : '') +
           (res.durationMs ? ` · ${(res.durationMs / 1000).toFixed(1)}s` : '') +
           (res.sessionId ? `\n  resume: ${res.sessionId}` : '');
-        return res.ok ? `${head}\n\n${res.output}` : `${head}\n  error: ${res.error}` + (res.output ? `\n\n${res.output}` : '');
+        // An escape warning must reach a HUMAN on the success path too — the whole point is that
+        // ok:true and "your shared checkout was modified" are both true at once (PR #28).
+        const esc = res.escape ? `\n  ⚠ ${res.escape.note}` : '';
+        return res.ok ? `${head}${esc}\n\n${res.output}` : `${head}\n  error: ${res.error}${esc}` + (res.output ? `\n\n${res.output}` : '');
       });
       process.exit(res.ok ? 0 : 1);
       break;

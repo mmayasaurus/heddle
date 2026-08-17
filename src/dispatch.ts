@@ -11,6 +11,7 @@ import { materializeAgentsMd, readPack, withMandatoryPacks, composePacks } from 
 import { materializeWorkerMcp, validateWorkerMcp, codexMcpFlags, claudeMcpConfigFile } from './mcp.js';
 import { classifyEffort, assessResult, type ResultAssessment } from './classify.js';
 import { pickReviewer, snapshotWorktree, sameSnapshot, diffInstruction, embeddedDiff, normalizeProvider, type ReviewerPick } from './review.js';
+import { parentCheckoutOf, checkoutFingerprint, escapedPaths } from './worktree.js';
 import { decideCapabilities, capabilityPolicy } from './capabilities.js';
 import { resolveIdentity, attributeDispatch, WORKER_ENV, type BoundIdentity } from './identity.js';
 import { readProviderCaps, type CapsByProvider } from './usage.js';
@@ -132,6 +133,13 @@ export interface DispatchOutcome extends WorkerResult {
   execution?: string;
   /** Present iff heddle refused to run the dispatch (ok is then false). */
   refusal?: DispatchRefusal;
+  /**
+   * HED-98 worktree confinement. Set when the worker ran in a linked worktree AND the parent
+   * checkout changed underneath it (`paths`), or when the check could not be made (`available:
+   * false`). A dedicated field, NOT `error`: the work product may be perfectly good, and callers
+   * that treat a non-empty `error` as failure would otherwise misread a warning as a failed run.
+   */
+  escape?: { available: boolean; parentRoot: string; paths: string[]; note: string };
   /** Why this route ran — the cap-aware decision, verbatim from the ledger's `route_reason` (HED-67). */
   routeReason?: string;
   /** Account the worker was billed to / advised (codex: CODEX_HOME basename; claude advisory: best acct id). */
@@ -317,6 +325,13 @@ async function runTarget(
   let restoreMcp: () => void = () => {};
   let before: ReturnType<typeof snapshotWorktree> | null = null;
   let after: ReturnType<typeof snapshotWorktree> | null = null;
+  // HED-98: workers dispatched into <repo>/.worktrees/<agent> can resolve "the project root" by
+  // walking up (a linked worktree's .git is a FILE pointing at the parent) and write into the
+  // CANONICAL checkout. No provider offers a verified write-confinement flag, so heddle DETECTS:
+  // fingerprint the parent checkout around the run and name whatever changed.
+  const wt = parentCheckoutOf(req.cwd);
+  const parentBefore = wt ? checkoutFingerprint(wt.parentRoot) : null;
+  let escapeReport: DispatchOutcome['escape'];
   let result: WorkerResult;
   try {
     let systemPromptAppend: string | undefined;
@@ -348,9 +363,18 @@ async function runTarget(
     before = route.readOnly ? snapshotWorktree(req.cwd) : null;
     // diff_base delivery is PER TARGET: a claude read-only reviewer has no Bash (its --tools set),
     // so it gets the diff embedded; every other reviewer is told to run git itself.
-    const prompt = req.diffBase
+    const basePrompt = req.diffBase
       ? (isClaude && route.readOnly ? embeddedDiff(req.cwd, req.diffBase) : diffInstruction(req.diffBase)) + req.prompt
       : req.prompt;
+    // Best-effort PREVENTION to pair with the detection above: state the boundary explicitly, since
+    // a worker that walks up to find "the project root" lands in the parent checkout and has no
+    // other way to know it is inside a linked worktree.
+    const prompt = wt
+      ? `Your project root is the git WORKTREE ${wt.worktreeRoot} (your working directory is ` +
+        `${req.cwd}). Create and edit files ONLY under that worktree. Do NOT walk up to ` +
+        `${wt.parentRoot} — that is a different checkout shared with other agents, and writing ` +
+        `there corrupts their work.\n\n${basePrompt}`
+      : basePrompt;
     result = await adapter.dispatch(prompt, {
       model: target.model,
       cwd: req.cwd,
@@ -383,6 +407,29 @@ async function runTarget(
     }
   }
 
+  // HED-98 worktree confinement: did anything change in the PARENT checkout while this worker ran?
+  // Reported as a WARNING, not a failure: the work product may be perfectly good and destroying it
+  // would be its own harm — but the side effects are dangerous and must never be silent. Nothing is
+  // reverted (the operator decides, same discipline as the read-only mandate). heddle cannot ATTRIBUTE
+  // the change — another agent legitimately editing the canonical checkout looks identical — so the
+  // wording says what was observed, not who did it.
+  if (wt) {
+    const escaped = escapedPaths(parentBefore, checkoutFingerprint(wt.parentRoot));
+    if (escaped === null) {
+      const note = `escape-warning: worktree confinement could NOT be checked for ${wt.parentRoot} ` +
+        `(its state was unreadable) — this run is unverified, not proven clean`;
+      escapeReport = { available: false, parentRoot: wt.parentRoot, paths: [], note };
+      process.stderr.write(`heddle: ${note}\n`);
+    } else if (escaped.length) {
+      const note = `escape-warning: the parent checkout ${wt.parentRoot} changed while this worker ran in ` +
+        `${wt.worktreeRoot} — ${escaped.length} change(s): ${escaped.slice(0, 10).join(', ')}` +
+        (escaped.length > 10 ? `, +${escaped.length - 10} more` : '') +
+        ` (heddle cannot attribute the change; if it was this worker it escaped its sandbox — HED-98)`;
+      escapeReport = { available: true, parentRoot: wt.parentRoot, paths: escaped, note };
+      process.stderr.write(`heddle: ${note}\n`);
+    }
+  }
+
   // HED-3 read-only mandate: the worktree must be exactly as it was. A violation is recorded and
   // surfaced — the reviewer's findings are still returned and nothing is reverted (operator's call).
   let mandateOk: boolean | null = null;
@@ -408,7 +455,9 @@ async function runTarget(
 
   ctx.ledger.finish(ledgerId, {
     ok: result.ok,
-    error: result.error,
+    // The escape note is appended to the LEDGER's error column so the row is durably self-describing
+    // (the outcome keeps it in its own `escape` field, so callers never mistake it for a failure).
+    error: escapeReport ? [result.error, escapeReport.note].filter(Boolean).join('; ') : result.error,
     sessionId: result.sessionId,
     durationMs: result.durationMs,
     inputTokens: result.usage?.inputTokens,
@@ -433,6 +482,7 @@ async function runTarget(
     execution: providerExecution(ctx.table, target.provider),
     routeReason: ctx.routeReason,
     account: ctx.account ?? null,
+    ...(escapeReport ? { escape: escapeReport } : {}),
     ...(ctx.review ? { review: { authorProvider: ctx.review.authorProvider, reviewerProvider: target.provider, reviewerModel: target.model, mandateOk, reviewerPick: ctx.review.reviewerPick } } : {}),
     ...(assessment ? { assessment } : {}),
   };
@@ -592,7 +642,14 @@ export async function dispatch(
   // / 5h-headroom evidence the scoreboard is built on (PR #24, found by the dispatched test worker).
   ctx.routeReason = `${plan.decision.routeReason}; ${target.provider}/${target.model} failed → class fallback`
     + (ctx.claudeAccount ? `; ${ctx.claudeAccount.reason}` : '');
-  return runTarget(fallback, req, ctx, route, `${route.provider}/${route.model}`);
+  const fbOutcome = await runTarget(fallback, req, ctx, route, `${route.provider}/${route.model}`);
+  // A PRIMARY that escaped its worktree and then FAILED must not have that warning discarded when
+  // the fallback succeeds — the parent checkout is still dirty and someone has to know (PR #28).
+  if (primary.escape && !fbOutcome.escape) return { ...fbOutcome, escape: primary.escape };
+  if (primary.escape && fbOutcome.escape) {
+    return { ...fbOutcome, escape: { ...fbOutcome.escape, note: `${primary.escape.note}; then ${fbOutcome.escape.note}` } };
+  }
+  return fbOutcome;
 }
 
 /** Everything a dispatch decides BEFORE any ledger row or worker: route, policy, caps, accounts. */
