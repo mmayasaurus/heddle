@@ -34,7 +34,10 @@ function runTsc(): Promise<void> {
     execFile(
       process.execPath,
       [join(PROJECT_ROOT, 'node_modules', 'typescript', 'bin', 'tsc')],
-      { cwd: PROJECT_ROOT, env: { PATH: process.env.PATH ?? '' } },
+      // `timeout` makes node kill tsc itself. The child is deliberately NOT registered with cli.ts's
+      // cleanup set — build.ts is imported BY cli.ts, so reaching back would be a circular import —
+      // and a self-killing child honours the no-orphans guarantee without that coupling.
+      { cwd: PROJECT_ROOT, env: { PATH: process.env.PATH ?? '' }, timeout: 120_000 },
       (error, stdout, stderr) => {
         if (error) {
           rejectBuild(new Error(
@@ -48,6 +51,16 @@ function runTsc(): Promise<void> {
   });
 }
 
-export async function ensureBuilt(): Promise<void> {
-  if (await needsBuild()) await runTsc();
+let built: Promise<void> | undefined;
+
+/**
+ * Fallback for running a single test file directly; `globalSetup` is what normally builds. Memoized
+ * per process because `needsBuild()` walks all of `src/`, and without this every runCli()/startMcp()
+ * call would repeat that scan. This is NOT the cross-worker lock — that is globalSetup's job, since
+ * a module-level promise is per-worker and therefore not a lock at all.
+ */
+export function ensureBuilt(): Promise<void> {
+  return (built ??= (async () => {
+    if (await needsBuild()) await runTsc();
+  })());
 }

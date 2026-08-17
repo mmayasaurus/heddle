@@ -16,8 +16,19 @@ export type McpOptions = ChildOptions;
 const closers = new Set<() => Promise<void>>();
 
 async function cleanup(): Promise<void> {
-  await Promise.all([...closers].map((close) => close()));
+  // Take and clear the set FIRST, and settle rather than race: a close() that rejects must not fail
+  // the afterEach hook (which would surface as a teardown error on an unrelated test, hiding whatever
+  // actually went wrong) and must not leave a stale closer behind to be called again next time.
+  const pending = [...closers];
   closers.clear();
+  const outcomes = await Promise.allSettled(pending.map((close) => close()));
+  for (const outcome of outcomes) {
+    if (outcome.status === 'rejected') {
+      // Report it — a server that would not shut down is worth knowing about, just not worth
+      // failing an unrelated test over.
+      process.stderr.write(`heddle test harness: MCP client close failed: ${String(outcome.reason)}\n`);
+    }
+  }
 }
 
 afterEach(cleanup);
