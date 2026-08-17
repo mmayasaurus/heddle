@@ -468,7 +468,15 @@ async function runTarget(
   // not reported; only losses are. Warning, not failure — the deliverable may be fine, and the
   // operator decides what to do about a tree that was reset under them.
   const lost = destroyedWork(cwdBefore, checkoutFingerprint(req.cwd));
-  if (lost && lost.length) {
+  if (lost === null && cwdBefore !== null) {
+    // The BEFORE read worked and the AFTER one did not: silence here would be indistinguishable
+    // from "nothing was destroyed", which is the one thing a safety check must never imply
+    // (PR #40, codacy + codex-connector). Mirrors the escape check's available:false.
+    const note = `destroyed-work-warning: could NOT re-read ${req.cwd} after the dispatch — whether ` +
+      `pre-existing work survived is UNVERIFIED, not proven intact`;
+    destroyedReport = { paths: [], note };
+    process.stderr.write(`heddle: ${note}\n`);
+  } else if (lost && lost.length) {
     const note = `destroyed-work-warning: uncommitted work present in ${req.cwd} before this dispatch is ` +
       `gone — ${lost.length} item(s): ${lost.slice(0, 10).join(', ')}` +
       (lost.length > 10 ? `, +${lost.length - 10} more` : '') +
@@ -701,9 +709,15 @@ export async function dispatch(
   // / 5h-headroom evidence the scoreboard is built on (PR #24, found by the dispatched test worker).
   ctx.routeReason = `${plan.decision.routeReason}; ${target.provider}/${target.model} failed → class fallback`
     + (ctx.claudeAccount ? `; ${ctx.claudeAccount.reason}` : '');
-  const fbOutcome = await runTarget(fallback, req, ctx, route, `${route.provider}/${route.model}`);
+  let fbOutcome = await runTarget(fallback, req, ctx, route, `${route.provider}/${route.model}`);
   // A PRIMARY that escaped its worktree and then FAILED must not have that warning discarded when
   // the fallback succeeds — the parent checkout is still dirty and someone has to know (PR #28).
+  // A primary that destroyed work and THEN failed must not have that warning discarded when the
+  // fallback succeeds — the tree is still wrecked and someone has to know (PR #40, 2 reviewers).
+  if (primary.destroyed && !fbOutcome.destroyed) fbOutcome = { ...fbOutcome, destroyed: primary.destroyed };
+  else if (primary.destroyed && fbOutcome.destroyed) {
+    fbOutcome = { ...fbOutcome, destroyed: { ...fbOutcome.destroyed, note: `${primary.destroyed.note}; then ${fbOutcome.destroyed.note}` } };
+  }
   if (primary.escape && !fbOutcome.escape) return { ...fbOutcome, escape: primary.escape };
   if (primary.escape && fbOutcome.escape) {
     return { ...fbOutcome, escape: { ...fbOutcome.escape, note: `${primary.escape.note}; then ${fbOutcome.escape.note}` } };

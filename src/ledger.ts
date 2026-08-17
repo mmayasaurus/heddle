@@ -762,6 +762,9 @@ export class Ledger {
     }
   }
 
+  /** Release the SQLite handle. Only the OWNER of a Ledger closes it — a caller handed one
+   *  (dispatch passing its ledger to a classifier, a test passing a temp ledger) must not close it
+   *  out from under its owner. */
   close(): void {
     this.db.close();
   }

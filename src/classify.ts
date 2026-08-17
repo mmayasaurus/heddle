@@ -82,7 +82,10 @@ export async function classify(
   try {
     const identity = resolveIdentity();
     const attribution = attributeDispatch(identity, undefined);
-    (ledger ?? new Ledger()).recordClassification({
+    // An injected ledger belongs to the caller and must NOT be closed here; a fallback one is ours
+    // to close, or every classification leaks a SQLite handle in a long-lived process (PR #40, gitar).
+    const own = ledger ? null : new Ledger();
+    (ledger ?? own!).recordClassification({
       orchestrator: attribution.orchestrator, identitySource: attribution.identitySource,
       kind, provider: cfg.provider, model: cfg.model, cwd, promptPreview: instruction,
       ok: res.ok, error: res.error,
@@ -90,6 +93,7 @@ export async function classify(
       outputTokens: res.usage?.outputTokens, reasoningTokens: res.usage?.reasoningOutputTokens,
       durationMs: res.durationMs ?? Date.now() - started,
     });
+    if (own) own.close();
   } catch (err) {
     process.stderr.write(`heddle: could not ledger the ${kind} classification (${err instanceof Error ? err.message : String(err)})\n`);
   }

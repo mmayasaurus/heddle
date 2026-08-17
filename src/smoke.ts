@@ -16,7 +16,14 @@ import type { WorkerAdapter } from './types.js';
  * (1.8s vs kimi's 74s), so the safe default is also the better one. A metered model can still be
  * run deliberately — pass it explicitly WITH --opt-in.
  */
-const [, , which, prompt, modelArg, resumeArg] = process.argv;
+// Flags must NEVER land in a positional slot: `smoke.js cursor "p" --opt-in` used to bind
+// modelArg='--opt-in' (garbage model, and the metered guard read as satisfied), and
+// `smoke.js cursor "p" kimi-k3-high --opt-in` bound resumeArg='--opt-in' and passed it as a resume
+// id. The remediation this file itself prints was therefore broken (PR #40, five reviewers).
+const argv = process.argv.slice(2);
+const flags = new Set(argv.filter((a) => a.startsWith('--')));
+const [which, prompt, modelArg, resumeArg] = argv.filter((a) => !a.startsWith('--'));
+const optIn = flags.has('--opt-in');
 
 if (!which || !prompt) {
   console.error('usage: node dist/smoke.js <codex|cursor|agy> "<prompt>" [model] [resumeId]');
@@ -33,7 +40,7 @@ if (which === 'codex') {
   model = modelArg ?? 'composer-2.5';
   // Explicitly naming a metered model is allowed, but never silently: this runner has no routing
   // table behind it, so the opt-in gate has to live here.
-  if (!isCursorNativeModel(model) && !process.argv.includes('--opt-in')) {
+  if (!isCursorNativeModel(model) && !optIn) {
     console.error(
       `refusing to smoke-test cursor model "${model}": it bills the metered "Other Models" pool ` +
       `shared with Cursor PR review. Use a Cursor-native model (composer-2.5, cursor-grok-*, auto), ` +
