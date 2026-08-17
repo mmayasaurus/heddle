@@ -12,7 +12,8 @@ import type { LineageSource } from './envelope.js';
 import {
   ChannelTransport, InboundPump, CHANNEL_INSTRUCTIONS, SENDMESSAGE_LIMITS, sendMessageHint, confirmSent, mirrorSent, mirrorReceived, errorMessage,
 } from './bridge.js';
-import { parseAddress } from './address.js';
+import { parseAddress, BROADCAST, OPERATOR } from './address.js';
+import { pauseReadiness, type InFlightSource } from './quiesce.js';
 import { TIERS, MESSAGE_KINDS, type Tier, type MessageKind } from './types.js';
 
 /**
@@ -161,6 +162,11 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
   const log = opts.log ?? new CommsLog(env.HEDDLE_COMMS_DB || DEFAULT_COMMS_PATH);
   const ownsLedger = opts.ledger === undefined;
   const ledger = ownsLedger ? openLedgerIfPresent(env, warn) : opts.ledger;
+  // The ledger is held as the narrow LineageSource the envelope layer needs; quiescence wants the
+  // in-flight view, which only a real Ledger has. Resolve that once, by capability, so an injected
+  // lineage-only stub reports "cannot tell" instead of a misleading zero.
+  const inFlightSource: InFlightSource | null =
+    ledger && typeof (ledger as { inFlight?: unknown }).inFlight === 'function' ? (ledger as InFlightSource) : null;
   const tokenPath = opts.operatorTokenPath ?? OPERATOR_TOKEN_PATH;
   const { identity: me, isOperator } = resolveCommsIdentity(env, cwd, warn, tokenPath);
   const isWorker = env.HEDDLE_WORKER === '1';
@@ -180,6 +186,47 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
   if (me) {
     const restored = broker.restoreHeld({ sender: me });
     if (restored) warn(`restored ${restored} held message(s) posted by ${me}`);
+  }
+
+
+  /**
+   * Ask the whole fleet to pause and park its work (HED-119). OPERATOR ONLY by design: a
+   * halt-the-fleet signal any agent could raise would be a denial of service on the fleet, and the
+   * only thing that proves "the human" is the token-verified operator binding.
+   */
+  async function requestFleetPause(reason: string | undefined): Promise<ReturnType<typeof text> | ReturnType<typeof errorText>> {
+    const who = requireMe();
+    if (!(isOperator && operatorStillValid())) {
+      return errorText('refused: only the operator can request a fleet pause (bind HEDDLE_COMMS_ROLE=operator + the token)');
+    }
+    const why = reason ?? 'account rotation';
+    const posted = await broker.post({
+      from: who, to: BROADCAST, kind: 'status',
+      body: `FLEET PAUSE REQUESTED — ${why}. Park your work now: commit or push anything uncommitted, stop starting new dispatches, then call ack_pause with work_parked=true. Do not resume until the operator says so.`,
+      // No timestamp in meta: the broker stamps ts on the row, and pause_status reads it back.
+      meta: { fleetPause: { reason: why } },
+    });
+    return text({ ...posted, readiness: pauseReadiness(log, inFlightSource) });
+  }
+
+  /** Answer the operator's pause. `workParked` is the agent's own assertion — see quiesce.ts. */
+  async function ackFleetPause(workParkedArg: unknown, note: string | undefined): Promise<ReturnType<typeof text> | ReturnType<typeof errorText>> {
+    const who = requireMe();
+    const pause = log.latestFleetPause();
+    if (!pause) return errorText('refused: no fleet pause has been requested');
+    if (typeof workParkedArg !== 'boolean') {
+      return errorText('refused: work_parked must be a boolean — say true only once your work is committed or parked');
+    }
+    const workParked = workParkedArg;
+    // Bind the ack to THIS session instance: if the process is replaced under the same address
+    // before rotation, readiness must not honour its predecessor's answer.
+    const ackSessionId = log.session(who)?.sessionId ?? null;
+    const posted = await broker.post({
+      from: who, to: OPERATOR, kind: 'status', replyTo: pause.id,
+      body: note ?? (workParked ? 'paused; work parked' : 'paused; work NOT parked'),
+      meta: { pauseAck: true, workParked, ackSessionId },
+    });
+    return text({ ...posted, pauseId: pause.id, workParked });
   }
 
   /** The bound identity, re-verified for the operator on every call so a token rotation bites immediately. */
@@ -249,6 +296,13 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
         }
         case 'acquire_floor': return text(broker.acquireFloor(requireMe(), requireStr(a.room, 'room'), num(a.lease_ms)));
         case 'release_floor': return text(broker.releaseFloor(requireMe(), requireStr(a.room, 'room')));
+        case 'request_pause': return requestFleetPause(str(a.reason));
+        case 'ack_pause': return ackFleetPause(a.work_parked, str(a.note));
+        case 'pause_status': {
+          requireMe();
+          const staleMs = num(a.stale_ms);
+          return text(pauseReadiness(log, inFlightSource, staleMs === undefined ? {} : { staleMs }));
+        }
         case 'comms_whoami': return text({
           identity: operatorStillValid() ? me : null, revoked: !operatorStillValid(), sessionName, worker: isWorker, operator: isOperator && operatorStillValid(), pushEnabled, session: me ? log.session(me) : null,
           rooms: me ? log.roomsFor(me).map((r) => r.name) : [], liveSessions: log.liveSessions(), sendMessageLimits: SENDMESSAGE_LIMITS,
@@ -453,6 +507,21 @@ export const TOOLS = [
     name: 'comms_whoami',
     description: "Your bound comms identity, this session's registration, rooms, live comms sessions, and the documented limits of the tactical SendMessage layer.",
     inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'request_pause',
+    description: 'OPERATOR ONLY. Ask the whole fleet to pause and park its work — the first step of a Claude account rotation, which relaunches every session. Broadcasts at operator tier and returns the current readiness.',
+    inputSchema: { type: 'object', properties: { reason: { type: 'string' } } },
+  },
+  {
+    name: 'ack_pause',
+    description: "Answer the operator's pause request. Set work_parked=true ONLY once your work is committed, pushed, or otherwise safe to lose from memory — the fleet is relaunched once everyone acks, and anything you are still holding goes with it.",
+    inputSchema: { type: 'object', properties: { work_parked: { type: 'boolean' }, note: { type: 'string' } }, required: ['work_parked'] },
+  },
+  {
+    name: 'pause_status',
+    description: 'Who has acked the pause, who is still pending, who acked with work NOT parked, whose ack came from a replaced session, and how many dispatches are in flight. ready=true means every check passed INCLUDING a consulted dispatch ledger — it is never true on unverified in-flight status. stale_ms can only WIDEN the live-session window (it is clamped to the broker default).',
+    inputSchema: { type: 'object', properties: { stale_ms: { type: 'number' } } },
   },
 ];
 

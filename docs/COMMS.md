@@ -621,6 +621,62 @@ delivers.
 
 Identity/env for dispatched workers (`HEDDLE_COMMS_ADDRESS`, `HEDDLE_WORKER`) is U's HED-2.
 
+## Fleet pause / quiescence (HED-119)
+
+Rotating the fleet onto another Claude account means **relaunching every session**, because
+`CLAUDE_CONFIG_DIR` is read at process start — no running session can be moved in place. A
+relaunch is only safe when the fleet is genuinely idle, so the broker provides the pause handshake
+the rotator (HED-117) triggers on. It measures quiet instead of inferring it: a silent agent and a
+busy agent look identical from outside.
+
+| Tool | Who | What it does |
+| --- | --- | --- |
+| `request_pause` | operator only | Broadcasts an operator-tier `@all` pause and returns readiness |
+| `ack_pause` | any bound agent | Answers the current pause with `work_parked` true/false |
+| `pause_status` | anyone bound | Who acked, who is pending, who is not parked, dispatches in flight |
+
+**Why operator-only.** A halt-the-fleet signal any agent could raise is a denial of service on the
+whole fleet. The pause is recognised *only* as an operator-tier broadcast carrying `meta.fleetPause`,
+and tier is stamped by the broker from a sealed decision — a sender can never request `operator`. An
+agent that writes the same `meta` into a post of its own lands at `agent-message` and
+`latestFleetPause()` does not see it. There is a test for exactly that forgery.
+
+**Readiness is three independent conditions**, each able to block alone:
+
+1. every live agent (operator excluded) has acked the current pause — acks are matched by
+   `reply_to`, so an ack against an earlier pause never clears a newer one;
+2. every ack asserts `work_parked` — an agent that acks while holding uncommitted work is named in
+   `notParked` rather than averaged away;
+3. no dispatch is in flight — a worker mid-run would be orphaned by the relaunch.
+
+`work_parked` is the agent's **own word**. The broker cannot inspect another session's worktree and
+does not pretend to; asking is more honest than guessing, and the answer is recorded in the log
+either way. A re-ack supersedes the previous one, so an agent can ack `false`, commit, and re-ack
+`true` without the operator chasing it.
+
+**`ledgerConsulted`** distinguishes "no dispatches are running" from "no ledger was available to
+ask", and an unverifiable dispatch status is itself a blocker — `ready` is never true on an
+unconsulted ledger, because a rotator must not read a zero out of an absent ledger as permission to
+relaunch.
+
+**Acks are bound to a session instance**, not just an address. If a process is replaced under the
+same address after acking, it never answered the current pause, so its predecessor's ack does not
+carry over — the address reappears in `pending` and is named in `restarted`.
+
+Stale sessions (heartbeat older than `stale_ms`) drop out of `live`, so one dead terminal cannot
+block a rotation forever — and that applies to `notParked` too: a dead session's "not parked" is
+not something anyone can clear. `stale_ms` is **clamped to at least the broker default**: widening
+the window only makes more agents owe an ack, but shrinking it could age live agents out and
+manufacture `ready: true` from a fleet that never answered.
+
+`joinedAfterPause` names sessions that started after the broadcast. The inbound pump starts a
+first-time session at the current tail, so such a session may never have been shown the pause; it
+is named (and blocks) rather than being silently blamed for ignoring the operator. Re-issue
+`request_pause` to include it.
+
+No schema change was needed: a pause is an ordinary message, an ack is an ordinary reply, and the
+protocol is a query over both.
+
 ## Roadmap
 
 - **HED-4:** Comms log & address grammar — durable append-only storage and registry (built).
