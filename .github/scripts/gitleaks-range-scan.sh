@@ -3,7 +3,15 @@
 # it directly. POSIX sh on purpose: this runs inside the gitleaks container image,
 # where the runner's default shell is `sh -e`, not bash. Inputs: BASE, HEAD,
 # GITHUB_WORKSPACE, GITHUB_STEP_SUMMARY, RUNNER_TEMP (all provided by the workflow).
-set -u
+#
+# `set -e` is REQUIRED here, not stylistic: inline in the workflow this body ran
+# under the container runner's default `sh -e`, and the code is written for that —
+# see the `|| rc=$?` comment further down, which exists precisely because errexit
+# would otherwise abort on gitleaks' exit-2 before the completeness checks run.
+# Extracting the script without `-e` silently dropped errexit and weakened the
+# fail-closed guarantee this scan exists to provide (caught in review by copilot,
+# codex and qodo on the HED-113 PRs — a real regression, not a nit).
+set -eu
 # Container jobs: see the semgrep step — without this every git call
 # (ours AND gitleaks' own) fails with "dubious ownership".
 git config --global --add safe.directory "$GITHUB_WORKSPACE"

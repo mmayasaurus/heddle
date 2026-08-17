@@ -238,7 +238,10 @@ jobs:
         # config-only PR, reviewed by a human) before a PR can benefit from it.
         # A PR that touches those files is additionally flagged in the summary
         # (Spinventory det-tier finding, #2077).
-        run: .github/scripts/gitleaks-range-scan.sh
+        # Invoked via `sh` on purpose: the script sets its own `set -eu`, and
+        # calling the interpreter explicitly means a lost exec bit (archive/checkout
+        # quirks) cannot turn the security scan into a silent no-op (codacy).
+        run: sh .github/scripts/gitleaks-range-scan.sh
 
       - name: Upload SARIF to code scanning
         # always(): the report matters MOST when the scan step just failed on
