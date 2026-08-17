@@ -415,6 +415,7 @@ async function runTarget(
     cachedInputTokens: result.usage?.cachedInputTokens,
     outputTokens: result.usage?.outputTokens,
     reasoningTokens: result.usage?.reasoningOutputTokens,
+    output: result.output,
   });
 
   return {
