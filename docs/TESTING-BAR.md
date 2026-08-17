@@ -54,6 +54,13 @@ as scaffolding underneath a behavioral test; SUPERFICIAL never lands as the *onl
 7. **"Renders"/"is defined"/"was called once"** with no observable consequence attached.
 8. **Tests that can't fail for the stated reason** — read the assertion and ask: which regression makes
    this red? If you can't name one, it's superficial.
+9. **A harness that invokes the thing differently from production** — a local test rig must invoke the
+   code under test EXACTLY as CI does, byte for byte; otherwise its green is testing a different program.
+   Measured case (HED-113, 2026-08-17): the gitleaks-guard fixture rig ran the script as `sh -e <script>`,
+   supplying the very `-e` flag that the extraction had silently dropped — so 12/12 passed green while the
+   regression was live in the shipped workflow. The rig now invokes it the way the workflow does.
+   Ask of any harness: does it add a flag, an env var, a shell, or a working directory that production
+   does not? Each difference is a class of bug the suite cannot see.
 
 ## 3. Before → after — three examples from the dashboard suite
 

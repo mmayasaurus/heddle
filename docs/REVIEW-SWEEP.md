@@ -75,7 +75,7 @@ Read these notices to confirm their status, then move on without treating them a
 
 ## Address every item
 
-For every finding identified across all channels, either fix it or reply with clear technical rationale — and for inline threads (channel c) resolve the thread; issue comments (a) get a fix or a reply; review bodies (b) get a fix or a reply plus a disposition receipt. When disputing automated bot findings, always provide concrete evidence such as a green run link, a documentation quote, or a measured runtime value. Never rubber-stamp and never resolve a thread silently.
+For every finding identified across all channels, either fix it or reply with clear technical rationale — and for inline threads (channel c) resolve the thread; issue comments (a) get a fix or a reply; review bodies (b) get a fix or a reply plus a disposition receipt. When disputing automated bot findings, always provide concrete evidence such as a green run link, a documentation quote, or a measured runtime value. **A negative claim is only as strong as its search boundary** — "this appears nowhere else", "nothing else calls it", "no other path reaches this" only counts if you state the scope you searched, and that scope is wide enough to be worth trusting. A grep over three plausible directories that silently excluded the repo-root config file produced a confidently wrong "the content survives nowhere" during the 2026-08-17 workspace triage; the content was in the root file. State the boundary, or don't make the claim. Never rubber-stamp and never resolve a thread silently.
 
 Bots are frequently wrong. Three real examples from the first CI PRs on the two heddle repos (heddle#2, heddle-dashboard#5) demonstrate valid refutations:
 
