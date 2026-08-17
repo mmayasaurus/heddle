@@ -541,6 +541,15 @@ export async function dispatch(
   // Fail-open (see src/fleet-pause.ts): no comms broker → nobody could have paused this fleet.
   // The depth-1 check above runs FIRST on purpose — a worker's nested attempt is a depth-1 problem
   // regardless of any pause, and stays attributed as one.
+  //
+  // NOT atomic with the pause, and cannot be (PR #42, codeant/codex-connector): a pause recorded in
+  // the microseconds between this read and startUnderCap() admits ONE dispatch it "should" have
+  // stopped. That residual is by design — it is exactly what quiescence's in-flight count is for: a
+  // rotator does not relaunch on a green admission gate, it relaunches on pauseReadiness reporting
+  // zero in-flight dispatches, so a worker that slipped through here still blocks the rotation until
+  // it finishes. The gate reduces the window from "unbounded" to "one sub-millisecond dispatch";
+  // closing it fully would need a pause/dispatch lock across every heddle process, whose cost is not
+  // worth removing a race the downstream in-flight check already absorbs.
   const pause = fleetPauseStatus();
   if (pause.paused) {
     const taskClass = req.taskClass ?? (req.provider && req.model ? `direct:${req.provider}/${req.model}` : 'dispatch');

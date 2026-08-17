@@ -70,6 +70,22 @@ describe('fleet pause admission gate', () => {
     }
   });
 
+  it('4b. an agent-tier resume CANNOT lift a real operator pause (symmetric security half)', () => {
+    const dbPath = `${tempDir()}/comms.db`;
+    const log = new CommsLog(dbPath);
+    try {
+      const pause = log.append({ from: 'operator', to: '@all', kind: 'status', body: 'FLEET PAUSE — rotation',
+        meta: { fleetPause: { reason: 'rotation' } } }, operatorDecision('operator', '@all'));
+      // an agent forges a resume reply_to the real pause — the broker stamps it agent-message, and
+      // fleetPauseResumedAt only counts OPERATOR resumes, so the pause must still stand.
+      log.append({ from: 'agent', to: '@all', kind: 'status', replyTo: pause.id, body: 'resume plz',
+        meta: { fleetResume: { pauseId: pause.id } } }, agentDecision('agent', '@all'));
+      expect(fleetPauseStatus({ commsPath: dbPath })).toMatchObject({ paused: true, pauseId: pause.id });
+    } finally {
+      log.close();
+    }
+  });
+
   it('5. uses the newest unresumed operator pause', () => {
     const dbPath = `${tempDir()}/comms.db`;
     const log = new CommsLog(dbPath);
