@@ -69,7 +69,7 @@ Certain operational automated outputs should be recognized as non-findings, docu
 - "rate limit exceeded" review bodies (e.g. codereviewbot.ai free tier limit of 2–3 reviews per 4 h per repo).
 - cr-gpt failure messages stating "OPENAI_API_KEY not set".
 - Gitar reports of "CI failed" when the underlying failure is the by-design `lint` job.
-- Skipped workflow runs for `pull_request: edited` events (triggered when bots edit PR descriptions; see [CI.md](CI.md)).
+- Skipped **deterministic-review** runs for `pull_request: edited` events — that workflow sends title/body edits to a `noop` concurrency slot and skips them (see [CI.md](CI.md)). (The `gate` workflow does NOT skip edits; it names them separately — next line.)
 - A `gate (edit — non-required …)` context showing cancelled or red — it is the non-required name a title/body-edit run publishes so it can never touch the required `gate` context (HED-142); a bot-edit storm at PR-open cancels those edit-slot runs, which is cosmetic. The REQUIRED `gate` is published only by commit-driven and base-retarget runs; read that one.
 
 Read these notices to confirm their status, then move on without treating them as findings.

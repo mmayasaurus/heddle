@@ -58,7 +58,13 @@ permissions: {}
 # re-runs the gate (nothing is skipped, so no `skipped` check-run can ever
 # supersede a red one) but cannot kill the run that matters.
 concurrency:
-  group: gate-${{ github.event.pull_request.number || github.ref }}-${{ github.event.action == 'edited' && 'edit' || 'run' }}
+  # Slot keyed on the SAME condition as the gate job name (HED-142): commit-driven
+  # events AND base retargets share the 'run' slot; only title/body edits get 'edit'.
+  # A cosmetic edit therefore cannot cancel an in-flight commit or RETARGET run —
+  # those publish the required `gate` and must not be killed by a body-edit
+  # (copilot/codex/qodo, HED-142 r1). Edits can still cancel each other in 'edit',
+  # which only ever touches the non-required `gate (edit …)` context.
+  group: gate-${{ github.event.pull_request.number || github.ref }}-${{ (github.event.action != 'edited' || github.event.changes.base.ref.from != '') && 'run' || 'edit' }}
   cancel-in-progress: true
 
 jobs:
