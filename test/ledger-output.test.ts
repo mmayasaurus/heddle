@@ -1,8 +1,8 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { describe, it, expect, beforeEach } from 'vitest';
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync } from 'node:fs';
 import { isAbsolute, join, sep } from 'node:path';
 import { Ledger } from '../src/ledger.js';
+import { useTempResources } from './helpers.js';
 
 function startRow(ledger: Ledger): number {
   return ledger.start({
@@ -13,16 +13,13 @@ function startRow(ledger: Ledger): number {
 }
 
 describe('Ledger output persistence (temp db)', () => {
+  const { tempDir, trackLedger } = useTempResources('heddle-ledger-output-test-');
   let dir: string;
   let ledger: Ledger;
 
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), 'heddle-ledger-output-test-'));
-    ledger = new Ledger(join(dir, 'ledger.db'));
-  });
-  afterEach(() => {
-    ledger?.close();
-    if (dir) rmSync(dir, { recursive: true, force: true });
+    dir = tempDir();
+    ledger = trackLedger(new Ledger(join(dir, 'ledger.db')));
   });
 
   it('stores a portable output filename and returns its content through getWithOutput', () => {

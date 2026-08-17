@@ -1,8 +1,7 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { join } from 'node:path';
 import { Ledger, parsePsTable, ownerVerdict, DEFAULT_ORPHAN_MAX_AGE_MS } from '../src/ledger.js';
+import { useTempResources } from './helpers.js';
 
 /**
  * Orphan hygiene (HED-90) against a TEMP database — never the operator's real ledger.
@@ -38,16 +37,13 @@ function row(ledger: Ledger, id: number): Record<string, unknown> {
 }
 
 describe('Ledger.sweepOrphans (temp db)', () => {
+  const { tempDir, trackLedger } = useTempResources('heddle-sweep-test-');
   let dir: string;
   let ledger: Ledger;
 
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), 'heddle-sweep-test-'));
-    ledger = new Ledger(join(dir, 'ledger.db'));
-  });
-  afterEach(() => {
-    ledger?.close();
-    if (dir) rmSync(dir, { recursive: true, force: true });
+    dir = tempDir();
+    ledger = trackLedger(new Ledger(join(dir, 'ledger.db')));
   });
 
   it('closes a row older than the age limit: outcome=orphaned, ok=0, reason recorded, gone from inFlight', () => {
@@ -168,15 +164,12 @@ describe('Ledger.sweepOrphans (temp db)', () => {
 });
 
 describe('Ledger.sweepOrphans round-2 semantics (temp db)', () => {
+  const { tempDir, trackLedger } = useTempResources('heddle-sweep2-test-');
   let dir: string;
   let ledger: Ledger;
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), 'heddle-sweep2-test-'));
-    ledger = new Ledger(join(dir, 'ledger.db'));
-  });
-  afterEach(() => {
-    ledger?.close();
-    if (dir) rmSync(dir, { recursive: true, force: true });
+    dir = tempDir();
+    ledger = trackLedger(new Ledger(join(dir, 'ledger.db')));
   });
 
   it('age never overrides a POSITIVE liveness verdict — a long-running dispatch with a live owner stays', () => {

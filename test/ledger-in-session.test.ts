@@ -1,8 +1,7 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { join } from 'node:path';
 import { Ledger } from '../src/ledger.js';
+import { useTempResources } from './helpers.js';
 
 function dispatchRecord() {
   return {
@@ -13,16 +12,13 @@ function dispatchRecord() {
 }
 
 describe('Ledger in-session reports (temp db)', () => {
+  const { tempDir, trackLedger } = useTempResources('heddle-ledger-in-session-test-');
   let dir: string;
   let ledger: Ledger;
 
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), 'heddle-ledger-in-session-test-'));
-    ledger = new Ledger(join(dir, 'ledger.db'));
-  });
-  afterEach(() => {
-    ledger?.close();
-    if (dir) rmSync(dir, { recursive: true, force: true });
+    dir = tempDir();
+    ledger = trackLedger(new Ledger(join(dir, 'ledger.db')));
   });
 
   it('counts a confirmed in-session handoff with its tokens', () => {
