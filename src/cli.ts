@@ -33,6 +33,8 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
       --timeout <ms>       wall-clock budget (default 600000)
       --codex-home <path>  account selection for codex workers
       --opt-in             required for task classes that gate on it (and for exec-privileged)
+      --override-reason <r> REQUIRED with --provider/--model when no --class: why this bypasses the
+                           routing table (recorded on the ledger row; HED-95)
       --no-fallback        do not try the table's fallback on failure
       --capabilities a,b   GRANT worker capabilities: net | browse | exec-privileged (default: none)
       --in-session         claude classes: return the in-session (Agent tool) instruction instead of a headless worker
@@ -131,6 +133,7 @@ try {
         timeoutMs: arg('--timeout') ? Number(arg('--timeout')) : undefined,
         env: Object.keys(env).length ? env : undefined,
         optIn: has('--opt-in'),
+        overrideReason: arg('--override-reason'),
         noFallback: has('--no-fallback'),
         capabilities: arg('--capabilities')?.split(',').map((s) => s.trim()).filter(Boolean),
         inSession: has('--in-session'),
@@ -171,7 +174,7 @@ try {
         taskClass, provider, model, prompt: '(dry run)', cwd: arg('--cwd') ?? process.cwd(),
         optIn: has('--opt-in'), env: Object.keys(env).length ? env : undefined,
         inSession: has('--in-session'), accountPin: arg('--account'),
-        authorProvider: arg('--author-provider'),
+        authorProvider: arg('--author-provider'), overrideReason: arg('--override-reason'),
       });
       const summary = summarizePlan(plan) as any;
       out(json, summary, () =>

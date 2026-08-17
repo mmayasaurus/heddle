@@ -59,6 +59,7 @@ server.tool(
     task_class: z.string().optional().describe('Routing task class (see list_task_classes) — supplies policy. Alone: the table\'s route. With provider+model: the named route under this class\'s policy.'),
     provider: z.string().optional().describe('Explicit route: claude | codex | cursor | gemini (the agy CLI). Requires model (both or neither). Without task_class = direct path. "claude" runs a headless claude -p worker on the best registry account (in_session:true instead returns the structured claude-in-session refusal to run it as your own Agent-tool subagent).'),
     model: z.string().optional().describe('Explicit route: model id for provider (e.g. cursor-grok-4.6-high).'),
+    override_reason: z.string().optional().describe('REQUIRED when you pass provider+model WITHOUT a task_class: one line on why this bypasses the routing table (a bench, a probe, a judgment call). Recorded on the ledger row so routing can be tuned from evidence. Not a gate on your judgment — just say why.'),
     cwd: z.string().optional().describe('Working directory for the worker (default: server cwd).'),
     issue: z.string().optional().describe('Linear issue this sub-task serves, e.g. SPI-712.'),
     agent: z.string().optional().describe("Dispatching orchestrator's fleet identity, e.g. K — used only when this heddle process has no bound identity (HEDDLE_AGENT/FLEET_AGENT/.fleet-agent); a bound identity always wins and the result says which."),
@@ -103,7 +104,7 @@ server.tool(
         autoEffort: a.auto_effort,
         resume: a.resume,
         env: Object.keys(env).length ? env : undefined,
-        optIn: a.opt_in,
+        optIn: a.opt_in, overrideReason: a.override_reason,
         noFallback: a.no_fallback,
         timeoutMs: a.timeout_ms,
         capabilities: a.capabilities,
@@ -138,6 +139,7 @@ server.tool(
     in_session: z.boolean().optional(),
     account_pin: z.string().optional(),
     author_provider: z.string().optional(),
+    override_reason: z.string().optional().describe('Same rule as dispatch_worker: a bare provider+model with no task_class is reported as WOULD REFUSE unless you say why it bypasses the routing table.'),
   },
   async (a) => {
     try {
@@ -145,7 +147,7 @@ server.tool(
       if (a.codex_home) env.CODEX_HOME = a.codex_home;
       const plan = planDispatch({
         taskClass: a.task_class, provider: a.provider, model: a.model, prompt: '(dry run)',
-        cwd: process.cwd(), optIn: a.opt_in, env: Object.keys(env).length ? env : undefined, identity: IDENTITY,
+        cwd: process.cwd(), optIn: a.opt_in, overrideReason: a.override_reason, env: Object.keys(env).length ? env : undefined, identity: IDENTITY,
         inSession: a.in_session, accountPin: a.account_pin, authorProvider: a.author_provider,
       });
       return text(summarizePlan(plan));

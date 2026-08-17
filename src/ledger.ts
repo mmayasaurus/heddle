@@ -58,6 +58,8 @@ export interface DispatchRecord {
   capabilities: string | null;
   /** Why this route was taken when a cap/policy check chose it (HED-67), e.g. `cap:claude 5h 92%>=90`. */
   routeReason: string | null;
+  /** HED-95: operator's stated reason for routing around the table (direct provider+model path). */
+  overrideReason: string | null;
   /** Account selected for the worker (HED-68 / CODEX_HOME rotation), when heddle chose one. */
   account: string | null;
   /** How `orchestrator` was determined: `bound` (process identity) or `caller` (tool/CLI argument). */
@@ -86,13 +88,13 @@ export interface DispatchRecord {
 export type DispatchStartRecord =
   Omit<DispatchRecord, 'id' | 'ok' | 'error' | 'inputTokens' | 'cachedInputTokens' | 'outputTokens' |
     'reasoningTokens' | 'durationMs' | 'finishedAt' | 'startedAt' | 'refusal' | 'capabilities' |
-    'routeReason' | 'account' | 'identitySource' |
+    'routeReason' | 'account' | 'identitySource' | 'overrideReason' |
     // Derived/sweep-owned, never caller-provided: the owner identity is stamped by insertStart
     // itself; `outcome` is written only by the orphan sweep (HED-90); `outputPath` is produced by
     // persistOutput when finish() records a deliverable (HED-23); and `executionMode` is decided by
     // which insert ran — 'subprocess' for start(), 'in-session' for a claude handoff (HED-99).
     'executionMode' | 'outputPath' | 'ownerPid' | 'ownerComm' | 'ownerStartedAt' | 'outcome'> &
-  Partial<Pick<DispatchRecord, 'capabilities' | 'routeReason' | 'account' | 'identitySource'>>;
+  Partial<Pick<DispatchRecord, 'capabilities' | 'routeReason' | 'account' | 'identitySource' | 'overrideReason'>>;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS dispatches (
@@ -120,6 +122,7 @@ CREATE TABLE IF NOT EXISTS dispatches (
   route_reason TEXT,
   account TEXT,
   identity_source TEXT,
+  override_reason TEXT,
   execution_mode TEXT,
   output_path TEXT,
   started_at TEXT NOT NULL,
@@ -200,6 +203,9 @@ const MIGRATIONS: { column: string; ddl: string }[] = [
   { column: 'route_reason', ddl: 'ALTER TABLE dispatches ADD COLUMN route_reason TEXT' },
   { column: 'account', ddl: 'ALTER TABLE dispatches ADD COLUMN account TEXT' },
   { column: 'identity_source', ddl: 'ALTER TABLE dispatches ADD COLUMN identity_source TEXT' },
+  // HED-95: WHY a dispatch bypassed the routing table. Nullable by design — class dispatches
+  // never carry one, and that asymmetry is exactly what makes the retune (HED-79) readable.
+  { column: 'override_reason', ddl: 'ALTER TABLE dispatches ADD COLUMN override_reason TEXT' },
   // HED-90 (orphan hygiene, 2026-08-16):
   { column: 'owner_pid', ddl: 'ALTER TABLE dispatches ADD COLUMN owner_pid INTEGER' },
   { column: 'owner_comm', ddl: 'ALTER TABLE dispatches ADD COLUMN owner_comm TEXT' },
@@ -316,12 +322,12 @@ export class Ledger {
       INSERT INTO dispatches
         (orchestrator, task_class, provider, model, skills, issue, pr, cwd, prompt_preview,
          session_id, fell_back_from, capabilities, route_reason, account, identity_source,
-         execution_mode, started_at, owner_pid, owner_comm, owner_started_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'subprocess', ?, ?, ?, ?)
+         override_reason, execution_mode, started_at, owner_pid, owner_comm, owner_started_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'subprocess', ?, ?, ?, ?)
     `).run(
       r.orchestrator, r.taskClass, r.provider, r.model, r.skills, r.issue, r.pr, r.cwd,
       r.promptPreview.slice(0, 500), r.sessionId, r.fellBackFrom, r.capabilities ?? null,
-      r.routeReason ?? null, r.account ?? null, r.identitySource ?? null, now,
+      r.routeReason ?? null, r.account ?? null, r.identitySource ?? null, r.overrideReason ?? null, now,
       process.pid, basename(process.execPath), Math.round(Date.now() - process.uptime() * 1000),
     );
     return Number(info.lastInsertRowid);
@@ -334,12 +340,13 @@ export class Ledger {
       INSERT INTO dispatches
         (orchestrator, task_class, provider, model, skills, issue, pr, cwd, prompt_preview,
          session_id, fell_back_from, refusal, capabilities, route_reason, account, identity_source,
-         execution_mode, ok, error, started_at, finished_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+         override_reason, execution_mode, ok, error, started_at, finished_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
     `).run(
       r.orchestrator, r.taskClass, r.provider, r.model, r.skills, r.issue, r.pr, r.cwd,
       r.promptPreview.slice(0, 500), r.sessionId, r.fellBackFrom, refusal, r.capabilities ?? null,
-      r.routeReason ?? null, r.account ?? null, r.identitySource ?? null, executionMode ?? null, reason, now, now,
+      r.routeReason ?? null, r.account ?? null, r.identitySource ?? null, r.overrideReason ?? null,
+      executionMode ?? null, reason, now, now,
     );
     return Number(info.lastInsertRowid);
   }
