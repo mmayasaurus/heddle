@@ -294,6 +294,16 @@ server.tool(
   async (a) => text(ledger().recent(a.limit ?? 20, a.issue)),
 );
 
+server.tool(
+  'get_dispatch',
+  'One dispatch record plus its full recorded worker output, if available.',
+  { id: z.number().int().describe('Ledger dispatch id.') },
+  async (a) => {
+    const dispatch = ledger().getWithOutput(a.id);
+    return dispatch ? text(dispatch) : errorText(`no dispatch #${a.id} in the ledger`);
+  },
+);
+
 // Orphan hygiene (HED-90): close provably-dead in-flight rows at start and every 30 minutes —
 // this server is long-lived, and rows orphaned by OTHER processes dying keep appearing while it
 // runs. Best-effort; stderr only (stdout is the MCP protocol), and failures are logged, not

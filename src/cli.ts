@@ -54,6 +54,7 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
   heddle workers [--stale <hours>] [--json]   dispatches still in flight (--stale: only orphans older than N hours)
   heddle ledger [--issue SPI-n] [--limit N] [--json]
   heddle ledger finish <id> --error "<why>"   close an orphaned in-flight row (ok=0)
+  heddle ledger show <id> [--json]             show one dispatch and its recorded worker output
   heddle ledger sweep [--dry-run] [--max-age-h N] [--json]   close orphans: age > N hours (default 24)
                                  or owner process provably gone (outcome='orphaned'); dry-run lists only
   heddle ledger report-in-session <id> (--ok | --failed) [--error "<why>"] [--input-tokens N] [--cached-input-tokens N] [--output-tokens N] [--reasoning-tokens N] [--duration-ms N] [--json]  administrative path: may report any orchestrator's handoff
@@ -251,6 +252,21 @@ try {
     }
 
     case 'ledger': {
+      if (process.argv[3] === 'show') {
+        const id = Number(process.argv[4]);
+        if (!Number.isInteger(id)) {
+          console.error('usage: heddle ledger show <id> [--json]');
+          process.exit(2);
+        }
+        const row = new Ledger().getWithOutput(id);
+        if (!row) {
+          console.error(`heddle: no dispatch #${id}`);
+          process.exit(1);
+        }
+        const { output, ...summary } = row;
+        out(json, row, () => `${JSON.stringify(summary, null, 2)}\n\n${output ?? '(no output recorded)'}`);
+        break;
+      }
       if (process.argv[3] === 'sweep') {
         const maxAgeH = arg('--max-age-h');
         // `has()` distinguishes "--max-age-h given without a value" (an error a hurried operator

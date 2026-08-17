@@ -1,6 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
-import { mkdirSync } from 'node:fs';
-import { basename, dirname, join } from 'node:path';
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { basename, dirname, isAbsolute, join } from 'node:path';
 import { homedir } from 'node:os';
 import { makePsProbe, type OwnerProbe } from './ledger-ps.js';
 
@@ -64,6 +64,8 @@ export interface DispatchRecord {
   identitySource: string | null;
   /** How the work ran: a heddle subprocess, or an orchestrator-owned in-session subagent. */
   executionMode: string | null;
+  /** Full worker deliverable lives outside SQLite so dashboard polling never reads large text blobs. */
+  outputPath: string | null;
   startedAt: string;
   finishedAt: string | null;
   /** pid of the process that recorded this dispatch. start() and finish() always run in the same
@@ -86,9 +88,10 @@ export type DispatchStartRecord =
     'reasoningTokens' | 'durationMs' | 'finishedAt' | 'startedAt' | 'refusal' | 'capabilities' |
     'routeReason' | 'account' | 'identitySource' |
     // Derived/sweep-owned, never caller-provided: the owner identity is stamped by insertStart
-    // itself; `outcome` is written only by the orphan sweep (HED-90); `executionMode` is decided by
+    // itself; `outcome` is written only by the orphan sweep (HED-90); `outputPath` is produced by
+    // persistOutput when finish() records a deliverable (HED-23); and `executionMode` is decided by
     // which insert ran — 'subprocess' for start(), 'in-session' for a claude handoff (HED-99).
-    'executionMode' | 'ownerPid' | 'ownerComm' | 'ownerStartedAt' | 'outcome'> &
+    'executionMode' | 'outputPath' | 'ownerPid' | 'ownerComm' | 'ownerStartedAt' | 'outcome'> &
   Partial<Pick<DispatchRecord, 'capabilities' | 'routeReason' | 'account' | 'identitySource'>>;
 
 const SCHEMA = `
@@ -118,6 +121,7 @@ CREATE TABLE IF NOT EXISTS dispatches (
   account TEXT,
   identity_source TEXT,
   execution_mode TEXT,
+  output_path TEXT,
   started_at TEXT NOT NULL,
   finished_at TEXT
 );
@@ -201,6 +205,8 @@ const MIGRATIONS: { column: string; ddl: string }[] = [
   { column: 'owner_comm', ddl: 'ALTER TABLE dispatches ADD COLUMN owner_comm TEXT' },
   { column: 'owner_started_at', ddl: 'ALTER TABLE dispatches ADD COLUMN owner_started_at INTEGER' },
   { column: 'outcome', ddl: 'ALTER TABLE dispatches ADD COLUMN outcome TEXT' },
+  // HED-23: worker deliverables can be large, so SQLite keeps only their atomically-written path.
+  { column: 'output_path', ddl: 'ALTER TABLE dispatches ADD COLUMN output_path TEXT' },
   // HED-99: a finished in-session handoff becomes a real dispatch only after its orchestrator reports it.
   { column: 'execution_mode', ddl: 'ALTER TABLE dispatches ADD COLUMN execution_mode TEXT' },
 ];
@@ -265,9 +271,11 @@ function orphanReason(
 
 export class Ledger {
   private db: DatabaseSync;
+  private outputDir: string;
 
   constructor(path: string = DEFAULT_LEDGER_PATH) {
     mkdirSync(dirname(path), { recursive: true });
+    this.outputDir = join(dirname(path), 'outputs');
     this.db = new DatabaseSync(path);
     // Several heddle processes (one MCP server per orchestrator session, CLIs, the dashboard) share
     // this file; wait briefly for a writer instead of failing with SQLITE_BUSY. Set FIRST so it also
@@ -418,18 +426,44 @@ export class Ledger {
   finish(id: number, outcome: {
     ok: boolean; error?: string; sessionId?: string; durationMs?: number;
     inputTokens?: number; cachedInputTokens?: number; outputTokens?: number; reasoningTokens?: number;
+    output?: string;
   }): void {
+    const outputPath = this.persistOutput(id, outcome.output);
+    // A second finish() without output must not orphan its existing deliverable; match session_id's COALESCE.
     this.db.prepare(`
       UPDATE dispatches SET ok = ?, error = ?, session_id = COALESCE(?, session_id),
         duration_ms = ?, input_tokens = ?, cached_input_tokens = ?, output_tokens = ?,
-        reasoning_tokens = ?, finished_at = ?, outcome = NULL
+        reasoning_tokens = ?, output_path = COALESCE(?, output_path), finished_at = ?, outcome = NULL
       WHERE id = ?
     `).run(
       outcome.ok ? 1 : 0, outcome.error ?? null, outcome.sessionId ?? null,
       outcome.durationMs ?? null, outcome.inputTokens ?? null, outcome.cachedInputTokens ?? null,
       outcome.outputTokens ?? null, outcome.reasoningTokens ?? null,
-      new Date().toISOString(), id,
+      outputPath, new Date().toISOString(), id,
     );
+  }
+
+  private persistOutput(id: number, output: string | undefined): string | null {
+    // Worker output is large by design; trim() can scan it all and materialize a second copy just to find non-whitespace.
+    if (!output || !/\S/.test(output)) return null;
+    const filename = `${id}.md`;
+    const path = join(this.outputDir, filename);
+    const tempPath = join(this.outputDir, `.${id}.${process.pid}.${Date.now()}.tmp`);
+    try {
+      mkdirSync(this.outputDir, { recursive: true });
+      // Unreviewed model output can quote source, secrets in error text, or customer data; shared machines must not expose it.
+      // The mode is applied at creation, and the rename preserves it.
+      writeFileSync(tempPath, output, { encoding: 'utf8', mode: 0o600 });
+      renameSync(tempPath, path);
+      // Keep rows portable when ledger.db and outputs/ move together instead of pointing at a stale home directory.
+      return filename;
+    } catch (err) {
+      // A write can succeed before rename fails; remove our temp file so <ledger>/outputs never accumulates debris forever.
+      try { rmSync(tempPath, { force: true }); } catch { /* nothing else to do */ }
+      // A completed worker must remain visible even if the secondary deliverable store is unavailable.
+      process.stderr.write(`heddle: could not persist output for dispatch #${id} (${err instanceof Error ? err.message : String(err)})\n`);
+      return null;
+    }
   }
 
   /**
@@ -635,6 +669,20 @@ export class Ledger {
   get(id: number): Record<string, unknown> | null {
     const row = this.db.prepare('SELECT * FROM dispatches WHERE id = ?').get(id);
     return (row as Record<string, unknown> | undefined) ?? null;
+  }
+
+  /** A missing output file is recoverable: ledger history stays readable after retention or manual cleanup. */
+  getWithOutput(id: number): (Record<string, unknown> & { output: string | null }) | null {
+    const row = this.get(id);
+    if (!row) return null;
+    const outputPath = row.output_path;
+    if (typeof outputPath !== 'string') return { ...row, output: null };
+    try {
+      // Stored filenames keep the ledger portable; existing absolute paths remain readable for local backward compatibility.
+      return { ...row, output: readFileSync(isAbsolute(outputPath) ? outputPath : join(this.outputDir, outputPath), 'utf8') };
+    } catch {
+      return { ...row, output: null };
+    }
   }
 
   close(): void {
