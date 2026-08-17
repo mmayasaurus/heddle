@@ -140,7 +140,7 @@ The authoritative wording lives in [CI.md](CI.md#standing-rules-maya-2026-08-15-
 
 - Merge commits only, pinned to the commit you swept: `gh pr merge $N --merge --match-head-commit <swept-sha>` (a push landing between sweep #2 and the merge must not slip through unswept).
 - Never squash, never force-push.
-- Ensure the branch is up to date with the base repository's `main` (merge it into the branch if behind — from a fork that means the base repo's remote, not the fork's `origin/main`). Exception for config-text-only PRs: see `.claude/rules/pr-discipline.md` (a non-overlapping `main` advance does not force a re-merge).
+- Ensure the branch is **not conflicting** — `gh pr view $N --json mergeable` must read `MERGEABLE` (`UNKNOWN` only means GitHub is still computing; poll again). Merge the base repository's `main` into the branch **only** when it reads `CONFLICTING` — from a fork that means the base repo's remote, not the fork's `origin/main`. A branch that is merely **behind** merges as-is, however far behind: being behind is not a defect, and force-marching every PR forward on each `main` advance does not converge on a busy repo (each forward-merge is a new HEAD, restarting CI and the 15-minute sweep clock while `main` moves again). `mergeable` is the decision; `mergeStateStatus` (`BEHIND` / `UNSTABLE` / `CLEAN` / `BLOCKED`) is informational if you want to see *how* far off you are — it is not what the rule keys on. Full rationale, including the measured basis: `.claude/rules/pr-discipline.md` condition 5.
 - PR description body carries `Fixes <ticket>`.
 - Keep the branch after merging (branches are history).
 - Who may merge is a maintainer policy outside this document.

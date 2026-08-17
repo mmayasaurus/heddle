@@ -34,9 +34,12 @@ When all six conditions in `/Users/mayatobi/Developer/Spinventory-Rebuild-App/.c
 3. All required checks green at HEAD.
 4. Merge commit only, pinned to the swept commit (`gh pr merge <n> --merge --match-head-commit <swept-sha>`) — never squash, never force-push.
 5. PR body has `Fixes HED-n`; branch **not CONFLICTING** — `gh pr view <n> --json mergeable` reads
-   `MERGEABLE` (poll past `UNKNOWN`, which only means GitHub is still computing). Merge `origin/main`
-   in **only** when it reads `CONFLICTING` (never rebase a published branch); a branch that is merely
-   BEHIND merges as-is. **Do not merge main forward just because main moved** (Maya-ratified
+   `MERGEABLE` (poll past `UNKNOWN`, which only means GitHub is still computing). Merge the base
+   repository's `main` in **only** when it reads `CONFLICTING` (from a fork that is the base repo's
+   remote, not the fork's `origin/main`; never rebase a published branch); a branch that is merely
+   behind merges as-is. Mind the enum: `mergeable` is only `MERGEABLE` / `CONFLICTING` / `UNKNOWN`,
+   and it is what this rule keys on — behind-ness appears in `mergeStateStatus` (`BEHIND`,
+   `UNSTABLE`, `CLEAN`, `BLOCKED`), which is informational here, not a gate. **Do not merge main forward just because main moved** (Maya-ratified
    2026-08-17): nothing requires it — both rulesets are `strict: false`, so `gate` at HEAD is the only
    enforced gate — Spinventory has the same posture with agents A–Q merging all day, and on a repo
    with six active agents it does not converge, since each forward-merge is a new HEAD costing a fresh
