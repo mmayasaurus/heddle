@@ -1,8 +1,7 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { join } from 'node:path';
 import { Ledger } from '../src/ledger.js';
+import { useTempResources } from './helpers.js';
 
 /**
  * Ledger round-trip against a TEMP database. Pattern for every test that touches the ledger:
@@ -18,17 +17,13 @@ function startRow(ledger: Ledger, over: Partial<Parameters<Ledger['start']>[0]> 
 }
 
 describe('Ledger (temp db)', () => {
+  const { tempDir, trackLedger } = useTempResources('heddle-ledger-test-');
   let dir: string;
   let ledger: Ledger;
 
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), 'heddle-ledger-test-'));
-    ledger = new Ledger(join(dir, 'ledger.db'));
-  });
-  afterEach(() => {
-    // Guarded so a beforeEach failure surfaces as itself, not as a teardown TypeError.
-    ledger?.close();
-    if (dir) rmSync(dir, { recursive: true, force: true });
+    dir = tempDir();
+    ledger = trackLedger(new Ledger(join(dir, 'ledger.db')));
   });
 
   it('a started dispatch is in flight until finished, then carries the outcome', () => {

@@ -9,6 +9,7 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     include: ['test/**/*.test.ts'],
+    globalSetup: ['test/global-setup.ts'],
     environment: 'node',
     // Strip identity/worker/env overrides so results don't depend on who runs the suite (a heddle
     // worker inherits HEDDLE_WORKER=1 and would trip depth-1 in every un-injected dispatch test).
