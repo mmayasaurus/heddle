@@ -358,5 +358,5 @@ describe('concurrent materialization', () => {
         restoreAgents();
       }
     } finally { restoreEnv(); }
-  });
+  }, 45_000); // snapshot-heavy under parallel forks
 });

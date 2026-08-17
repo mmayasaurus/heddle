@@ -1,7 +1,11 @@
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, isAbsolute, join } from 'node:path';
+import { basename, dirname, isAbsolute, join } from 'node:path';
 import { homedir } from 'node:os';
+import { makePsProbe, type OwnerProbe } from './ledger-ps.js';
+
+// Re-exported so consumers/tests keep one import surface for ledger concerns.
+export { parsePsTable, ownerVerdict, type OwnerProbe, type PsEntry } from './ledger-ps.js';
 
 /**
  * Dispatch ledger — the durable record of every sub-task heddle routes.
@@ -62,6 +66,17 @@ export interface DispatchRecord {
   outputPath: string | null;
   startedAt: string;
   finishedAt: string | null;
+  /** pid of the process that recorded this dispatch. start() and finish() always run in the same
+   *  process, so this pid being provably gone means finish() can never arrive (HED-90). */
+  ownerPid: number | null;
+  /** Executable basename of that process (node/bun) — informational, and the liveness fallback
+   *  when a process start time is unavailable (HED-87's ps-comm pattern). */
+  ownerComm: string | null;
+  /** Epoch ms the owner process started (now − process.uptime()). The primary pid-reuse-safe
+   *  identity: a pid recycled to a NEW process cannot have this start time. */
+  ownerStartedAt: number | null;
+  /** null for normal rows; 'orphaned' when the hygiene sweep closed the row (HED-90). */
+  outcome: string | null;
 }
 
 /** What a dispatch must supply to start (or refuse) a row; the trailing lineage/policy fields are
@@ -69,7 +84,11 @@ export interface DispatchRecord {
 export type DispatchStartRecord =
   Omit<DispatchRecord, 'id' | 'ok' | 'error' | 'inputTokens' | 'cachedInputTokens' | 'outputTokens' |
     'reasoningTokens' | 'durationMs' | 'finishedAt' | 'startedAt' | 'refusal' | 'capabilities' |
-    'routeReason' | 'account' | 'identitySource' | 'outputPath'> &
+    'routeReason' | 'account' | 'identitySource' |
+    // Derived/sweep-owned, never caller-provided: the owner identity is stamped by insertStart
+    // itself; `outcome` is written only by the orphan sweep (HED-90); `outputPath` is produced by
+    // persistOutput when finish() records a deliverable (HED-23).
+    'outputPath' | 'ownerPid' | 'ownerComm' | 'ownerStartedAt' | 'outcome'> &
   Partial<Pick<DispatchRecord, 'capabilities' | 'routeReason' | 'account' | 'identitySource'>>;
 
 const SCHEMA = `
@@ -120,6 +139,7 @@ CREATE INDEX IF NOT EXISTS idx_reviews_pair ON reviews(author_provider, reviewer
 CREATE INDEX IF NOT EXISTS idx_dispatches_issue ON dispatches(issue);
 CREATE INDEX IF NOT EXISTS idx_dispatches_orch ON dispatches(orchestrator);
 CREATE INDEX IF NOT EXISTS idx_dispatches_started ON dispatches(started_at);
+CREATE INDEX IF NOT EXISTS idx_dispatches_finished ON dispatches(finished_at);
 `;
 
 /**
@@ -156,6 +176,11 @@ const MIGRATIONS: { column: string; ddl: string }[] = [
   { column: 'route_reason', ddl: 'ALTER TABLE dispatches ADD COLUMN route_reason TEXT' },
   { column: 'account', ddl: 'ALTER TABLE dispatches ADD COLUMN account TEXT' },
   { column: 'identity_source', ddl: 'ALTER TABLE dispatches ADD COLUMN identity_source TEXT' },
+  // HED-90 (orphan hygiene, 2026-08-16):
+  { column: 'owner_pid', ddl: 'ALTER TABLE dispatches ADD COLUMN owner_pid INTEGER' },
+  { column: 'owner_comm', ddl: 'ALTER TABLE dispatches ADD COLUMN owner_comm TEXT' },
+  { column: 'owner_started_at', ddl: 'ALTER TABLE dispatches ADD COLUMN owner_started_at INTEGER' },
+  { column: 'outcome', ddl: 'ALTER TABLE dispatches ADD COLUMN outcome TEXT' },
   // HED-23: worker deliverables can be large, so SQLite keeps only their atomically-written path.
   { column: 'output_path', ddl: 'ALTER TABLE dispatches ADD COLUMN output_path TEXT' },
 ];
@@ -175,6 +200,48 @@ END;
 
 /** Trigger bodies are frozen at CREATE; drop the v1 (id, orchestrator only) body so the widened one applies. */
 const LINEAGE_TRIGGER_DROP_V1 = "DROP TRIGGER IF EXISTS dispatches_lineage_immutable;";
+
+/** One in-flight row the sweep would close, and why. */
+export interface OrphanCandidate {
+  id: number;
+  startedAt: string;
+  reason: string;
+}
+
+/** Nothing heddle dispatches legitimately runs this long (worker budgets are minutes). */
+export const DEFAULT_ORPHAN_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+/** One-decimal hours (floor): 24.1h must never display as "24h (limit 24h)". */
+function hours(ms: number): string {
+  return (Math.floor(ms / 360_000) / 10).toFixed(1);
+}
+
+/**
+ * Why one in-flight row is an orphan, or null when it isn't:
+ *   - its owner is provably gone (pid-reuse-safe start-time verdict), or
+ *   - it exceeded the age limit AND the owner is not demonstrably alive — age alone never
+ *     overrides a POSITIVE liveness verdict (a legitimately long-running dispatch is no orphan).
+ */
+function orphanReason(
+  row: Record<string, unknown>,
+  probe: OwnerProbe,
+  maxAgeMs: number,
+  now: Date,
+): string | null {
+  const ageMs = now.getTime() - Date.parse(String(row.started_at ?? ''));
+  const ownerPid = row.owner_pid == null ? null : Number(row.owner_pid);
+  const ownerStartedAt = row.owner_started_at == null ? null : Number(row.owner_started_at);
+  // true = same process instance still running · false = provably gone · null = unknown
+  const alive = ownerPid == null ? null : probe(ownerPid, ownerStartedAt);
+  if (alive === false) {
+    return `owner process ${ownerPid} (${row.owner_comm ?? '?'}) is gone`;
+  }
+  if (alive !== true && Number.isFinite(ageMs) && ageMs > maxAgeMs) {
+    return `in-flight for ${hours(ageMs)}h (limit ${hours(maxAgeMs)}h) and owner ${
+      ownerPid == null ? 'unrecorded' : 'liveness unknown'}`;
+  }
+  return null;
+}
 
 export class Ledger {
   private db: DatabaseSync;
@@ -217,15 +284,19 @@ export class Ledger {
   }
 
   private insertStart(r: DispatchStartRecord, now: string): number {
+    // start() and finish() always run in this same process, so its identity is the row's owner:
+    // if this pid is later provably gone, finish() can never arrive and the row is an orphan.
     const info = this.db.prepare(`
       INSERT INTO dispatches
         (orchestrator, task_class, provider, model, skills, issue, pr, cwd, prompt_preview,
-         session_id, fell_back_from, capabilities, route_reason, account, identity_source, started_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         session_id, fell_back_from, capabilities, route_reason, account, identity_source,
+         started_at, owner_pid, owner_comm, owner_started_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       r.orchestrator, r.taskClass, r.provider, r.model, r.skills, r.issue, r.pr, r.cwd,
       r.promptPreview.slice(0, 500), r.sessionId, r.fellBackFrom, r.capabilities ?? null,
       r.routeReason ?? null, r.account ?? null, r.identitySource ?? null, now,
+      process.pid, basename(process.execPath), Math.round(Date.now() - process.uptime() * 1000),
     );
     return Number(info.lastInsertRowid);
   }
@@ -307,7 +378,7 @@ export class Ledger {
     this.db.prepare(`
       UPDATE dispatches SET ok = ?, error = ?, session_id = COALESCE(?, session_id),
         duration_ms = ?, input_tokens = ?, cached_input_tokens = ?, output_tokens = ?,
-        reasoning_tokens = ?, output_path = COALESCE(?, output_path), finished_at = ?
+        reasoning_tokens = ?, output_path = COALESCE(?, output_path), finished_at = ?, outcome = NULL
       WHERE id = ?
     `).run(
       outcome.ok ? 1 : 0, outcome.error ?? null, outcome.sessionId ?? null,
@@ -368,11 +439,11 @@ export class Ledger {
     return row?.account ?? null;
   }
 
-  closeIfInFlight(id: number, error: string): boolean {
+  closeIfInFlight(id: number, error: string, opts: { outcome?: string; now?: Date } = {}): boolean {
     const info = this.db.prepare(`
-      UPDATE dispatches SET ok = 0, error = ?, finished_at = ?
+      UPDATE dispatches SET ok = 0, error = ?, outcome = COALESCE(?, outcome), finished_at = ?
       WHERE id = ? AND finished_at IS NULL
-    `).run(error, new Date().toISOString(), id);
+    `).run(error, opts.outcome ?? null, (opts.now ?? new Date()).toISOString(), id);
     return Number(info.changes) > 0;
   }
 
@@ -467,6 +538,46 @@ export class Ledger {
       'SELECT * FROM dispatches WHERE finished_at IS NULL ORDER BY id DESC',
     ).all() as Record<string, unknown>[];
   }
+
+  /**
+   * Orphan hygiene (HED-90): close in-flight rows whose finish() can provably never arrive, so the
+   * ledger's "running" view stays honest. A row is an orphan when
+   *   (a) it is older than `maxAgeMs` (default 24h) — nothing heddle dispatches runs that long — OR
+   *   (b) its recorded owner process is gone: the pid no longer exists, or exists but is no longer
+   *       the recorded executable (pid-reuse-safe ps-comm check, HED-87 pattern).
+   * Closing writes finished_at, ok=0, outcome='orphaned' and the reason into error — guarded by
+   * `finished_at IS NULL`, so a real finish() racing the sweep always wins. `dryRun` computes the
+   * same candidates and mutates nothing.
+   *
+   * `isOwnerAlive` is injectable for tests; the default probes ps once for all candidate pids.
+   * A `null` verdict (ps unavailable) is UNKNOWN — such rows are left alone rather than guessed at.
+   */
+  sweepOrphans(opts: {
+    maxAgeMs?: number;
+    dryRun?: boolean;
+    now?: Date;
+    isOwnerAlive?: OwnerProbe;
+  } = {}): { candidates: OrphanCandidate[]; closed: number } {
+    const maxAgeMs = opts.maxAgeMs ?? DEFAULT_ORPHAN_MAX_AGE_MS;
+    const now = opts.now ?? new Date();
+    const rows = this.inFlight();
+    const probe = opts.isOwnerAlive ?? makePsProbe(rows);
+    const candidates: OrphanCandidate[] = [];
+    for (const row of rows) {
+      const reason = orphanReason(row, probe, maxAgeMs, now);
+      if (reason !== null) {
+        candidates.push({ id: Number(row.id), startedAt: String(row.started_at ?? ''), reason });
+      }
+    }
+    let closed = 0;
+    if (!opts.dryRun) {
+      for (const c of candidates) {
+        if (this.closeIfInFlight(c.id, `orphan sweep: ${c.reason}`, { outcome: 'orphaned', now })) closed++;
+      }
+    }
+    return { candidates, closed };
+  }
+
 
   /** In-flight rows started more than `olderThanMs` ago — orphans to close (heddle workers --stale). */
   staleInFlight(olderThanMs: number, now = Date.now()): Record<string, unknown>[] {

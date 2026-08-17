@@ -205,6 +205,37 @@ and records why it chose what it chose (`route_reason` in the ledger).
   the `plan_dispatch` MCP tool print the decision, the checks, the remaining
   fallback and the account advice — no ledger row, no worker.
 
+## Fable budget (BUILT — HED-76, 2026-08-16; Maya: "we are burning through fable use even just orchestrating")
+
+Fable is soft-capped at **50% of an account's WEEKLY allowance**, and on day 1 of
+the week 58% of it was gone while Codex/Cursor/Gemini headroom idled — so the
+router treats the **Fable-attributed weekly share** as its own budget, separate
+from the raw 5h/7d windows:
+
+- **Source**: W's estimator (HED-75) publishes `fableWeeklyEstimatePct` +
+  `fableWeeklySamples` on every Claude account row of the `limits.json` mirror
+  (percentage points of the weekly cap consumed by Fable models; `null` until
+  ≥3 attributed samples). Only the FABLE-attributed estimate is consulted —
+  non-Fable work never counts against it; a null/stale estimate is UNKNOWN and
+  decides nothing (the same discipline as every other cap).
+- **`cap:fable-soft-cap`** — a CLASS route to `claude/fable` moves to its class
+  fallback when even the best addressable account's estimate is ≥ 45 (the
+  advise threshold under the 50% cap). Soft semantics: explicit routes never
+  move, no/blocked fallback keeps the primary with the check recorded.
+- **`fable-headroom`** — the account picker prefers the lowest Fable-weekly
+  estimate (among accounts with a KNOWN estimate) when picking for a
+  fable-model dispatch; 5h ordering is the fallback when no estimates exist.
+- **Advisory line** — `adviseClaudeAccount` appends `Fable-weekly: <acct>
+  lowest at <n>%` (and the soft-cap warning at ≥45) so in-session orchestrators
+  see weekly pressure too.
+- **`escalate-judgment` class** — Fable as an out-of-process worker for
+  genuinely hard, BOUNDED problems (the Anthropic-side mirror of Sol's role):
+  primary `claude/fable`, fallback `claude/opus` (which is what
+  `cap:fable-soft-cap` lands on when the budget is tight), `worker-role` pack,
+  auto-assessed, no opt-in gate, ledgered like every dispatch so Fable-class
+  counts are visible in `heddle usage`. Not for labor — the codex/cursor
+  classes stay the default.
+
 ## Claude workers & automatic account switching (BUILT — HED-78, 2026-08-15)
 
 Maya: "Yes let's def build the auto account switching!" — so Claude classes now

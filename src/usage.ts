@@ -45,6 +45,12 @@ export interface AccountCaps {
   noteCodes: string[];
   limitReached: boolean;
   stale: boolean;
+  /** Claude only (W's HED-75 estimator): estimated share of the WEEKLY cap consumed by FABLE, in
+   *  percentage points (soft cap 50). null/absent until >=3 attributed samples / other providers —
+   *  optional so fixtures and the raw tap (which has no attribution) need not carry it. */
+  fableWeeklyEstimatePct?: number | null;
+  /** Attributed samples behind the estimate (its confidence); null/absent when no estimate. */
+  fableWeeklySamples?: number | null;
 }
 
 export interface ProviderCaps {
@@ -133,6 +139,8 @@ export function readLimitsMirror(usageDir: string, nowS: number): CapsByProvider
           noteCodes: strList(a.noteCodes),
           limitReached: a.limitReached === true,
           stale: a.stale === true,
+          fableWeeklyEstimatePct: num(a.fableWeeklyEstimatePct),
+          fableWeeklySamples: num(a.fableWeeklySamples),
         }))
       : [];
     // Per-provider freshness: the contract carries capturedAt + staleAfterSecs per provider — a

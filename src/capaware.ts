@@ -114,7 +114,7 @@ function bindingFor(target: RouteTarget, caps: ProviderCaps): { label: string; u
 
 export function decideRoute(
   table: RoutingTable, target: RouteTarget, fallback: RouteTarget | undefined, caps: CapsByProvider,
-  opts: { explicit: boolean },
+  opts: { explicit: boolean; claudeAccounts?: () => ClaudeAccount[]; accountPin?: string },
 ): RouteDecision {
   const policy = capAwarePolicy(table);
   const checks: string[] = [];
@@ -132,6 +132,44 @@ export function decideRoute(
 
   if (!policy.enabled) {
     return { target, fallback, routedAwayForCap: false, routeReason: 'cap-aware routing disabled (policy)', checks: [...checks, 'policy.cap_aware_routing.enabled = false (soft route-away off; hard billing guards stay)'] };
+  }
+
+  // Fable soft cap (HED-76): a FABLE-model class route moves to its class fallback when even the
+  // best addressable account's Fable-weekly estimate is at/over the advise threshold — the weekly
+  // Fable share (soft cap 50%) binds long before the raw 5h/7d windows. Soft semantics throughout:
+  // explicit routes are never moved (naming fable is the choice), a missing/stale estimate is
+  // UNKNOWN (no-op), a blocked or absent fallback keeps the primary with the check recorded, and
+  // only the FABLE-ATTRIBUTED estimate is consulted — non-Fable work never counts against it.
+  if (!opts.explicit && target.provider === 'claude' && target.model === 'fable') {
+    // Accounts are read LAZILY (a thunk): a codex/cursor/gemini route must not pay a sync
+    // accounts.json read (PR #24, five reviewers).
+    const best = bestFableWeekly(caps.claude, opts.claudeAccounts?.() ?? [], opts.accountPin);
+    if (best === null) {
+      checks.push('claude fable-weekly: no fresh estimate on the deciding account — no fable-soft-cap decision');
+    } else {
+      const who = best.pinned ? `pinned account ${best.id}` : `best account ${best.id}`;
+      checks.push(`claude fable-weekly ${fmtPct(best.pct)}% (${who}) vs fable act threshold ${FABLE_SOFT_CAP_ADVISE_PCT} (weekly cap ${FABLE_WEEKLY_CAP_PCT})`);
+      if (best.pct >= FABLE_SOFT_CAP_ADVISE_PCT && fallback) {
+        const fbWhy = hardRefusal(fallback, caps);
+        if (fbWhy) {
+          checks.push(`fable soft cap hit but the fallback is blocked (${fbWhy}) — running the primary`);
+        } else {
+          // The fallback's OWN binding window is recorded but does NOT veto the move: the Fable
+          // weekly share is a different pool from 5h/7d, and a claude→claude fallback (fable→opus)
+          // shares the very window the primary would also draw on — declining to move would spend
+          // the scarcer budget to protect the looser one (PR #24, gitar).
+          const fbCaps = caps[fallback.provider];
+          const fb = fbCaps ? bindingFor(fallback, fbCaps) : null;
+          checks.push(`fallback ${fallback.provider} ${fb ? fb.label : 'caps unknown'} (recorded; the fable budget decides this move)`);
+          checks.push(`FABLE SOFT CAP → ${fallback.provider}/${fallback.model}`);
+          return {
+            target: fallback, fallback: undefined, routedAwayForCap: true,
+            routeReason: `cap:fable-soft-cap fable-weekly ${fmtPct(best.pct)}%>=${FABLE_SOFT_CAP_ADVISE_PCT}${best.pinned ? ` (pinned ${best.id})` : ''} → ${fallback.provider}/${fallback.model}`,
+            checks,
+          };
+        }
+      }
+    }
   }
 
   if (opts.explicit) {
@@ -257,7 +295,13 @@ export function adviseClaudeAccount(caps: ProviderCaps | undefined, accounts: Cl
     : accounts.length
       ? `Claude accounts: ${accounts.length} registered, no fresh per-account capture (claude-<acctId>.json) — cannot advise.`
       : 'Claude accounts: none registered in ~/.heddle/accounts.json.';
-  return { best, current, known, line };
+  // Fable budget advisory (HED-76): surfaced whenever a fresh estimate exists so orchestration
+  // sessions see WEEKLY Fable pressure, not just the 5h window.
+  const fable = bestFableWeekly(caps, accounts);
+  const fableLine = fable === null ? line
+    : `${line} Fable-weekly: ${fable.id} lowest at ${fmtPct(fable.pct)}%` +
+      (fable.pct >= FABLE_SOFT_CAP_ADVISE_PCT ? ` — at/over the ${FABLE_SOFT_CAP_ADVISE_PCT}% act threshold (weekly cap ${FABLE_WEEKLY_CAP_PCT}); prefer Opus for delegated work or rotate accounts.` : '.');
+  return { best, current, known, line: fableLine };
 }
 
 /**
@@ -277,8 +321,64 @@ export interface AccountPick {
   envUnset: string[];
 }
 
+/**
+ * Fable budget (HED-76, Maya 2026-08-16: 58% of the weekly cap burned on day 1 while other
+ * subscriptions idled): Fable is soft-capped at 50% of an account's WEEKLY allowance, and W's
+ * estimator (HED-75) publishes `fableWeeklyEstimatePct` per Claude account row. At/over this
+ * threshold the router routes a fable-model dispatch to the class fallback (fable-soft-cap) and
+ * the account picker prefers Fable headroom for fable targets (fable-headroom). ONLY the
+ * Fable-attributed estimate is consulted — non-Fable work never counts against it. null/stale
+ * estimates are UNKNOWN → no-op, same discipline as every other cap.
+ */
+export const FABLE_SOFT_CAP_ADVISE_PCT = 45;
+// Two DIFFERENT numbers, deliberately: 50 is Anthropic's actual Fable share of the weekly
+// allowance (the hard reality), 45 is heddle's ACT threshold — the margin exists so the router
+// steps off Fable before the real ceiling, and because the estimate itself is approximate
+// (HED-75 attributes samples; it is exact only when a Fable-scoped window is published).
+export const FABLE_WEEKLY_CAP_PCT = 50;
+
+/** The freshest usable Fable-weekly estimate for an account row (null = unknown). */
+function fableWeeklyOf(caps: ProviderCaps | undefined, accountId: string): number | null {
+  if (!caps || caps.stale || caps.source === 'none') return null;
+  const row = caps.accounts.find((r) => r.id === accountId);
+  if (!row || row.stale) return null;
+  return typeof row.fableWeeklyEstimatePct === 'number' && Number.isFinite(row.fableWeeklyEstimatePct)
+    ? row.fableWeeklyEstimatePct : null;
+}
+
+/** Percentages are shown to ONE decimal: 44.6 must not print as "45% vs soft cap 45", which reads
+ *  like the threshold should have fired (PR #24, copilot/qodo). */
+export const fmtPct = (n: number): string => (Number.isInteger(n) ? n.toFixed(0) : n.toFixed(1));
+
+/**
+ * The Fable-weekly estimate the soft cap must judge.
+ * - PINNED dispatch → that account's own estimate: the pin is where the work WILL run, so another
+ *   account's headroom is irrelevant (a pinned over-cap account previously escaped the cap because
+ *   the fleet minimum was below it — PR #24, codeant + codex-connector).
+ * - otherwise → the lowest estimate among ADDRESSABLE accounts, since the picker is free to choose.
+ * null = nothing known (unknown never decides).
+ */
+export function bestFableWeekly(
+  caps: ProviderCaps | undefined, accounts: ClaudeAccount[], pin?: string,
+): { id: string; pct: number; pinned?: true } | null {
+  if (pin) {
+    const pinned = accounts.find((a) => a.id === pin);
+    if (pinned) {
+      const pct = fableWeeklyOf(caps, pinned.id);
+      return pct === null ? null : { id: pinned.id, pct, pinned: true };
+    }
+  }
+  let best: { id: string; pct: number } | null = null;
+  for (const a of accounts) {
+    if (a.loggedIn === false) continue;
+    const pct = fableWeeklyOf(caps, a.id);
+    if (pct !== null && (best === null || pct < best.pct)) best = { id: a.id, pct };
+  }
+  return best;
+}
+
 export function pickClaudeAccount(
-  caps: ProviderCaps | undefined, accounts: ClaudeAccount[], opts: { pin?: string; routeAwayAtPct?: number } = {},
+  caps: ProviderCaps | undefined, accounts: ClaudeAccount[], opts: { pin?: string; routeAwayAtPct?: number; forFable?: boolean } = {},
 ): AccountPick | null {
   if (accounts.length === 0) return null;
   const envFor = (a: ClaudeAccount): { env: Record<string, string>; envUnset: string[] } => a.configDir
@@ -303,6 +403,26 @@ export function pickClaudeAccount(
   // A logged-out account is not addressable, whatever its caps say (a fresh keeper anchor for a dir
   // whose credential was replaced would otherwise make the picker choose an account that 401s).
   const addressable = accounts.filter((a) => a.loggedIn !== false);
+  // For a FABLE-model target, Fable-weekly headroom outranks 5h headroom (HED-76): the weekly
+  // Fable share is the binding constraint, and only accounts with a KNOWN estimate compete on it
+  // (unknown → fall through to the normal 5h ordering — unknown never decides).
+  if (opts.forFable) {
+    const fable = addressable
+      .map((a) => ({ a, pct: fableWeeklyOf(caps, a.id), used: usedOf(a.id) }))
+      .filter((x): x is { a: ClaudeAccount; pct: number; used: number | null } => x.pct !== null)
+      // Equal Fable headroom → the account with more 5h headroom wins (unknown 5h sorts last),
+      // so a tie is not decided by registry order (PR #24, codex-connector).
+      .sort((x, y) => x.pct - y.pct || (x.used ?? Infinity) - (y.used ?? Infinity));
+    if (fable.length) {
+      const best = fable[0];
+      const note = best.pct >= FABLE_SOFT_CAP_ADVISE_PCT ? ` — every known account is at/over the ${FABLE_SOFT_CAP_ADVISE_PCT}% Fable act threshold` : '';
+      return {
+        account: best.a, usedPct: best.used,
+        reason: `account:${best.a.id} fable-headroom (fable-weekly ${fmtPct(best.pct)}%, lowest of ${fable.length} known)${note}`,
+        ...envFor(best.a),
+      };
+    }
+  }
   const fresh = addressable
     .map((a) => ({ a, used: usedOf(a.id) }))
     .filter((x): x is { a: ClaudeAccount; used: number } => x.used !== null)

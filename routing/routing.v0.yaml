@@ -157,6 +157,14 @@ task_classes:
     why: opt-in only — Kimi is ~74s even on a trivial prompt and bills the metered "Other Models" pool that Cursor PR review draws on; ask Maya first
     skills: [worker-role]
     edits_code: false
+  escalate-judgment:        # genuinely hard bounded problems — Fable as an OOP worker (Maya 2026-08-16)
+    provider: claude
+    model: fable
+    fallback: {provider: claude, model: opus}
+    why: the Anthropic-side mirror of Sol's hard-problem role — dispatch Fable OUT-OF-PROCESS for a genuinely hard, bounded problem (account-picked by Fable-weekly headroom); at/over the 45% fable-weekly soft cap the class routes to Opus instead (cap:fable-soft-cap). Ledgered like every dispatch so Fable-class counts are visible. Not for labor — codex/cursor classes stay the default.
+    skills: [worker-role]
+    edits_code: false
+    auto_assess: true
   bulk-mechanical:          # renames, sweeps, codemods, boilerplate, test scaffolds
     provider: codex
     model: gpt-5.6-luna
