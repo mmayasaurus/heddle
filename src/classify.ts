@@ -85,15 +85,21 @@ export async function classify(
     // An injected ledger belongs to the caller and must NOT be closed here; a fallback one is ours
     // to close, or every classification leaks a SQLite handle in a long-lived process (PR #40, gitar).
     const own = ledger ? null : new Ledger();
-    (ledger ?? own!).recordClassification({
-      orchestrator: attribution.orchestrator, identitySource: attribution.identitySource,
-      kind, provider: cfg.provider, model: cfg.model, cwd, promptPreview: instruction,
-      ok: res.ok, error: res.error,
-      inputTokens: res.usage?.inputTokens, cachedInputTokens: res.usage?.cachedInputTokens,
-      outputTokens: res.usage?.outputTokens, reasoningTokens: res.usage?.reasoningOutputTokens,
-      durationMs: res.durationMs ?? Date.now() - started,
-    });
-    if (own) own.close();
+    try {
+      (ledger ?? own!).recordClassification({
+        orchestrator: attribution.orchestrator, identitySource: attribution.identitySource,
+        kind, provider: cfg.provider, model: cfg.model, cwd, promptPreview: instruction,
+        ok: res.ok, error: res.error,
+        inputTokens: res.usage?.inputTokens, cachedInputTokens: res.usage?.cachedInputTokens,
+        outputTokens: res.usage?.outputTokens, reasoningTokens: res.usage?.reasoningOutputTokens,
+        durationMs: res.durationMs ?? Date.now() - started,
+      });
+    } finally {
+      // Close a ledger WE opened even if the record threw — otherwise the very failure this
+      // best-effort block exists to survive leaks the SQLite handle (PR #40, corgea). An INJECTED
+      // ledger is the caller's and is never closed here.
+      if (own) own.close();
+    }
   } catch (err) {
     process.stderr.write(`heddle: could not ledger the ${kind} classification (${err instanceof Error ? err.message : String(err)})\n`);
   }
