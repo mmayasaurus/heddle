@@ -17,7 +17,7 @@ import type { CommsLog } from './log.js';
  *    not that the AGENT is working — nudging on it would mean nobody is ever idle. Activity is read
  *    from the session transcript's mtime instead, which only advances when a turn writes.
  * 2. It does not speak with the operator's authority. The loop runs inside the operator's session
- *    (see `isCurrentOperatorInstance`), so its posts would otherwise be stamped `operator` — a
+ *    (see `isElectedNudger`), so its posts would otherwise be stamped `operator` — a
  *    machine wearing the human's authority, which is exactly the spoofing the tier system exists to
  *    prevent. Nudges request `agent-message` explicitly; the envelope layer honours a demotion
  *    unconditionally.
@@ -179,15 +179,25 @@ export function shouldRunNudger(isOperator: boolean, pushEnabled: boolean): bool
 }
 
 /**
- * The DYNAMIC check, run every cycle: is THIS process the current owner of the operator presence
- * row? Two operator sessions can share a valid token and both pass `shouldRunNudger`, but the
- * `sessions` row is keyed by address, so the last to register owns it — and `heartbeatSession` only
- * touches rows matching its own instance, so ownership does not thrash. The non-owner stops
- * nudging. (The log-based cooldown is the backstop: even a brief double-owner cannot double-nudge,
- * because the first nudge's `lastNudgeAt` suppresses the second.)
+ * The DYNAMIC check, run every cycle: should THIS operator process nudge?
+ *
+ * Two operator sessions can share a valid token and both pass `shouldRunNudger`, so exactly one
+ * must be elected. The `sessions` row is keyed by address and only the owner's `heartbeatSession`
+ * keeps it fresh, so:
+ *  - a FRESH owner that is me → I nudge;
+ *  - a fresh owner that is someone else → I stand down;
+ *  - NO fresh owner (the elected session exited — clean unregister removes the row — or crashed and
+ *    its row went stale) → any live operator may nudge, so the survivor takes over instead of
+ *    nudging dying with the owner.
+ *
+ * The last case can briefly let two survivors both nudge, but the log-based cooldown is the
+ * backstop: the first nudge's `lastNudgeAt` suppresses the second. `staleMs` mirrors the session
+ * staleness the rest of the broker uses.
  */
-export function isCurrentOperatorInstance(log: CommsLog, instanceId: string): boolean {
-  return log.session(OPERATOR)?.sessionId === instanceId;
+export function isElectedNudger(log: CommsLog, instanceId: string, staleMs?: number): boolean {
+  const owner = staleMs === undefined ? log.liveSession(OPERATOR) : log.liveSession(OPERATOR, staleMs);
+  if (!owner) return true;                    // no fresh owner: don't let nudging die with it
+  return owner.sessionId === instanceId;      // else only the fresh owner nudges
 }
 
 /** The nudge body. Deliberately tells the agent what to do next, not merely that it stopped. */

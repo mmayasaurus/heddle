@@ -14,7 +14,7 @@ import {
 } from './bridge.js';
 import { parseAddress, BROADCAST, OPERATOR } from './address.js';
 import { pauseReadiness, type InFlightSource } from './quiesce.js';
-import { dueForNudge, nudgeBody, shouldRunNudger, isCurrentOperatorInstance, parseNudgeMs, type NudgeOptions } from './nudge.js';
+import { dueForNudge, nudgeBody, shouldRunNudger, isElectedNudger, parseNudgeMs, type NudgeOptions } from './nudge.js';
 import { TIERS, MESSAGE_KINDS, type Tier, type MessageKind } from './types.js';
 
 /**
@@ -430,7 +430,7 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
           if (stopping) return;
           if (!operatorStillValid()) { await revokeOperator(); return; }
           try {
-            if (isCurrentOperatorInstance(log, instanceId)) {
+            if (isElectedNudger(log, instanceId)) {
               for (const idle of dueForNudge(log, nudgeOpts)) {
                 await broker.post({
                   from: OPERATOR, to: idle.address, kind: 'status', body: nudgeBody(idle),

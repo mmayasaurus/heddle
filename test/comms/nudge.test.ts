@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CommsLog } from '../../src/comms/log.js';
-import { dueForNudge, idleAgents, isCurrentOperatorInstance, listProjectDirs, parseNudgeMs, MIN_NUDGE_MS, shouldRunNudger, transcriptActivityAt, transcriptRoots } from '../../src/comms/nudge.js';
+import { dueForNudge, idleAgents, isElectedNudger, listProjectDirs, parseNudgeMs, MIN_NUDGE_MS, shouldRunNudger, transcriptActivityAt, transcriptRoots } from '../../src/comms/nudge.js';
 import { seal } from '../../src/comms/seal.js';
 
 /**
@@ -152,15 +152,20 @@ describe('idle nudger (temp db + temp projects dir)', () => {
     expect(roots).toEqual([shared, shared]);
   });
 
-  it('nudges ONLY from the process that owns the operator presence row', () => {
+  it('elects exactly one operator nudger, and self-heals when the owner exits', () => {
     log.registerSession({ address: 'operator', sessionId: 'op-A', sessionName: 'operator' });
-    expect(isCurrentOperatorInstance(log, 'op-A')).toBe(true);
-    expect(isCurrentOperatorInstance(log, 'op-B')).toBe(false);
+    expect(isElectedNudger(log, 'op-A')).toBe(true);
+    expect(isElectedNudger(log, 'op-B')).toBe(false);
 
-    // A second operator session registers: it now owns the row, and the first must stand down.
+    // A second operator session registers: it now owns the fresh row; the first stands down.
     log.registerSession({ address: 'operator', sessionId: 'op-B', sessionName: 'operator' });
-    expect(isCurrentOperatorInstance(log, 'op-A')).toBe(false);
-    expect(isCurrentOperatorInstance(log, 'op-B')).toBe(true);
+    expect(isElectedNudger(log, 'op-A')).toBe(false);
+    expect(isElectedNudger(log, 'op-B')).toBe(true);
+
+    // op-B (the owner) crashes: its row goes stale because only its own heartbeat refreshed it.
+    // A surviving op-A must take over rather than nudging dying with the owner.
+    nowMs += 120_000;
+    expect(isElectedNudger(log, 'op-A')).toBe(true);   // no fresh owner → survivor nudges
   });
 
   it('reads the cooldown from the LOG, so a nudger restart cannot re-nudge everyone', () => {
