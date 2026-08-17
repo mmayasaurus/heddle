@@ -54,7 +54,14 @@ as scaffolding underneath a behavioral test; SUPERFICIAL never lands as the *onl
 7. **"Renders"/"is defined"/"was called once"** with no observable consequence attached.
 8. **Tests that can't fail for the stated reason** — read the assertion and ask: which regression makes
    this red? If you can't name one, it's superficial.
-9. **A harness that invokes the thing differently from production** — a local test rig must invoke the
+9. **A green suite that never asked whether the property could be false** — T's line, earned on
+   heddle#39: *"the useful habit is asking what a passing test would look like if the property were
+   false — not whether the suite is green."* All three real security defects there (fail-open
+   redaction, an escaped-form scrubber dodge, an env-inheritance leak) were invisible to a passing
+   suite; reviewers caught every one and the tests caught none. For any guard, write down what the
+   world looks like when the guard is broken, then name the test that goes red in that world. If you
+   cannot name it, the property is unverified no matter how green the run is.
+10. **A harness that invokes the thing differently from production** — a local test rig must invoke the
    code under test EXACTLY as CI does, byte for byte; otherwise its green is testing a different program.
    Measured case (HED-113, 2026-08-17): the gitleaks-guard fixture rig ran the script as `sh -e <script>`,
    supplying the very `-e` flag that the extraction had silently dropped — so 12/12 passed green while the
