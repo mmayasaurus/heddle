@@ -20,6 +20,16 @@ OWNER=mmayasaurus REPO=$(gh repo view --json name -q .name) N=<pr-number>
 | (d) Code-scanning alerts | SARIF security and lint findings | `gh api --paginate "repos/$OWNER/$REPO/code-scanning/alerts?pr=$N&state=open"` | Any open alert associated with the PR. (`pr` is a documented query parameter of this endpoint — GitHub's OpenAPI description, component `pr-alias`.) |
 | (e) Checks at HEAD | CI workflow jobs and status rollups | `gh pr checks $N` (`--required` filters to the ruleset's required ones) and `gh pr view $N --json statusCheckRollup` | Every required check has SUCCEEDED (pending, skipped and cancelled do not count). A red NON-required check is still a finding unless its red is documented as by-design (e.g. the dashboard `lint` job until HED-14) — a red gitleaks or actionlint job is never "just non-required". |
 
+> [!IMPORTANT]
+> **A red SECRETS check is resolved by re-running it to green, never by analysis — even when the
+> analysis is right.** If gitleaks is red because a scan step failed, a SARIF upload broke, or a
+> provider had an incident, the fix is to re-run the job until it reports green at the current HEAD.
+> Reasoning your way to "the red is infrastructural, the code is fine" may be entirely correct and is
+> still not a pass: it is the one waiver nobody should be making, because it is indistinguishable
+> from the case where the scan never examined the content. (2026-08-17, heddle#29 during a GitHub
+> incident.) Every other channel can be dispositioned with a written rationale; this one is settled
+> by a green run.
+
 > [!NOTE]
 > A "Code scanning results / <tool>" check in channel (e) is a summary of open alerts in channel (d); see [CI.md](CI.md). For a PR from a **fork**, the scanners still run but cannot upload SARIF (read-only token), so channel (d) stays empty — read the semgrep and gitleaks **job summaries / logs** in channel (e) instead; a fork PR is not clean until those say so. On heddle-dashboard, the `lint` job is red by design until HED-14 and is not required.
 
