@@ -34,7 +34,7 @@ describe('dispatch — review fixes', () => {
     expect(explicitOutcome.refusal?.instruction).toContain('provider="cursor", model="composer-2.5-fast"');
 
     const directOutcome = await dispatch(
-      { provider: 'claude', model: 'opus', prompt: 'x', cwd: tempDir(), inSession: true }, tempLedger(), () => fakeAdapter().adapter,
+      { overrideReason: 'test: exercises the direct provider+model path', provider: 'claude', model: 'opus', prompt: 'x', cwd: tempDir(), inSession: true }, tempLedger(), () => fakeAdapter().adapter,
     );
     expect(directOutcome.refusal?.reason).toMatch(/^direct route claude\/opus names a provider that/);
   });
@@ -114,7 +114,7 @@ describe('dispatch — review fixes', () => {
     expect(classOutcome.execution).toBe('headless');
 
     const directOutcome = await dispatch(
-      { provider: 'codex', model: 'gpt-5.6-luna', prompt: 'x', cwd: tempDir() }, tempLedger(), () => fakeAdapter().adapter,
+      { overrideReason: 'test: exercises the direct provider+model path', provider: 'codex', model: 'gpt-5.6-luna', prompt: 'x', cwd: tempDir() }, tempLedger(), () => fakeAdapter().adapter,
     );
     expect(directOutcome.execution).toBe('headless');
   });

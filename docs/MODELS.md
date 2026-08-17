@@ -398,6 +398,29 @@ choosing a worker instead:
   operator (or a future plugin install) wires it. Verified end-to-end on
   Claude Code 2.1.232 (`additionalContext` reached the model verbatim).
 
+## Overrides must say why (BUILT — HED-95, 2026-08-16)
+
+Enforcement lives IN heddle, not in any one harness's hooks — so it binds every
+orchestrator on every harness and is behaviorally testable.
+
+- A dispatch carries EITHER a `task_class` OR `provider`+`model` **with an
+  `override_reason`**. A bare `provider`+`model` is refused
+  (`override-reason-required`) with the class list and a one-line path forward.
+  The refusal is a ledgered row, so the bypass attempt is itself evidence.
+- **Not model police.** The override is one field away and always runs: benches,
+  probes and judgment calls are legitimate. The point is that the REASON lands in
+  the data — `override_reason` on the ledger row — so the routing retune (HED-79)
+  sees the distribution of WHY humans route around the table, not merely that they
+  did. (The night this shipped, one orchestrator bypassed 10× with the reason
+  "terra proven" existing only in its own head.)
+- A task class + explicit `provider`/`model` needs NO reason: the class still
+  supplies the policy (skills/MCP, opt-in gates, caps), only the route is named.
+  A class dispatch MAY carry a reason; it is simply never required.
+- Structural hard blocks are unaffected and still refuse regardless: worker
+  depth-1, max-children, capability denials, metered-pool refusals.
+- Surfaces: `override_reason` on `dispatch_worker` (MCP), `--override-reason` on
+  the CLI.
+
 ## Known routing pitfalls (2026-08-15)
 
 Learned from Agent V's HED-4/5 dispatches (ledger #35–41); policy until the linked tickets

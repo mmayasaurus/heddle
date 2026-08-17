@@ -4,7 +4,7 @@ import { CursorAdapter } from './adapters/cursor.js';
 import { ClaudeAdapter } from './adapters/claude.js';
 import { Ledger, type DispatchStartRecord } from './ledger.js';
 import {
-  loadRouting, resolveRoute, directRoute, providerExecution, structuralCaps,
+  loadRouting, resolveRoute, directRoute, providerExecution, structuralCaps, listTaskClasses,
   type Route, type RouteTarget, type RoutingTable, type StructuralCaps,
 } from './routing.js';
 import { materializeAgentsMd, readPack, withMandatoryPacks, composePacks } from './skillpacks.js';
@@ -68,6 +68,13 @@ export interface DispatchRequest {
   resume?: string;
   /** Per-dispatch account selection (CODEX_HOME, CURSOR_API_KEY, …). See src/env.ts. */
   env?: Record<string, string>;
+  /**
+   * HED-95: WHY this dispatch routes around the routing table. Required on the DIRECT path
+   * (provider+model with no task class) — benches, probes and judgment calls are all legitimate,
+   * the point is that the reason lands in the ledger so HED-79's retune sees the real distribution
+   * of why humans bypass the table (it previously saw only that they did).
+   */
+  overrideReason?: string;
   /** Required to run a task class marked requires_explicit_opt_in, and to grant `exec-privileged`. */
   optIn?: boolean;
   /** Skip the routing table's fallback on failure. */
@@ -108,7 +115,7 @@ export interface DispatchRequest {
  * `refusal` column.
  */
 export interface DispatchRefusal {
-  code: 'claude-in-session' | 'not-dispatchable' | 'depth-1' | 'max-children' | 'capability-denied' | 'metered-pool-exhausted' | 'same-provider-review';
+  code: 'claude-in-session' | 'not-dispatchable' | 'depth-1' | 'max-children' | 'capability-denied' | 'metered-pool-exhausted' | 'same-provider-review' | 'override-reason-required';
   reason: string;
   /** What to do instead, when there is a clear alternative. */
   instruction?: string;
@@ -190,6 +197,7 @@ function baseRecord(
   return {
     orchestrator: ctx.attribution.orchestrator,
     identitySource: ctx.attribution.identitySource,
+    overrideReason: req.overrideReason?.trim() || null,
     taskClass,
     provider: target.provider,
     model: target.model,
@@ -457,6 +465,24 @@ export async function dispatch(
   // A worker dispatching an opt-in class (or a malformed request) still gets a ledgered, attributed
   // depth-1 refusal, never a bare throw, and never costs a classifier spawn.
   if (identity.worker) return refuseDepth1(req, ctx, table);
+
+  // ---- HED-95: the DIRECT path must say WHY it bypasses the routing table --------------------
+  // Not model police: an override is one field away, and benches/probes/judgment calls are all
+  // legitimate. The point is that the REASON lands in the ledger, so the routing retune (HED-79)
+  // can see the distribution of why humans route around the table instead of only that they did.
+  // Refused as a ledgered row (never a bare throw) so the bypass attempt is itself evidence.
+  if (!req.taskClass && req.provider && req.model && !req.overrideReason?.trim()) {
+    const classes = listTaskClasses(table);
+    const target: RouteTarget = { taskClass: 'direct', provider: req.provider, model: req.model, skills: req.skills ?? [], mcp: req.mcp ?? [] } as RouteTarget;
+    return refusalOutcome(ctx, req, 'direct', target, withMandatoryPacks(req.skills ?? []), {
+      code: 'override-reason-required',
+      reason: `a direct provider+model dispatch (${req.provider}/${req.model}) must say why it bypasses the routing table`,
+      instruction: `Pass a task_class instead (${classes.join(', ')}) — the table carries the policy: ` +
+        `default skills/MCP, opt-in gates, fallbacks and cap-aware routing. If bypassing IS the intent ` +
+        `(a bench, a probe, a judgment call), pass override_reason: "<why>" and it will run — the reason ` +
+        `is recorded on the ledger row so routing can be tuned from evidence.`,
+    });
+  }
 
   // Resume affinity (HED-78): a claude session is persisted under ONE config dir — resuming it on a
   // freshly-picked account would not find the session. Pin the pick to the account the session last

@@ -90,7 +90,7 @@ describe('dispatch — class + explicit route, and in-session refusal', () => {
   it('returns a structured in-session refusal for a direct Claude route without invoking an adapter', async () => {
     const fake = fakeAdapter();
     const ledger = tempLedger();
-    const outcome = await dispatch({ provider: 'claude', model: 'opus', prompt: 'x', cwd: tempDir(), inSession: true }, ledger, () => fake.adapter);
+    const outcome = await dispatch({ overrideReason: 'test: exercises the direct provider+model path', provider: 'claude', model: 'opus', prompt: 'x', cwd: tempDir(), inSession: true }, ledger, () => fake.adapter);
     expect(outcome.refusal?.code).toBe('claude-in-session');
     expect(outcome.taskClass).toBe('direct:claude/opus');
     expect(fake.calls).toHaveLength(0);
@@ -118,7 +118,7 @@ describe('dispatch — class + explicit route, and in-session refusal', () => {
   });
 
   it('words a direct claude route\'s refusal as a direct route, not a task class', async () => {
-    const outcome = await dispatch({ provider: 'claude', model: 'opus', prompt: 'x', cwd: tempDir(), inSession: true }, tempLedger(), () => fakeAdapter().adapter);
+    const outcome = await dispatch({ overrideReason: 'test: exercises the direct provider+model path', provider: 'claude', model: 'opus', prompt: 'x', cwd: tempDir(), inSession: true }, tempLedger(), () => fakeAdapter().adapter);
     expect(outcome.refusal?.reason).toMatch(/^direct route claude\/opus names a provider that runs as an in-session subagent/);
     expect(outcome.refusal?.instruction).not.toContain('declared fallback');
   });

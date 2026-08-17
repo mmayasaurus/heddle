@@ -47,7 +47,7 @@ describe('dispatch — mandatory skill materialization', () => {
     const adapter = fake.adapter;
 
     const outcome = await dispatch(
-      { provider: 'codex', model: 'gpt-5.6-luna', prompt: 'x', cwd, skills: ['quality-gate'], orchestrator: 'U' },
+      { overrideReason: 'test: exercises the direct provider+model path', provider: 'codex', model: 'gpt-5.6-luna', prompt: 'x', cwd, skills: ['quality-gate'], orchestrator: 'U' },
       ledger,
       () => adapter,
     );
