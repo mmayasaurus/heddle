@@ -45,8 +45,8 @@ describe('rotator supervisor tick', () => {
     pauseIntent: () => w.intent,
     liveAddresses: () => [...w.live],
     isRelaunched: (a) => w.relaunched_set.has(a),
-    requestPause: (reason, intent) => { w.paused.push({ reason, intent }); w.pauseId = 1; w.intent = intent; },
-    resumePause: (reason) => { w.resumed.push(reason); w.pauseId = null; w.intent = null; },
+    requestPause: async (reason, intent) => { w.paused.push({ reason, intent }); w.pauseId = 1; w.intent = intent; },
+    resumePause: async (reason) => { w.resumed.push(reason); w.pauseId = null; w.intent = null; },
     killSession: async (a) => { w.killed.push(a); const r = w.killOk(a); if (r.ok) { w.live = w.live.filter((x) => x !== a); w.relaunched_set.delete(a); } return r; },
     relaunch: async (a, account) => {
       const r = w.relaunchOk(a);
@@ -54,7 +54,7 @@ describe('rotator supervisor tick', () => {
       if (r.ok) { w.live.push(a); w.relaunched_set.add(a); }
       return r;
     },
-    needsHuman: (m) => w.needsHumanMsgs.push(m),
+    needsHuman: async (m) => { w.needsHumanMsgs.push(m); },
   });
 
   /** A world with a fleet of `addrs` all live on the source account and NO pause in force. */

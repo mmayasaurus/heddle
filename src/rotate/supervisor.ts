@@ -69,9 +69,9 @@ export interface RotatorDeps {
   isRelaunched(address: string): boolean;
 
   /** OPERATOR-tier broadcast that begins a rotation; stamps `intent` into the pause meta. */
-  requestPause(reason: string, intent: RotationIntent): void;
+  requestPause(reason: string, intent: RotationIntent): Promise<void>;
   /** OPERATOR-tier resume that lifts the in-force pause. */
-  resumePause(reason: string): void;
+  resumePause(reason: string): Promise<void>;
   /**
    * Terminate one old session AND remove its presence row, so it immediately leaves the live set.
    * Irreversible — only called after readiness.ready. Un-registering here (not waiting for the
@@ -84,7 +84,7 @@ export interface RotatorDeps {
   /** Launch one session on `account` (R's fleet-relaunch.sh). Returns its exit outcome. */
   relaunch(address: string, account: string): Promise<{ ok: boolean; code: string }>;
   /** Post a needs-human to the operator (rotation cannot proceed unattended). */
-  needsHuman(message: string): void;
+  needsHuman(message: string): Promise<void>;
 }
 
 /**
@@ -106,12 +106,12 @@ export async function tick(deps: RotatorDeps): Promise<RotatorStep> {
       case 'watch':
         return { phase: 'watch', reason: decision.reason };
       case 'exhausted':
-        deps.needsHuman(`Account rotation needed but no target: ${decision.reason}`);
+        await deps.needsHuman(`Account rotation needed but no target: ${decision.reason}`);
         return { phase: 'exhausted', reason: decision.reason };
       case 'rotate': {
         // Capture the roster NOW — these are the sessions that must come back on the target.
         const intent: RotationIntent = { target: decision.target.id, from: decision.current, roster: deps.liveAddresses() };
-        deps.requestPause(decision.reason, intent);
+        await deps.requestPause(decision.reason, intent);
         return { phase: 'paused', reason: decision.reason };
       }
     }
@@ -143,13 +143,13 @@ export async function tick(deps: RotatorDeps): Promise<RotatorStep> {
       if (!k.ok) {
         // A refused kill means the old session may still be live — relaunching over it would put
         // two processes on one conversation. Stop before that, don't retry blindly.
-        deps.needsHuman(`Rotation to ${intent.target} could NOT kill ${address} (${k.code}) — the old session may still be live. Resolve manually, then resume_pause.`);
+        await deps.needsHuman(`Rotation to ${intent.target} could NOT kill ${address} (${k.code}) — the old session may still be live. Resolve manually, then resume_pause.`);
         return { phase: 'blocked', reason: `kill of ${address} refused: ${k.code}`, target: intent.target };
       }
       const r = await deps.relaunch(address, intent.target);
       if (!r.ok) {
         // A half-relaunched fleet is the dangerous state — stop and surface it, never retry blindly.
-        deps.needsHuman(`Rotation to ${intent.target} FAILED relaunching ${address} (${r.code}). Fleet is half-rotated — resolve manually, then resume_pause.`);
+        await deps.needsHuman(`Rotation to ${intent.target} FAILED relaunching ${address} (${r.code}). Fleet is half-rotated — resolve manually, then resume_pause.`);
         return { phase: 'blocked', reason: `relaunch of ${address} failed: ${r.code}`, target: intent.target };
       }
     }
@@ -163,6 +163,6 @@ export async function tick(deps: RotatorDeps): Promise<RotatorStep> {
   if (pending.length > 0) {
     return { phase: 'verifying', reason: `waiting for ${pending.join(', ')} to re-register on ${intent.target}`, pending };
   }
-  deps.resumePause(`rotation complete: fleet on ${intent.target}`);
+  await deps.resumePause(`rotation complete: fleet on ${intent.target}`);
   return { phase: 'resumed', reason: `resumed on ${intent.target}` };
 }
