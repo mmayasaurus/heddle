@@ -53,6 +53,10 @@ const thresholds = {
   softPct: Number.isFinite(softPct) && softPct > 0 ? softPct : DEFAULT_THRESHOLDS.softPct,
   hardPct: Number.isFinite(hardPct) && hardPct > 0 ? hardPct : DEFAULT_THRESHOLDS.hardPct,
 };
+if (thresholds.hardPct <= thresholds.softPct) {
+  warn(`refusing to run: hard threshold (${thresholds.hardPct}%) must be ABOVE soft (${thresholds.softPct}%) — a value between them would never trigger a rotation.`);
+  process.exit(1);
+}
 
 const scriptsDir = env.HEDDLE_FLEET_SCRIPTS;
 if ((mode === 'run' || mode === 'once') && !scriptsDir) {
@@ -89,12 +93,18 @@ async function main(): Promise<void> {
   if (mode === 'once') { await runOnce(); log.close(); return; }
 
   // --run: one tick per interval, self-scheduling so a slow tick never overlaps the next.
-  const intervalMs = Number(env.HEDDLE_ROTATE_INTERVAL_MS) || 60_000;
+  // A bad env value (negative is truthy) would clamp the timer to ~0 and spin — validate it.
+  const rawInterval = Number(env.HEDDLE_ROTATE_INTERVAL_MS);
+  const intervalMs = Number.isFinite(rawInterval) && rawInterval >= 1_000 ? rawInterval : 60_000;
   let stopping = false;
   const loop = async (): Promise<void> => {
     if (stopping) return;
+    // A token rotation revokes the operator everywhere (like the comms server's per-call check) —
+    // a daemon that keeps pausing/killing after its authority was revoked would be dangerous.
+    if (!operatorTokenMatches(env)) { warn('operator token no longer matches (rotated?) — stopping.'); stopping = true; try { log.close(); } catch { /* closing */ } process.exit(1); }
     try { await runOnce(); } catch (err) { warn(`tick failed: ${errorMessage(err)}`); }
-    if (!stopping) setTimeout(() => void loop(), intervalMs).unref();
+    // NOT unref()'d: the timer is the daemon's only event-loop reference; unref would exit after the first tick.
+    if (!stopping) setTimeout(() => void loop(), intervalMs);
   };
   const bye = () => { stopping = true; try { log.close(); } catch { /* closing */ } process.exit(0); };
   process.on('SIGTERM', bye); process.on('SIGINT', bye);

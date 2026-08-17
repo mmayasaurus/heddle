@@ -109,6 +109,29 @@ describe('decideRotation', () => {
     expect(d.target.id).toBe('acct3');                 // acct2 has the most headroom but is logged out
   });
 
+
+  it('does NOT rotate when the whole caps snapshot is provider-stale', () => {
+    const stale = { ...caps([acctCaps('acct1', 95)]), stale: true };
+    const d = decideRotation(stale, accounts, envOn(accounts[0]!));
+    expect(d.action).toBe('unknown');
+  });
+
+  it('does NOT rotate when caps.source is none (nothing usable)', () => {
+    const none = { ...caps([acctCaps('acct1', 95)]), source: 'none' as const };
+    const d = decideRotation(none, accounts, envOn(accounts[0]!));
+    expect(d.action).toBe('unknown');
+  });
+
+  it('is EXHAUSTED when the best OTHER account is itself over the hard cap', () => {
+    // acct1 (current) 91%, acct2 90% is the best alternative but also over the 90% hard cap.
+    const d = decideRotation(
+      caps([acctCaps('acct1', 91), acctCaps('acct2', 90), acctCaps('acct3', 94)]),
+      accounts, envOn(accounts[0]!),
+    );
+    expect(d.action).toBe('exhausted');
+    expect(d.reason).toMatch(/best alternative acct2/);
+  });
+
   it('honours custom thresholds', () => {
     const strict = { softPct: 50, hardPct: 60 };
     expect(decideRotation(caps([acctCaps('acct1', 55)]), accounts, envOn(accounts[0]!), strict).action).toBe('watch');

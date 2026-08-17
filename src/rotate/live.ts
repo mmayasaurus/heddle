@@ -88,7 +88,10 @@ export function createRotatorDeps(o: LiveRotatorOptions): RotatorDeps {
 
     pauseIntent: (): RotationIntent | null => {
       const p = o.log.latestFleetPause();
-      const meta = (p?.meta ?? {}) as { fleetPause?: { rotation?: unknown } };
+      // A lifted pause is spent — its rotation intent is history, not a live plan (else --status
+      // and a re-entrant tick would both act on a rotation that already completed).
+      if (!p || o.log.fleetPauseResumedAt(p.id)) return null;
+      const meta = (p.meta ?? {}) as { fleetPause?: { rotation?: unknown } };
       const rot = meta.fleetPause?.rotation as Partial<RotationIntent> | undefined;
       if (!rot || typeof rot.target !== 'string' || typeof rot.from !== 'string' || !Array.isArray(rot.roster)) return null;
       return { target: rot.target, from: rot.from, roster: rot.roster.map(String) };
@@ -106,21 +109,26 @@ export function createRotatorDeps(o: LiveRotatorOptions): RotatorDeps {
     },
 
     requestPause: async (reason, intent) => {
-      await o.broker.post({
+      const posted = await o.broker.post({
         from: OPERATOR, to: BROADCAST, kind: 'status',
         body: `FLEET PAUSE — account rotation: ${reason}. Park your work now (commit or push anything uncommitted), stop starting new dispatches, then call ack_pause with work_parked=true. Do not resume until the rotation completes.`,
         meta: { fleetPause: { reason, rotation: intent } },
       });
+      // A refused post appended no pause row — the rotation did not begin. Throw so the tick surfaces
+      // it (the bin's loop logs it) rather than reporting 'paused' for a pause that does not exist.
+      if (posted.outcome === 'refused') throw new Error(`request_pause refused (${posted.code}) — rotation not started`);
     },
 
     resumePause: async (reason) => {
       const p = o.log.latestFleetPause();
       if (!p) return; // nothing in force to lift
-      await o.broker.post({
+      const posted = await o.broker.post({
         from: OPERATOR, to: BROADCAST, kind: 'status', replyTo: p.id,
         body: `FLEET RESUMED — ${reason}. Carry on.`,
         meta: { fleetResume: { pauseId: p.id } },
       });
+      // A refused resume left the pause IN FORCE — surface it rather than reporting 'resumed'.
+      if (posted.outcome === 'refused') throw new Error(`resume_pause refused (${posted.code}) — pause still in force`);
     },
 
     killSession: async (address) => {
@@ -139,15 +147,26 @@ export function createRotatorDeps(o: LiveRotatorOptions): RotatorDeps {
     },
 
     relaunch: async (address, account) => {
+      // The target MUST be a known registry account. If the registry is unreadable/missing the row,
+      // fail CLOSED — silently omitting --account would relaunch onto the DEFAULT login, i.e. the
+      // wrong account, which is worse than not relaunching.
+      const accounts = readClaudeAccounts(o.accountsPath);
+      const target = accounts.find((a) => a.id === account);
+      if (!target) return { ok: false, code: `target account "${account}" not in registry` };
       // Omit --account for the DEFAULT login (configDir null) — setting CLAUDE_CONFIG_DIR to the
       // default dir changes Claude's auth resolution (see the accounts.json _doc).
-      const target = readClaudeAccounts(o.accountsPath).find((a) => a.id === account);
-      const args = [address, ...(target?.configDir ? ['--account', account] : [])];
+      const args = [address, ...(target.configDir ? ['--account', account] : [])];
       const code = runScript('fleet-relaunch.sh', args);
       return code === 0 ? { ok: true, code: 'launched' } : { ok: false, code: `fleet-relaunch exit ${code}` };
     },
 
     needsHuman: async (message) => {
+      // De-dupe: a persistent block (e.g. a kill that keeps refusing) re-enters this every tick.
+      // fleet-kill REFUSES rather than guesses, so re-attempting is safe — but re-posting the same
+      // needs-human each interval would spam the operator. Post only when the message changed.
+      const recent = o.log.transcript({ inbox: OPERATOR }, { limit: 1 })
+        .filter((m) => m.kind === 'needs-human' && m.from === OPERATOR);
+      if (recent[0]?.body === message) return;
       await o.broker.post({ from: OPERATOR, to: OPERATOR, kind: 'needs-human', body: message });
     },
   };

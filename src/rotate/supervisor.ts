@@ -88,9 +88,13 @@ export interface RotatorDeps {
 }
 
 /**
- * One step of the rotator. Returns the transition taken (for logging and tests). Never throws for
- * an operational failure — a relaunch/verify problem becomes a `blocked` needs-human, because a
- * half-rotated fleet must surface to the human, not crash the supervisor into an unknown state.
+ * One step of the rotator. Returns the transition taken (for logging and tests).
+ *
+ * Operational FAILURES from the primitives — a refused kill, a failed relaunch — become a `blocked`
+ * needs-human (a half-rotated fleet must surface to the human, not proceed). A dependency that
+ * itself THROWS (a broker post refused, an exec error the adapter did not map) propagates to the
+ * caller's loop, which logs it and reschedules the next tick — the supervisor is never left in an
+ * unknown in-memory state because it holds none: the next tick re-derives everything.
  */
 /**
  * Kill then relaunch each still-un-moved session onto the target, in order. Stops at the first

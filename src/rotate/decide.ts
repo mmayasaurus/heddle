@@ -48,7 +48,10 @@ export function decideRotation(
 ): RotateAction {
   const cur = currentClaudeAccount(accounts, env);
   const currentId = cur?.id ?? null;
-  const usedRow = cur && caps ? caps.accounts.find((r) => r.id === cur.id) : undefined;
+  // A provider snapshot that is stale/absent at the PROVIDER level is unusable regardless of the
+  // per-row flags — mirrors adviseClaudeAccount. Never rotate (or declare idle) on it.
+  const capsUsable = caps !== undefined && !caps.stale && caps.source !== 'none';
+  const usedRow = cur && capsUsable ? caps.accounts.find((r) => r.id === cur.id) : undefined;
   const usedPct = usedRow && !usedRow.stale ? usedRow.fiveHour.usedPercentage : null;
 
   if (currentId === null) {
@@ -74,6 +77,10 @@ export function decideRotation(
     // The best account IS the current one — every alternative is worse or unusable. Rotating would
     // land us back where we are (or somewhere equally dead), so the operator must decide.
     return { action: 'exhausted', current: currentId, usedPct, reason: `${currentId} at ${usedPct.toFixed(0)}% is still the best account — all Claude accounts are near the cap` };
+  }
+  // The best OTHER account is itself at/over the hard cap — rotating there just hits the wall again.
+  if (pick.usedPct !== null && pick.usedPct >= thresholds.hardPct) {
+    return { action: 'exhausted', current: currentId, usedPct, reason: `${currentId} at ${usedPct.toFixed(0)}%; best alternative ${pick.account.id} is also at ${pick.usedPct.toFixed(0)}% (>= ${thresholds.hardPct}% hard) — all accounts near the cap` };
   }
   return {
     action: 'rotate', current: currentId, usedPct, target: pick.account,
