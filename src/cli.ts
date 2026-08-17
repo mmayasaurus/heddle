@@ -57,6 +57,7 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
   heddle ledger show <id> [--json]             show one dispatch and its recorded worker output
   heddle ledger sweep [--dry-run] [--max-age-h N] [--json]   close orphans: age > N hours (default 24)
                                  or owner process provably gone (outcome='orphaned'); dry-run lists only
+  heddle ledger report-in-session <id> (--ok | --failed) [--error "<why>"] [--input-tokens N] [--cached-input-tokens N] [--output-tokens N] [--reasoning-tokens N] [--duration-ms N] [--json]  administrative path: may report any orchestrator's handoff
   heddle usage [--since <iso>] [--json]    per-provider totals
   heddle reviews [--limit N] [--json]      adversarial-review scoreboard (author→reviewer pairs) + recent reviews
   heddle review-outcome <dispatch-id> --total N --accepted M [--notes "…"]   record how many findings you accepted
@@ -300,6 +301,46 @@ try {
           process.exit(1);
         }
         out(json, { id, closed: true }, () => `closed #${id} (ok=0): ${error}`);
+        break;
+      }
+      if (process.argv[3] === 'report-in-session') {
+        const usage = 'usage: heddle ledger report-in-session <id> (--ok | --failed) [--error "<why>"] [--input-tokens N] [--cached-input-tokens N] [--output-tokens N] [--reasoning-tokens N] [--duration-ms N] [--json]';
+        const numericFlag = (flag: string): number | undefined => {
+          const index = process.argv.indexOf(flag);
+          if (index === -1) return undefined;
+          const raw = process.argv[index + 1];
+          const value = raw === undefined || raw.startsWith('-') ? NaN : Number(raw);
+          if (!Number.isFinite(value) || !Number.isInteger(value) || value < 0) {
+            console.error(usage);
+            process.exit(2);
+          }
+          return value;
+        };
+        const id = Number(process.argv[4]);
+        const ok = has('--ok');
+        const failed = has('--failed');
+        // `id <= 0` belongs here, not only in the ledger: reportInSession THROWS on a bad id (a
+        // caller bug, deliberately not a `false` return), and an operator who typed `0` should get
+        // the usage line and exit 2 like every other bad argument — not a stack trace.
+        if (!Number.isInteger(id) || id <= 0 || ok === failed) {
+          console.error(usage);
+          process.exit(2);
+        }
+        const ledger = new Ledger();
+        const matched = ledger.reportInSession(id, {
+          ok,
+          error: arg('--error'),
+          inputTokens: numericFlag('--input-tokens'),
+          cachedInputTokens: numericFlag('--cached-input-tokens'),
+          outputTokens: numericFlag('--output-tokens'),
+          reasoningTokens: numericFlag('--reasoning-tokens'),
+          durationMs: numericFlag('--duration-ms'),
+        });
+        if (!matched) {
+          console.error(`heddle: row #${id} is not an unreported in-session handoff — nothing recorded`);
+          process.exit(1);
+        }
+        out(json, { id, matched: true }, () => `reported in-session outcome for #${id} (${ok ? 'ok' : 'failed'})`);
         break;
       }
       const rows = new Ledger().recent(Number(arg('--limit') ?? 20), arg('--issue'));

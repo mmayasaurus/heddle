@@ -62,6 +62,8 @@ export interface DispatchRecord {
   account: string | null;
   /** How `orchestrator` was determined: `bound` (process identity) or `caller` (tool/CLI argument). */
   identitySource: string | null;
+  /** How the work ran: a heddle subprocess, or an orchestrator-owned in-session subagent. */
+  executionMode: string | null;
   /** Full worker deliverable lives outside SQLite so dashboard polling never reads large text blobs. */
   outputPath: string | null;
   startedAt: string;
@@ -87,8 +89,9 @@ export type DispatchStartRecord =
     'routeReason' | 'account' | 'identitySource' |
     // Derived/sweep-owned, never caller-provided: the owner identity is stamped by insertStart
     // itself; `outcome` is written only by the orphan sweep (HED-90); `outputPath` is produced by
-    // persistOutput when finish() records a deliverable (HED-23).
-    'outputPath' | 'ownerPid' | 'ownerComm' | 'ownerStartedAt' | 'outcome'> &
+    // persistOutput when finish() records a deliverable (HED-23); and `executionMode` is decided by
+    // which insert ran — 'subprocess' for start(), 'in-session' for a claude handoff (HED-99).
+    'executionMode' | 'outputPath' | 'ownerPid' | 'ownerComm' | 'ownerStartedAt' | 'outcome'> &
   Partial<Pick<DispatchRecord, 'capabilities' | 'routeReason' | 'account' | 'identitySource'>>;
 
 const SCHEMA = `
@@ -117,6 +120,7 @@ CREATE TABLE IF NOT EXISTS dispatches (
   route_reason TEXT,
   account TEXT,
   identity_source TEXT,
+  execution_mode TEXT,
   output_path TEXT,
   started_at TEXT NOT NULL,
   finished_at TEXT
@@ -141,6 +145,26 @@ CREATE INDEX IF NOT EXISTS idx_dispatches_orch ON dispatches(orchestrator);
 CREATE INDEX IF NOT EXISTS idx_dispatches_started ON dispatches(started_at);
 CREATE INDEX IF NOT EXISTS idx_dispatches_finished ON dispatches(finished_at);
 `;
+
+/**
+ * Guard the values a caller may put into a reported in-session outcome. These land in columns that
+ * `usageByProvider` SUMs, so one NaN or negative silently corrupts every aggregate read afterwards —
+ * a report is rejected loudly rather than persisted. THROWS rather than returning false: `false` is
+ * reserved for "no matching row", a normal outcome callers branch on, while a malformed number is a
+ * caller bug that must not be disguised as one.
+ */
+function assertReportable(id: number, outcome: {
+  durationMs?: number; inputTokens?: number; cachedInputTokens?: number;
+  outputTokens?: number; reasoningTokens?: number;
+}): void {
+  if (!Number.isInteger(id) || id <= 0) throw new TypeError(`id must be a positive integer (got ${id})`);
+  for (const [field, value] of Object.entries(outcome)) {
+    if (typeof value !== 'number') continue; // ok/error are validated by their own types
+    if (!Number.isInteger(value) || value < 0) {
+      throw new TypeError(`${field} must be a non-negative integer (got ${value})`);
+    }
+  }
+}
 
 /**
  * Add every missing column. `existing` is the column set observed BEFORE the ALTERs — several heddle
@@ -183,6 +207,8 @@ const MIGRATIONS: { column: string; ddl: string }[] = [
   { column: 'outcome', ddl: 'ALTER TABLE dispatches ADD COLUMN outcome TEXT' },
   // HED-23: worker deliverables can be large, so SQLite keeps only their atomically-written path.
   { column: 'output_path', ddl: 'ALTER TABLE dispatches ADD COLUMN output_path TEXT' },
+  // HED-99: a finished in-session handoff becomes a real dispatch only after its orchestrator reports it.
+  { column: 'execution_mode', ddl: 'ALTER TABLE dispatches ADD COLUMN execution_mode TEXT' },
 ];
 
 /**
@@ -290,8 +316,8 @@ export class Ledger {
       INSERT INTO dispatches
         (orchestrator, task_class, provider, model, skills, issue, pr, cwd, prompt_preview,
          session_id, fell_back_from, capabilities, route_reason, account, identity_source,
-         started_at, owner_pid, owner_comm, owner_started_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         execution_mode, started_at, owner_pid, owner_comm, owner_started_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'subprocess', ?, ?, ?, ?)
     `).run(
       r.orchestrator, r.taskClass, r.provider, r.model, r.skills, r.issue, r.pr, r.cwd,
       r.promptPreview.slice(0, 500), r.sessionId, r.fellBackFrom, r.capabilities ?? null,
@@ -301,17 +327,19 @@ export class Ledger {
     return Number(info.lastInsertRowid);
   }
 
-  private insertRefusal(r: DispatchStartRecord, refusal: string, reason: string, now: string): number {
+  private insertRefusal(
+    r: DispatchStartRecord, refusal: string, reason: string, now: string, executionMode?: string,
+  ): number {
     const info = this.db.prepare(`
       INSERT INTO dispatches
         (orchestrator, task_class, provider, model, skills, issue, pr, cwd, prompt_preview,
          session_id, fell_back_from, refusal, capabilities, route_reason, account, identity_source,
-         ok, error, started_at, finished_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+         execution_mode, ok, error, started_at, finished_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
     `).run(
       r.orchestrator, r.taskClass, r.provider, r.model, r.skills, r.issue, r.pr, r.cwd,
       r.promptPreview.slice(0, 500), r.sessionId, r.fellBackFrom, refusal, r.capabilities ?? null,
-      r.routeReason ?? null, r.account ?? null, r.identitySource ?? null, reason, now, now,
+      r.routeReason ?? null, r.account ?? null, r.identitySource ?? null, executionMode ?? null, reason, now, now,
     );
     return Number(info.lastInsertRowid);
   }
@@ -364,8 +392,35 @@ export class Ledger {
    * Record a dispatch heddle REFUSED to run (policy/structural cap): a finished row, ok=0, with the
    * refusal code and reason, so the decision is auditable and never shows as in-flight.
    */
-  refuse(r: DispatchStartRecord, refusal: string, reason: string): number {
-    return this.insertRefusal(r, refusal, reason, new Date().toISOString());
+  refuse(r: DispatchStartRecord, refusal: string, reason: string, executionMode?: string): number {
+    return this.insertRefusal(r, refusal, reason, new Date().toISOString(), executionMode);
+  }
+
+  /**
+   * Confirm an orchestrator-owned in-session handoff actually ran. The handoff begins as a finished
+   * refusal so it cannot occupy a worker slot; clearing that refusal only after this guarded update
+   * makes the existing usage query count the reported outcome without creating an in-flight row.
+   * This mirrors dispatches_lineage_immutable: who dispatched what is a fact, and confirming another
+   * orchestrator's handoff corrupts attribution just as surely as rewriting its orchestrator column.
+   */
+  reportInSession(id: number, outcome: {
+    ok: boolean; error?: string; durationMs?: number;
+    inputTokens?: number; cachedInputTokens?: number; outputTokens?: number; reasoningTokens?: number;
+  }, orchestrator?: string): boolean {
+    assertReportable(id, outcome);
+    const sql = `
+      UPDATE dispatches SET refusal = NULL, ok = ?, error = ?, duration_ms = ?, input_tokens = ?,
+        cached_input_tokens = ?, output_tokens = ?, reasoning_tokens = ?, finished_at = ?
+      WHERE id = ? AND execution_mode = 'in-session' AND refusal IS NOT NULL${orchestrator === undefined ? '' : ' AND orchestrator = ?'}
+    `;
+    // A failed handoff without an observed error stays null: do not fabricate failure text nobody observed.
+    const info = this.db.prepare(sql).run(
+      outcome.ok ? 1 : 0, outcome.ok ? null : outcome.error ?? null, outcome.durationMs ?? null,
+      outcome.inputTokens ?? null, outcome.cachedInputTokens ?? null, outcome.outputTokens ?? null,
+      outcome.reasoningTokens ?? null, new Date().toISOString(), id,
+      ...(orchestrator === undefined ? [] : [orchestrator]),
+    );
+    return Number(info.changes) > 0;
   }
 
   finish(id: number, outcome: {
