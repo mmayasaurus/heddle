@@ -26,6 +26,8 @@ describe('rotator supervisor tick', () => {
     decision: RotateAction = { action: 'idle', current: 'acct1', usedPct: 10, reason: 'idle' };
     relaunchOk: (address: string) => { ok: boolean; code: string } = () => ({ ok: true, code: 'launched' });
     killOk: (address: string) => { ok: boolean; code: string } = () => ({ ok: true, code: 'killed' });
+    verifyTimedOut = false;         // HED-157: VERIFY boot-timeout — false = still within the window
+    verifyTimeoutMsVal = 300_000;
     // recorders
     killed: string[] = [];
     relaunched: { address: string; account: string }[] = [];
@@ -48,6 +50,7 @@ describe('rotator supervisor tick', () => {
     isRelaunched: (a) => w.relaunched_set.has(a),
     markRelaunched: async (a) => { w.marks.add(a); },
     wasRelaunched: (a) => w.marks.has(a),
+    verifyTimeout: () => ({ timedOut: w.verifyTimedOut, timeoutMs: w.verifyTimeoutMsVal }),
     requestPause: async (reason, intent) => { w.paused.push({ reason, intent }); w.pauseId = 1; w.intent = intent; },
     resumePause: async (reason) => { w.resumed.push(reason); w.pauseId = null; w.intent = null; },
     killSession: async (a) => { w.killed.push(a); const r = w.killOk(a); if (r.ok) { w.live = w.live.filter((x) => x !== a); w.relaunched_set.delete(a); } return r; },
@@ -222,5 +225,72 @@ describe('rotator supervisor tick', () => {
     expect(step.phase).toBe('idle');
     expect(w.killed).toEqual([]);
     expect(w.resumed).toEqual([]);
+  });
+
+  // ── HED-157 hardening ──────────────────────────────────────────────────────────────────────
+
+  it('VERIFY boot-timeout: a member that never boots past the deadline stops waiting and escalates — not infinite VERIFY', async () => {
+    w.pauseId = 1;
+    w.intent = { target: 'acct2', from: 'acct1', roster: ['R', 'S', 'V'] };
+    w.ready = true;
+    w.marks = new Set(['R', 'S', 'V']);                            // every roster member already relaunched
+    w.live = ['R', 'S']; w.relaunched_set = new Set(['R', 'S']);    // V never re-registered (crashed on boot)
+    w.verifyTimedOut = true;                                       // past the deadline
+    const step = await tick(deps(w));
+    expect(step.phase).toBe('blocked');
+    expect(w.needsHumanMsgs).toHaveLength(1);                      // one combined escalation
+    expect(w.needsHumanMsgs[0]).toContain('V');
+    expect(w.needsHumanMsgs[0]).toMatch(/did not come back within 300000ms/);
+    expect(w.resumed).toEqual([]);                                 // DECISION: never auto-resume on a VERIFY timeout
+  });
+
+  it('VERIFY: before the deadline, a not-yet-booted member just waits — no escalation (unchanged behavior)', async () => {
+    w.pauseId = 1;
+    w.intent = { target: 'acct2', from: 'acct1', roster: ['R', 'S', 'V'] };
+    w.ready = true;
+    w.marks = new Set(['R', 'S', 'V']);
+    w.live = ['R', 'S']; w.relaunched_set = new Set(['R', 'S']);
+    w.verifyTimedOut = false;                                      // still within the window
+    const step = await tick(deps(w));
+    expect(step.phase).toBe('verifying');
+    expect(w.needsHumanMsgs).toEqual([]);
+  });
+
+  it('a late joiner (live but NOT in the roster) is excluded from kill/relaunch, and the original roster still completes', async () => {
+    w.pauseId = 1;
+    w.intent = { target: 'acct2', from: 'acct1', roster: ['R', 'S', 'V'] };
+    w.ready = true;
+    w.live = ['R', 'S', 'V', 'W'];   // W registered a live session AFTER the pause started
+    const step = await tick(deps(w));
+    expect(step.phase).toBe('relaunching');
+    expect(w.killed.sort()).toEqual(['R', 'S', 'V']);                          // W is NOT killed
+    expect(w.relaunched.map((r) => r.address).sort()).toEqual(['R', 'S', 'V']); // W is NOT relaunched
+    expect(w.needsHumanMsgs).toHaveLength(1);
+    expect(w.needsHumanMsgs[0]).toBe(
+      'rotation 1: W joined during the pause and was NOT rotated — it remains on the acct1 account; it rotates next cycle.',
+    );
+  });
+
+  it('multiple late joiners are named together in ONE combined warning, never one call per address', async () => {
+    w.pauseId = 1;
+    w.intent = { target: 'acct2', from: 'acct1', roster: ['R', 'S', 'V'] };
+    w.ready = true;
+    w.live = ['R', 'S', 'V', 'X', 'W']; // two late joiners: W and X
+    const step = await tick(deps(w));
+    expect(step.phase).toBe('relaunching');
+    expect(w.needsHumanMsgs).toHaveLength(1);            // one call, not one per joiner (dedup-friendly)
+    expect(w.needsHumanMsgs[0]).toContain('W, X');        // sorted, combined into one list
+    expect(w.needsHumanMsgs[0]).toMatch(/were NOT rotated/);
+    expect(w.needsHumanMsgs[0]).toMatch(/they remain on the acct1 account/);
+  });
+
+  it('a live address that IS in the roster never triggers the joiner warning', async () => {
+    w.pauseId = 1;
+    w.intent = { target: 'acct2', from: 'acct1', roster: ['R', 'S', 'V'] };
+    w.ready = true;
+    w.live = ['R', 'S', 'V']; // exact roster, no extras
+    const step = await tick(deps(w));
+    expect(step.phase).toBe('relaunching');
+    expect(w.needsHumanMsgs).toEqual([]);
   });
 });
