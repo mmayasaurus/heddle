@@ -32,6 +32,14 @@ export interface LiveRotatorOptions {
   scriptsDir: string;
   sessionsDir?: string;
   accountsPath?: string;
+  /**
+   * Test/targeted scope: if set, the rotator only rotates these fleet addresses — the roster it
+   * captures, kills and relaunches is filtered to them. The PAUSE stays fleet-wide (pauseReadiness
+   * reads the whole roster, so the quiesce protocol still waits for everyone), so this bounds the
+   * KILL blast radius to a chosen subject without weakening the quiet gate. The supervised first
+   * run uses it to rotate exactly one idle agent (HED-117).
+   */
+  only?: string[];
   thresholds?: RotateThresholds;
   now?: () => number;
   warn?: (m: string) => void;
@@ -97,7 +105,8 @@ export function createRotatorDeps(o: LiveRotatorOptions): RotatorDeps {
       return { target: rot.target, from: rot.from, roster: rot.roster.map(String) };
     },
 
-    liveAddresses: () => o.log.liveSessions().map((s) => s.address).filter((a) => a !== OPERATOR),
+    liveAddresses: () => o.log.liveSessions().map((s) => s.address)
+      .filter((a) => a !== OPERATOR && (!o.only || o.only.includes(a))),
 
     isRelaunched: (address: string): boolean => {
       // The live session at `address` started after the in-force pause ⇒ it is the post-rotation

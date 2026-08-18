@@ -64,10 +64,13 @@ if ((mode === 'run' || mode === 'once') && !scriptsDir) {
   process.exit(1);
 }
 
+// Optional single-/multi-subject scope (HED-117): the supervised first run rotates ONE idle agent.
+const only = (env.HEDDLE_ROTATE_ONLY ?? '').split(',').map((x) => x.trim().toUpperCase()).filter(Boolean);
 const deps = createRotatorDeps({
   log, broker, inFlight: ledger, thresholds,
   usageDir: env.HEDDLE_USAGE_DIR || join(homedir(), '.heddle', 'usage'),
   scriptsDir: scriptsDir ?? '', // only reached for active modes, which required it above
+  ...(only.length ? { only } : {}),
 });
 
 const stamp = () => new Date().toISOString();
@@ -77,6 +80,7 @@ async function statusOnce(): Promise<void> {
   const readiness = deps.readiness();
   process.stdout.write(JSON.stringify({
     at: stamp(), identity, isOperator,
+    scope: only.length ? only : 'whole fleet',
     decision: { action: decision.action, reason: decision.reason },
     pause: { inForce: readiness.pauseId !== null, ready: readiness.ready, blockers: readiness.blockers },
     intent: deps.pauseIntent(),

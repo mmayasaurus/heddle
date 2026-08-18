@@ -23,8 +23,8 @@ describe('createRotatorDeps — testable parts', () => {
     seal({ from: 'operator', to: '@all', tier: 'operator' as const, verified: true, evidence: null,
       code: 'operator-token', reason: 'test', dispatchId: null, requestedTier: null, downgradedFrom: null });
 
-  const deps = (sessionsDir?: string) =>
-    createRotatorDeps({ log, broker: dummyBroker, inFlight: null, usageDir: dir, scriptsDir: dir, now: () => nowMs, ...(sessionsDir ? { sessionsDir } : {}) });
+  const deps = (sessionsDir?: string, only?: string[]) =>
+    createRotatorDeps({ log, broker: dummyBroker, inFlight: null, usageDir: dir, scriptsDir: dir, now: () => nowMs, ...(sessionsDir ? { sessionsDir } : {}), ...(only ? { only } : {}) });
 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), 'heddle-rotate-live-'));
@@ -32,8 +32,20 @@ describe('createRotatorDeps — testable parts', () => {
     log = new CommsLog(join(dir, 'comms.db'), { now: clock });
     log.register({ address: 'operator' });
     log.register({ address: 'V' });
+    log.register({ address: 'R' });
+    log.register({ address: 'S' });
   });
   afterEach(() => { log.close?.(); rmSync(dir, { recursive: true, force: true }); });
+
+  it('liveAddresses excludes the operator and, when `only` is set, restricts to that scope', () => {
+    log.registerSession({ address: 'R', sessionId: 's-R', sessionName: 'R' });
+    log.registerSession({ address: 'S', sessionId: 's-S', sessionName: 'S' });
+    log.registerSession({ address: 'V', sessionId: 's-V', sessionName: 'V' });
+    log.registerSession({ address: 'operator', sessionId: 's-op', sessionName: 'operator' });
+    expect(deps().liveAddresses().sort()).toEqual(['R', 'S', 'V']);      // operator excluded
+    expect(deps(undefined, ['V']).liveAddresses()).toEqual(['V']);        // scoped to one subject
+    expect(deps(undefined, ['R', 'V']).liveAddresses().sort()).toEqual(['R', 'V']);
+  });
 
   it('pauseIntent reads back the rotation plan stamped into an operator pause meta', () => {
     log.append(
