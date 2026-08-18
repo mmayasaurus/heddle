@@ -180,8 +180,11 @@ export function createRotatorDeps(o: LiveRotatorOptions): RotatorDeps {
     wasRelaunched: (address) => {
       const p = o.log.latestFleetPause();
       if (!p) return false;
-      // Per-rotation markers are few (one per fleet member); a bounded inbox scan finds them.
-      return o.log.transcript({ inbox: OPERATOR }, { limit: 500 }).some((m) => {
+      // transcript() is oldest-first, so a bare {limit} scans the OLDEST messages and would miss this
+      // pause's markers once the operator inbox grows past it (re-relaunching forever). The markers are
+      // posted after the pause's own id, so scope to sinceId:p.id — correct and bounded (a rotation
+      // posts one marker per fleet member).
+      return o.log.transcript({ inbox: OPERATOR }, { sinceId: p.id, limit: 500 }).some((m) => {
         const rr = (m.meta as { rotationRelaunched?: { pauseId?: number; address?: string } } | null)?.rotationRelaunched;
         return rr?.pauseId === p.id && rr?.address === address;
       });
@@ -190,10 +193,15 @@ export function createRotatorDeps(o: LiveRotatorOptions): RotatorDeps {
     needsHuman: async (message) => {
       // De-dupe: a persistent block (e.g. a kill that keeps refusing) re-enters this every tick.
       // fleet-kill REFUSES rather than guesses, so re-attempting is safe — but re-posting the same
-      // needs-human each interval would spam the operator. Post only when the message changed.
-      const recent = o.log.transcript({ inbox: OPERATOR }, { limit: 1 })
-        .filter((m) => m.kind === 'needs-human' && m.from === OPERATOR);
-      if (recent[0]?.body === message) return;
+      // needs-human each interval would spam the operator. The spam is per-rotation, so scope to the
+      // active pause; transcript() is oldest-first, so take the LAST match — never {limit:1}, which
+      // returns the OLDEST message in the whole inbox and so almost never de-dupes.
+      const p = o.log.latestFleetPause();
+      if (p) {
+        const seen = o.log.transcript({ inbox: OPERATOR }, { sinceId: p.id, limit: 500 })
+          .filter((m) => m.kind === 'needs-human' && m.from === OPERATOR);
+        if (seen[seen.length - 1]?.body === message) return;
+      }
       await o.broker.post({ from: OPERATOR, to: OPERATOR, kind: 'needs-human', body: message });
     },
   };

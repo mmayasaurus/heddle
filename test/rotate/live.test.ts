@@ -19,8 +19,8 @@ describe('createRotatorDeps — testable parts', () => {
   const clock = () => new Date(nowMs).toISOString();
   const dummyBroker = {} as Broker; // pauseIntent/isRelaunched never touch the broker
 
-  const operatorDecision = () =>
-    seal({ from: 'operator', to: '@all', tier: 'operator' as const, verified: true, evidence: null,
+  const operatorDecision = (to = '@all') =>
+    seal({ from: 'operator', to, tier: 'operator' as const, verified: true, evidence: null,
       code: 'operator-token', reason: 'test', dispatchId: null, requestedTier: null, downgradedFrom: null });
 
   const deps = (sessionsDir?: string, only?: string[]) =>
@@ -105,5 +105,50 @@ describe('createRotatorDeps — testable parts', () => {
     // pid 2^31-1 is not a real live process; even with a post-pause startedAt it must not count.
     writeFileSync(join(sessionsDir, 'v.json'), JSON.stringify({ name: 'V', pid: 2147483646, startedAt: nowMs + 10_000 }), 'utf8');
     expect(deps(sessionsDir).isRelaunched('V')).toBe(false);
+  });
+
+  it('wasRelaunched finds THIS pause\'s marker even past a >500-message operator inbox (oldest-first regression)', () => {
+    // The buggy scan read transcript(limit:500) oldest-first, so once the operator inbox exceeded 500
+    // the current pause's relaunch marker fell outside the window and wasRelaunched returned false
+    // forever — re-relaunching an already-relaunched session. The sinceId:p.id fix scopes to messages
+    // posted after the pause, where the marker always is.
+    for (let i = 0; i < 550; i++) {
+      log.append({ from: 'operator', to: 'operator', kind: 'status', body: `filler ${i}` }, operatorDecision('operator'));
+    }
+    log.append(
+      { from: 'operator', to: '@all', kind: 'status', body: 'pause',
+        meta: { fleetPause: { reason: 'r', rotation: { target: 'acct2', from: 'acct1', roster: ['V'] } } } },
+      operatorDecision(),
+    );
+    const pause = log.latestFleetPause();
+    expect(pause).not.toBeNull();
+    log.append(
+      { from: 'operator', to: 'operator', kind: 'status', body: `rotation ${pause!.id}: relaunched V`,
+        meta: { rotationRelaunched: { pauseId: pause!.id, address: 'V' } } },
+      operatorDecision('operator'),
+    );
+    expect(deps().wasRelaunched('V')).toBe(true);   // false before the fix — marker sat past the 500-window
+    expect(deps().wasRelaunched('R')).toBe(false);  // no marker for R
+  });
+
+  it('needsHuman de-dupes against the latest alert since the pause, not the oldest inbox message', async () => {
+    const posted: string[] = [];
+    // Broker stub that records posts AND writes them to the log, so the next de-dupe scan can see them.
+    const broker = { post: async (m: { from: string; to: string; kind: string; body: string; meta?: unknown }) => {
+      posted.push(m.body);
+      log.append({ from: m.from, to: m.to, kind: m.kind, body: m.body, meta: (m.meta as object) ?? null }, operatorDecision(m.to));
+    } } as unknown as Broker;
+    const d = createRotatorDeps({ log, broker, inFlight: null, usageDir: dir, scriptsDir: dir, now: () => nowMs });
+    // An ancient needs-human BEFORE the pause — the message the buggy limit:1 scan compared against.
+    log.append({ from: 'operator', to: 'operator', kind: 'needs-human', body: 'ancient alert' }, operatorDecision('operator'));
+    for (let i = 0; i < 520; i++) log.append({ from: 'operator', to: 'operator', kind: 'status', body: `f${i}` }, operatorDecision('operator'));
+    log.append(
+      { from: 'operator', to: '@all', kind: 'status', body: 'pause',
+        meta: { fleetPause: { reason: 'r', rotation: { target: 'acct2', from: 'acct1', roster: ['V'] } } } },
+      operatorDecision(),
+    );
+    await d.needsHuman('kill refused for V');   // nothing matching since the pause → posts
+    await d.needsHuman('kill refused for V');   // same message → must de-dupe, no second post
+    expect(posted).toEqual(['kill refused for V']);  // exactly one — was 2 (spam) before the fix
   });
 });
