@@ -146,7 +146,7 @@ task_classes:
     provider: cursor
     model: cursor-grok-4.6-high   # Cursor-Models pool — does NOT touch the PR-review dollar pool
     fallback: {provider: gemini, model: gemini-3.1-pro-high}
-    why: independent diagnosis/review of a diff or plan — diversity of model FAMILY is the point; Grok sits on the generous Cursor-Models pool
+    why: independent diagnosis/review of a diff or plan — diversity of model FAMILY is the point; Grok sits on the generous Cursor-Models pool. Give it a SELF-CONTAINED brief (no memtrace); expect 5-8 min (grok ran ~374-520s in the 2026-08-18 ledger), so pick it deliberately — for a SMALL diff use quick-alt-take (grok-medium) instead.
     skills: [worker-role]
     edits_code: false
   second-opinion-hard:      # opt-in only: costs the metered pool PR review needs
@@ -179,7 +179,7 @@ task_classes:
     model: composer-2.5
     mcp: [memtrace]         # memtrace-first discipline for every code-editing class (Maya, 2026-08-15)
     fallback: {provider: codex, model: gpt-5.6-luna}
-    why: fast structural drafts (files, stubs, wiring) — Composer is Cursor-native, cache-warm, ~1.8s on a trivial prompt; coding-tuned, not a reasoner
+    why: fast structural drafts (files, stubs, wiring) — Composer is Cursor-native, cache-warm, ~1.8s on a trivial prompt; coding-tuned, not a reasoner. Fallback stays codex/luna (NOT a Cursor sibling) — it is the CAPABILITY-FIT escape hatch, since only codex enforces net/exec capabilities, so scaffold work needing one falls to codex (test/dispatch-caps.test.ts). The generous Cursor-Models pool rarely needs cap-overflow anyway. (HED-79 retune 2026-08-18 considered a grok-medium fallback for overflow and REJECTED it — it would have removed the capability path.)
     skills: [worker-role, quality-gate]
     edits_code: true
   research-summarize:       # doc reading, log triage, summarization
@@ -199,7 +199,7 @@ task_classes:
   quick-alt-take:           # cheap fast alternative draft to compare against primary
     provider: cursor
     model: cursor-grok-4.6-medium
-    why: cheap second draft to compare against a primary — same family as second-opinion, lower effort
+    why: cheap second draft, and the cheap REVIEW variant for SMALL diffs — same Grok family as second-opinion at lower effort (grok-medium); prefer this over second-opinion when the diff is small (HED-79 retune 2026-08-18)
     skills: [worker-role]
     edits_code: false
   adversarial-review:       # HED-3 (Maya: "super important") — a DIFFERENT model family reviews a diff/
