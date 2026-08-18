@@ -56,27 +56,34 @@ exists because an unconfigured DeepSource opened ~118 non-defect threads on one 
 
 ## GitHub required-status-check semantics — observed (HED-142)
 
-GitHub resolves a required status check from the newest check-run of the required name on the head
-commit. Every row below is an observed `mergeable_state` from a real PR in the sandbox
-`mmayasaurus/heddle-gate-sandbox` (a throwaway repo whose ruleset required exactly one check named
-`gate`, `strict:false`) — not doc-inference. Legend: `blocked` = a required check is unsatisfied
+GitHub resolves a required status check from the newest check-run of the required name **in the newest
+check-suite** on the head commit — suite-creation order, not run-completion order (rows 1, 6, 7). Rows
+1–6 are observed `mergeable_state` from a real PR in the sandbox `mmayasaurus/heddle-gate-sandbox` (a
+throwaway repo whose ruleset required exactly one check named `gate`, `strict:false`); row 7 is a live
+observation from dashboard#45 — not doc-inference. Legend: `blocked` = a required check is unsatisfied
 (cannot merge), `unstable` = mergeable but a non-required check is failing/pending, `clean` =
 mergeable and all green.
 
 | # | Scenario | Latest `gate` check-runs (oldest→newest) | `mergeable_state` | What it proves |
 |---|---|---|---|---|
-| 1 | baseline; commit run then bot-edit churn | success, cancelled, success, success | `unstable` | Latest `gate` success ⇒ mergeable. A mid-sequence CANCELLED run did not stick because a later same-SHA success superseded it (a later same-SHA run supersedes for resolution). Unstable only because non-required bot checks were pending. |
+| 1 | baseline; commit run then bot-edit churn | success, cancelled, success, success | `unstable` | Latest `gate` success ⇒ mergeable. A mid-sequence CANCELLED run did not stick because a later same-SHA success superseded it (a later same-SHA **suite** supersedes for resolution — see row 7). Unstable only because non-required bot checks were pending. |
 | 2 | gate job `if:false` on every run | skipped, skipped, skipped | `unstable` | A required check that is only ever `skipped` is treated as satisfied ⇒ skip does not block. |
 | 3 | red commit, then a later `skipped` run (masking test) | failure, failure, cancelled, failure, skipped | `clean` | A `skipped` run SUPERSEDES prior failures ⇒ skip MASKS a real red. Unsafe. |
 | 4 | dynamic job name — `gate` on commit, `gate-edit` on a body edit | `gate`=success, then `gate-edit`=success (×N) | `blocked` | The latest check-suite produced `gate-edit`, not `gate`, so the required `gate` context reads unsatisfied ⇒ BLOCKED, even though an earlier suite delivered `gate` green. |
 | 5 | verdict-echo — green commit, then a title/body edit storm | `gate`=success (commit), then `gate`=success (×N echo runs) | `clean` | Every edit run publishes the STATIC `gate` context (never `gate-edit`), so the latest suite always satisfies the requirement ⇒ stays mergeable through edits. Solves row 4. |
 | 6 | verdict-echo anti-mask — red commit, then an edit that REMOVES the failing marker from the title | `gate`=failure (commit) + a `gate-verdict`=failure marker, then `gate`=failure (×N echo, incl. after the title no longer signals failure) | `blocked` | The echo re-emits the SHA-bound `gate-verdict` rather than recomputing from the current title, so a red STAYS red across edits ⇒ does NOT mask (the exact hole row 3's skip left open). |
+| 7 | verdict-echo marker race on a SLOW build — commit run still building when bot edits fire (dashboard#45, live) | commit `gate`=success in the OLDEST suite; edit-echoes that gave up waiting for the marker = failure in NEWER suites | `blocked` | GitHub reads the required context from the newest SUITE, so the newer fail-closed echoes blocked the PR even though the commit success completed later — and `gh pr checks`, which uses the newest RUN, showed `pass` (the divergence is the tell; `mergeable_state` is the authority). **Fixed** by making the echo WAIT for the marker (stay pending) instead of failing closed at a fixed timeout, so it never lands a premature red in a newer suite. Live-only: the sandbox can't show it — instant builds keep suite-order and run-order aligned. |
 
 These force three constraints on any edit-safe gate: every run must publish the static required context
 `gate` [row 4 — omitting it blocks]; an edit run must never publish a passing or `skipped` `gate` that
 misrepresents a real red [row 3 — skip masks]; and an edit run's `gate` must not be turned red by
-cancellation (a cancelled required check reds the PR until a later run supersedes — dashboard#41). The
-verdict echo below is the shape that satisfies all three, validated by rows 5–6.
+cancellation (a cancelled required check reds the PR until a later suite supersedes — dashboard#41). The
+verdict echo below is the shape that satisfies all three, validated by rows 5–6, with the slow-build
+timing corner (row 7) fixed by the pending-wait.
+
+*Sandbox vs live:* the sandbox validates the **semantics** (which conclusion supersedes which); only a
+live PR validates the **timing** — suite-creation order versus run-completion order — because the
+sandbox's instant builds keep the two aligned. Row 7 is a live-only finding.
 
 ## The gate survives PR edits: the verdict echo (HED-142)
 
@@ -111,12 +118,16 @@ The `gate-verdict` marker is deliberately **not** required — requiring it woul
 
 Residuals, by design:
 
-- **Marker race.** An edit that fires before the commit run has published its marker finds none; the
-  echo polls ~150 s, then **fails closed** (red, never green) with a self-describing error naming the
-  SHA and the remedy (“re-run the `gate` workflow, or push a commit”), and heals automatically once the
-  commit run's own `gate` supersedes it. On the dashboard the rust build can outlast the poll, so a
-  fresh commit + immediate edit can show a transient red *during the build* — harmless, since a PR is
-  not mergeable mid-build anyway.
+- **Marker race.** An edit that fires before the commit run has published its marker finds none. The
+  echo does **not** fail closed early — a premature red would land in a check-suite *newer* than the
+  commit run's own gate, and since GitHub resolves the required check from the newest suite, it would
+  block the PR until another edit superseded it (exactly what an earlier fixed-150 s version did to
+  dashboard#45 — matrix row 7). Instead the echo stays **pending**, polling for the marker while a
+  commit-path job for the SHA is still in flight (up to a ~20 min ceiling) and self-describing that
+  pending state in its job summary. A pending required check correctly blocks merge *while the build
+  runs*, then resolves to the real verdict once the commit run publishes. It fails closed only if the
+  marker never appears (commit run cancelled or never ran), with a self-describing remedy (re-run
+  `gate`, or push a commit).
 - **Reopen.** `reopened` is a commit-path event, so it re-runs the real gate and refreshes the marker
   for the (unchanged) head SHA; verdicts are SHA-bound, so reopen carries no stale-verdict hazard —
   which is also why close/reopen reliably forces a fresh verdict after a runner-side outage.

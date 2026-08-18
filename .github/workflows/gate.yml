@@ -17,9 +17,11 @@
 # name `gate-verdict` is NOT required and must stay out of the ruleset (see below).
 #
 # ── EDIT-SAFE via a verdict echo (HED-142) ──────────────────────────────────
-# GitHub resolves a required status check from the NEWEST check-run of the
-# required name on the head commit. A PR `edited` event (reviewer bots edit the
-# body constantly) re-fires this workflow with NO new commit. Three earlier
+# GitHub resolves a required status check from the newest check-run of the
+# required name in the newest check-SUITE on the head commit (suite order, not
+# run completion order — measured live on dashboard#45). A PR `edited` event
+# (reviewer bots edit the body constantly) re-fires this workflow with NO new
+# commit, in a NEW suite. Three earlier
 # fixes each died on a GitHub semantic we had inferred rather than observed; all
 # six behaviours are now reproduced in a sandbox and written up in docs/CI.md:
 #   • skip the edit run  → it publishes a `skipped` check-run, and `skipped`
@@ -36,8 +38,11 @@
 # latest `gate-verdict` and republishes exactly that conclusion. So an edit can
 # only ever REPEAT the real verdict for the exact commit under review — green
 # stays green, red stays red (no mask) — and `gate` is present on every suite
-# (no block). Edit runs are ~5s and get their own concurrency slot with
-# cancel-in-progress: false, so they never cancel anything (no cancellation-red).
+# (no block). Edit runs normally take seconds (they just read the marker); one
+# that races an in-flight commit build stays PENDING, waiting for that build's
+# verdict, rather than failing closed into a newer suite. They get their own
+# concurrency slot with cancel-in-progress: false, so they never cancel anything
+# (no cancellation-red).
 # On a reopened PR the head SHA is unchanged and `reopened` is a commit-path
 # event, so it simply re-runs `build` and refreshes the marker — verdicts are
 # SHA-bound, so reopen carries no stale-verdict hazard.
@@ -162,7 +167,10 @@ jobs:
     needs: [build]
     if: always()
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    # 20 min: the commit path exits in seconds, but an edit-path echo that races
+    # an in-flight build waits (pending) for that build's verdict rather than
+    # failing closed into a newer suite — see the echo step.
+    timeout-minutes: 20
     permissions:
       checks: write
     steps:
@@ -182,15 +190,34 @@ jobs:
           if [ "$IS_EDIT" = "true" ]; then
             echo "edit event — echoing the last real verdict (gate-verdict marker) for $SHA"
             CONC=none
-            # The commit run may still be in flight when a fast edit arrives, so
-            # poll briefly for its marker before deciding. ~150s covers the core
-            # build; if it is still absent the commit run is genuinely not done
-            # (or never ran) and we fail CLOSED — never green — with a remedy.
-            for i in $(seq 1 15); do
-              CONC=$(gh api "repos/$REPO/commits/$SHA/check-runs" \
-                --jq '[.check_runs[] | select(.name=="gate-verdict")] | sort_by(.started_at) | last | .conclusion // "none"' 2>/dev/null || echo none)
+            # WAIT for this SHA's real verdict; do not fail closed early. During
+            # a race the commit run is still computing the verdict, so a premature
+            # red would land in a check-suite NEWER than the commit run's own gate
+            # — and GitHub resolves a required check from the newest SUITE, so that
+            # red would block the PR until another edit superseded it (measured
+            # live on dashboard#45: the commit `gate` sits in the oldest suite and
+            # never supersedes a newer edit suite). Instead stay pending: poll
+            # while the marker is absent AND a commit-path job for this SHA is
+            # still in flight (after a ~90s startup grace, so we don't quit before
+            # the commit run has even registered). Fail closed only if the marker
+            # never appears (commit run cancelled / never ran) or at the ceiling.
+            for i in $(seq 1 108); do
+              CR=$(gh api "repos/$REPO/commits/$SHA/check-runs" --paginate 2>/dev/null || echo '{}')
+              CONC=$(echo "$CR" | jq -r '[.check_runs[] | select(.name=="gate-verdict")] | sort_by(.started_at) | last | .conclusion // "none"')
               [ "$CONC" != "none" ] && break
-              echo "  no gate-verdict marker yet for ${SHA} (attempt $i/15) — waiting 10s for the commit run"
+              INFLIGHT=$(echo "$CR" | jq -r '[.check_runs[] | select((.name|test("^(build|web|rust)")) and .status != "completed")] | length')
+              if [ "$i" -gt 9 ] && [ "${INFLIGHT:-1}" = "0" ]; then
+                echo "  no gate-verdict marker for ${SHA} and no commit-path job in flight — the commit gate never published a verdict (cancelled / never ran)."
+                break
+              fi
+              if [ -z "${WAITED:-}" ]; then
+                WAITED=1
+                {
+                  echo "### gate — waiting for the commit-path verdict on \`${SHA}\`"
+                  echo "This edit run is holding the required \`gate\` **pending** until the commit-path build for this commit publishes its \`gate-verdict\`, which the echo then reflects. Pending here means *blocked-while-building*, not failed."
+                } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+              fi
+              echo "  waiting for the commit run's verdict on ${SHA} (attempt ${i}/108; marker absent, commit-path jobs in flight=${INFLIGHT:-?})"
               sleep 10
             done
             case "$CONC" in
