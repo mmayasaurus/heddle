@@ -601,7 +601,7 @@ export async function dispatch(
   const overrideGate = overrideReasonGate(req);
   if (overrideGate) {
     return refusalOutcome(ctx, req, overrideGate.taskClass, overrideGate.target,
-      withMandatoryPacks(req.skills ?? []), overrideGate.refusal(listTaskClasses(table)));
+      withMandatoryPacks(req.skills ?? []), overrideGate.refusal(table));
   }
 
   // Resume affinity (HED-78): a claude session is persisted under ONE config dir — resuming it on a
@@ -761,27 +761,72 @@ export async function dispatch(
  * Returns null when the request is fine: it carries a task class, or it is a direct route WITH a
  * stated reason.
  */
+const NON_REASON_STOPLIST = new Set([
+  'habit', 'proven', 'faster', 'fast', 'worked before', 'works', 'it works', 'default', 'usual',
+  'preference', 'prefer', 'same as before', 'as usual', 'familiar',
+]);
+
+function overrideReasonCore(reason: string, provider: string, model: string): string {
+  const tokens = [provider, model, ...model.split(/[-/]/)]
+    .map((token) => token.trim().toLowerCase())
+    .filter(Boolean);
+  let core = reason.trim().toLowerCase();
+  for (const token of new Set(tokens)) {
+    const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    core = core.replace(new RegExp(`(?<![a-z0-9])${escaped}(?![a-z0-9])`, 'g'), ' ');
+  }
+  return core.replace(/\s+/g, ' ').trim();
+}
+
+/** True when a direct-route override reason is only its identity or a non-justification cliché. */
+export function isNonReason(reason: string, provider: string, model: string): boolean {
+  const core = overrideReasonCore(reason, provider, model);
+  return !core || NON_REASON_STOPLIST.has(core) || core.replace(/\s/g, '').length < 8;
+}
+
 export function overrideReasonGate(
   req: Pick<DispatchRequest, 'taskClass' | 'provider' | 'model' | 'skills' | 'mcp' | 'overrideReason'>,
-): { taskClass: string; target: RouteTarget; refusal: (classes: string[]) => DispatchRefusal } | null {
-  if (req.taskClass || !req.provider || !req.model || req.overrideReason?.trim()) return null;
+): { taskClass: string; target: RouteTarget; refusal: (table: RoutingTable) => DispatchRefusal } | null {
+  if (req.taskClass || !req.provider || !req.model) return null;
+  const { provider, model } = req;
+  const reason = req.overrideReason?.trim() ?? '';
+  if (reason && !isNonReason(reason, provider, model)) return null;
   // The same task_class shape directRoute() produces, so bypass rows sort with every other direct
   // row instead of needing a special case in the retune query (PR #32, copilot).
-  const taskClass = `direct:${req.provider}/${req.model}`;
-  const target = { taskClass, provider: req.provider, model: req.model, skills: req.skills, mcp: req.mcp } as unknown as RouteTarget;
+  const taskClass = `direct:${provider}/${model}`;
+  const target = { taskClass, provider, model, skills: req.skills, mcp: req.mcp } as unknown as RouteTarget;
   return {
     taskClass,
     target,
-    refusal: (classes: string[]) => ({
-      code: 'override-reason-required' as const,
-      reason: `a direct provider+model dispatch (${req.provider}/${req.model}) must say why it bypasses the routing table`,
-      // Field names differ per surface — name all three rather than assuming an MCP caller.
-      instruction: `Pass a task class instead (${classes.join(', ')}) — the table carries the policy: ` +
-        `default skills/MCP, opt-in gates, fallbacks and cap-aware routing. If bypassing IS the intent ` +
-        `(a bench, a probe, a judgment call), say why and it runs: override_reason (MCP), ` +
-        `--override-reason (CLI), overrideReason (JS API). The reason is recorded on the ledger row so ` +
-        `routing can be tuned from evidence.`,
-    }),
+    refusal: (table: RoutingTable) => {
+      const matches = listTaskClasses(table)
+        .map((taskClass) => {
+          const route = resolveRoute(table, taskClass);
+          if (route.provider === provider && route.model === model) return { taskClass, kind: 'primary' as const };
+          const fallback = route.fallback;
+          if (fallback && fallback.provider === provider && fallback.model === model) return { taskClass, kind: 'fallback' as const };
+          return null;
+        })
+        .filter((match): match is { taskClass: string; kind: 'primary' | 'fallback' } => match !== null)
+        .sort((a, b) => (a.kind === b.kind ? 0 : a.kind === 'primary' ? -1 : 1));
+      const routeInstruction = matches.length
+        ? matches.map(({ taskClass, kind }) =>
+          `${provider}/${model} IS the ${kind} route of task class \`${taskClass}\` — dispatch by class (task_class: ${taskClass}) instead of naming the model.`,
+        ).join(' ')
+        : `Pass a task class instead (${listTaskClasses(table).join(', ')}) — the table carries the policy: default skills/MCP, opt-in gates, fallbacks and cap-aware routing.`;
+      const reasonMessage = !reason
+        ? `a direct provider+model dispatch (${provider}/${model}) has no override reason and must say why it bypasses the routing table`
+        : `a direct provider+model dispatch (${provider}/${model}) has an override reason that is not a justification (\`${overrideReasonCore(reason, provider, model)}\`) — that's not a reason ('${overrideReasonCore(reason, provider, model)}')`;
+      return {
+        code: 'override-reason-required' as const,
+        reason: reasonMessage,
+        // Field names differ per surface — name all three rather than assuming an MCP caller.
+        instruction: `${routeInstruction} If bypassing IS the intent ` +
+          `(a bench, a probe, a judgment call), say why and it runs: override_reason (MCP), ` +
+          `--override-reason (CLI), overrideReason (JS API). The reason is recorded on the ledger row so ` +
+          `routing can be tuned from evidence.`,
+      };
+    },
   };
 }
 
@@ -962,7 +1007,7 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
   }
   // The dry run must mirror what dispatch() would do — including refusing a bare direct route.
   const gate = overrideReasonGate(req);
-  const overrideReasonRequired = gate ? gate.refusal(listTaskClasses(table)).reason : undefined;
+  const overrideReasonRequired = gate ? gate.refusal(table).reason : undefined;
   return { route, target, fallback, origin, execution, decision, skillsForRefusal, account, accountAdvice, accountPick, notDispatchable, reviewerPick, sameProviderReview, overrideReasonRequired };
 }
 
