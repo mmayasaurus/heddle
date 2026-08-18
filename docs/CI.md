@@ -72,7 +72,7 @@ mergeable and all green.
 | 4 | dynamic job name — `gate` on commit, `gate-edit` on a body edit | `gate`=success, then `gate-edit`=success (×N) | `blocked` | The latest check-suite produced `gate-edit`, not `gate`, so the required `gate` context reads unsatisfied ⇒ BLOCKED, even though an earlier suite delivered `gate` green. |
 | 5 | verdict-echo — green commit, then a title/body edit storm | `gate`=success (commit), then `gate`=success (×N echo runs) | `clean` | Every edit run publishes the STATIC `gate` context (never `gate-edit`), so the latest suite always satisfies the requirement ⇒ stays mergeable through edits. Solves row 4. |
 | 6 | verdict-echo anti-mask — red commit, then an edit that REMOVES the failing marker from the title | `gate`=failure (commit) + a `gate-verdict`=failure marker, then `gate`=failure (×N echo, incl. after the title no longer signals failure) | `blocked` | The echo re-emits the SHA-bound `gate-verdict` rather than recomputing from the current title, so a red STAYS red across edits ⇒ does NOT mask (the exact hole row 3's skip left open). |
-| 7 | verdict-echo marker race on a SLOW build — commit run still building when bot edits fire (dashboard#45, live) | commit `gate`=success in the OLDEST suite; edit-echoes that gave up waiting for the marker = failure in NEWER suites | `blocked` | GitHub reads the required context from the newest SUITE, so the newer fail-closed echoes blocked the PR even though the commit success completed later — and `gh pr checks`, which uses the newest RUN, showed `pass` (the divergence is the tell; `mergeable_state` is the authority). **Fixed** by making the echo WAIT for the marker (stay pending) instead of failing closed at a fixed timeout, so it never lands a premature red in a newer suite. Live-only: the sandbox can't show it — instant builds keep suite-order and run-order aligned. |
+| 7 | verdict-echo marker race on a SLOW build — commit run still building when bot edits fire (dashboard#45, live) | commit `gate`=success in the OLDEST suite; edit-echoes that gave up waiting for the marker = failure in NEWER suites | `blocked` | GitHub reads the required context from the newest SUITE, so the newer fail-closed echoes blocked the PR even though the commit success completed later — and `gh pr checks`, which uses the newest RUN, showed `pass` (the divergence is the tell; `mergeable_state` is the authority). **Fixed** by making the echo WAIT while the build is in flight — bound by an *invariant* (the `gate` job's timeout exceeds the longest leaf timeout), never an elapsed-time ceiling — so it never lands a premature red in a newer suite; two fixed timeouts (150 s, then ~20 min) were each falsified live here before the invariant. Live-only: the sandbox can't show it — instant builds keep suite-order and run-order aligned. |
 
 These force three constraints on any edit-safe gate: every run must publish the static required context
 `gate` [row 4 — omitting it blocks]; an edit run must never publish a passing or `skipped` `gate` that
@@ -119,14 +119,19 @@ The `gate-verdict` marker is deliberately **not** required — requiring it woul
 Residuals, by design:
 
 - **Marker race.** An edit that fires before the commit run has published its marker finds none. The
-  echo does **not** fail closed early — a premature red would land in a check-suite *newer* than the
-  commit run's own gate, and since GitHub resolves the required check from the newest suite, it would
-  block the PR until another edit superseded it (exactly what an earlier fixed-150 s version did to
-  dashboard#45 — matrix row 7). Instead the echo stays **pending**, polling for the marker while a
-  commit-path job for the SHA is still in flight (up to a ~20 min ceiling) and self-describing that
-  pending state in its job summary. A pending required check correctly blocks merge *while the build
-  runs*, then resolves to the real verdict once the commit run publishes. It fails closed only if the
-  marker never appears (commit run cancelled or never ran), with a self-describing remedy (re-run
+  echo does **not** fail closed on a timer — a premature red would land in a check-suite *newer* than
+  the commit run's own gate, and since GitHub resolves the required check from the newest suite, it
+  would block the PR until another edit superseded it (matrix row 7). Instead the echo stays
+  **pending**, polling for the marker *for as long as a commit-path job for the SHA is in flight*, and
+  self-describing that pending state in its job summary. The only fail-closed trigger is the build
+  being verifiably gone (no leaf job in flight) with still no marker — never an elapsed-time ceiling.
+  The wait bound is an **invariant, not a constant**: the `gate` job's `timeout-minutes` exceeds the
+  longest leaf timeout in its workflow (core 20 > 15; dashboard 50 > 45), so a leaf cannot outlive its
+  own timeout — the marker always appears first (a timed-out build publishes its failure, which the
+  echo echoes). Two earlier *fixed* timeouts (150 s, then a ~20 min ceiling) were each falsified live
+  on dashboard#45 by a build that outran them; the invariant closes the class. A pending required check
+  correctly blocks merge *while the build runs*, then resolves to the real verdict; it fails closed only
+  if the marker never appears (commit run cancelled or never ran), with a self-describing remedy (re-run
   `gate`, or push a commit).
 - **Reopen.** `reopened` is a commit-path event, so it re-runs the real gate and refreshes the marker
   for the (unchanged) head SHA; verdicts are SHA-bound, so reopen carries no stale-verdict hazard —
