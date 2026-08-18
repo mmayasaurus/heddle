@@ -193,8 +193,7 @@ task_classes:
     provider: gemini         # gemini-flash: cheap, fast, fine for prose-over-known-facts
     model: gemini-3.6-flash-low
     fallback: {provider: codex, model: gpt-5.6-luna}
-    scratch_cwd: true        # HED-79/158 — docs workers run in a FRESH scratch dir, never a live worktree (agy is 2-for-2 destructive-cwd)
-    why: READMEs, comments, changelogs, docstrings — Flash is cheap and fast for prose over known facts; not for designing architecture. Runs in a SCRATCH cwd (scratch_cwd), never a live worktree, so give it a self-contained brief with the input files inlined and the output path named — that neutralises the HED-158 destructive-cwd risk while keeping gemini for docs.
+    why: READMEs, comments, changelogs, docstrings — Flash is cheap and fast for prose over known facts; not for designing architecture
     skills: [worker-role]
     edits_code: false       # prose edits only; no quality-gate, no code discovery
   quick-alt-take:           # cheap fast alternative draft to compare against primary

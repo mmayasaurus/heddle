@@ -441,10 +441,6 @@ economics, not a demotion; sonnet was 3-for-3 on the drawer rounds post-directiv
 **Applied:**
 - `scaffold` / `second-opinion` / `quick-alt-take` — class-doc clarifications (self-contained brief,
   deliberate-choice cost, cheap-variant guidance).
-- **scratch-cwd** (change 5, HED-158): `documentation` now carries `scratch_cwd: true` — its
-  gemini-flash worker runs in a fresh `mkdtemp`, never a live worktree. A class that only needs input
-  files + an output path never needs the worktree the escape/reset incidents required; this is the
-  structural fix that makes agy-for-docs safe rather than lucky (agy is 2-for-2 destructive-cwd).
 
 **Considered and REJECTED** (the evidence standard the retune was meant to carry):
 - *Swap `scaffold`'s fallback to grok-medium for overflow* — REJECTED. codex/luna is the
@@ -464,6 +460,14 @@ economics, not a demotion; sonnet was 3-for-3 on the drawer rounds post-directiv
 - *A `gemini-overflow-implementation` class* (agy running Sonnet-class on the idle pool) — DEFERRED;
   it routes cwd-writing work to agy, which HED-158 keeps OUT of cwd-writing classes until it earns
   re-entry via a clean read-only track record.
+- *scratch-cwd for `documentation`* (change 5, HED-158) — DEFERRED after PR review found it not
+  ready. Overriding the worker's cwd to an empty scratch dir BREAKS documentation's edit-in-place
+  contract: a worker editing `README.md` (relative) writes into scratch and the edit never reaches
+  the repo (qodo/codeant/codex, PR #47), while an *absolute* output path would write to the live tree
+  anyway — so it neither functions nor fully isolates. It only works with an output-integration
+  workflow (worker writes to scratch, orchestrator copies back) that isn't built. Meanwhile the
+  agy-safety goal is served by DETECTION (`destroyedWork`/`escapedPaths`, HED-98/127) + the
+  worker-hygiene pack + commit-before-dispatch. Split out as its own ticket to design properly.
 
 ## Known routing pitfalls (2026-08-15)
 

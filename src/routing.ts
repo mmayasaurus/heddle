@@ -40,13 +40,6 @@ export interface Route extends RouteTarget {
   readOnly: boolean;
   /** HED-3: run assess_result on the worker's output and attach the assessment. */
   autoAssess: boolean;
-  /**
-   * HED-79/HED-158: run this class's workers in a FRESH scratch cwd (mkdtemp), never the caller's
-   * worktree — even when a cwd is explicitly passed. For non-code classes (documentation) whose
-   * workers only need input files + an output path, this removes the live worktree the escape/reset
-   * incidents required (agy is 2-for-2 destructive-cwd, HED-158). Default false.
-   */
-  scratchCwd: boolean;
   /** HED-3: ordered alternatives when the caller's `author_provider` matches the route (a reviewer must differ). */
   reviewerPool?: { provider: string; model: string }[];
 }
@@ -145,7 +138,6 @@ export function resolveRoute(table: RoutingTable, taskClass: string): Route {
     dispatchable: node.dispatchable !== false,
     readOnly: node.read_only === true,
     autoAssess: node.auto_assess === true,
-    scratchCwd: node.scratch_cwd === true,
     reviewerPool: Array.isArray(node.reviewer_pool)
       ? (node.reviewer_pool as any[]).filter((e) => e && typeof e.provider === 'string' && typeof e.model === 'string')
           .map((e) => ({ provider: e.provider as string, model: e.model as string }))
@@ -269,5 +261,5 @@ export function directRoute(
   }
   if (cfg.status === 'excluded') throw new Error(`provider "${provider}" is excluded from orchestration`);
   if (cfg.status === 'held') throw new Error(`provider "${provider}" is on hold and not routable yet`);
-  return { taskClass: `direct:${provider}/${model}`, provider, model, skills, mcp, editsCode: false, dispatchable: true, readOnly: false, autoAssess: false, scratchCwd: false };
+  return { taskClass: `direct:${provider}/${model}`, provider, model, skills, mcp, editsCode: false, dispatchable: true, readOnly: false, autoAssess: false };
 }

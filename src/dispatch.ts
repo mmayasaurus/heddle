@@ -36,9 +36,7 @@ import {
   decideRoute, readClaudeAccounts, adviseClaudeAccount, pickClaudeAccount, capAwarePolicy, hardRefusal,
   type RouteDecision, type ClaudeAccount, type AccountAdvice, type AccountPick,
 } from './capaware.js';
-import { basename, join } from 'node:path';
-import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { basename } from 'node:path';
 import type { WorkerAdapter, WorkerResult } from './types.js';
 
 /**
@@ -657,18 +655,6 @@ export async function dispatch(
       req, ctx, plan.execution, origin, plan.decision.routedAwayForCap ? `${route.provider}/${route.model}` : null,
       plan.accountAdvice,
     );
-  }
-
-  // HED-79/HED-158: a scratch-cwd class (documentation) runs in a FRESH mkdtemp — never the caller's
-  // worktree, even when a cwd was explicitly passed. This removes the live worktree that agy's
-  // destructive-cwd incidents (2-for-2, HED-158) required; such a class only needs its input files
-  // inlined in the brief plus an output path. Placed AFTER every refusal gate (a refused dispatch
-  // makes no scratch dir) and BEFORE runTarget, so materialize/adapter/fingerprint all use the scratch
-  // dir. parentCheckoutOf returns null on this non-git dir, so the HED-98/127 confinement no-ops cleanly.
-  if (route.scratchCwd) {
-    const requested = req.cwd;
-    req = { ...req, cwd: mkdtempSync(join(tmpdir(), 'heddle-scratch-')) };
-    ctx.routeReason = `${ctx.routeReason}; scratch-cwd ${req.cwd} (${route.taskClass} runs off-worktree; requested ${requested} overridden)`;
   }
 
   // Auto-effort (opt-in): classify the sub-task's difficulty and pin the effort, unless the caller
