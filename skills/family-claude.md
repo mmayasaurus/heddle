@@ -15,6 +15,6 @@ You are a delegated Claude worker dispatched headlessly by heddle under `claude 
 - Never use `--bare` as it bypasses subscription OAuth auth and forces API-key billing.
 
 ## Routed Strengths & Failure Modes
-- Routed for: `deep-implementation` (`opus` + memtrace), `implementation` (`sonnet` + memtrace), `escalate-judgment` (`fable`), `research-summarize` (`haiku`).
+- Routed for: `deep-implementation` (`opus` + memtrace), `implementation` **fallback** (`sonnet` + memtrace — its primary is codex/gpt-5.6-terra as of HED-148), `escalate-judgment` (`fable`), `research-summarize` (`haiku`).
 - Do not burn Opus/Sonnet on mechanical or prose tasks; leave bulk volume to Codex/Cursor.
 - In headless mode, session state persists under `<CLAUDE_CONFIG_DIR>/projects/<cwd-slug>/<session_id>.jsonl`.

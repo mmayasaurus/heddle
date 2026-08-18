@@ -71,20 +71,20 @@ describe('dispatch — class + explicit route, and in-session refusal', () => {
     const fake = fakeAdapter();
     const ledger = tempLedger();
     const outcome = await dispatch(
-      { taskClass: 'implementation', prompt: 'x', cwd: tempDir(), orchestrator: 'U', issue: 'HED-1', inSession: true },
+      { taskClass: 'deep-implementation', prompt: 'x', cwd: tempDir(), orchestrator: 'U', issue: 'HED-1', inSession: true },
       ledger, () => fake.adapter,
     );
     expect(outcome.ok).toBe(false);
     expect(outcome.execution).toBe('in-session-subagent');
     expect(outcome.refusal?.code).toBe('claude-in-session');
-    expect(outcome.refusal?.reason).toContain('implementation');
-    expect(outcome.refusal?.reason).toContain('claude/sonnet');
-    for (const text of ['Agent tool', 'sonnet', 'worker-role', 'code-discovery', 'quality-gate', 'memtrace', 'gpt-5.6-terra']) expect(outcome.refusal?.instruction).toContain(text);
+    expect(outcome.refusal?.reason).toContain('deep-implementation');
+    expect(outcome.refusal?.reason).toContain('claude/opus');
+    for (const text of ['Agent tool', 'opus', 'worker-role', 'code-discovery', 'quality-gate', 'memtrace', 'gpt-5.6-sol']) expect(outcome.refusal?.instruction).toContain(text);
     // family-claude included: an in-session refusal names the packs a REAL dispatch to that
     // provider would materialize, so the orchestrator hands its subagent the same set (PR #34).
     expect(outcome.skills).toEqual(['worker-role', 'worker-hygiene', 'code-discovery', 'quality-gate', 'family-claude']);
     expect(fake.calls).toHaveLength(0);
-    expect(ledger.recent(1)[0]).toMatchObject({ refusal: 'claude-in-session', ok: 0, task_class: 'implementation', provider: 'claude', model: 'sonnet', orchestrator: 'U', issue: 'HED-1', skills: 'worker-role,worker-hygiene,code-discovery,quality-gate,family-claude' });
+    expect(ledger.recent(1)[0]).toMatchObject({ refusal: 'claude-in-session', ok: 0, task_class: 'deep-implementation', provider: 'claude', model: 'opus', orchestrator: 'U', issue: 'HED-1', skills: 'worker-role,worker-hygiene,code-discovery,quality-gate,family-claude' });
     expect(ledger.recent(1)[0].finished_at).not.toBeNull();
     expect(ledger.inFlight()).toEqual([]);
   });

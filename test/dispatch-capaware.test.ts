@@ -39,10 +39,10 @@ describe('dispatch cap-aware decisions', () => {
     const accounts = [{ id: 'acct1', configDir: null }, { id: 'acct2', configDir: '/x/.claude-acct2' }]; const claude = fresh('claude', 70); claude.accounts = [
       { id: 'acct1', fiveHour: { usedPercentage: 70, resetsAt: null }, sevenDay: { usedPercentage: null, resetsAt: null }, windows: {}, noteCodes: [], limitReached: false, stale: false }, { id: 'acct2', fiveHour: { usedPercentage: 20, resetsAt: null }, sevenDay: { usedPercentage: null, resetsAt: null }, windows: {}, noteCodes: [], limitReached: false, stale: false },
     ];
-    const ledger = tempLedger(); const refused = await dispatch({ taskClass: 'implementation', prompt: 'x', cwd: tempDir(), identity: unbound, inSession: true, caps: { claude }, accounts }, ledger, () => fakeAdapter().adapter);
+    const ledger = tempLedger(); const refused = await dispatch({ taskClass: 'deep-implementation', prompt: 'x', cwd: tempDir(), identity: unbound, inSession: true, caps: { claude }, accounts }, ledger, () => fakeAdapter().adapter);
     expect(refused).toMatchObject({ refusal: { code: 'claude-in-session' }, account: 'acct2' }); expect(refused.refusal?.instruction).toContain('acct2 has the most 5h headroom'); expect(ledger.recent(1)[0].account).toBe('acct1');
-    const fake = fakeAdapter(); claude.fiveHour.usedPercentage = 95; const away = await dispatch({ taskClass: 'implementation', prompt: 'x', cwd: tempDir(), identity: unbound, caps: { claude, ...caps({ codex: 5 }) }, accounts }, ledger, () => fake.adapter);
-    expect(away).toMatchObject({ usedFallback: true }); expect(fake.calls[0].opts.model).toBe('gpt-5.6-terra'); expect(away.routeReason).toContain('cap:route-away claude 5h 95%'); expect(ledger.recent(1)[0]).toMatchObject({ task_class: 'implementation', fell_back_from: 'claude/sonnet' });
+    const fake = fakeAdapter(); claude.fiveHour.usedPercentage = 95; const away = await dispatch({ taskClass: 'deep-implementation', prompt: 'x', cwd: tempDir(), identity: unbound, caps: { claude, ...caps({ codex: 5 }) }, accounts }, ledger, () => fake.adapter);
+    expect(away).toMatchObject({ usedFallback: true }); expect(fake.calls[0].opts.model).toBe('gpt-5.6-sol'); expect(away.routeReason).toContain('cap:route-away claude 5h 95%'); expect(ledger.recent(1)[0]).toMatchObject({ task_class: 'deep-implementation', fell_back_from: 'claude/opus' });
   });
 
   it('keeps planning side-effect free while returning the cap-aware target and trace', () => {

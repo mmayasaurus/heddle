@@ -601,7 +601,7 @@ export async function dispatch(
   const overrideGate = overrideReasonGate(req);
   if (overrideGate) {
     return refusalOutcome(ctx, req, overrideGate.taskClass, overrideGate.target,
-      withMandatoryPacks(req.skills ?? []), overrideGate.refusal(listTaskClasses(table)));
+      withMandatoryPacks(req.skills ?? []), overrideGate.refusal(table));
   }
 
   // Resume affinity (HED-78): a claude session is persisted under ONE config dir — resuming it on a
@@ -666,6 +666,21 @@ export async function dispatch(
       req = { ...req, effort: await classifyEffort(route.taskClass, req.prompt, req.cwd, ctx.ledger) };
     } catch (err) {
       process.stderr.write(`heddle: auto-effort classification failed (${err instanceof Error ? err.message : String(err)}) — using the route default\n`);
+    }
+  }
+
+  // HED-148 part B: monoculture advisory. Fires HERE — after every plan-level refusal gate above
+  // (notDispatchable, same-provider, cap-aware/metered, in-session) has passed — so a direct dispatch
+  // that will be REFUSED never gets a spurious nudge (gitar). Still pre-run, so it reflects the agent's
+  // ESTABLISHED prior-8h direct pattern, not the dispatch being committed right now; the boundary case
+  // where THIS dispatch is itself the threshold-crosser is caught by the next one. Advisory only — a
+  // ledger query failure must never break the dispatch, so it is caught like the auto-effort classifier.
+  if (!req.taskClass && req.provider && req.model && ctx.attribution.orchestrator) {
+    try {
+      const note = monocultureNote(ledger, ctx.attribution.orchestrator);
+      if (note) process.stderr.write(`heddle: ${formatMonocultureWarning(note)}\n`);
+    } catch (err) {
+      process.stderr.write(`heddle: monoculture check failed (${err instanceof Error ? err.message : String(err)}) — skipping\n`);
     }
   }
 
@@ -761,28 +776,147 @@ export async function dispatch(
  * Returns null when the request is fine: it carries a task class, or it is a direct route WITH a
  * stated reason.
  */
+const NON_REASON_STOPLIST = new Set([
+  'habit', 'proven', 'faster', 'fast', 'worked before', 'works', 'it works', 'default', 'usual',
+  'preference', 'prefer', 'same as before', 'as usual', 'familiar',
+]);
+
+function overrideReasonCore(reason: string, provider: string, model: string): string {
+  // Word-tokenize on any non-alphanumeric run. This drops punctuation ENTIRELY, so a stoplisted
+  // cliché with trailing/embedded punctuation ("worked before.", "terra: worked before.") still
+  // normalizes to the bare cliché instead of sneaking past the exact-match set (qodo/codeant/gitar/
+  // codex). It also means NO dynamic RegExp built from caller-controlled provider/model, sidestepping
+  // the ReDoS surface codacy flagged. Identity words (provider + the model's segments, length >= 2 so
+  // a bare version digit like "5" never strips a real digit out of the reason) are removed first.
+  const identity = new Set(
+    [provider, ...model.split(/[^a-z0-9]+/i)]
+      .map((t) => t.trim().toLowerCase())
+      .filter((t) => t.length >= 2),
+  );
+  return reason
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((w) => w && !identity.has(w))
+    .join(' ');
+}
+
+/** True when a direct-route override reason is only its identity or a non-justification cliché. */
+export function isNonReason(reason: string, provider: string, model: string): boolean {
+  const core = overrideReasonCore(reason, provider, model);
+  return !core || NON_REASON_STOPLIST.has(core) || core.replace(/\s/g, '').length < 8;
+}
+
 export function overrideReasonGate(
   req: Pick<DispatchRequest, 'taskClass' | 'provider' | 'model' | 'skills' | 'mcp' | 'overrideReason'>,
-): { taskClass: string; target: RouteTarget; refusal: (classes: string[]) => DispatchRefusal } | null {
-  if (req.taskClass || !req.provider || !req.model || req.overrideReason?.trim()) return null;
+): { taskClass: string; target: RouteTarget; refusal: (table: RoutingTable) => DispatchRefusal } | null {
+  if (req.taskClass || !req.provider || !req.model) return null;
+  const { provider, model } = req;
+  const reason = req.overrideReason?.trim() ?? '';
+  if (reason && !isNonReason(reason, provider, model)) return null;
   // The same task_class shape directRoute() produces, so bypass rows sort with every other direct
   // row instead of needing a special case in the retune query (PR #32, copilot).
-  const taskClass = `direct:${req.provider}/${req.model}`;
-  const target = { taskClass, provider: req.provider, model: req.model, skills: req.skills, mcp: req.mcp } as unknown as RouteTarget;
+  const taskClass = `direct:${provider}/${model}`;
+  const target = { taskClass, provider, model, skills: req.skills, mcp: req.mcp } as unknown as RouteTarget;
   return {
     taskClass,
     target,
-    refusal: (classes: string[]) => ({
-      code: 'override-reason-required' as const,
-      reason: `a direct provider+model dispatch (${req.provider}/${req.model}) must say why it bypasses the routing table`,
-      // Field names differ per surface — name all three rather than assuming an MCP caller.
-      instruction: `Pass a task class instead (${classes.join(', ')}) — the table carries the policy: ` +
-        `default skills/MCP, opt-in gates, fallbacks and cap-aware routing. If bypassing IS the intent ` +
-        `(a bench, a probe, a judgment call), say why and it runs: override_reason (MCP), ` +
-        `--override-reason (CLI), overrideReason (JS API). The reason is recorded on the ledger row so ` +
-        `routing can be tuned from evidence.`,
-    }),
+    refusal: (table: RoutingTable) => {
+      // Only suggest a class the caller could actually dispatch BY NAME: a non-dispatchable class
+      // (orchestration) or an opt-in-gated one (second-opinion-hard/kimi) would ITSELF be refused,
+      // so naming it as "the alternative" just moves the refusal one hop (grok, HED-148 review).
+      // resolveRoute is wrapped: the table is only minimally validated at load, so a single malformed
+      // or excluded class must not crash the refusal itself while it scans for a match (qodo).
+      const suggestable = listTaskClasses(table)
+        .map((taskClass) => {
+          try { return { taskClass, route: resolveRoute(table, taskClass) }; }
+          catch (err) {
+            // Don't crash the refusal on one malformed class (qodo), but don't hide WHY it failed
+            // either (corgea) — log the diagnostic and skip only that class as a suggestion.
+            process.stderr.write(`heddle: routing class '${taskClass}' failed to resolve while composing an override-reason refusal (${err instanceof Error ? err.message : String(err)}) — skipping it\n`);
+            return null;
+          }
+        })
+        .filter((x): x is { taskClass: string; route: ReturnType<typeof resolveRoute> } =>
+          x !== null && x.route.dispatchable !== false && !x.route.requiresExplicitOptIn);
+      const matches = suggestable
+        .map(({ taskClass, route }) => {
+          if (route.provider === provider && route.model === model) return { taskClass, kind: 'primary' as const };
+          const fallback = route.fallback;
+          if (fallback && fallback.provider === provider && fallback.model === model) return { taskClass, kind: 'fallback' as const };
+          return null;
+        })
+        .filter((match): match is { taskClass: string; kind: 'primary' | 'fallback' } => match !== null)
+        .sort((a, b) => (a.kind === b.kind ? 0 : a.kind === 'primary' ? -1 : 1));
+      const routeInstruction = matches.length
+        ? matches.map(({ taskClass, kind }) =>
+          `${provider}/${model} IS the ${kind} route of task class \`${taskClass}\` — dispatch by that class instead of naming the model.`,
+        ).join(' ')
+        : `Pass a task class instead (${suggestable.map((s) => s.taskClass).join(', ')}) — the table carries the policy: default skills/MCP, opt-in gates, fallbacks and cap-aware routing.`;
+      const core = overrideReasonCore(reason, provider, model);
+      const reasonMessage = !reason
+        ? `a direct provider+model dispatch (${provider}/${model}) has no override reason and must say why it bypasses the routing table`
+        : `a direct provider+model dispatch (${provider}/${model}) gave an override reason that reduces to '${core}' — that names the route or is a cliché, not a reason; say what about THIS task needs ${provider}/${model}`;
+      return {
+        code: 'override-reason-required' as const,
+        reason: reasonMessage,
+        // Field names differ per surface — name all three rather than assuming an MCP caller.
+        instruction: `${routeInstruction} If bypassing IS the intent ` +
+          `(a bench, a probe, a judgment call), say why and it runs: override_reason (MCP), ` +
+          `--override-reason (CLI), overrideReason (JS API). The reason is recorded on the ledger row so ` +
+          `routing can be tuned from evidence.`,
+      };
+    },
   };
+}
+
+// ---- HED-148 part B: monoculture warning (advisory, never a refusal) --------------------------
+// A direct dispatch that just cleared the override-reason gate is deliberate — but if one agent's
+// recent hand-picking is lopsided toward a single provider, that's worth a nudge: a task class exists
+// precisely to spread that load, and a human reading a wall of "codex, codex, codex" direct rows has
+// no signal an alternative was available. Warn only — never blocks, never writes the ledger.
+const MONOCULTURE_WINDOW_MS = 8 * 60 * 60 * 1000;
+const MONOCULTURE_FLOOR = 5;
+const MONOCULTURE_SHARE_THRESHOLD = 0.6;
+
+export interface MonocultureNote {
+  /** The direct-dispatch provider whose share tripped the guard. */
+  provider: string;
+  /** Total qualifying (non-refused) direct dispatches in the window. */
+  directCount: number;
+  /** `provider`'s share of `directCount`, as a percentage (0-100). */
+  directPct: number;
+  /** Direct-route provider counts in the window — the metric that triggers this note. */
+  directMix: Record<string, number>;
+  /** Class-routed provider counts in the same window — context only, never part of the trigger. */
+  classRoutedMix: Record<string, number>;
+}
+
+/**
+ * Non-blocking signal that one agent's recent DIRECT (hand-picked provider+model) dispatches lean
+ * heavily toward one provider. Class-routed dispatches never count toward the trigger — task-class
+ * routing IS the diversification lever, and counting it here would penalize using it.
+ */
+export function monocultureNote(ledger: Ledger, agent: string, opts?: { now?: Date }): MonocultureNote | null {
+  const now = opts?.now ?? new Date();
+  const sinceIso = new Date(now.getTime() - MONOCULTURE_WINDOW_MS).toISOString();
+  const { directMix, classRoutedMix } = ledger.directAndClassMix(agent, sinceIso);
+  const directCount = Object.values(directMix).reduce((sum, n) => sum + n, 0);
+  if (directCount < MONOCULTURE_FLOOR) return null;
+  const [provider, count] = Object.entries(directMix).sort(([, a], [, b]) => b - a)[0];
+  const share = count / directCount;
+  if (share <= MONOCULTURE_SHARE_THRESHOLD) return null;
+  return { provider, directCount, directPct: share * 100, directMix, classRoutedMix };
+}
+
+/** Pure formatter — one stderr line, both mixes so the reader sees the whole picture, not just the trip. */
+export function formatMonocultureWarning(note: MonocultureNote): string {
+  const fmtMix = (mix: Record<string, number>): string => {
+    const parts = Object.entries(mix).sort(([, a], [, b]) => b - a).map(([provider, n]) => `${n} ${provider}`);
+    return parts.length ? parts.join(', ') : 'none';
+  };
+  return `monoculture-warning: direct dispatches are ${Math.round(note.directPct)}% ${note.provider} over 8h ` +
+    `(direct: ${fmtMix(note.directMix)}; class-routed: ${fmtMix(note.classRoutedMix)}) — ` +
+    `task classes spread this load across providers; dispatch by class where one fits`;
 }
 
 /** Everything a dispatch decides BEFORE any ledger row or worker: route, policy, caps, accounts. */
@@ -962,7 +1096,7 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
   }
   // The dry run must mirror what dispatch() would do — including refusing a bare direct route.
   const gate = overrideReasonGate(req);
-  const overrideReasonRequired = gate ? gate.refusal(listTaskClasses(table)).reason : undefined;
+  const overrideReasonRequired = gate ? gate.refusal(table).reason : undefined;
   return { route, target, fallback, origin, execution, decision, skillsForRefusal, account, accountAdvice, accountPick, notDispatchable, reviewerPick, sameProviderReview, overrideReasonRequired };
 }
 

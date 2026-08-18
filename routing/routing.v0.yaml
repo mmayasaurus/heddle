@@ -135,11 +135,11 @@ task_classes:
     skills: [worker-role, code-discovery, quality-gate]
     edits_code: true
   implementation:           # well-scoped feature work with clear spec
-    provider: claude
-    model: sonnet
+    provider: codex
+    model: gpt-5.6-terra
     mcp: [memtrace]
-    fallback: {provider: codex, model: gpt-5.6-terra}
-    why: well-scoped feature with a clear spec — Sonnet is the default coding workhorse, Terra the Codex equivalent; do not spend Opus here
+    fallback: {provider: claude, model: sonnet}
+    why: well-scoped feature with a clear spec — Terra (Codex) is the default coding workhorse; Sonnet is the Claude-family fallback. Do not spend Opus here. (Primary flipped Claude→Codex 2026-08-17, HED-148, per Maya's move-load-off-Claude directive; effort left at the codex default that authored well here as the prior fallback.)
     skills: [worker-role, code-discovery, quality-gate]
     edits_code: true
   second-opinion:           # independent diagnosis/review of a diff or plan (diversity valuable)

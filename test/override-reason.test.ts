@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { dispatch } from '../src/dispatch.js';
+import { dispatch, isNonReason, planDispatch } from '../src/dispatch.js';
 import { Ledger, applyLedgerMigrations } from '../src/ledger.js';
 import { useTempResources, fakeAdapter, IDENTITIES } from './helpers.js';
 
@@ -14,10 +14,42 @@ describe('dispatch — direct override reasons', () => {
     const outcome = await dispatch({ provider: 'codex', model: 'gpt-5.6-terra', prompt: 'x', cwd: tempDir(), identity: unbound }, ledger, () => fake.adapter);
 
     expect(outcome.refusal?.code).toBe('override-reason-required');
+    expect(outcome.refusal?.instruction).toContain('codex/gpt-5.6-terra IS the primary route of task class `implementation`');
     expect(outcome.refusal?.instruction).toContain('implementation');
-    expect(outcome.refusal?.instruction).toContain('bulk-mechanical');
     expect(fake.calls).toHaveLength(0);
     expect(ledger.recent(1)).toEqual([expect.objectContaining({ refusal: 'override-reason-required', task_class: 'direct:codex/gpt-5.6-terra' })]);
+  });
+
+  describe('regression PR#148 — junk direct override reasons', () => {
+    it.each([
+      'habit', 'proven', 'faster', 'fast', 'worked before', 'works', 'it works', 'default',
+      'usual', 'preference', 'prefer', 'same as before', 'as usual', 'familiar',
+      'terra proven', 'gpt-5.6-terra', 'x',
+      // punctuation must NOT let a cliché slip past the exact-match set (qodo/codex/gitar/codeant):
+      'worked before.', 'same as before!', 'terra: worked before.', 'proven!!!', '!!!!!!!!',
+    ])('rejects %j after stripping the direct route identity', (reason) => {
+      expect(isNonReason(reason, 'codex', 'gpt-5.6-terra')).toBe(true);
+    });
+
+    it.each([
+      'proven for numbered specs',
+      'terra is the only lineage that handled the recursive YAML edge last time',
+      "proven approach won't parse",
+    ])('accepts a specific justification: %j', (reason) => {
+      expect(isNonReason(reason, 'codex', 'gpt-5.6-terra')).toBe(false);
+    });
+
+    it('refuses a junk reason and makes dispatch and plan_dispatch agree on the reason', async () => {
+      const ledger = tempLedger(); const fake = fakeAdapter();
+      const request = { provider: 'codex', model: 'gpt-5.6-terra', prompt: 'x', cwd: tempDir(), identity: unbound, overrideReason: 'terra proven' };
+      const outcome = await dispatch(request, ledger, () => fake.adapter);
+      const plan = planDispatch(request);
+
+      expect(outcome.refusal).toMatchObject({ code: 'override-reason-required' });
+      expect(plan.overrideReasonRequired).toBe(outcome.refusal?.reason);
+      expect(plan.overrideReasonRequired).toContain("reduces to 'proven'");
+      expect(fake.calls).toHaveLength(0);
+    });
   });
 
   it('treats a whitespace-only direct override reason as missing and refuses before calling the adapter', async () => {

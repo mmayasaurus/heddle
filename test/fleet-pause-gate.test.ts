@@ -150,7 +150,7 @@ describe('fleet pause admission gate', () => {
     const fake = fakeAdapter(undefined, { readAgents: false });
     const request = {
       provider: 'codex', model: 'gpt-5.6-terra', prompt: 'x', cwd: tempDir(),
-      overrideReason: 'bench', identity: IDENTITIES.unbound,
+      overrideReason: 'bench paused admission path', identity: IDENTITIES.unbound,
     };
 
     process.env.HEDDLE_COMMS_DB = dbPath;
