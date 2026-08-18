@@ -115,7 +115,7 @@ describe('formatMonocultureWarning', () => {
     expect(formatMonocultureWarning(note)).toBe(
       'monoculture-warning: direct dispatches are 100% codex over 8h ' +
       '(direct: 5 codex; class-routed: 3 cursor, 2 gemini) — ' +
-      'this route has a task class; dispatch by class to spread load',
+      'task classes spread this load across providers; dispatch by class where one fits',
     );
   });
 
@@ -129,7 +129,7 @@ describe('formatMonocultureWarning', () => {
     expect(formatMonocultureWarning(note)).toBe(
       'monoculture-warning: direct dispatches are 63% codex over 8h ' +
       '(direct: 5 codex, 2 cursor, 1 gemini; class-routed: none) — ' +
-      'this route has a task class; dispatch by class to spread load',
+      'task classes spread this load across providers; dispatch by class where one fits',
     );
   });
 });

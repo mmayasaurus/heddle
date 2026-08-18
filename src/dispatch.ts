@@ -604,18 +604,6 @@ export async function dispatch(
       withMandatoryPacks(req.skills ?? []), overrideGate.refusal(table));
   }
 
-  // HED-148 part B: the gate above just admitted a DIRECT dispatch (same condition it uses: no task
-  // class, provider+model named). Advisory only — a ledger query failure here must never break the
-  // dispatch it is merely commenting on, so it is caught and noted like the auto-effort classifier below.
-  if (!req.taskClass && req.provider && req.model && ctx.attribution.orchestrator) {
-    try {
-      const note = monocultureNote(ledger, ctx.attribution.orchestrator);
-      if (note) process.stderr.write(`heddle: ${formatMonocultureWarning(note)}\n`);
-    } catch (err) {
-      process.stderr.write(`heddle: monoculture check failed (${err instanceof Error ? err.message : String(err)}) — skipping\n`);
-    }
-  }
-
   // Resume affinity (HED-78): a claude session is persisted under ONE config dir — resuming it on a
   // freshly-picked account would not find the session. Pin the pick to the account the session last
   // ran under (explicit accountPin still wins; unknown session ids keep the normal pick).
@@ -678,6 +666,21 @@ export async function dispatch(
       req = { ...req, effort: await classifyEffort(route.taskClass, req.prompt, req.cwd, ctx.ledger) };
     } catch (err) {
       process.stderr.write(`heddle: auto-effort classification failed (${err instanceof Error ? err.message : String(err)}) — using the route default\n`);
+    }
+  }
+
+  // HED-148 part B: monoculture advisory. Fires HERE — after every plan-level refusal gate above
+  // (notDispatchable, same-provider, cap-aware/metered, in-session) has passed — so a direct dispatch
+  // that will be REFUSED never gets a spurious nudge (gitar). Still pre-run, so it reflects the agent's
+  // ESTABLISHED prior-8h direct pattern, not the dispatch being committed right now; the boundary case
+  // where THIS dispatch is itself the threshold-crosser is caught by the next one. Advisory only — a
+  // ledger query failure must never break the dispatch, so it is caught like the auto-effort classifier.
+  if (!req.taskClass && req.provider && req.model && ctx.attribution.orchestrator) {
+    try {
+      const note = monocultureNote(ledger, ctx.attribution.orchestrator);
+      if (note) process.stderr.write(`heddle: ${formatMonocultureWarning(note)}\n`);
+    } catch (err) {
+      process.stderr.write(`heddle: monoculture check failed (${err instanceof Error ? err.message : String(err)}) — skipping\n`);
     }
   }
 
@@ -779,15 +782,22 @@ const NON_REASON_STOPLIST = new Set([
 ]);
 
 function overrideReasonCore(reason: string, provider: string, model: string): string {
-  const tokens = [provider, model, ...model.split(/[-/]/)]
-    .map((token) => token.trim().toLowerCase())
-    .filter(Boolean);
-  let core = reason.trim().toLowerCase();
-  for (const token of new Set(tokens)) {
-    const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    core = core.replace(new RegExp(`(?<![a-z0-9])${escaped}(?![a-z0-9])`, 'g'), ' ');
-  }
-  return core.replace(/\s+/g, ' ').trim();
+  // Word-tokenize on any non-alphanumeric run. This drops punctuation ENTIRELY, so a stoplisted
+  // cliché with trailing/embedded punctuation ("worked before.", "terra: worked before.") still
+  // normalizes to the bare cliché instead of sneaking past the exact-match set (qodo/codeant/gitar/
+  // codex). It also means NO dynamic RegExp built from caller-controlled provider/model, sidestepping
+  // the ReDoS surface codacy flagged. Identity words (provider + the model's segments, length >= 2 so
+  // a bare version digit like "5" never strips a real digit out of the reason) are removed first.
+  const identity = new Set(
+    [provider, ...model.split(/[^a-z0-9]+/i)]
+      .map((t) => t.trim().toLowerCase())
+      .filter((t) => t.length >= 2),
+  );
+  return reason
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((w) => w && !identity.has(w))
+    .join(' ');
 }
 
 /** True when a direct-route override reason is only its identity or a non-justification cliché. */
@@ -814,9 +824,12 @@ export function overrideReasonGate(
       // Only suggest a class the caller could actually dispatch BY NAME: a non-dispatchable class
       // (orchestration) or an opt-in-gated one (second-opinion-hard/kimi) would ITSELF be refused,
       // so naming it as "the alternative" just moves the refusal one hop (grok, HED-148 review).
+      // resolveRoute is wrapped: the table is only minimally validated at load, so a single malformed
+      // or excluded class must not crash the refusal itself while it scans for a match (qodo).
       const suggestable = listTaskClasses(table)
-        .map((taskClass) => ({ taskClass, route: resolveRoute(table, taskClass) }))
-        .filter(({ route }) => route.dispatchable !== false && !route.requiresExplicitOptIn);
+        .map((taskClass) => { try { return { taskClass, route: resolveRoute(table, taskClass) }; } catch { return null; } })
+        .filter((x): x is { taskClass: string; route: ReturnType<typeof resolveRoute> } =>
+          x !== null && x.route.dispatchable !== false && !x.route.requiresExplicitOptIn);
       const matches = suggestable
         .map(({ taskClass, route }) => {
           if (route.provider === provider && route.model === model) return { taskClass, kind: 'primary' as const };
@@ -828,12 +841,13 @@ export function overrideReasonGate(
         .sort((a, b) => (a.kind === b.kind ? 0 : a.kind === 'primary' ? -1 : 1));
       const routeInstruction = matches.length
         ? matches.map(({ taskClass, kind }) =>
-          `${provider}/${model} IS the ${kind} route of task class \`${taskClass}\` — dispatch by class (task_class: ${taskClass}) instead of naming the model.`,
+          `${provider}/${model} IS the ${kind} route of task class \`${taskClass}\` — dispatch by that class instead of naming the model.`,
         ).join(' ')
         : `Pass a task class instead (${suggestable.map((s) => s.taskClass).join(', ')}) — the table carries the policy: default skills/MCP, opt-in gates, fallbacks and cap-aware routing.`;
+      const core = overrideReasonCore(reason, provider, model);
       const reasonMessage = !reason
         ? `a direct provider+model dispatch (${provider}/${model}) has no override reason and must say why it bypasses the routing table`
-        : `a direct provider+model dispatch (${provider}/${model}) has an override reason that is not a justification (\`${overrideReasonCore(reason, provider, model)}\`) — that's not a reason ('${overrideReasonCore(reason, provider, model)}')`;
+        : `a direct provider+model dispatch (${provider}/${model}) gave an override reason that reduces to '${core}' — that names the route or is a cliché, not a reason; say what about THIS task needs ${provider}/${model}`;
       return {
         code: 'override-reason-required' as const,
         reason: reasonMessage,
@@ -894,7 +908,7 @@ export function formatMonocultureWarning(note: MonocultureNote): string {
   };
   return `monoculture-warning: direct dispatches are ${Math.round(note.directPct)}% ${note.provider} over 8h ` +
     `(direct: ${fmtMix(note.directMix)}; class-routed: ${fmtMix(note.classRoutedMix)}) — ` +
-    `this route has a task class; dispatch by class to spread load`;
+    `task classes spread this load across providers; dispatch by class where one fits`;
 }
 
 /** Everything a dispatch decides BEFORE any ledger row or worker: route, policy, caps, accounts. */

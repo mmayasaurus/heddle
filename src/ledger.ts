@@ -745,13 +745,16 @@ export class Ledger {
   /**
    * HED-148: direct-vs-class-routed provider mix for one orchestrator since `sinceIso`, counting only
    * dispatches that actually ran (`refusal IS NULL`) — a refused direct dispatch never ran, so
-   * counting it would inflate the very share the monoculture guard warns about. `provider` is read
-   * straight off the column rather than parsed out of `task_class`, since every row already carries it.
+   * counting it would inflate the very share the monoculture guard warns about. Classifier rows
+   * (`execution_mode='classification'`, from auto-effort / auto-assess) are excluded the same way every
+   * other worker aggregate excludes them — they are bookkeeping, not worker dispatches, and would
+   * otherwise pollute the class-routed mix (copilot/codex). `provider` is read straight off the column
+   * rather than parsed out of `task_class`, since every row already carries it.
    */
   directAndClassMix(agent: string, sinceIso: string): { directMix: Record<string, number>; classRoutedMix: Record<string, number> } {
     const select = (cmp: 'LIKE' | 'NOT LIKE') => this.db.prepare(`
       SELECT provider, COUNT(*) AS n FROM dispatches
-      WHERE orchestrator = ? AND started_at >= ? AND refusal IS NULL AND task_class ${cmp} 'direct:%'
+      WHERE orchestrator = ? AND started_at >= ? AND refusal IS NULL AND ${CLASSIFICATION_EXCLUDED} AND task_class ${cmp} 'direct:%'
       GROUP BY provider
     `).all(agent, sinceIso) as { provider: string; n: number }[];
     const toMix = (rows: { provider: string; n: number }[]) =>

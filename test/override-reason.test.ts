@@ -25,6 +25,8 @@ describe('dispatch — direct override reasons', () => {
       'habit', 'proven', 'faster', 'fast', 'worked before', 'works', 'it works', 'default',
       'usual', 'preference', 'prefer', 'same as before', 'as usual', 'familiar',
       'terra proven', 'gpt-5.6-terra', 'x',
+      // punctuation must NOT let a cliché slip past the exact-match set (qodo/codex/gitar/codeant):
+      'worked before.', 'same as before!', 'terra: worked before.', 'proven!!!', '!!!!!!!!',
     ])('rejects %j after stripping the direct route identity', (reason) => {
       expect(isNonReason(reason, 'codex', 'gpt-5.6-terra')).toBe(true);
     });
@@ -45,7 +47,7 @@ describe('dispatch — direct override reasons', () => {
 
       expect(outcome.refusal).toMatchObject({ code: 'override-reason-required' });
       expect(plan.overrideReasonRequired).toBe(outcome.refusal?.reason);
-      expect(plan.overrideReasonRequired).toContain("that's not a reason ('proven')");
+      expect(plan.overrideReasonRequired).toContain("reduces to 'proven'");
       expect(fake.calls).toHaveLength(0);
     });
   });
