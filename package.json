@@ -2,7 +2,7 @@
   "name": "heddle",
   "version": "0.0.1",
   "private": true,
-  "description": "Cross-provider agent orchestration for subscription coding CLIs — routing, skill packs, inter-agent comms, and a visibility dashboard.",
+  "description": "Cross-provider agent orchestration for subscription coding CLIs \u2014 routing, skill packs, inter-agent comms, and a visibility dashboard.",
   "type": "module",
   "engines": {
     "node": ">=22.12.0"
@@ -27,6 +27,7 @@
     "heddle": "dist/cli.js",
     "heddle-mcp": "dist/mcp-server.js",
     "heddle-comms": "dist/comms/channel-server.js",
-    "heddle-hook-dispatch-guidance": "dist/hook-dispatch-guidance.js"
+    "heddle-hook-dispatch-guidance": "dist/hook-dispatch-guidance.js",
+    "heddle-rotator": "dist/rotate/rotator-bin.js"
   }
 }
