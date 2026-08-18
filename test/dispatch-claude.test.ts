@@ -56,10 +56,10 @@ describe('dispatch — headless Claude workers', () => {
     }
   });
 
-  it('passes Claude MCP through a temporary config file and composes the implementation skill packs', async () => {
+  it('passes Claude MCP through a temporary config file and composes the deep-implementation skill packs', async () => {
     const fake = fakeAdapter(undefined, { readAgents: false }); let mcpDuringCall: unknown;
     const adapter = { ...fake.adapter, dispatch: async (prompt: string, opts: Parameters<typeof fake.adapter.dispatch>[1]) => { expect(opts.mcpConfigPath).toBeDefined(); expect(existsSync(opts.mcpConfigPath!)).toBe(true); mcpDuringCall = JSON.parse(readFileSync(opts.mcpConfigPath!, 'utf8')); return fake.adapter.dispatch(prompt, opts); } };
-    const outcome = await dispatch({ taskClass: 'implementation', prompt: 'x', cwd: tempDir(), identity: unbound, accounts, caps: { claude: claudeCaps([{ id: 'acct1', used: 1 }, { id: 'acct2', used: 2 }]) } }, tempLedger(), () => adapter);
+    const outcome = await dispatch({ taskClass: 'deep-implementation', prompt: 'x', cwd: tempDir(), identity: unbound, accounts, caps: { claude: claudeCaps([{ id: 'acct1', used: 1 }, { id: 'acct2', used: 2 }]) } }, tempLedger(), () => adapter);
     expect(mcpDuringCall).toEqual({ mcpServers: { memtrace: { command: 'memtrace', args: ['mcp'] } } }); expect(existsSync(fake.calls[0].opts.mcpConfigPath!)).toBe(false);
     expect(fake.calls[0].opts.systemPromptAppend).toContain('### code-discovery'); expect(fake.calls[0].opts.systemPromptAppend).toContain('### quality-gate'); expect(outcome.ok).toBe(true);
   });

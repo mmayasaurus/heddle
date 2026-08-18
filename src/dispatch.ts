@@ -811,9 +811,14 @@ export function overrideReasonGate(
     taskClass,
     target,
     refusal: (table: RoutingTable) => {
-      const matches = listTaskClasses(table)
-        .map((taskClass) => {
-          const route = resolveRoute(table, taskClass);
+      // Only suggest a class the caller could actually dispatch BY NAME: a non-dispatchable class
+      // (orchestration) or an opt-in-gated one (second-opinion-hard/kimi) would ITSELF be refused,
+      // so naming it as "the alternative" just moves the refusal one hop (grok, HED-148 review).
+      const suggestable = listTaskClasses(table)
+        .map((taskClass) => ({ taskClass, route: resolveRoute(table, taskClass) }))
+        .filter(({ route }) => route.dispatchable !== false && !route.requiresExplicitOptIn);
+      const matches = suggestable
+        .map(({ taskClass, route }) => {
           if (route.provider === provider && route.model === model) return { taskClass, kind: 'primary' as const };
           const fallback = route.fallback;
           if (fallback && fallback.provider === provider && fallback.model === model) return { taskClass, kind: 'fallback' as const };
@@ -825,7 +830,7 @@ export function overrideReasonGate(
         ? matches.map(({ taskClass, kind }) =>
           `${provider}/${model} IS the ${kind} route of task class \`${taskClass}\` — dispatch by class (task_class: ${taskClass}) instead of naming the model.`,
         ).join(' ')
-        : `Pass a task class instead (${listTaskClasses(table).join(', ')}) — the table carries the policy: default skills/MCP, opt-in gates, fallbacks and cap-aware routing.`;
+        : `Pass a task class instead (${suggestable.map((s) => s.taskClass).join(', ')}) — the table carries the policy: default skills/MCP, opt-in gates, fallbacks and cap-aware routing.`;
       const reasonMessage = !reason
         ? `a direct provider+model dispatch (${provider}/${model}) has no override reason and must say why it bypasses the routing table`
         : `a direct provider+model dispatch (${provider}/${model}) has an override reason that is not a justification (\`${overrideReasonCore(reason, provider, model)}\`) — that's not a reason ('${overrideReasonCore(reason, provider, model)}')`;
