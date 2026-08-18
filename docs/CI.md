@@ -9,7 +9,7 @@ installs) are tracked in Linear **HED-13**.
 
 | Workflow | Trigger | Jobs | Posture |
 |---|---|---|---|
-| `gate.yml` | push `main`, **PRs to any base** (stacked PRs included) incl. base retargets, manual | **`gate`** — `npm ci` → `npm run typecheck` (src + test) → `npm test` (vitest) → `npm run build` → smoke the built CLI (`classes`/`packs --json` must be non-empty arrays) | the **required** merge check (job name `gate` is the ruleset's context string — don't rename) |
+| `gate.yml` | push `main`, **PRs to any base** (stacked PRs included) incl. base retargets + title/body edits, manual | **`build`** (`npm ci` → `npm run typecheck` src+test → `npm test` vitest → `npm run build` → smoke the built CLI, `classes`/`packs --json` non-empty) → **`gate`** aggregates it and records a `gate-verdict` marker; a title/body edit makes `gate` **echo** that marker instead of rebuilding | the **required** merge check (job name `gate` is the ruleset's context string — don't rename); edit-safe via the verdict echo (HED-142 — see below) |
 | `deterministic-review.yml` | PRs (incl. drafts for gitleaks; base-branch retargets), push `main` | **semgrep** (`p/typescript` + `p/nodejs`, diff-aware vs the PR base, full on `main`, SARIF → code scanning) · **gitleaks** (official CLI over exactly `base.sha..head.sha`). gitleaks' shell lives in `.github/scripts/gitleaks-range-scan.sh` (HED-113) so the fixture matrix can exercise it directly. | semgrep report-only · gitleaks red on a hit (not required) |
 | `actions-hygiene.yml` | PRs / `main` pushes touching `.github/**` | **actionlint** · **zizmor** (SARIF → code scanning) | actionlint red on findings · zizmor report (same-repo) / red (forks) |
 | `.github/dependabot.yml` | weekly | grouped bumps of the hash-pinned actions, 7-day cooldown | — |
@@ -48,9 +48,82 @@ exists because an unconfigured DeepSource opened ~118 non-defect threads on one 
 - **Least privilege.** Workflow-level `permissions: {}`, per-job grants with a comment on each,
   `persist-credentials: false` on every checkout, no PR-controlled string expanded into a `run:`.
 - **Fork PRs get scanned too**; only the SARIF-upload steps (write token) are same-repo-guarded.
-- `pull_request: edited` is handled *only* for base-branch retargets (the baseline/range moves);
-  title/body edits are skipped by the job guards and get their own concurrency group so they never
-  cancel an in-flight scan.
+- `pull_request: edited` in **`deterministic-review.yml`** is handled *only* for base-branch retargets
+  (the baseline/range moves); title/body edits are skipped by the job guards and get their own
+  concurrency group so they never cancel an in-flight scan. The required **`gate`** check handles edits
+  differently — it *echoes* the last real verdict rather than skipping (skipping would mask a red); see
+  the verdict echo below.
+
+## GitHub required-status-check semantics — observed (HED-142)
+
+GitHub resolves a required status check from the newest check-run of the required name on the head
+commit. Every row below is an observed `mergeable_state` from a real PR in the sandbox
+`mmayasaurus/heddle-gate-sandbox` (a throwaway repo whose ruleset required exactly one check named
+`gate`, `strict:false`) — not doc-inference. Legend: `blocked` = a required check is unsatisfied
+(cannot merge), `unstable` = mergeable but a non-required check is failing/pending, `clean` =
+mergeable and all green.
+
+| # | Scenario | Latest `gate` check-runs (oldest→newest) | `mergeable_state` | What it proves |
+|---|---|---|---|---|
+| 1 | baseline; commit run then bot-edit churn | success, cancelled, success, success | `unstable` | Latest `gate` success ⇒ mergeable. A mid-sequence CANCELLED run did not stick because a later same-SHA success superseded it (a later same-SHA run supersedes for resolution). Unstable only because non-required bot checks were pending. |
+| 2 | gate job `if:false` on every run | skipped, skipped, skipped | `unstable` | A required check that is only ever `skipped` is treated as satisfied ⇒ skip does not block. |
+| 3 | red commit, then a later `skipped` run (masking test) | failure, failure, cancelled, failure, skipped | `clean` | A `skipped` run SUPERSEDES prior failures ⇒ skip MASKS a real red. Unsafe. |
+| 4 | dynamic job name — `gate` on commit, `gate-edit` on a body edit | `gate`=success, then `gate-edit`=success (×N) | `blocked` | The latest check-suite produced `gate-edit`, not `gate`, so the required `gate` context reads unsatisfied ⇒ BLOCKED, even though an earlier suite delivered `gate` green. |
+| 5 | verdict-echo — green commit, then a title/body edit storm | `gate`=success (commit), then `gate`=success (×N echo runs) | `clean` | Every edit run publishes the STATIC `gate` context (never `gate-edit`), so the latest suite always satisfies the requirement ⇒ stays mergeable through edits. Solves row 4. |
+| 6 | verdict-echo anti-mask — red commit, then an edit that REMOVES the failing marker from the title | `gate`=failure (commit) + a `gate-verdict`=failure marker, then `gate`=failure (×N echo, incl. after the title no longer signals failure) | `blocked` | The echo re-emits the SHA-bound `gate-verdict` rather than recomputing from the current title, so a red STAYS red across edits ⇒ does NOT mask (the exact hole row 3's skip left open). |
+
+These force three constraints on any edit-safe gate: every run must publish the static required context
+`gate` [row 4 — omitting it blocks]; an edit run must never publish a passing or `skipped` `gate` that
+misrepresents a real red [row 3 — skip masks]; and an edit run's `gate` must not be turned red by
+cancellation (a cancelled required check reds the PR until a later run supersedes — dashboard#41). The
+verdict echo below is the shape that satisfies all three, validated by rows 5–6.
+
+## The gate survives PR edits: the verdict echo (HED-142)
+
+Reviewer bots edit PR bodies constantly, and each edit fires a `pull_request: edited` check-suite. The
+matrix above rules out the two shortcuts — skipping an edit run **masks** a red (row 3); renaming the
+edit run's job **blocks** the PR because the latest suite no longer carries `gate` (row 4). So every
+run, commit or edit, must publish a `gate` conclusion equal to the real verdict for the head commit.
+`gate.yml` does that with a **verdict echo**:
+
+- **Commit / retarget / push** runs do the real work — the leaf jobs (`build` in core; `web` + `rust` +
+  `rust-test` in the dashboard), each guarded to commit-events with an `if:`. The `gate` job takes their
+  aggregate conclusion, records it as a **non-required `gate-verdict` marker check-run on the head SHA**,
+  and exits with it. `gate` is the real verdict.
+- **Title/body-edit** runs skip the leaf jobs (no cold rebuild) and the `gate` job **echoes**: it reads
+  the head SHA's latest `gate-verdict` and exits with exactly that conclusion. An edit can only *repeat*
+  the verdict the commit already earned — green stays green, red stays red — so it never masks (row 6)
+  and always publishes the static `gate` context (row 5).
+
+Two mechanisms keep it honest:
+
+- **Discriminator `github.event.changes.base.ref.from`** — populated on a base **retarget** (which must
+  re-run the real gate against the new base), empty/absent on a title/body edit (which echoes). GitHub
+  coerces the absent value so `!= ''` is *false* for a plain edit; verified in the sandbox, and both
+  `gate.yml`s derive `IS_EDIT` from the same expression.
+- **Two concurrency slots.** Commit-driven events share a `run` slot with `cancel-in-progress: true` (a
+  newer commit supersedes the stale run). Title/body edits use an `edit` slot with
+  `cancel-in-progress: false` — echoes are ~5 s and are never cancelled, so a cancelled edit run can
+  never red the required context (the failure measured on dashboard#41).
+
+The `gate-verdict` marker is deliberately **not** required — requiring it would recreate the row-4 block
+(it exists only on commit runs). Do not add it to the ruleset.
+
+Residuals, by design:
+
+- **Marker race.** An edit that fires before the commit run has published its marker finds none; the
+  echo polls ~150 s, then **fails closed** (red, never green) with a self-describing error naming the
+  SHA and the remedy (“re-run the `gate` workflow, or push a commit”), and heals automatically once the
+  commit run's own `gate` supersedes it. On the dashboard the rust build can outlast the poll, so a
+  fresh commit + immediate edit can show a transient red *during the build* — harmless, since a PR is
+  not mergeable mid-build anyway.
+- **Reopen.** `reopened` is a commit-path event, so it re-runs the real gate and refreshes the marker
+  for the (unchanged) head SHA; verdicts are SHA-bound, so reopen carries no stale-verdict hazard —
+  which is also why close/reopen reliably forces a fresh verdict after a runner-side outage.
+- **Fork PRs.** On a fork-head PR `GITHUB_TOKEN` is read-only regardless of `permissions:`, so the
+  marker POST 403s. The commit path still reports the real verdict (the POST is best-effort and only
+  warns); only later *edit* runs on a fork degrade — and they **fail closed, never mask**. The fleet
+  uses same-repo branches, where the marker always publishes.
 
 ## The review sweep (before anything is called clean)
 
