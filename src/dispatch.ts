@@ -827,7 +827,15 @@ export function overrideReasonGate(
       // resolveRoute is wrapped: the table is only minimally validated at load, so a single malformed
       // or excluded class must not crash the refusal itself while it scans for a match (qodo).
       const suggestable = listTaskClasses(table)
-        .map((taskClass) => { try { return { taskClass, route: resolveRoute(table, taskClass) }; } catch { return null; } })
+        .map((taskClass) => {
+          try { return { taskClass, route: resolveRoute(table, taskClass) }; }
+          catch (err) {
+            // Don't crash the refusal on one malformed class (qodo), but don't hide WHY it failed
+            // either (corgea) — log the diagnostic and skip only that class as a suggestion.
+            process.stderr.write(`heddle: routing class '${taskClass}' failed to resolve while composing an override-reason refusal (${err instanceof Error ? err.message : String(err)}) — skipping it\n`);
+            return null;
+          }
+        })
         .filter((x): x is { taskClass: string; route: ReturnType<typeof resolveRoute> } =>
           x !== null && x.route.dispatchable !== false && !x.route.requiresExplicitOptIn);
       const matches = suggestable
