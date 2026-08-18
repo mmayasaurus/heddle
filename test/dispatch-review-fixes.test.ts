@@ -22,9 +22,9 @@ describe('dispatch — review fixes', () => {
 
   it('words in-session refusals according to how the route originated', async () => {
     const classOutcome = await dispatch(
-      { taskClass: 'implementation', prompt: 'x', cwd: tempDir(), inSession: true }, tempLedger(), () => fakeAdapter().adapter,
+      { taskClass: 'deep-implementation', prompt: 'x', cwd: tempDir(), inSession: true }, tempLedger(), () => fakeAdapter().adapter,
     );
-    expect(classOutcome.refusal?.reason).toMatch(/^task class "implementation" routes to claude\/sonnet, which/);
+    expect(classOutcome.refusal?.reason).toMatch(/^task class "deep-implementation" routes to claude\/opus, which/);
 
     const explicitOutcome = await dispatch(
       { taskClass: 'bulk-mechanical', provider: 'claude', model: 'haiku', prompt: 'x', cwd: tempDir(), inSession: true },
@@ -41,12 +41,12 @@ describe('dispatch — review fixes', () => {
 
   it('honors an MCP override in the in-session instruction', async () => {
     const noMcp = await dispatch(
-      { taskClass: 'implementation', prompt: 'x', cwd: tempDir(), mcp: [], inSession: true }, tempLedger(), () => fakeAdapter().adapter,
+      { taskClass: 'deep-implementation', prompt: 'x', cwd: tempDir(), mcp: [], inSession: true }, tempLedger(), () => fakeAdapter().adapter,
     );
     expect(noMcp.refusal?.instruction).not.toContain('memtrace');
 
     const overridden = await dispatch(
-      { taskClass: 'implementation', prompt: 'x', cwd: tempDir(), mcp: ['serena'], inSession: true }, tempLedger(), () => fakeAdapter().adapter,
+      { taskClass: 'deep-implementation', prompt: 'x', cwd: tempDir(), mcp: ['serena'], inSession: true }, tempLedger(), () => fakeAdapter().adapter,
     );
     expect(overridden.refusal?.instruction).toContain('MCP [serena]');
     expect(overridden.refusal?.instruction).not.toContain('memtrace');

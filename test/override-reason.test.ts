@@ -14,7 +14,7 @@ describe('dispatch — direct override reasons', () => {
     const outcome = await dispatch({ provider: 'codex', model: 'gpt-5.6-terra', prompt: 'x', cwd: tempDir(), identity: unbound }, ledger, () => fake.adapter);
 
     expect(outcome.refusal?.code).toBe('override-reason-required');
-    expect(outcome.refusal?.instruction).toContain('codex/gpt-5.6-terra IS the fallback route of task class `implementation`');
+    expect(outcome.refusal?.instruction).toContain('codex/gpt-5.6-terra IS the primary route of task class `implementation`');
     expect(outcome.refusal?.instruction).toContain('implementation');
     expect(fake.calls).toHaveLength(0);
     expect(ledger.recent(1)).toEqual([expect.objectContaining({ refusal: 'override-reason-required', task_class: 'direct:codex/gpt-5.6-terra' })]);

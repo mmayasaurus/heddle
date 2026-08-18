@@ -17,7 +17,7 @@ bots — do not dispatch workers there.
 |---|---|---|---|
 | `orchestration` | claude **fable** | — | Decompose, integrate, judge, land. In-session; shares the orchestrator prompt cache. Do not dispatch this class to a subprocess. |
 | `deep-implementation` | claude **opus** + memtrace | codex **gpt-5.6-sol** | Gnarly features, cross-cutting refactors, subtle bugs. Opus: strongest coding judgment + native skills/MCP. Sol: independent family if Opus is spent or you want a second coding lineage. |
-| `implementation` | claude **sonnet** + memtrace | codex **gpt-5.6-terra** | Well-scoped feature with a clear spec. Sonnet is the default coding workhorse; Terra is the Codex equivalent. Do not spend Opus here. |
+| `implementation` | codex **gpt-5.6-terra** + memtrace | claude **sonnet** | Well-scoped feature with a clear spec. Terra (Codex) is the default coding workhorse; Sonnet is the Claude-family fallback. Do not spend Opus here. (Primary flipped Claude→Codex 2026-08-17, HED-148 — move default load off the shared Claude 5h pool.) |
 | `scaffold` | cursor **composer-2.5** | codex **gpt-5.6-luna** | Fast structural drafts (files, stubs, wiring). Composer is Cursor-native, cache-warm, ~1.8s on a trivial prompt — coding-tuned, not a reasoner. |
 | `bulk-mechanical` | codex **gpt-5.6-luna** `effort=low` | cursor **composer-2.5-fast** | Renames, sweeps, codemods, boilerplate, test scaffolds. Luna+low is cheap volume. Fallback `-fast` bills ~2× on Cursor — prefer Luna. |
 | `second-opinion` | cursor **grok-4.6-high** | gemini **3.1-pro-high** | Independent diagnosis/review of a diff or plan. Diversity of *family* is the point. Grok sits on the Cursor-Models pool (does not starve PR review). |
@@ -97,7 +97,7 @@ get a temporary `AGENTS.md` block (restored after dispatch).
 4. **Direct sub beats Cursor middleman.** Claude/GPT/Gemini have their own
    CLIs; routing them via Cursor is both policy-illegal and the wrong pool.
 5. **Match spend to difficulty.** Haiku/Luna/Flash/Composer for cheap work;
-   Sonnet/Terra for scoped features; Opus/Sol for hard; Kimi only when asked.
+   Terra/Sonnet for scoped features; Opus/Sol for hard; Kimi only when asked.
    Latency snapshots: Composer ~1.8s · Grok-4.5-low ~2.8s · Flash-low ~3s ·
    3.7-flash-low ~5.6s · Kimi-high ~74s.
 
@@ -194,8 +194,8 @@ and records why it chose what it chose (`route_reason` in the ledger).
   declares a fallback whose own window is under it → the fallback runs, ledgered
   with `fell_back_from` + `route_reason: cap:route-away …`. Both over → the
   primary runs (soft cap, `cap:both-over`). No fallback → primary (`cap:over`).
-  Applies to Claude-primary classes too: `implementation` at Claude 5h ≥ 90 %
-  runs its declared `codex/gpt-5.6-terra` fallback as a subprocess instead of a
+  Applies to Claude-primary classes too: `deep-implementation` at Claude 5h ≥ 90 %
+  runs its declared `codex/gpt-5.6-sol` fallback as a subprocess instead of a
   headless claude worker (below the threshold you get the claude worker on the
   best account; with `in_session: true`, the structured refusal + advice).
 - **Cursor pools** (Maya-corrected model, W's fields): `included-total` gates
@@ -362,7 +362,7 @@ choosing a worker instead:
   `adversarial-review` class (HED-3, below) runs on "any provider except the
   author's". `provider` and `model` must be given together (a lone half is
   rejected).
-- **Claude-primary classes** (implementation, deep-implementation,
+- **Claude-primary classes** (deep-implementation,
   research-summarize) run as **headless `claude -p` workers by default**
   (HED-78, `execution: headless`) on the best registry account. Passing
   `in_session: true` opts into the HED-18 protocol instead: a structured
@@ -461,6 +461,9 @@ Follow-up data (Agent V, ledger #48–55, later the same day):
   section skeleton it was accurate (2/3 overall; the miss was the fabricated roadmap above).
 - **`second-opinion` (grok) is strong on security-boundary design when the design is pasted in and
   no memtrace is attached** — 10 ranked findings, 3 critical, all actionable (411 s).
-- **The `implementation` task class is unusable via the CLI today** — its claude primary throws
-  before the fallback runs (U's HED-18 refusal change covers it); use a direct provider/model.
+- **`implementation` is usable via the CLI** (was: "unusable — its claude primary throws before the
+  fallback runs"). The class fallback runs now — verified 2026-08-17: HED-148 dispatches ran on sonnet
+  directly AND fell back to codex/gpt-5.6-terra when Claude was capped. As of HED-148 the class routes
+  **codex-primary (gpt-5.6-terra), claude/sonnet fallback** (flip to move default load off the shared
+  Claude 5h pool) — see the class table above.
 

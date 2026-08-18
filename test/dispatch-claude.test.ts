@@ -147,7 +147,7 @@ describe('dispatch — headless Claude workers', () => {
 
   it('hands the attached MCP server names to the claude adapter so the allowlist can include them', async () => {
     const fake = fakeAdapter(undefined, { readAgents: false });
-    await dispatch({ taskClass: 'implementation', prompt: 'x', cwd: tempDir(), identity: unbound, accounts, caps: { claude: claudeCaps([{ id: 'acct1', used: 1 }]) } }, tempLedger(), () => fake.adapter);
+    await dispatch({ taskClass: 'deep-implementation', prompt: 'x', cwd: tempDir(), identity: unbound, accounts, caps: { claude: claudeCaps([{ id: 'acct1', used: 1 }]) } }, tempLedger(), () => fake.adapter);
     expect(fake.calls[0].opts.mcpServers).toEqual(['memtrace']);
   });
 
