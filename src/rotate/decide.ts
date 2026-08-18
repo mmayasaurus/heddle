@@ -46,16 +46,18 @@ export function decideRotation(
   env: NodeJS.ProcessEnv,
   thresholds: RotateThresholds = DEFAULT_THRESHOLDS,
 ): RotateAction {
-  const cur = currentClaudeAccount(accounts, env);
-  const currentId = cur?.id ?? null;
   // A provider snapshot that is stale/absent at the PROVIDER level is unusable regardless of the
   // per-row flags — mirrors adviseClaudeAccount. Never rotate (or declare idle) on it.
   const capsUsable = caps !== undefined && !caps.stale && caps.source !== 'none';
-  const usedRow = cur && capsUsable ? caps.accounts.find((r) => r.id === cur.id) : undefined;
+  // The FLEET's active account, from the tap (authoritative), NOT the rotator's own CLAUDE_CONFIG_DIR
+  // — the rotator is a standalone process whose env account is unrelated to the fleet's. Fall back to
+  // the env-derived account only when the tap does not name one.
+  const currentId = (capsUsable && caps.activeAccount) ? caps.activeAccount : (currentClaudeAccount(accounts, env)?.id ?? null);
+  const usedRow = currentId && capsUsable ? caps.accounts.find((r) => r.id === currentId) : undefined;
   const usedPct = usedRow && !usedRow.stale ? usedRow.fiveHour.usedPercentage : null;
 
   if (currentId === null) {
-    return { action: 'unknown', current: null, usedPct: null, reason: 'current account not resolvable from CLAUDE_CONFIG_DIR / registry' };
+    return { action: 'unknown', current: null, usedPct: null, reason: 'current account not resolvable from the tap activeAccount or CLAUDE_CONFIG_DIR / registry' };
   }
   if (usedPct === null) {
     // A stale or absent 5h reading is NOT zero — rotating (or declaring idle) on unknown data is

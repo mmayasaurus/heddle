@@ -132,6 +132,16 @@ describe('decideRotation', () => {
     expect(d.reason).toMatch(/best alternative acct2/);
   });
 
+
+  it('reads the CURRENT account from the tap activeAccount, not the rotator process env', () => {
+    // The rotator process env points at acct1's dir, but the tap says the FLEET is active on acct3.
+    const c = { ...caps([acctCaps('acct1', 20), acctCaps('acct3', 95), acctCaps('acct2', 10)]), activeAccount: 'acct3' };
+    const d = decideRotation(c, accounts, { CLAUDE_CONFIG_DIR: '/h/.claude-acct1' });
+    // Decision is about acct3 (the fleet's account, 95%), not acct1 (the rotator's env, 20%).
+    expect(d.current).toBe('acct3');
+    expect(d.action).toBe('rotate');
+  });
+
   it('honours custom thresholds', () => {
     const strict = { softPct: 50, hardPct: 60 };
     expect(decideRotation(caps([acctCaps('acct1', 55)]), accounts, envOn(accounts[0]!), strict).action).toBe('watch');
