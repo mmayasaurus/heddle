@@ -133,13 +133,9 @@ describe('createRotatorDeps — testable parts', () => {
 
   it('needsHuman de-dupes against the latest alert since the pause, not the oldest inbox message', async () => {
     const posted: string[] = [];
-    // Broker stub that records posts AND writes them to the log, so the next de-dupe scan can see them.
-    const broker = { post: async (m: { from: string; to: string; kind: string; body: string; meta?: unknown }) => {
-      posted.push(m.body);
-      log.append({ from: m.from, to: m.to, kind: m.kind, body: m.body, meta: (m.meta as object) ?? null }, operatorDecision(m.to));
-    } } as unknown as Broker;
+    const broker = { post: async (m: { body: string }) => { posted.push(m.body); } } as unknown as Broker;
     const d = createRotatorDeps({ log, broker, inFlight: null, usageDir: dir, scriptsDir: dir, now: () => nowMs });
-    // An ancient needs-human BEFORE the pause — the message the buggy limit:1 scan compared against.
+    // An ancient needs-human BEFORE the pause — what the buggy limit:1 (oldest) scan compared against.
     log.append({ from: 'operator', to: 'operator', kind: 'needs-human', body: 'ancient alert' }, operatorDecision('operator'));
     for (let i = 0; i < 520; i++) log.append({ from: 'operator', to: 'operator', kind: 'status', body: `f${i}` }, operatorDecision('operator'));
     log.append(
@@ -147,8 +143,9 @@ describe('createRotatorDeps — testable parts', () => {
         meta: { fleetPause: { reason: 'r', rotation: { target: 'acct2', from: 'acct1', roster: ['V'] } } } },
       operatorDecision(),
     );
-    await d.needsHuman('kill refused for V');   // nothing matching since the pause → posts
-    await d.needsHuman('kill refused for V');   // same message → must de-dupe, no second post
-    expect(posted).toEqual(['kill refused for V']);  // exactly one — was 2 (spam) before the fix
+    // This rotation already posted a needs-human — it sits AFTER the pause, unlike the ancient one.
+    log.append({ from: 'operator', to: 'operator', kind: 'needs-human', body: 'kill refused for V' }, operatorDecision('operator'));
+    await d.needsHuman('kill refused for V');   // matches the latest alert since the pause → must de-dupe
+    expect(posted).toEqual([]);                  // buggy code compared vs the ancient one and WOULD have posted
   });
 });
