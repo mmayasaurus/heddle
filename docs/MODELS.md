@@ -428,6 +428,43 @@ orchestrator on every harness and is behaviorally testable.
 - Surfaces: `override_reason` on `dispatch_worker` (MCP), `--override-reason` on
   the CLI.
 
+## Routing retune (HED-79, 2026-08-18 — ledger-driven)
+
+Refreshed from the live ledger (147 rows). **Post-directive (≥ 2026-08-17 22:32Z, after the
+msg-92 dispatch-by-class directive) the fleet mix is BALANCED — claude 13 / codex 9 / cursor 5 /
+gemini 2.** The 74%→62% codex *lifetime* figure is pre-directive HABIT, not model merit (HED-95's
+class-vs-bypass distinction only exists from ~08-17 22:30Z, so weight post-directive rows for any
+quality-per-provider read). Merit signal: codex/terra `implementation` ≈171s vs claude/sonnet ≈790s
+— the economics behind the HED-148 flip. Sonnet stays a fully-credible fallback (the flip was
+economics, not a demotion; sonnet was 3-for-3 on the drawer rounds post-directive).
+
+**Applied:**
+- `scaffold` / `second-opinion` / `quick-alt-take` — class-doc clarifications (self-contained brief,
+  deliberate-choice cost, cheap-variant guidance).
+- **scratch-cwd** (change 5, HED-158): `documentation` now carries `scratch_cwd: true` — its
+  gemini-flash worker runs in a fresh `mkdtemp`, never a live worktree. A class that only needs input
+  files + an output path never needs the worktree the escape/reset incidents required; this is the
+  structural fix that makes agy-for-docs safe rather than lucky (agy is 2-for-2 destructive-cwd).
+
+**Considered and REJECTED** (the evidence standard the retune was meant to carry):
+- *Swap `scaffold`'s fallback to grok-medium for overflow* — REJECTED. codex/luna is the
+  CAPABILITY-FIT escape hatch (only codex enforces net/exec caps); the full-suite gate proved it via
+  `test/dispatch-caps.test.ts`. The generous Cursor-Models pool rarely needs cap-overflow anyway.
+- *A provider-freshness TIEBREAK in `decideRoute()`* — REJECTED. A walk of every primary→fallback
+  pair shows each encodes a deliberate asymmetry a freshness override would violate (preciousness,
+  quality, cost, capability, diversity) — **zero pairs benefit**. Deeper reason (R, verbatim): *"a
+  runtime freshness override that moves work off an under-threshold primary makes the ROUTER ITSELF a
+  table-bypass — same disease, one layer down."* HED-148 made the table the policy; nothing bypasses
+  it silently, the router included. `route_away_at_pct` is already the prefer-fresher-UNDER-PRESSURE
+  knob; the real remaining gap is WEEKLY-window pressure — HED-106 lever 3 (extend `bindingFor` to the
+  fableWeekly books once W's data populates), an extension of the existing mechanism, not a competitor.
+- *A new `mechanical-edit` class* — DROPPED as redundant with `bulk-mechanical` + `scaffold`.
+- *Move `research-summarize` to gemini-pro* — KEPT on haiku; `gemini-analysis` already owns the
+  pro/long-context lane, and haiku is the ~1.6s near-free cheap-triage tier.
+- *A `gemini-overflow-implementation` class* (agy running Sonnet-class on the idle pool) — DEFERRED;
+  it routes cwd-writing work to agy, which HED-158 keeps OUT of cwd-writing classes until it earns
+  re-entry via a clean read-only track record.
+
 ## Known routing pitfalls (2026-08-15)
 
 Learned from Agent V's HED-4/5 dispatches (ledger #35–41); policy until the linked tickets
