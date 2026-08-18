@@ -742,6 +742,23 @@ export class Ledger {
     return (sinceIso ? stmt.all(sinceIso) : stmt.all()) as Record<string, unknown>[];
   }
 
+  /**
+   * HED-148: direct-vs-class-routed provider mix for one orchestrator since `sinceIso`, counting only
+   * dispatches that actually ran (`refusal IS NULL`) — a refused direct dispatch never ran, so
+   * counting it would inflate the very share the monoculture guard warns about. `provider` is read
+   * straight off the column rather than parsed out of `task_class`, since every row already carries it.
+   */
+  directAndClassMix(agent: string, sinceIso: string): { directMix: Record<string, number>; classRoutedMix: Record<string, number> } {
+    const select = (cmp: 'LIKE' | 'NOT LIKE') => this.db.prepare(`
+      SELECT provider, COUNT(*) AS n FROM dispatches
+      WHERE orchestrator = ? AND started_at >= ? AND refusal IS NULL AND task_class ${cmp} 'direct:%'
+      GROUP BY provider
+    `).all(agent, sinceIso) as { provider: string; n: number }[];
+    const toMix = (rows: { provider: string; n: number }[]) =>
+      Object.fromEntries(rows.map((r) => [r.provider, Number(r.n)]));
+    return { directMix: toMix(select('LIKE')), classRoutedMix: toMix(select('NOT LIKE')) };
+  }
+
   /** One dispatch row by id, or null. Read-only lookup — the comms broker verifies lineage with it. */
   get(id: number): Record<string, unknown> | null {
     const row = this.db.prepare('SELECT * FROM dispatches WHERE id = ?').get(id);
