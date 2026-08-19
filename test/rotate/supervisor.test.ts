@@ -256,41 +256,4 @@ describe('rotator supervisor tick', () => {
     expect(w.needsHumanMsgs).toEqual([]);
   });
 
-  it('a late joiner (live but NOT in the roster) is excluded from kill/relaunch, and the original roster still completes', async () => {
-    w.pauseId = 1;
-    w.intent = { target: 'acct2', from: 'acct1', roster: ['R', 'S', 'V'] };
-    w.ready = true;
-    w.live = ['R', 'S', 'V', 'W'];   // W registered a live session AFTER the pause started
-    const step = await tick(deps(w));
-    expect(step.phase).toBe('relaunching');
-    expect(w.killed.sort()).toEqual(['R', 'S', 'V']);                          // W is NOT killed
-    expect(w.relaunched.map((r) => r.address).sort()).toEqual(['R', 'S', 'V']); // W is NOT relaunched
-    expect(w.needsHumanMsgs).toHaveLength(1);
-    expect(w.needsHumanMsgs[0]).toBe(
-      'rotation 1: W joined during the pause and was NOT rotated — it remains on the acct1 account; it rotates next cycle.',
-    );
-  });
-
-  it('multiple late joiners are named together in ONE combined warning, never one call per address', async () => {
-    w.pauseId = 1;
-    w.intent = { target: 'acct2', from: 'acct1', roster: ['R', 'S', 'V'] };
-    w.ready = true;
-    w.live = ['R', 'S', 'V', 'X', 'W']; // two late joiners: W and X
-    const step = await tick(deps(w));
-    expect(step.phase).toBe('relaunching');
-    expect(w.needsHumanMsgs).toHaveLength(1);            // one call, not one per joiner (dedup-friendly)
-    expect(w.needsHumanMsgs[0]).toContain('W, X');        // sorted, combined into one list
-    expect(w.needsHumanMsgs[0]).toMatch(/were NOT rotated/);
-    expect(w.needsHumanMsgs[0]).toMatch(/they remain on the acct1 account/);
-  });
-
-  it('a live address that IS in the roster never triggers the joiner warning', async () => {
-    w.pauseId = 1;
-    w.intent = { target: 'acct2', from: 'acct1', roster: ['R', 'S', 'V'] };
-    w.ready = true;
-    w.live = ['R', 'S', 'V']; // exact roster, no extras
-    const step = await tick(deps(w));
-    expect(step.phase).toBe('relaunching');
-    expect(w.needsHumanMsgs).toEqual([]);
-  });
 });

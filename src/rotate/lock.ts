@@ -44,33 +44,33 @@ export function acquireLock(
   // the rotator's first run).
   mkdirSync(dirname(lockPath), { recursive: true });
   // Claim it ATOMICALLY (O_EXCL via flag 'wx'): a check-then-write would let two rotators cold-starting
-  // inside the read->write window both see "free" and both win. On EEXIST we inspect the holder — a LIVE
-  // pid refuses; a STALE one (dead: crashed without reaching cleanup) is cleared and the exclusive
-  // create retried once.
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      writeFileSync(lockPath, String(pid), { flag: 'wx' });
-      return { ok: true };
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
-      const existing = readLockPid(lockPath);
-      if (existing !== null && isAlive(existing)) return { ok: false, heldBy: existing };
-      // Stale (dead pid) or an unreadable/garbage lock — clear it and retry the exclusive create.
-      releaseLock(lockPath);
-    }
+  // inside the read->write window both see "free" and both win. This fresh-acquire path is race-free,
+  // and it is the REALISTIC guard: a LIVE daemon refusing a later manual --once goes through it.
+  try {
+    writeFileSync(lockPath, String(pid), { flag: 'wx' });
+    return { ok: true };
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
   }
-  // Lost a stale-takeover race: another acquirer created a lock between our clear and retry. Refuse
-  // rather than clobber a lock we no longer own.
-  const winner = readLockPid(lockPath);
-  return winner !== null ? { ok: false, heldBy: winner } : { ok: false };
+  const existing = readLockPid(lockPath);
+  if (existing !== null && isAlive(existing)) return { ok: false, heldBy: existing };
+  // Stale (dead pid) or unreadable — take it over by OVERWRITING with our pid. KNOWN LIMITATION: the
+  // stale-takeover is NOT race-free — two rotators cold-starting against the SAME stale lock can both
+  // overwrite and both proceed. A fully race-free takeover needs OS advisory locks (flock), which the
+  // zero-native-dep rule forbids; an unlink-then-recreate is WORSE (one contender's unlink can delete
+  // the other's freshly-created live lock). The window is doubly narrow — it needs a prior crash that
+  // left a stale lock AND two near-simultaneous acquirers. Documented; a stronger scheme is a follow-up.
+  writeFileSync(lockPath, String(pid), 'utf8');
+  return { ok: true };
 }
 
-/** Release the lock. Idempotent — a missing file (already released, or never acquired) is not an error. */
+/** Release the lock. Idempotent — a missing file (already released, or never acquired) is not an error;
+ *  any OTHER unlink failure (e.g. a permission problem) is real and rethrown rather than silently hidden. */
 export function releaseLock(lockPath: string): void {
   try {
     unlinkSync(lockPath);
-  } catch {
-    /* already gone */
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') throw err;
   }
 }
 

@@ -176,23 +176,12 @@ export async function tick(deps: RotatorDeps): Promise<RotatorStep> {
 
   const live = deps.liveAddresses();
 
-  // A live address absent from the captured roster joined the fleet DURING the pause (HED-157). v1
-  // DECISION: exclude it from this rotation rather than kill/relaunch it — the roster is the pause's
-  // contract, and mutating it mid-flight risks racing the very kill/relaunch loop below. Warn instead,
-  // once per tick for ALL such joiners together (never one call per address: the adapter's needsHuman
-  // dedup compares only against the LAST posted message, so alternating per-address bodies across
-  // ticks would defeat it and spam the operator for the rotation's whole duration).
-  const joiners = live.filter((a) => !intent.roster.includes(a)).sort();
-  if (joiners.length > 0) {
-    const list = joiners.join(', ');
-    const grammar = joiners.length === 1
-      ? { verb: 'was', pronoun: 'it', remain: 'remains', rotate: 'rotates' }
-      : { verb: 'were', pronoun: 'they', remain: 'remain', rotate: 'rotate' };
-    await deps.needsHuman(
-      `rotation ${readiness.pauseId}: ${list} joined during the pause and ${grammar.verb} NOT rotated — `
-      + `${grammar.pronoun} ${grammar.remain} on the ${intent.from} account; ${grammar.pronoun} ${grammar.rotate} next cycle.`,
-    );
-  }
+  // NOTE: handling a session that JOINS the fleet DURING the pause (a live address absent from the
+  // captured roster) was attempted here (HED-157) and REVERTED — a warn-only exclusion cannot let the
+  // rotation proceed: pauseReadiness() counts every live session, so an un-acked joiner would wedge the
+  // quiesce gate below forever; and heartbeat-based liveness cannot distinguish a genuine joiner from a
+  // returning stale session. The correct fix (reconcile the joiner with readiness, or a roster-scoped
+  // readiness) is deferred to a follow-up. Until then the fleet-wide quiesce gate carries joiners.
 
   // A roster member still needs (kill+)relaunch until it carries a DURABLE relaunch marker. This is
   // the source of truth, not the live set: a member killed-but-not-relaunched by a mid-rotation
