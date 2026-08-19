@@ -15,13 +15,20 @@ import type { DispatchOptions, WorkerAdapter, WorkerResult, TokenUsage } from '.
  *    detects upstream silent-Flash-fallback #710) and a final
  *    {event:"result", result:{status, response, conversation_id, usage{input_tokens,
  *    output_tokens, thinking_tokens, cache_read_tokens, total_tokens}}}.
- *  - Resume: `--conversation <id>`. Effort is baked into model slugs (…-low/-medium/-high).
+ *  - Resume: `--conversation <id>`. Effort is the model-slug SUFFIX (…-low/-medium/-high) and the
+ *    catalog is entirely suffixed. `--effort` is MUTUALLY EXCLUSIVE with a suffixed slug — passing
+ *    both hard-errors ("invalid model selection … conflicts with --effort"), so this adapter sends
+ *    `--effort` ONLY for an unsuffixed model id. Verified HED-28 (agy 1.1.15, 2026-08-19).
  *  - Policy: gemini-* slugs ONLY — agy's catalog also lists claude- and gpt-oss- third-party
  *    models; direct-subscription families never route through a middleman.
  */
 
 /** Retry probe ceiling for the #573 hang check — a hung agy emits nothing, so this is ample. */
 const RETRY_PROBE_MS = 120_000;
+
+/** Gemini encodes reasoning effort as the model-slug suffix; agy's whole catalog is suffixed. */
+const GEMINI_SUFFIX = /-(?:low|medium|high)$/;
+const GEMINI_LEVELS = new Set(['low', 'medium', 'high']);
 
 /**
  * Serializes dispatches per conversation id. Overlapping calls against the SAME conversation
@@ -62,6 +69,38 @@ export class AgyAdapter implements WorkerAdapter {
     return withConversationLock(opts.resume, () => this.execute(prompt, opts));
   }
 
+  /**
+   * Reconcile an explicit effort override with agy's slug-encoded effort. Gemini's catalog is
+   * entirely effort-suffixed (…-low/-medium/-high) and agy hard-errors if `--effort` is passed
+   * alongside a suffixed slug ("invalid model selection … conflicts with --effort", verified HED-28,
+   * agy 1.1.15). So when a caller ALSO sets `opts.effort` (e.g. via `auto_effort`), HONOR it by
+   * REWRITING the slug's suffix — the effort knob is the explicit override — rather than silently
+   * dropping it (which would run the routed effort and ignore the request; codeant/codex #59 review).
+   * A level with no gemini equivalent (codex's `minimal`/`xhigh`) can't be a gemini slug, so it's left
+   * to the routed model's own suffix.
+   */
+  private resolveModel(model: string, effort?: string): string {
+    const lvl = effort?.toLowerCase();
+    if (!lvl || !GEMINI_LEVELS.has(lvl)) return model;
+    return GEMINI_SUFFIX.test(model) ? model.replace(GEMINI_SUFFIX, `-${lvl}`) : model;
+  }
+
+  /**
+   * The exact agy argv for one dispatch — pure, so tests can pin the invocation contract. Effort is
+   * folded into the model (see resolveModel); `--effort` is emitted ONLY for an unsuffixed id with a
+   * gemini-valid level, because agy errors when a suffixed slug and `--effort` are both present.
+   */
+  buildArgs(prompt: string, opts: DispatchOptions): string[] {
+    const model = this.resolveModel(opts.model, opts.effort);
+    const args = ['-p', prompt, '--output-format', 'stream-json', '--model', model];
+    const lvl = opts.effort?.toLowerCase();
+    if (lvl && GEMINI_LEVELS.has(lvl) && !GEMINI_SUFFIX.test(model)) args.push('--effort', lvl);
+    if (this.skipPermissions) args.push('--dangerously-skip-permissions');
+    if (opts.resume) args.push('--conversation', opts.resume);
+    args.push(...(opts.extraFlags ?? []));
+    return args;
+  }
+
   private async execute(prompt: string, opts: DispatchOptions): Promise<WorkerResult> {
     if (!opts.model.startsWith('gemini-')) {
       return {
@@ -70,11 +109,7 @@ export class AgyAdapter implements WorkerAdapter {
       };
     }
 
-    const args = ['-p', prompt, '--output-format', 'stream-json', '--model', opts.model];
-    if (opts.effort) args.push('--effort', opts.effort);
-    if (this.skipPermissions) args.push('--dangerously-skip-permissions');
-    if (opts.resume) args.push('--conversation', opts.resume);
-    args.push(...(opts.extraFlags ?? []));
+    const args = this.buildArgs(prompt, opts);
 
     const budget = opts.timeoutMs ?? 600_000;
     const started = Date.now();

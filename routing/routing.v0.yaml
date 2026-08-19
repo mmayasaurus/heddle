@@ -81,6 +81,9 @@ providers:
                                       # defensive (timeout, status check, model-echo verification)
     auth: google-subscription         # Antigravity CLI (agy) personal OAuth, quota-billed
     execution: headless               # agy -p --output-format stream-json
+    # Effort is the model-slug SUFFIX (…-low/-medium/-high); do NOT also set a task-class `effort:` for
+    # gemini — agy errors when `--effort` is combined with a suffixed slug (HED-28). The adapter guards
+    # this, but keep the routing effort-free for gemini so the intent stays clear.
     models:                           # snapshot 2026-08-01 — verify against `agy models`
       - gemini-3.7-flash-low          # ✅ 5.6s e2e + model-echo verified 2026-08-14 (released 8-13;
       - gemini-3.7-flash-medium       #    Google's coding/agent "workhorse"; NOT yet in `agy models`

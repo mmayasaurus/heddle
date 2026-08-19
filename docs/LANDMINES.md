@@ -140,6 +140,17 @@ flags churn monthly.
 - **Never** use the reverse-engineered OpenCode↔Antigravity OAuth plugins: the flagship plugin is
   archived with an explicit ToS-violation + real-account-ban warning in its own README, corroborated
   by ban threads on Google's official forum. Not with a primary Google account, not ever here.
+- **`--effort` CONFLICTS with an effort-suffixed model slug (HED-28, live-verified agy 1.1.15,
+  2026-08-19).** agy's catalog is entirely suffixed (`gemini-3.6-flash-{low,medium,high}`,
+  `gemini-3.1-pro-{low,high}`) and effort rides that suffix. Passing BOTH a suffixed slug AND
+  `--effort` hard-errors — `"invalid model selection (--model gemini-3.6-flash-low --effort high): …
+  conflicts with --effort"`, status ERROR, zero output; the two no-`--effort` controls SUCCEED and
+  echo the slug's own effort. So `src/adapters/agy.ts` `resolveModel` HONORS an explicit `opts.effort`
+  (e.g. from `auto_effort`) by REWRITING the slug suffix (`-low` + `effort:high` → `-high`) rather than
+  silently dropping it (codeant/codex #59 P1), and `buildArgs` emits `--effort` ONLY for an unsuffixed
+  id (the live catalog has none) with a gemini-valid level. A non-gemini level (codex's `minimal`/
+  `xhigh`) has no slug and is left to the routed suffix. `--effort low|medium|high` IS a real flag
+  (per `agy --help`), never combined with a suffixed slug.
 
 ## Account rotation (multiple subscriptions per provider)
 
