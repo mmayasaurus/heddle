@@ -28,6 +28,9 @@ export const DEFAULT_VERIFY_TIMEOUT_MS = 300_000;
 /** Default PRE-KILL quiesce timeout (HED-186), overridable via `LiveRotatorOptions.quiesceTimeoutMs`. */
 export const DEFAULT_QUIESCE_TIMEOUT_MS = 1_200_000; // 20 min: quiesce waits on the DISPATCH LEDGER, and a deep-implementation (opus) worker can outlive 10 min — 20 accommodates a typical in-flight worker so a HEALTHY rotation isn't aborted. Wedge-breaker, not an SLA.
 
+/** Default post-abort cooldown (HED-200): how long WATCH holds off re-rotating after a quiesce-abort. */
+export const DEFAULT_ABORT_COOLDOWN_MS = 1_800_000; // 30 min — enough for the operator to see the needs-human and act; env-overridable
+
 export interface LiveRotatorOptions {
   log: CommsLog;
   broker: Broker;
@@ -52,6 +55,8 @@ export interface LiveRotatorOptions {
   verifyTimeoutMs?: number;
   /** PRE-KILL quiesce timeout in ms (HED-186). Default `DEFAULT_QUIESCE_TIMEOUT_MS` (20 minutes). */
   quiesceTimeoutMs?: number;
+  /** Post-abort cooldown in ms (HED-200). Default `DEFAULT_ABORT_COOLDOWN_MS` (30 minutes). */
+  abortCooldownMs?: number;
   now?: () => number;
   warn?: (m: string) => void;
 }
@@ -239,6 +244,23 @@ export function createRotatorDeps(o: LiveRotatorOptions): RotatorDeps {
       const baseMs = pauseTimeMs();
       if (baseMs === null) return { timedOut: false, timeoutMs };
       return { timedOut: now() - baseMs > timeoutMs, timeoutMs };
+    },
+
+    recordAbort: async (target, pauseId) => {
+      const posted = await o.broker.post({ from: OPERATOR, to: OPERATOR, kind: 'status',
+        body: `rotation ${pauseId} to ${target} aborted at quiesce — post-abort cooldown started`,
+        meta: { rotationAborted: { target, pauseId } } });
+      // A refused post appended NO marker row → the cooldown would not engage and the sawtooth resumes.
+      // Throw so the tick reschedules and retries (mirrors requestPause/resumePause refusal handling).
+      if (posted.outcome === 'refused') throw new Error(`recordAbort refused (${posted.code}) — cooldown marker not persisted`);
+    },
+
+    abortCooldownActive: (): boolean => {
+      const cooldownMs = o.abortCooldownMs ?? DEFAULT_ABORT_COOLDOWN_MS;
+      const a = o.log.latestAbort();
+      if (!a) return false;
+      const ms = Date.parse(a.ts);
+      return Number.isFinite(ms) && now() - ms < cooldownMs;
     },
 
     needsHuman: async (message) => {

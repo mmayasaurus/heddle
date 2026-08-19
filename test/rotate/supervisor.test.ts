@@ -30,13 +30,16 @@ describe('rotator supervisor tick', () => {
     verifyTimeoutMsVal = 300_000;
     quiesceTimedOut = false;        // HED-186: PRE-KILL quiesce timeout — false = still within the window
     quiesceTimeoutMsVal = 1_200_000;
+    abortCooldown = false;          // HED-200: is a recent abort still inside its cooldown window?
     // recorders
     killed: string[] = [];
     relaunched: { address: string; account: string }[] = [];
     needsHumanMsgs: string[] = [];
     paused: { reason: string; intent: RotationIntent }[] = [];
     resumed: string[] = [];
-    ops: string[] = [];  // call order across resumePause/needsHuman (the abort path lifts BEFORE it escalates)
+    abortsRecorded: { target: string; pauseId: number }[] = [];  // HED-200: durable abort markers stamped
+    recordAbortFails = false;       // HED-200 review: the marker post was refused (rate limit / body cap)
+    ops: string[] = [];  // call order across resumePause/needsHuman/recordAbort (the abort path escalates, STAMPS, then lifts)
   }
 
   const readinessOf = (w: World): PauseReadiness => ({
@@ -64,6 +67,13 @@ describe('rotator supervisor tick', () => {
       if (r.ok) { w.live.push(a); w.relaunched_set.add(a); }
       return r;
     },
+    recordAbort: async (t, pauseId) => {
+      w.ops.push('recordAbort');
+      // A refused broker post throws WITHOUT persisting the marker — the live adapter's contract.
+      if (w.recordAbortFails) throw new Error('recordAbort refused (rate-limited) — cooldown marker not persisted');
+      w.abortsRecorded.push({ target: t, pauseId });
+    },
+    abortCooldownActive: () => w.abortCooldown,
     needsHuman: async (m) => { w.ops.push('needsHuman'); w.needsHumanMsgs.push(m); },
   });
 
@@ -282,8 +292,11 @@ describe('rotator supervisor tick', () => {
     expect(w.needsHumanMsgs).toHaveLength(1);
     expect(w.needsHumanMsgs[0]).toMatch(/did not quiesce within 1200000ms/);
     expect(w.needsHumanMsgs[0]).toContain('have not acked: S, V');   // the blockers reach the human
-    // Escalate FIRST, then lift: a resumePause that throws must not swallow the operator notification.
-    expect(w.ops).toEqual(['needsHuman', 'resumePause']);
+    // Escalate FIRST, then STAMP, then lift: a resumePause that throws must not swallow the operator
+    // notification, and the HED-200 cooldown marker must be durable BEFORE the pause is durably lifted —
+    // a crash in between would otherwise free the fleet with no cooldown and re-arm the sawtooth.
+    expect(w.ops).toEqual(['needsHuman', 'recordAbort', 'resumePause']);
+    expect(w.abortsRecorded).toEqual([{ target: 'acct2', pauseId: 1 }]);  // target AND the pause it aborted
   });
 
   it('QUIESCE timeout MID-ROTATION: some members already relaunched stays BLOCKED — the pause is NOT lifted', async () => {
@@ -348,6 +361,77 @@ describe('rotator supervisor tick', () => {
     expect(step.phase).toBe('relaunching');
     expect(w.killed.sort()).toEqual(['R', 'S', 'V']);
     expect(w.resumed).toEqual([]);                  // no abort — readiness wins
+  });
+
+  // ── HED-200: durable post-abort cooldown ───────────────────────────────────────────────────
+  // The abort above lifts the pause but leaves the account STILL over threshold, so decide() re-issues
+  // 'rotate' on the very next tick. Untreated that is a pause → quiesce-fail → abort SAWTOOTH, one
+  // cycle per interval — and because each cycle mints a NEW pause id, the needsHuman de-dupe (scoped
+  // to the active pause) misses it and re-posts every cycle too.
+
+  it('WATCH: a rotate decision INSIDE the post-abort cooldown holds — no pause requested, nothing killed', async () => {
+    w.decision = rotateDecision('acct1', acct('acct2', null));
+    w.abortCooldown = true;
+    const step = await tick(deps(w));
+    expect(step.phase).toBe('watch');
+    expect(step.reason).toMatch(/post-abort cooldown/);
+    expect(step.reason).toMatch(/rotate acct1 → acct2/);  // the underlying decision still reaches the log
+    expect(w.paused).toEqual([]);                   // THE point: no new fleet-wide pause is requested
+    expect(w.killed).toEqual([]);
+  });
+
+  it('WATCH: the same rotate decision OUTSIDE the cooldown pauses as before — the hold expires', async () => {
+    w.decision = rotateDecision('acct1', acct('acct2', null));
+    w.abortCooldown = false;
+    const step = await tick(deps(w));
+    expect(step.phase).toBe('paused');
+    expect(w.paused).toHaveLength(1);
+    expect(w.paused[0]?.intent).toMatchObject({ target: 'acct2', from: 'acct1' });
+  });
+
+  it('the cooldown gates ONLY the rotate branch — an exhausted decision still escalates during it', async () => {
+    // Ordering guard, like the quiesce-timeout one above: the check lives INSIDE `case 'rotate'`. Hoisted
+    // above the switch it would also swallow the no-target escalation, hiding a real needs-human.
+    w.decision = { action: 'exhausted', current: 'acct1', usedPct: 97, reason: 'all accounts near the cap' };
+    w.abortCooldown = true;
+    const step = await tick(deps(w));
+    expect(step.phase).toBe('exhausted');
+    expect(w.needsHumanMsgs).toHaveLength(1);
+  });
+
+  it('a quiesce timeout that stays BLOCKED records NO abort marker — the pause was never lifted', async () => {
+    // The marker means "a rotation aborted and the fleet is free again". A half-rotated fleet HELD under
+    // its pause is the opposite case: a human is already on it, and stamping a cooldown here would also
+    // suppress the retry that human may be working toward.
+    w.pauseId = 1;
+    w.intent = { target: 'acct2', from: 'acct1', roster: ['R', 'S', 'V'] };
+    w.marks = new Set(['R']);                       // progress was made → blocked, not aborted
+    w.live = ['R', 'S', 'V'];
+    w.ready = false; w.blockers = ['1 live agent(s) have not acked: V'];
+    w.quiesceTimedOut = true;
+    const step = await tick(deps(w));
+    expect(step.phase).toBe('blocked');
+    expect(w.abortsRecorded).toEqual([]);
+    expect(w.ops).toEqual(['needsHuman']);          // no lift, so no stamp
+  });
+
+  it('a recordAbort that FAILS aborts the abort: the tick throws and the pause is NEVER lifted', async () => {
+    // The fail-CLOSED half of stamping before the lift. A refused marker post (rate limit, body cap) means
+    // no cooldown exists; lifting anyway would free the fleet with decide() still saying 'rotate', i.e. the
+    // sawtooth this whole issue is about. Throwing instead leaves the pause IN FORCE — the next tick
+    // re-enters this branch and retries the marker (or, if a roster member has since gone not-live, takes
+    // the blocked path and holds for a human). Either way: never a lifted pause with no marker.
+    w.pauseId = 1;
+    w.intent = { target: 'acct2', from: 'acct1', roster: ['R', 'S', 'V'] };
+    w.live = ['R', 'S', 'V'];                       // nothing killed → this IS the abort path
+    w.ready = false; w.blockers = ['2 live agent(s) have not acked: S, V'];
+    w.quiesceTimedOut = true;
+    w.recordAbortFails = true;                      // the broker refuses the marker post
+    await expect(tick(deps(w))).rejects.toThrow(/cooldown marker not persisted/);
+    expect(w.resumed).toEqual([]);                  // THE point: no lift without a durable marker
+    expect(w.ops).toEqual(['needsHuman', 'recordAbort']);  // ...and it stopped exactly there
+    expect(w.abortsRecorded).toEqual([]);           // the marker really did not land
+    expect(w.killed).toEqual([]);                   // still nothing irreversible
   });
 
 });

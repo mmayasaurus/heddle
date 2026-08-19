@@ -5,7 +5,7 @@ import { CommsLog, DEFAULT_COMMS_PATH } from '../comms/log.js';
 import { Broker } from '../comms/broker.js';
 import { ChannelTransport, errorMessage } from '../comms/bridge.js';
 import { resolveCommsIdentity, openLedgerIfPresent, OPERATOR_TOKEN_PATH, operatorTokenMatches } from '../comms/server.js';
-import { createRotatorDeps, DEFAULT_VERIFY_TIMEOUT_MS, DEFAULT_QUIESCE_TIMEOUT_MS } from './live.js';
+import { createRotatorDeps, DEFAULT_VERIFY_TIMEOUT_MS, DEFAULT_QUIESCE_TIMEOUT_MS, DEFAULT_ABORT_COOLDOWN_MS } from './live.js';
 import { tick } from './supervisor.js';
 import { DEFAULT_THRESHOLDS } from './decide.js';
 import { acquireLock, releaseLock, LOCK_REQUIRED_MODES } from './lock.js';
@@ -34,7 +34,8 @@ import { acquireLock, releaseLock, LOCK_REQUIRED_MODES } from './lock.js';
  * (default ~/.heddle/usage) · HEDDLE_ROTATE_SOFT_PCT / HEDDLE_ROTATE_HARD_PCT · HEDDLE_ROTATE_SOFT_PCT_7D /
  * HEDDLE_ROTATE_HARD_PCT_7D (weekly-cap thresholds, HED-190) · HEDDLE_ROTATE_INTERVAL_MS
  * (default 60000) · HEDDLE_ROTATE_VERIFY_TIMEOUT_MS (default 300000) ·
- * HEDDLE_ROTATE_QUIESCE_TIMEOUT_MS (default 1200000) · HEDDLE_COMMS_DB · HEDDLE_LEDGER_DB.
+ * HEDDLE_ROTATE_QUIESCE_TIMEOUT_MS (default 1200000) · HEDDLE_ROTATE_ABORT_COOLDOWN_MS (post-abort
+ * cooldown, HED-200; default 1800000) · HEDDLE_COMMS_DB · HEDDLE_LEDGER_DB.
  */
 
 const warn = (m: string) => process.stderr.write(`heddle-rotator: ${m}\n`);
@@ -87,6 +88,11 @@ const verifyTimeoutMs = Number.isFinite(rawVerifyTimeout) && rawVerifyTimeout > 
 const rawQuiesceTimeout = Number(env.HEDDLE_ROTATE_QUIESCE_TIMEOUT_MS);
 const quiesceTimeoutMs = Number.isFinite(rawQuiesceTimeout) && rawQuiesceTimeout > 0 ? rawQuiesceTimeout : DEFAULT_QUIESCE_TIMEOUT_MS;
 
+// HED-200: how long WATCH refuses to start a NEW rotation after a quiesce-abort. The account is still
+// over threshold when the abort lifts the pause, so without this the next tick re-rotates immediately.
+const rawAbortCooldown = Number(env.HEDDLE_ROTATE_ABORT_COOLDOWN_MS);
+const abortCooldownMs = Number.isFinite(rawAbortCooldown) && rawAbortCooldown > 0 ? rawAbortCooldown : DEFAULT_ABORT_COOLDOWN_MS;
+
 const scriptsDir = env.HEDDLE_FLEET_SCRIPTS;
 if ((mode === 'run' || mode === 'once') && !scriptsDir) {
   warn('refusing to run: set HEDDLE_FLEET_SCRIPTS to the directory holding fleet-kill.sh and fleet-relaunch.sh.');
@@ -96,7 +102,7 @@ if ((mode === 'run' || mode === 'once') && !scriptsDir) {
 // Optional single-/multi-subject scope (HED-117): the supervised first run rotates ONE idle agent.
 const only = (env.HEDDLE_ROTATE_ONLY ?? '').split(',').map((x) => x.trim().toUpperCase()).filter(Boolean);
 const deps = createRotatorDeps({
-  log, broker, inFlight: ledger, thresholds, verifyTimeoutMs, quiesceTimeoutMs,
+  log, broker, inFlight: ledger, thresholds, verifyTimeoutMs, quiesceTimeoutMs, abortCooldownMs,
   usageDir: env.HEDDLE_USAGE_DIR || join(homedir(), '.heddle', 'usage'),
   scriptsDir: scriptsDir ?? '', // only reached for active modes, which required it above
   ...(only.length ? { only } : {}),
