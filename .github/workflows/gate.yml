@@ -217,6 +217,12 @@ jobs:
               # also fakes "no leaf in flight", advancing the fail-closed proof).
               if ! CR=$(gh api "repos/$REPO/commits/$SHA/check-runs" --paginate --slurp 2>/dev/null); then
                 echo "  could not read check runs for ${SHA}; build liveness is unknown — retrying"
+                # A failed read breaks the "verifiably gone" streak: you cannot prove
+                # the build is gone across an outage, so the sustained-dry proof must
+                # restart — else a pre-outage DRY streak plus one post-outage
+                # gone-read could hit the threshold and fail closed while the commit
+                # gate is about to publish (codex P1). Fail-closed direction only.
+                DRY=0
                 if [ "$i" -lt 12 ]; then sleep 10; else sleep 30; fi
                 continue
               fi

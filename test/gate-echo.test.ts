@@ -199,6 +199,20 @@ fi
     ]);
     expect(outageThenSuccess.status).toBe(0);
 
+    // codex P1 (DRY reset on failed read): a "verifiably gone" streak must NOT
+    // survive an API outage. 5 gone-polls build DRY→5, then an outage, then a
+    // gone-poll — WITHOUT the reset the pre-outage DRY + one post-outage gone-read
+    // hits the fail-closed threshold and reds prematurely; WITH the reset the streak
+    // restarts, so the echo keeps waiting and accepts the arriving fresh marker.
+    const dryStreakBrokenByOutage = run('', [
+      ...Array.from({ length: 5 }, () => pages(checkPage())),
+      ...Array.from({ length: 7 }, () => '__FAIL__'),
+      pages(checkPage()),
+      pages(checkPage(leaf('completed', T(0), 'success'), marker('success', T(5)))),
+      ...Array.from({ length: 60 }, () => '__FAIL__'),
+    ]);
+    expect(dryStreakBrokenByOutage.status).toBe(0);
+
     // A fresh FAILURE marker → red; no marker at all → red; malformed → red.
     expect(run(pages(checkPage(leaf('completed', T(0), 'failure'), marker('failure', T(5))))).status).not.toBe(0);
     expect(run(pages(checkPage(leaf('completed', T(0), 'success')))).status).not.toBe(0);
