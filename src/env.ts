@@ -59,6 +59,35 @@ const PARENT_IDENTITY_VARS = ['HEDDLE_AGENT', 'FLEET_AGENT'] as const;
  */
 const INHERITED_CREDENTIAL_VARS = ['CLAUDE_CODE_OAUTH_TOKEN'] as const;
 
+/**
+ * Vendor credential / billing / endpoint NAMESPACES. Any INHERITED env var whose name starts with one
+ * of these is stripped from a worker. A denylist of exact names can't keep pace with each vendor's new
+ * `*_BASE_URL` / `*_API_KEY` / `*_PROJECT` / `*_USE_VERTEXAI` switch — the HED-30 audit found ~15 current
+ * Anthropic override vars alone (ANTHROPIC_PROFILE, the FEDERATION/WORKSPACE ids, CUSTOM_HEADERS, the
+ * AWS_/BEDROCK_/VERTEX_/FOUNDRY_ base-URLs + keys, AWS_BEARER_TOKEN_BEDROCK, …) plus OpenAI/Google/Cursor
+ * ones that the exact-name list missed — so strip by namespace and stay correct as vendors add more.
+ * BILLING_SWITCH_VARS above stays for CODEX_API_KEY (a bare `CODEX_` prefix would also catch the
+ * CODEX_HOME account selector) and to name the switch in the override-refusal message. Account selectors
+ * are re-applied as overrides AFTER this strip, so an inherited stale selector is replaced by heddle's
+ * chosen one, never leaked. (Maya firsthand approval 2026-08-19.)
+ */
+const VENDOR_CREDENTIAL_PREFIXES = [
+  'ANTHROPIC_', 'OPENAI_', 'GEMINI_', 'GOOGLE_', 'GCLOUD_', 'VERTEXAI_', 'VERTEX_',
+  'CLAUDE_CODE_USE_', 'CURSOR_', 'AWS_', 'BEDROCK_', 'FOUNDRY_',
+] as const;
+
+/**
+ * The ONLY env vars an override may set (HED-30 ALLOWLIST — Maya firsthand 2026-08-19). The old
+ * denylist let any UNLISTED override pass silently, so a new vendor billing-switch (or a typo) slipped
+ * through; an allowlist is secure-by-default. The legitimate overrides heddle sets are exactly the
+ * account selectors and the worker stamps. Stamp names mirror `identity.WORKER_ENV` — hardcoded here to
+ * avoid an env.ts↔identity.ts import cycle, and a test guards them against drift.
+ */
+const OVERRIDE_ALLOWLIST = new Set<string>([
+  ...ACCOUNT_SELECTOR_VARS,
+  'HEDDLE_WORKER', 'HEDDLE_DISPATCH_ID', 'HEDDLE_PARENT',
+]);
+
 export interface WorkerEnvOptions {
   /** Explicit overrides — typically an account selector from the account registry. */
   overrides?: Record<string, string>;
@@ -71,9 +100,11 @@ export interface WorkerEnvOptions {
 }
 
 /**
- * Build the environment for a worker subprocess: the parent env minus every billing-switch
- * variable, plus explicit overrides. Returns the env and a list of what was stripped, so the
- * dispatch ledger can record that a subscription-billing guard actually fired.
+ * Build the environment for a worker subprocess: the parent env minus every billing-switch variable
+ * AND every vendor-credential namespace (HED-30), plus an ALLOW-LISTED set of overrides (account
+ * selectors + worker stamps only — a parent-identity override is silently dropped, any OTHER override
+ * is refused). Returns the env and a list of what was stripped, so the dispatch ledger can record that
+ * a subscription-billing guard actually fired.
  */
 export function buildWorkerEnv(opts: WorkerEnvOptions = {}): {
   env: NodeJS.ProcessEnv;
@@ -82,33 +113,37 @@ export function buildWorkerEnv(opts: WorkerEnvOptions = {}): {
   const env: NodeJS.ProcessEnv = { ...process.env };
   const stripped: string[] = [];
 
-  for (const key of BILLING_SWITCH_VARS) {
+  // Fixed strips in one pass: billing-switch vars + the orchestrator's identity + the inherited credential.
+  for (const key of [...BILLING_SWITCH_VARS, ...PARENT_IDENTITY_VARS, ...INHERITED_CREDENTIAL_VARS]) {
     if (env[key] !== undefined) {
       delete env[key];
       stripped.push(key);
     }
   }
-  for (const key of PARENT_IDENTITY_VARS) {
-    if (env[key] !== undefined) {
+  // Then strip any INHERITED var under a vendor credential/billing NAMESPACE (HED-30) — scalable vs a
+  // fixed denylist. Case-INSENSITIVE: Windows env names are case-insensitive but the copied object keeps
+  // their casing, so a lowercase `openai_base_url` would survive an uppercase startsWith yet still be
+  // read by the CLI as OPENAI_BASE_URL (codex-connector/qodo #64). Account selectors are re-applied as
+  // overrides below, so a stale inherited one is replaced.
+  for (const key of Object.keys(env)) {
+    if (VENDOR_CREDENTIAL_PREFIXES.some((p) => key.toUpperCase().startsWith(p))) {
       delete env[key];
-      stripped.push(key);
-    }
-  }
-  for (const key of INHERITED_CREDENTIAL_VARS) {
-    if (env[key] !== undefined) {
-      delete env[key];
-      stripped.push(key);
+      if (!stripped.includes(key)) stripped.push(key);
     }
   }
 
   for (const [key, value] of Object.entries(opts.overrides ?? {})) {
-    if (!ACCOUNT_SELECTOR_VARS.has(key) && (BILLING_SWITCH_VARS as readonly string[]).includes(key)) {
+    if ((PARENT_IDENTITY_VARS as readonly string[]).includes(key)) continue; // overrides cannot re-inject the parent's identity
+    if (!OVERRIDE_ALLOWLIST.has(key)) {
+      const isSwitch = (BILLING_SWITCH_VARS as readonly string[]).includes(key)
+        || VENDOR_CREDENTIAL_PREFIXES.some((p) => key.toUpperCase().startsWith(p));
       throw new Error(
-        `refusing to set "${key}" on a worker: it would move billing off the subscription. ` +
-          `Use an account selector (${[...ACCOUNT_SELECTOR_VARS].join(', ')}) instead.`,
+        `refusing to set "${key}" on a worker: overrides are allow-listed (HED-30) — only account ` +
+          `selectors (${[...ACCOUNT_SELECTOR_VARS].join(', ')}) and the worker stamps ` +
+          `(HEDDLE_WORKER, HEDDLE_DISPATCH_ID, HEDDLE_PARENT) may be set.` +
+          (isSwitch ? ' This is a vendor billing/endpoint switch — use an account selector instead.' : ''),
       );
     }
-    if ((PARENT_IDENTITY_VARS as readonly string[]).includes(key)) continue; // overrides cannot re-inject the parent's identity
     env[key] = value;
   }
 
