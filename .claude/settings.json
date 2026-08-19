@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "if [ -f \"$CLAUDE_PROJECT_DIR/.claude/hooks/agent-identity.py\" ]; then python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/agent-identity.py\"; else echo \"heddle: discipline hook agent-identity.py MISSING at .claude/hooks \u2014 running WITHOUT it (HED-107)\" >&2; fi",
+            "command": "if [ -f \"/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/agent-identity.py\" ]; then python3 \"/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/agent-identity.py\"; else echo \"heddle: discipline hook agent-identity.py MISSING at the Spinventory canonical \u2014 running WITHOUT it (HED-107; vendoring deferred to HED-96)\" >&2; fi",
             "timeout": 15
           }
         ]
@@ -18,7 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "if [ -f \"$CLAUDE_PROJECT_DIR/.claude/hooks/remind-owned-prs.py\" ]; then python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/remind-owned-prs.py\"; else echo \"heddle: discipline hook remind-owned-prs.py MISSING at .claude/hooks \u2014 running WITHOUT it (HED-107)\" >&2; fi",
+            "command": "if [ -f \"/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/remind-owned-prs.py\" ]; then python3 \"/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/remind-owned-prs.py\"; else echo \"heddle: discipline hook remind-owned-prs.py MISSING at the Spinventory canonical \u2014 running WITHOUT it (HED-107; vendoring deferred to HED-96)\" >&2; fi",
             "timeout": 8
           }
         ]
@@ -55,7 +55,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "if [ -f \"$CLAUDE_PROJECT_DIR/.claude/hooks/delegation-nudge.py\" ]; then python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/delegation-nudge.py\"; else echo \"heddle: discipline hook delegation-nudge.py MISSING at .claude/hooks \u2014 running WITHOUT it (HED-107)\" >&2; fi",
+            "command": "if [ -f \"/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/delegation-nudge.py\" ]; then python3 \"/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/delegation-nudge.py\"; else echo \"heddle: discipline hook delegation-nudge.py MISSING at the Spinventory canonical \u2014 running WITHOUT it (HED-107; vendoring deferred to HED-96)\" >&2; fi",
             "timeout": 5
           }
         ]
