@@ -111,6 +111,10 @@ export interface RotatorDeps {
    * lives in the adapter, same as verifyTimeout.
    */
   quiesceTimeout(): { timedOut: boolean; timeoutMs: number };
+  /** Record a durable post-abort marker (HED-200) so the WATCH branch can enforce a cooldown across ticks/crashes. */
+  recordAbort(target: string): Promise<void>;
+  /** Is a rotation-abort within its cooldown window (HED-200)? True ⇒ WATCH must NOT start a new rotation yet. */
+  abortCooldownActive(): boolean;
   /** Post a needs-human to the operator (rotation cannot proceed unattended). */
   needsHuman(message: string): Promise<void>;
 }
@@ -168,6 +172,12 @@ export async function tick(deps: RotatorDeps): Promise<RotatorStep> {
         await deps.needsHuman(`Account rotation needed but no target: ${decision.reason}`);
         return { phase: 'exhausted', reason: decision.reason };
       case 'rotate': {
+        // HED-200: after a quiesce-abort the account is still over threshold, so decide() would re-issue
+        // 'rotate' immediately → a fleet-wide pause/abort sawtooth. Hold in WATCH until the cooldown expires
+        // (or the operator resolves the blocker and the account drops below threshold on its own).
+        if (deps.abortCooldownActive()) {
+          return { phase: 'watch', reason: `${decision.reason} — holding: within the post-abort cooldown` };
+        }
         // Capture the roster NOW — these are the sessions that must come back on the target.
         const intent: RotationIntent = { target: decision.target.id, from: decision.current, roster: deps.liveAddresses() };
         await deps.requestPause(decision.reason, intent);
@@ -229,6 +239,11 @@ export async function tick(deps: RotatorDeps): Promise<RotatorStep> {
         // Nothing killed. Safe to lift. Notify FIRST so the escalation survives a resume-post failure.
         await deps.needsHuman(`rotation ${readiness.pauseId}: fleet did not quiesce within ${timeout.timeoutMs}ms (blockers: ${readiness.blockers.join(', ') || 'none reported'}) — aborting, nothing killed. Lifting the pause; the rotator may re-attempt on a later tick.`);
         await deps.resumePause(`rotation ${readiness.pauseId} to ${intent.target} ABORTED — fleet did not go quiet within ${timeout.timeoutMs}ms; no session was killed`);
+        // HED-200: stamp the abort DURABLY, last — the account is still over threshold, so without this
+        // the very next WATCH tick re-issues 'rotate' and the pause/abort cycle repeats forever. Ordered
+        // after resumePause on purpose: if the lift throws, the tick reschedules and re-runs this branch,
+        // so the marker lands once per COMPLETED abort rather than once per attempt.
+        await deps.recordAbort(intent.target);
         return { phase: 'aborted', reason: `quiesce timed out with no progress; pause lifted (blockers: ${readiness.blockers.join(', ') || 'none'})` };
       }
       return { phase: 'quiescing', reason: 'waiting for the fleet to go quiet', blockers: readiness.blockers };

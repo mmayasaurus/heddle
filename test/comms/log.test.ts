@@ -318,6 +318,47 @@ describe('CommsLog (temp db)', () => {
     expect(() => log.register({ address: '#fleet' })).toThrow(/register\(\) takes/);
   });
 
+  // ------------------------------------------------------------ rotation markers (HED-200)
+
+  /** An operator SELF-DM, the shape the rotator posts its durable markers in. */
+  const operatorSelfDm = (body: string, meta?: Record<string, unknown>, kind: 'status' | 'needs-human' = 'status') =>
+    log.append(
+      { from: 'operator', to: 'operator', kind, body, ...(meta ? { meta } : {}) },
+      seal(decision('operator', 'operator', 'operator')),
+    );
+
+  it('latestAbort returns the NEWEST rotation-abort marker, null when none, ignoring other operator traffic', () => {
+    expect(log.latestAbort()).toBeNull();                     // nothing recorded yet
+
+    // Operator traffic that is NOT an abort must never start a cooldown — the marker key is the gate.
+    operatorSelfDm('just a status');
+    operatorSelfDm('a relaunch marker', { rotationRelaunched: { pauseId: 1, address: 'V' } });
+    operatorSelfDm('unrelated alert', undefined, 'needs-human');
+    expect(log.latestAbort()).toBeNull();
+
+    const first = operatorSelfDm('rotation to acct2 aborted', { rotationAborted: { target: 'acct2' } });
+    expect(log.latestAbort()?.id).toBe(first.id);
+
+    // A LATER abort supersedes it. This is the ORDER BY id DESC contract: an oldest-first scan would
+    // pin the cooldown to the very first abort forever, so it would expire and never re-arm.
+    operatorSelfDm('noise posted after the first abort');
+    const second = operatorSelfDm('rotation to acct3 aborted', { rotationAborted: { target: 'acct3' } });
+    expect(log.latestAbort()?.id).toBe(second.id);
+    // toMatchObject, not toEqual: a sealed post also carries the broker's own lineage/tierCode stamps,
+    // and `json_extract($.rotationAborted)` reads straight past them.
+    expect(log.latestAbort()?.meta).toMatchObject({ rotationAborted: { target: 'acct3' } });
+  });
+
+  it('latestAbort ignores a marker an AGENT planted — the operator sender pin is the credential', () => {
+    // The meta key itself is not privileged (the log keeps it, as it keeps any non-broker meta), so
+    // without the sender pin any agent could halt fleet rotation for 30 minutes by posting this.
+    const planted = log.append({ from: 'V', to: 'operator', kind: 'status', body: 'pretending to abort',
+      meta: { rotationAborted: { target: 'acct9' } } });
+    expect(planted.meta).toEqual({ rotationAborted: { target: 'acct9' } });  // stored…
+    expect(planted.tier).toBe('agent-message');
+    expect(log.latestAbort()).toBeNull();                                    // …but never read as a marker
+  });
+
   // ------------------------------------------------------------ durability
 
   it('refuses to open a database whose schema version it does not understand — and never relabels it', () => {

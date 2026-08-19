@@ -422,6 +422,27 @@ export class CommsLog {
   }
 
   /**
+   * The newest rotation-abort marker, or null (HED-200). Posted by the rotator to the OPERATOR inbox
+   * when a quiesce-abort lifts the pause; the post-abort cooldown reads it to avoid a re-rotate
+   * SAWTOOTH. Newest-first by id — NOT a transcript scan (transcript() is oldest-first and would miss
+   * recent markers once the operator inbox grows, the same trap wasRelaunched documents).
+   *
+   * Pinned to sender AND target = operator, like `lastNudgeAt`: only an operator-bound surface can
+   * bind the `operator` sender address (verified by ORIGIN — see envelope.ts), so the sender pin is
+   * what keeps an agent from planting a marker; matching `meta.rotationAborted` alone would let any
+   * future internal message carrying that key silently start a fleet-wide cooldown. Tier is
+   * deliberately NOT pinned, unlike `latestFleetPause`: the broker always honours an explicit
+   * `agent-message` demotion, so a tier pin could render a legitimately-posted marker invisible.
+   */
+  latestAbort(): MessageRecord | null {
+    const row = this.db.prepare(
+      `${SELECT_WITH_MENTIONS} WHERE m.target = ? AND m.sender = ?
+       AND json_extract(m.meta, '$.rotationAborted') IS NOT NULL ORDER BY m.id DESC LIMIT 1`,
+    ).get(OPERATOR, OPERATOR) as Row | undefined;
+    return row ? toRecord(row) : null;
+  }
+
+  /**
    * When the operator's nudger last NUDGED this address, or null (HED-137).
    *
    * The cooldown lives in the log rather than in process memory on purpose: the nudger runs inside

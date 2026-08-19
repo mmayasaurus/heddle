@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CommsLog } from '../../src/comms/log.js';
 import { seal } from '../../src/comms/seal.js';
-import { createRotatorDeps, DEFAULT_VERIFY_TIMEOUT_MS, DEFAULT_QUIESCE_TIMEOUT_MS } from '../../src/rotate/live.js';
+import { createRotatorDeps, DEFAULT_VERIFY_TIMEOUT_MS, DEFAULT_QUIESCE_TIMEOUT_MS, DEFAULT_ABORT_COOLDOWN_MS } from '../../src/rotate/live.js';
 import type { Broker } from '../../src/comms/broker.js';
 
 /**
@@ -31,6 +31,14 @@ describe('createRotatorDeps — testable parts', () => {
     log.append(
       { from: 'operator', to: 'operator', kind: 'status', body: `rotation ${pauseId}: relaunched ${address}`,
         meta: { rotationRelaunched: { pauseId, address } } },
+      operatorDecision('operator'),
+    );
+
+  /** The durable abort marker tick() posts after a quiesce-abort — abortCooldownActive's source of truth. */
+  const appendAbortMarker = (target: string) =>
+    log.append(
+      { from: 'operator', to: 'operator', kind: 'status', body: `rotation to ${target} aborted at quiesce`,
+        meta: { rotationAborted: { target } } },
       operatorDecision('operator'),
     );
 
@@ -285,6 +293,73 @@ describe('createRotatorDeps — testable parts', () => {
       const result = custom.quiesceTimeout();
       expect(result.timeoutMs).toBe(1_000);
       expect(result.timedOut).toBe(true); // 2s elapsed > 1s timeout
+    });
+  });
+
+  describe('post-abort cooldown (HED-200)', () => {
+    /** A broker that records posts AND appends them, so the marker a write produces is readable back. */
+    const recordingBroker = (posted: Record<string, unknown>[]) => ({
+      post: async (m: Record<string, unknown>) => {
+        posted.push(m);
+        log.append(
+          { from: 'operator', to: 'operator', kind: 'status', body: String(m.body), meta: m.meta as Record<string, unknown> },
+          operatorDecision('operator'),
+        );
+      },
+    } as unknown as Broker);
+
+    it('recordAbort posts an operator SELF-DM carrying the target — the shape latestAbort() pins on', async () => {
+      const posted: Record<string, unknown>[] = [];
+      const d = createRotatorDeps({ log, broker: recordingBroker(posted), inFlight: null, usageDir: dir, scriptsDir: dir, now: () => nowMs });
+      await d.recordAbort('acct2');
+      expect(posted).toHaveLength(1);
+      // from/to BOTH operator matters: latestAbort() pins sender AND target, so a marker posted
+      // anywhere else would be written but never read — a cooldown that silently never engages.
+      expect(posted[0]).toMatchObject({ from: 'operator', to: 'operator', kind: 'status' });
+      expect(posted[0]?.meta).toEqual({ rotationAborted: { target: 'acct2' } });
+      expect(String(posted[0]?.body)).toMatch(/acct2/);
+    });
+
+    it('recordAbort → abortCooldownActive round-trips: the write and the read agree', async () => {
+      const d = createRotatorDeps({ log, broker: recordingBroker([]), inFlight: null, usageDir: dir, scriptsDir: dir, now: () => nowMs });
+      expect(d.abortCooldownActive()).toBe(false);   // nothing stamped yet
+      await d.recordAbort('acct2');
+      expect(d.abortCooldownActive()).toBe(true);    // the marker it just posted is the one it reads
+    });
+
+    it('is inactive when no abort has ever been recorded', () => {
+      expect(deps().abortCooldownActive()).toBe(false);
+    });
+
+    it('flips at the deadline measured from the MARKER (strictly-less, so exactly-at is expired)', () => {
+      appendAbortMarker('acct2');
+      expect(deps().abortCooldownActive()).toBe(true);
+      nowMs += DEFAULT_ABORT_COOLDOWN_MS - 1;
+      expect(deps().abortCooldownActive()).toBe(true);   // 1ms inside the window
+      nowMs += 1;                                        // exactly AT the deadline — `< cooldownMs` ⇒ expired
+      expect(deps().abortCooldownActive()).toBe(false);
+      nowMs += 60_000;
+      expect(deps().abortCooldownActive()).toBe(false);  // and stays expired — the hold is not permanent
+    });
+
+    it('reads the NEWEST marker: a fresh abort restarts the hold an expired one had released', () => {
+      // ORDER BY id DESC is the whole point — a `LIMIT 1` that found the OLDEST marker would leave the
+      // cooldown permanently expired after the first abort, and the sawtooth would return.
+      appendAbortMarker('acct2');
+      nowMs += DEFAULT_ABORT_COOLDOWN_MS;                // the first hold has expired
+      expect(deps().abortCooldownActive()).toBe(false);
+      appendAbortMarker('acct3');                        // a second rotation aborted just now
+      expect(deps().abortCooldownActive()).toBe(true);
+    });
+
+    it('honours a custom abortCooldownMs', () => {
+      appendAbortMarker('acct2');
+      nowMs += 2_000; // 2 seconds after the marker
+      const custom = createRotatorDeps({
+        log, broker: dummyBroker, inFlight: null, usageDir: dir, scriptsDir: dir, now: () => nowMs, abortCooldownMs: 1_000,
+      });
+      expect(custom.abortCooldownActive()).toBe(false);  // 2s elapsed ≥ 1s cooldown
+      expect(deps().abortCooldownActive()).toBe(true);   // ...but still inside the 30-minute default
     });
   });
 });
