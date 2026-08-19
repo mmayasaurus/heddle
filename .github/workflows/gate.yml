@@ -226,15 +226,24 @@ jobs:
               # the list is returned across suites — verified on heddle#57) can't
               # split the lookup across pages.
               # D1: emit the latest gate-verdict conclusion ONLY IF the marker is
-              # newer than the newest commit-path leaf on this SHA — i.e. posted by
-              # the CURRENT run, not left over from a prior same-SHA run (reopen /
-              # re-run). A stale marker reads as "none", so a same-SHA recompute's
-              # fresh verdict is never pre-empted by the old one. The ISO-8601-Z
-              # timestamps compare correctly as strings INSIDE jq (POSIX `test` has
-              # no portable string `>`, so the comparison stays in jq).
+              # newer than the newest EXECUTED (non-skipped) commit-path leaf on
+              # this SHA — i.e. posted by the CURRENT run, not left over from a prior
+              # same-SHA run (reopen / re-run). The `and .conclusion != "skipped"`
+              # guard is LOAD-BEARING: on a title/body edit the leaf jobs are
+              # if:-false and publish `skipped` check-runs whose started_at is the
+              # EDIT run's time (NEWER than the marker) — counting them would read
+              # every marker as stale and RED the required gate on every bot edit
+              # (finding 1, live-confirmed on heddle#57). in_progress leaves keep a
+              # null conclusion so they still count (the four-state waits on them).
+              # A stale marker reads as "none", so a same-SHA recompute's fresh
+              # verdict is never pre-empted by the old one. Residual: in the seconds
+              # before a fresh re-run's leaves are visible in the API the old marker
+              # can still read fresh — documented in docs/CI.md, same rarity as the
+              # class this closes. ISO-8601-Z timestamps compare as strings INSIDE
+              # jq (POSIX `test` has no portable string `>`, so it stays in jq).
               CONC=$(printf '%s\n' "$CR" | jq -r '
                 [.[].check_runs[]] as $all
-                | ([$all[] | select(.name | test("^(build|web|rust)")) | .started_at] | max) as $leaf
+                | ([$all[] | select((.name | test("^(build|web|rust)")) and .conclusion != "skipped") | .started_at] | max) as $leaf
                 | ([$all[] | select(.name == "gate-verdict")] | sort_by(.started_at) | last) as $m
                 | if $m == null or $leaf == null then "none"
                   elif $m.started_at >= $leaf then ($m.conclusion // "none")

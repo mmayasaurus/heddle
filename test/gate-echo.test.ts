@@ -141,6 +141,22 @@ fi
       run(pages(checkPage(leaf('completed', T(0), 'success')), checkPage(marker('success', T(5))))).status,
     ).toBe(0);
 
+    // Finding 1 (skipped-leaf false-RED guard): a title/body edit's OWN leaf jobs
+    // are if:-false → `skipped` check-runs whose started_at is NEWER than the
+    // marker. They must NOT count toward the freshness max, or the marker reads
+    // stale and the gate reds on every bot edit (live-confirmed on heddle#57). A
+    // real build + fresh marker + a NEWER skipped build → still green. (Without
+    // `.conclusion != "skipped"` in the $leaf select, this exits non-zero.)
+    expect(run(pages(checkPage(
+      leaf('completed', T(0), 'success'),
+      marker('success', T(5)),
+      leaf('completed', T(20), 'skipped'),
+    ))).status).toBe(0);
+
+    // >= boundary: a marker whose started_at equals the newest real leaf's is
+    // accepted (a marker never posts before its leaf starts; equal → fresh).
+    expect(run(pages(checkPage(leaf('completed', T(0), 'success'), marker('success', T(0))))).status).toBe(0);
+
     // D1 (freshness isolation — THE GAP that would false-green): the new build has
     // completed/FAILURE but its fresh failure marker has NOT posted yet; only the
     // OLD success marker exists on the SHA. Freshness rejects the stale success

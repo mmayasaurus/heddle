@@ -158,8 +158,13 @@ Residuals, by design:
   if the marker never appears (commit run cancelled or never ran), with a self-describing remedy (re-run
   `gate`, or push a commit).
 - **Reopen.** `reopened` is a commit-path event, so it re-runs the real gate and refreshes the marker
-  for the (unchanged) head SHA; verdicts are SHA-bound, so reopen carries no stale-verdict hazard —
-  which is also why close/reopen reliably forces a fresh verdict after a runner-side outage.
+  for the (unchanged) head SHA; verdicts are SHA-bound, so reopen carries no stale-verdict hazard in the
+  common case — which is also why close/reopen reliably forces a fresh verdict after a runner-side
+  outage. Narrow residual: in the few seconds between a re-run being triggered and its leaves appearing
+  in the check-runs API, the edit echo has no newer leaf to weigh the prior marker against, so it can
+  read that marker as fresh — a false-GREEN needing a same-SHA re-run whose result FLIPS *and* an edit
+  firing inside that window (the triple-coincidence rarity of the class the freshness filter closes); it
+  self-corrects the instant the new leaf is visible. Fully closing it would need check-suite inspection.
 - **Fork PRs.** On a fork-head PR `GITHUB_TOKEN` is read-only regardless of `permissions:`, so the
   marker POST 403s. The commit path still reports the real verdict (the POST is best-effort and only
   warns); only later *edit* runs on a fork degrade — and they **fail closed, never mask**. The fleet
@@ -169,11 +174,14 @@ Residuals, by design:
   heavily-reviewed SHA (each edit echo adds its own `gate` run — 4 were live on heddle#57) really does
   span pages, and a single-page read would miss the marker. A failed read leaves liveness *unknown* and
   retries rather than coercing to an empty `{}` (which reds the required gate on one API blip under
-  `set -eu`). The marker is accepted only when it is **fresher than the newest commit-path leaf**
-  (`marker.started_at >= max(leaf.started_at)`, compared in jq) AND no leaf is in flight — so a prior
-  same-SHA run's stale marker is never echoed into a newer suite (the false-GREEN a reopen / re-run
-  would otherwise open). Exit 0 is reachable **only** through that accept path (a `VERDICT` the loop
-  sets there and nowhere else), so neither loop exhaustion nor a retained value can green the gate.
+  `set -eu`). The marker is accepted only when it is **fresher than the newest EXECUTED (non-skipped)
+  commit-path leaf** (`marker.started_at >= max` over leaves whose `conclusion != "skipped"`, in jq)
+  AND no leaf is in flight — so a prior same-SHA run's stale marker is never echoed into a newer suite
+  (the false-GREEN a reopen / re-run would otherwise open). The `!= "skipped"` guard is load-bearing: a
+  title/body edit's OWN leaves are `if:`-false and publish `skipped` check-runs whose `started_at` is
+  the edit run's (newer) time — counting them would read every marker as stale and RED the gate on every
+  bot edit (caught live in review). Exit 0 is reachable **only** through that accept path (a `VERDICT`
+  the loop sets there and nowhere else), so neither loop exhaustion nor a retained value can green the gate.
   `deterministic-review.yml`'s scanner echoes carry the same hardening (tracked in HED-193).
 
 ## The review sweep (before anything is called clean)
