@@ -300,10 +300,10 @@ jobs:
                 echo "real verdict for ${SHA} = success — semgrep green"
                 exit 0 ;;
               "")
-                echo "::error::no semgrep-verdict marker for ${SHA} — the commit 'semgrep' run never published a verdict for this commit (it was cancelled or never ran; the scan is no longer in flight). Re-run 'Deterministic Review' on this PR, or push a commit. Failing closed."
+                echo "::error::no confirmed semgrep verdict for ${SHA} — never saw a fresh semgrep-verdict marker with no commit-path scan in flight (the commit 'semgrep' run was cancelled / never ran / still queued, or the check-runs API was unreachable). Re-run 'Deterministic Review' on this PR, or push a commit. Failing closed."
                 exit 1 ;;
               *)
-                echo "::error::real verdict for ${SHA} was '${CONC}' — echoing it. An edit never masks a real failure; fix the code and push a commit."
+                echo "::error::real verdict for ${SHA} was '${VERDICT}' — echoing it. An edit never masks a real failure; fix the code and push a commit."
                 exit 1 ;;
             esac
           fi
@@ -514,10 +514,10 @@ jobs:
                 echo "real verdict for ${SHA} = success — gitleaks green"
                 exit 0 ;;
               "")
-                echo "::error::no gitleaks-verdict marker for ${SHA} — the commit 'gitleaks' run never published a verdict for this commit (it was cancelled or never ran; the scan is no longer in flight). Re-run 'Deterministic Review' on this PR, or push a commit. Failing closed."
+                echo "::error::no confirmed gitleaks verdict for ${SHA} — never saw a fresh gitleaks-verdict marker with no commit-path scan in flight (the commit 'gitleaks' run was cancelled / never ran / still queued, or the check-runs API was unreachable). Re-run 'Deterministic Review' on this PR, or push a commit. Failing closed."
                 exit 1 ;;
               *)
-                echo "::error::real verdict for ${SHA} was '${CONC}' — echoing it. An edit never masks a real failure; fix the code and push a commit."
+                echo "::error::real verdict for ${SHA} was '${VERDICT}' — echoing it. An edit never masks a real failure; fix the code and push a commit."
                 exit 1 ;;
             esac
           fi
