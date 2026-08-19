@@ -3,12 +3,14 @@
 // pollute stdout parsing for agents, so it is suppressed at the entry point only —
 // `--disable-warning=<type>` silences just that category (`--no-warnings` would hide every
 // process warning; its `=…` suffix is ignored — verified Node 22.23, 2026-08-15).
+import { existsSync } from 'node:fs';
 import { dispatch, planDispatch, summarizePlan } from './dispatch.js';
 import { Ledger } from './ledger.js';
 import { loadRouting, describeTaskClasses } from './routing.js';
 import { listPacks, withMandatoryPacks } from './skillpacks.js';
 import { classifyEffort, assessResult } from './classify.js';
 import { resolveIdentity } from './identity.js';
+import { loadProjectRegistry, DEFAULT_PROJECTS_PATH } from './projects.js';
 
 /**
  * heddle CLI — the surface orchestrators (and later the dashboard) drive.
@@ -52,6 +54,7 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
                                  routing, account advice) — no ledger row, no worker
   heddle classes [--json]        task classes: route, why, default skill packs, edits-code
   heddle packs                   list available skill packs
+  heddle projects [--json]       registered projects and their fleets (~/.heddle/projects.json; HED-160)
   heddle whoami [--json]         this process's bound identity (HEDDLE_AGENT / FLEET_AGENT / .fleet-agent) + worker context
   heddle workers [--stale <hours>] [--json]   dispatches still in flight (--stale: only orphans older than N hours)
   heddle ledger [--issue SPI-n] [--limit N] [--json]
@@ -413,6 +416,19 @@ try {
           `${r.runs} runs, in=${r.input_tokens} out=${r.output_tokens}`).join('\n');
         return `${workers}\n\nclassifiers (not worker dispatches):\n${clsLines}`;
       });
+      break;
+    }
+
+    case 'projects': {
+      const reg = loadProjectRegistry();
+      out(json, reg, () => reg.projects.length
+        ? reg.projects.map((p) =>
+            `${p.name.padEnd(14)} team:${p.linearTeam}  room:${p.defaultRoom}  launcher:${p.launcher}\n` +
+            `${''.padEnd(15)}agents: ${p.agentIds.join(' ')}\n` +
+            `${''.padEnd(15)}roots:  ${p.workspaceRoots.join(', ')}`).join('\n\n')
+        : existsSync(DEFAULT_PROJECTS_PATH)
+          ? `(${DEFAULT_PROJECTS_PATH} is present but registers no projects)`
+          : `(no projects registered — ${DEFAULT_PROJECTS_PATH} is absent; consumers fall back to cwd inference. See docs/PROJECTS.md to populate it.)`);
       break;
     }
 
