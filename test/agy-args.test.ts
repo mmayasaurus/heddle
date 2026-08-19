@@ -13,6 +13,17 @@ describe('AgyAdapter.buildArgs — invocation contract', () => {
     const args = new AgyAdapter().buildArgs('x', { model: 'gemini-3.1-pro-high', cwd: '/tmp', resume: 'conv-9' });
     expect(args.slice(args.indexOf('--conversation'), args.indexOf('--conversation') + 2)).toEqual(['--conversation', 'conv-9']);
   });
+
+  it('composes resume + extraFlags and can disable permission-skip — exact argv', () => {
+    const args = new AgyAdapter('agy', false).buildArgs('go', {
+      model: 'gemini-3.6-flash-high', cwd: '/tmp', resume: 'c-1', extraFlags: ['--foo', 'bar'],
+    });
+    expect(args).toEqual([
+      '-p', 'go', '--output-format', 'stream-json', '--model', 'gemini-3.6-flash-high',
+      '--conversation', 'c-1', '--foo', 'bar',
+    ]);
+    expect(args).not.toContain('--dangerously-skip-permissions');
+  });
 });
 
 describe('regression HED-28 — agy --effort must not be combined with an effort-suffixed slug', () => {
