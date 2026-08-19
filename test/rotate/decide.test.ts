@@ -18,10 +18,10 @@ describe('decideRotation', () => {
     { id: 'acct3', configDir: '/h/.claude-acct3', loggedIn: true },
   ];
 
-  const acctCaps = (id: string, usedPct: number | null, stale = false): AccountCaps => ({
+  const acctCaps = (id: string, usedPct: number | null, stale = false, sevenDayPct: number | null = 0): AccountCaps => ({
     id,
     fiveHour: { usedPercentage: usedPct ?? 0, resetsAt: 1_800_000_000 },
-    sevenDay: { usedPercentage: 0, resetsAt: 1_800_000_000 },
+    sevenDay: { usedPercentage: sevenDayPct, resetsAt: 1_800_000_000 },
     windows: {},
     noteCodes: [],
     limitReached: false,
@@ -156,9 +156,57 @@ describe('decideRotation', () => {
   });
 
   it('honours custom thresholds', () => {
-    const strict = { softPct: 50, hardPct: 60 };
+    const strict = { ...DEFAULT_THRESHOLDS, softPct: 50, hardPct: 60 };
     expect(decideRotation(caps([acctCaps('acct1', 55)]), accounts, envOn(accounts[0]!), strict).action).toBe('watch');
     expect(decideRotation(caps([acctCaps('acct1', 55)]), accounts, envOn(accounts[0]!), DEFAULT_THRESHOLDS).action).toBe('idle');
+  });
+
+  // HED-190: the rotator must also trigger on the WEEKLY (7-day) cap. The window-keeper's staggering
+  // keeps 5h healthy while the weekly climbs, so a 5h-only trigger never fires for this case.
+  it('rotates on the WEEKLY (7d) hard cap even though 5h is healthy — the real HED-190 case', () => {
+    // Shape of the real incident (5h 22%, 7d climbing toward the cap): 7d must independently reach
+    // the hard band to force a rotate, since DEFAULT_THRESHOLDS.hard7dPct is 90.
+    const d = decideRotation(
+      caps([acctCaps('acct1', 22, false, 92), acctCaps('acct2', 10, false, 20), acctCaps('acct3', 40, false, 30)]),
+      accounts, envOn(accounts[0]!),
+    );
+    expect(d.action).toBe('rotate');
+    if (d.action !== 'rotate') throw new Error('unreachable');
+    expect(d.target.id).toBe('acct2'); // most 5h headroom — target selection stays 5h-based
+    expect(d.reason).toMatch(/7d/);
+  });
+
+  it('watches on the WEEKLY (7d) band even though 5h is idle', () => {
+    const d = decideRotation(caps([acctCaps('acct1', 20, false, 85)]), accounts, envOn(accounts[0]!));
+    expect(d.action).toBe('watch');
+    expect(d.reason).toMatch(/7d/);
+  });
+
+  it('is idle when both 5h and 7d are well below soft', () => {
+    const d = decideRotation(caps([acctCaps('acct1', 20, false, 20)]), accounts, envOn(accounts[0]!));
+    expect(d.action).toBe('idle');
+  });
+
+  it('rotates on 5h alone when 7d is null — a null 7d neither triggers nor blocks', () => {
+    const d = decideRotation(
+      caps([acctCaps('acct1', 95, false, null), acctCaps('acct2', 10, false, null)]),
+      accounts, envOn(accounts[0]!),
+    );
+    expect(d.action).toBe('rotate');
+    if (d.action !== 'rotate') throw new Error('unreachable');
+    expect(d.reason).not.toMatch(/7d/);
+  });
+
+  it('is unknown when both 5h and 7d are unavailable', () => {
+    const d = decideRotation(caps([acctCaps('acct1', null, /*stale*/ true, null)]), accounts, envOn(accounts[0]!));
+    expect(d.action).toBe('unknown');
+  });
+
+  it('honours custom 7d thresholds', () => {
+    const strict7d = { ...DEFAULT_THRESHOLDS, soft7dPct: 50, hard7dPct: 60 };
+    // 5h stays idle throughout (20%); only the 7d reading (55%) changes.
+    expect(decideRotation(caps([acctCaps('acct1', 20, false, 55)]), accounts, envOn(accounts[0]!), strict7d).action).toBe('watch');
+    expect(decideRotation(caps([acctCaps('acct1', 20, false, 55)]), accounts, envOn(accounts[0]!), DEFAULT_THRESHOLDS).action).toBe('idle');
   });
 });
 
