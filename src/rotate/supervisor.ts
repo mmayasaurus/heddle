@@ -42,7 +42,8 @@ export type RotatorStep =
   | { phase: 'verifying'; reason: string; pending: string[] }
   | { phase: 'resumed'; reason: string }         // rotation complete, pause lifted
   | { phase: 'exhausted'; reason: string }       // needs-human: no account to rotate to
-  | { phase: 'blocked'; reason: string; target?: string }; // needs-human: a relaunch/verify failure
+  | { phase: 'blocked'; reason: string; target?: string } // needs-human: a relaunch/verify failure
+  | { phase: 'aborted'; reason: string }; // quiesce timed out PRE-kill: pause lifted, human notified, nothing killed
 
 /**
  * Everything the state machine touches, injected so the machine is testable without a live fleet,
@@ -101,6 +102,15 @@ export interface RotatorDeps {
    * adapter-derived rather than computed here from raw timestamps.
    */
   verifyTimeout(): { timedOut: boolean; timeoutMs: number };
+  /**
+   * How long the PRE-KILL quiesce wait (for the pause in force) has run, against the configured
+   * quiesce-timeout. Bounds `tick`'s quiescing loop — without it a fleet that never goes quiet (an
+   * agent that never acks, or an in-flight dispatch that never clears) wedges the rotation forever.
+   * UNLIKE verifyTimeout, on timeout the supervisor LIFTS the pause (nothing killed yet, so aborting
+   * is safe) rather than staying blocked. Deadline math (now, the pause start, the env threshold)
+   * lives in the adapter, same as verifyTimeout.
+   */
+  quiesceTimeout(): { timedOut: boolean; timeoutMs: number };
   /** Post a needs-human to the operator (rotation cannot proceed unattended). */
   needsHuman(message: string): Promise<void>;
 }
@@ -192,6 +202,35 @@ export async function tick(deps: RotatorDeps): Promise<RotatorStep> {
   if (needsRelaunch.length > 0) {
     // Hold until the fleet is genuinely quiet, THEN do the irreversible half.
     if (!readiness.ready) {
+      // HED-186: bound the PRE-KILL wait. When nothing irreversible has happened yet, a timeout LIFTS
+      // the pause (safe) and escalates — never hang the fleet paused forever on a stuck agent. But this
+      // branch is RE-ENTRANT: a later tick can read !ready with the fleet already part-rotated, and then
+      // lifting is UNSAFE, so the guard below falls back to the VERIFY timeout's resolution (stay
+      // blocked) — resuming a half-rotated fleet is worse than waiting for a human.
+      const timeout = deps.quiesceTimeout();
+      if (timeout.timedOut) {
+        // Safe to auto-abort (lift the pause) ONLY if genuinely nothing has been killed: no roster
+        // member relaunched yet AND every roster member still live. killSession unregisters, so a killed
+        // member cannot appear in `live` — the liveness clause catches a kill-succeeded-relaunch-failed
+        // member (no mark, absent from live) that a mark-only check would miss when an INDEPENDENT
+        // blocker (a crashed+restarted agent, a new in-flight dispatch, an unconsultable ledger) makes
+        // the fleet !ready. Residual: a crash between relaunch and markRelaunched leaves a live-but-
+        // unmarked member the guard aborts past — alive on the target, so messy-not-destructive.
+        const noProgress = needsRelaunch.length === intent.roster.length
+          && intent.roster.every((a) => live.includes(a));
+        if (!noProgress) {
+          // Something has been killed and/or relaunched → the fleet may be HALF-ROTATED. Lifting the pause
+          // is unsafe; escalate and stay BLOCKED, like the VERIFY timeout (resuming a half-rotated fleet is
+          // worse than waiting for a human).
+          const done = intent.roster.length - needsRelaunch.length;
+          await deps.needsHuman(`rotation ${readiness.pauseId}: quiesce timed out mid-rotation — ${done} of ${intent.roster.length} member(s) already relaunched, or a roster member is not live; the fleet may be HALF-ROTATED. Pause HELD; resolve manually, then resume_pause.`);
+          return { phase: 'blocked', reason: `quiesce timed out mid-rotation (${done}/${intent.roster.length} relaunched or a member not live)`, target: intent.target };
+        }
+        // Nothing killed. Safe to lift. Notify FIRST so the escalation survives a resume-post failure.
+        await deps.needsHuman(`rotation ${readiness.pauseId}: fleet did not quiesce within ${timeout.timeoutMs}ms (blockers: ${readiness.blockers.join(', ') || 'none reported'}) — aborting, nothing killed. Lifting the pause; the rotator may re-attempt on a later tick.`);
+        await deps.resumePause(`rotation ${readiness.pauseId} to ${intent.target} ABORTED — fleet did not go quiet within ${timeout.timeoutMs}ms; no session was killed`);
+        return { phase: 'aborted', reason: `quiesce timed out with no progress; pause lifted (blockers: ${readiness.blockers.join(', ') || 'none'})` };
+      }
       return { phase: 'quiescing', reason: 'waiting for the fleet to go quiet', blockers: readiness.blockers };
     }
     return killRelaunchMark(deps, needsRelaunch, intent);

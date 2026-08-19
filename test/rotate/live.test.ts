@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CommsLog } from '../../src/comms/log.js';
 import { seal } from '../../src/comms/seal.js';
-import { createRotatorDeps, DEFAULT_VERIFY_TIMEOUT_MS } from '../../src/rotate/live.js';
+import { createRotatorDeps, DEFAULT_VERIFY_TIMEOUT_MS, DEFAULT_QUIESCE_TIMEOUT_MS } from '../../src/rotate/live.js';
 import type { Broker } from '../../src/comms/broker.js';
 
 /**
@@ -25,6 +25,14 @@ describe('createRotatorDeps — testable parts', () => {
 
   const deps = (sessionsDir?: string, only?: string[]) =>
     createRotatorDeps({ log, broker: dummyBroker, inFlight: null, usageDir: dir, scriptsDir: dir, now: () => nowMs, ...(sessionsDir ? { sessionsDir } : {}), ...(only ? { only } : {}) });
+
+  /** The durable relaunch marker tick() posts after a relaunch — wasRelaunched's source of truth. */
+  const appendRelaunchMarker = (pauseId: number, address: string) =>
+    log.append(
+      { from: 'operator', to: 'operator', kind: 'status', body: `rotation ${pauseId}: relaunched ${address}`,
+        meta: { rotationRelaunched: { pauseId, address } } },
+      operatorDecision('operator'),
+    );
 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), 'heddle-rotate-live-'));
@@ -122,11 +130,7 @@ describe('createRotatorDeps — testable parts', () => {
     );
     const pause = log.latestFleetPause();
     expect(pause).not.toBeNull();
-    log.append(
-      { from: 'operator', to: 'operator', kind: 'status', body: `rotation ${pause!.id}: relaunched V`,
-        meta: { rotationRelaunched: { pauseId: pause!.id, address: 'V' } } },
-      operatorDecision('operator'),
-    );
+    appendRelaunchMarker(pause!.id, 'V');
     expect(deps().wasRelaunched('V')).toBe(true);   // false before the fix — marker sat past the 500-window
     expect(deps().wasRelaunched('R')).toBe(false);  // no marker for R
   });
@@ -187,11 +191,7 @@ describe('createRotatorDeps — testable parts', () => {
       );
       const pause = log.latestFleetPause()!;
       nowMs += 6 * 60_000; // the marker lands 6 minutes after the pause
-      log.append(
-        { from: 'operator', to: 'operator', kind: 'status', body: `rotation ${pause.id}: relaunched V`,
-          meta: { rotationRelaunched: { pauseId: pause.id, address: 'V' } } },
-        operatorDecision('operator'),
-      );
+      appendRelaunchMarker(pause.id, 'V');
       nowMs += 60_000; // "now" is 1 minute after the MARKER (7 minutes after the pause)
       const result = deps().verifyTimeout();
       expect(result.timedOut).toBe(false); // would be TRUE if (wrongly) anchored to the pause start
@@ -205,11 +205,7 @@ describe('createRotatorDeps — testable parts', () => {
       );
       const pause = log.latestFleetPause()!;
       nowMs += 60_000; // the marker lands 1 minute after the pause
-      log.append(
-        { from: 'operator', to: 'operator', kind: 'status', body: `rotation ${pause.id}: relaunched V`,
-          meta: { rotationRelaunched: { pauseId: pause.id, address: 'V' } } },
-        operatorDecision('operator'),
-      );
+      appendRelaunchMarker(pause.id, 'V');
       nowMs += 6 * 60_000; // 6 minutes after the MARKER — past the 5-minute default
       const result = deps().verifyTimeout();
       expect(result.timedOut).toBe(true);
@@ -233,16 +229,60 @@ describe('createRotatorDeps — testable parts', () => {
         operatorDecision(),
       );
       const pause = log.latestFleetPause()!;
-      log.append(
-        { from: 'operator', to: 'operator', kind: 'status', body: `rotation ${pause.id}: relaunched V`,
-          meta: { rotationRelaunched: { pauseId: pause.id, address: 'V' } } },
-        operatorDecision('operator'),
-      );
+      appendRelaunchMarker(pause.id, 'V');
       nowMs += 2_000; // 2 seconds after the marker
       const custom = createRotatorDeps({
         log, broker: dummyBroker, inFlight: null, usageDir: dir, scriptsDir: dir, now: () => nowMs, verifyTimeoutMs: 1_000,
       });
       const result = custom.verifyTimeout();
+      expect(result.timeoutMs).toBe(1_000);
+      expect(result.timedOut).toBe(true); // 2s elapsed > 1s timeout
+    });
+  });
+
+  describe('quiesceTimeout (HED-186)', () => {
+    /** Raise a rotation pause at the current clock and return it. */
+    const pauseNow = () => {
+      log.append(
+        { from: 'operator', to: '@all', kind: 'status', body: 'pause',
+          meta: { fleetPause: { reason: 'r', rotation: { target: 'acct2', from: 'acct1', roster: ['V'] } } } },
+        operatorDecision(),
+      );
+      return log.latestFleetPause()!;
+    };
+
+    it('is never timed out when no pause is in force', () => {
+      expect(deps().quiesceTimeout()).toEqual({ timedOut: false, timeoutMs: DEFAULT_QUIESCE_TIMEOUT_MS });
+    });
+
+    it('flips at the deadline measured from the PAUSE START (not the relaunch marker)', () => {
+      pauseNow();
+      nowMs += DEFAULT_QUIESCE_TIMEOUT_MS; // exactly at the deadline — strictly-greater, so not yet
+      expect(deps().quiesceTimeout().timedOut).toBe(false);
+      nowMs += 1;                          // one ms past it
+      const result = deps().quiesceTimeout();
+      expect(result.timedOut).toBe(true);
+      expect(result.timeoutMs).toBe(DEFAULT_QUIESCE_TIMEOUT_MS);
+    });
+
+    it('anchors to the pause start even once a relaunch marker exists (unlike verifyTimeout)', () => {
+      // The two timeouts key off DIFFERENT anchors. A marker 1 minute old must not reset the quiesce
+      // clock: quiesce is measured from the pause, so a 21-minute-old pause is timed out regardless.
+      const pause = pauseNow();
+      nowMs += 20 * 60_000;
+      appendRelaunchMarker(pause.id, 'V');
+      nowMs += 60_000; // 21 min after the PAUSE, but only 1 min after the marker
+      expect(deps().quiesceTimeout().timedOut).toBe(true);   // pause-anchored ⇒ timed out
+      expect(deps().verifyTimeout().timedOut).toBe(false);   // marker-anchored ⇒ not
+    });
+
+    it('honours a custom quiesceTimeoutMs', () => {
+      pauseNow();
+      nowMs += 2_000; // 2 seconds after the pause
+      const custom = createRotatorDeps({
+        log, broker: dummyBroker, inFlight: null, usageDir: dir, scriptsDir: dir, now: () => nowMs, quiesceTimeoutMs: 1_000,
+      });
+      const result = custom.quiesceTimeout();
       expect(result.timeoutMs).toBe(1_000);
       expect(result.timedOut).toBe(true); // 2s elapsed > 1s timeout
     });

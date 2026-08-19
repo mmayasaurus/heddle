@@ -5,7 +5,7 @@ import { CommsLog, DEFAULT_COMMS_PATH } from '../comms/log.js';
 import { Broker } from '../comms/broker.js';
 import { ChannelTransport, errorMessage } from '../comms/bridge.js';
 import { resolveCommsIdentity, openLedgerIfPresent, OPERATOR_TOKEN_PATH, operatorTokenMatches } from '../comms/server.js';
-import { createRotatorDeps, DEFAULT_VERIFY_TIMEOUT_MS } from './live.js';
+import { createRotatorDeps, DEFAULT_VERIFY_TIMEOUT_MS, DEFAULT_QUIESCE_TIMEOUT_MS } from './live.js';
 import { tick } from './supervisor.js';
 import { DEFAULT_THRESHOLDS } from './decide.js';
 import { acquireLock, releaseLock, LOCK_REQUIRED_MODES } from './lock.js';
@@ -33,7 +33,8 @@ import { acquireLock, releaseLock, LOCK_REQUIRED_MODES } from './lock.js';
  * Env: HEDDLE_FLEET_SCRIPTS (dir with fleet-kill.sh/fleet-relaunch.sh) · HEDDLE_USAGE_DIR
  * (default ~/.heddle/usage) · HEDDLE_ROTATE_SOFT_PCT / HEDDLE_ROTATE_HARD_PCT · HEDDLE_ROTATE_SOFT_PCT_7D /
  * HEDDLE_ROTATE_HARD_PCT_7D (weekly-cap thresholds, HED-190) · HEDDLE_ROTATE_INTERVAL_MS
- * (default 60000) · HEDDLE_ROTATE_VERIFY_TIMEOUT_MS (default 300000) · HEDDLE_COMMS_DB · HEDDLE_LEDGER_DB.
+ * (default 60000) · HEDDLE_ROTATE_VERIFY_TIMEOUT_MS (default 300000) ·
+ * HEDDLE_ROTATE_QUIESCE_TIMEOUT_MS (default 1200000) · HEDDLE_COMMS_DB · HEDDLE_LEDGER_DB.
  */
 
 const warn = (m: string) => process.stderr.write(`heddle-rotator: ${m}\n`);
@@ -82,6 +83,10 @@ if (thresholds.hard7dPct <= thresholds.soft7dPct) {
 const rawVerifyTimeout = Number(env.HEDDLE_ROTATE_VERIFY_TIMEOUT_MS);
 const verifyTimeoutMs = Number.isFinite(rawVerifyTimeout) && rawVerifyTimeout > 0 ? rawVerifyTimeout : DEFAULT_VERIFY_TIMEOUT_MS;
 
+// HED-186: how long the PRE-KILL quiesce waits for the fleet to go quiet before ABORTING (lift the pause + needs-human).
+const rawQuiesceTimeout = Number(env.HEDDLE_ROTATE_QUIESCE_TIMEOUT_MS);
+const quiesceTimeoutMs = Number.isFinite(rawQuiesceTimeout) && rawQuiesceTimeout > 0 ? rawQuiesceTimeout : DEFAULT_QUIESCE_TIMEOUT_MS;
+
 const scriptsDir = env.HEDDLE_FLEET_SCRIPTS;
 if ((mode === 'run' || mode === 'once') && !scriptsDir) {
   warn('refusing to run: set HEDDLE_FLEET_SCRIPTS to the directory holding fleet-kill.sh and fleet-relaunch.sh.');
@@ -91,7 +96,7 @@ if ((mode === 'run' || mode === 'once') && !scriptsDir) {
 // Optional single-/multi-subject scope (HED-117): the supervised first run rotates ONE idle agent.
 const only = (env.HEDDLE_ROTATE_ONLY ?? '').split(',').map((x) => x.trim().toUpperCase()).filter(Boolean);
 const deps = createRotatorDeps({
-  log, broker, inFlight: ledger, thresholds, verifyTimeoutMs,
+  log, broker, inFlight: ledger, thresholds, verifyTimeoutMs, quiesceTimeoutMs,
   usageDir: env.HEDDLE_USAGE_DIR || join(homedir(), '.heddle', 'usage'),
   scriptsDir: scriptsDir ?? '', // only reached for active modes, which required it above
   ...(only.length ? { only } : {}),

@@ -28,12 +28,15 @@ describe('rotator supervisor tick', () => {
     killOk: (address: string) => { ok: boolean; code: string } = () => ({ ok: true, code: 'killed' });
     verifyTimedOut = false;         // HED-157: VERIFY boot-timeout — false = still within the window
     verifyTimeoutMsVal = 300_000;
+    quiesceTimedOut = false;        // HED-186: PRE-KILL quiesce timeout — false = still within the window
+    quiesceTimeoutMsVal = 1_200_000;
     // recorders
     killed: string[] = [];
     relaunched: { address: string; account: string }[] = [];
     needsHumanMsgs: string[] = [];
     paused: { reason: string; intent: RotationIntent }[] = [];
     resumed: string[] = [];
+    ops: string[] = [];  // call order across resumePause/needsHuman (the abort path lifts BEFORE it escalates)
   }
 
   const readinessOf = (w: World): PauseReadiness => ({
@@ -51,8 +54,9 @@ describe('rotator supervisor tick', () => {
     markRelaunched: async (a) => { w.marks.add(a); },
     wasRelaunched: (a) => w.marks.has(a),
     verifyTimeout: () => ({ timedOut: w.verifyTimedOut, timeoutMs: w.verifyTimeoutMsVal }),
+    quiesceTimeout: () => ({ timedOut: w.quiesceTimedOut, timeoutMs: w.quiesceTimeoutMsVal }),
     requestPause: async (reason, intent) => { w.paused.push({ reason, intent }); w.pauseId = 1; w.intent = intent; },
-    resumePause: async (reason) => { w.resumed.push(reason); w.pauseId = null; w.intent = null; },
+    resumePause: async (reason) => { w.ops.push('resumePause'); w.resumed.push(reason); w.pauseId = null; w.intent = null; },
     killSession: async (a) => { w.killed.push(a); const r = w.killOk(a); if (r.ok) { w.live = w.live.filter((x) => x !== a); w.relaunched_set.delete(a); } return r; },
     relaunch: async (a, account) => {
       const r = w.relaunchOk(a);
@@ -60,7 +64,7 @@ describe('rotator supervisor tick', () => {
       if (r.ok) { w.live.push(a); w.relaunched_set.add(a); }
       return r;
     },
-    needsHuman: async (m) => { w.needsHumanMsgs.push(m); },
+    needsHuman: async (m) => { w.ops.push('needsHuman'); w.needsHumanMsgs.push(m); },
   });
 
   /** A world with a fleet of `addrs` all live on the source account and NO pause in force. */
@@ -254,6 +258,96 @@ describe('rotator supervisor tick', () => {
     const step = await tick(deps(w));
     expect(step.phase).toBe('verifying');
     expect(w.needsHumanMsgs).toEqual([]);
+  });
+
+  // ── HED-186: PRE-KILL quiesce timeout ──────────────────────────────────────────────────────
+  // The MIRROR of the VERIFY timeout, with the OPPOSITE resolution: nothing has been killed yet, so
+  // the safe move is to lift the pause and escalate — never leave the fleet paused forever on a
+  // stuck agent that will not ack.
+
+  it('QUIESCE timeout: a fleet that never goes quiet ABORTS — pause lifted, human notified, nothing killed', async () => {
+    w.pauseId = 1;
+    w.intent = { target: 'acct2', from: 'acct1', roster: ['R', 'S', 'V'] };
+    w.live = ['R', 'S', 'V'];                       // every roster member still live: nothing was killed
+    w.ready = false; w.blockers = ['2 live agent(s) have not acked: S, V'];
+    w.quiesceTimedOut = true;                       // past the pre-kill deadline
+    const step = await tick(deps(w));
+    expect(step.phase).toBe('aborted');
+    expect(w.killed).toEqual([]);                   // THE point: the irreversible half never ran
+    expect(w.relaunched).toEqual([]);
+    expect(w.resumed).toHaveLength(1);              // the pause is LIFTED (unlike the VERIFY timeout)
+    expect(w.resumed[0]).toMatch(/ABORTED/);
+    expect(w.resumed[0]).toMatch(/no session was killed/);
+    expect(w.resumed[0]).toMatch(/rotation 1 to acct2/);              // the pause id reaches the resume log
+    expect(w.needsHumanMsgs).toHaveLength(1);
+    expect(w.needsHumanMsgs[0]).toMatch(/did not quiesce within 1200000ms/);
+    expect(w.needsHumanMsgs[0]).toContain('have not acked: S, V');   // the blockers reach the human
+    // Escalate FIRST, then lift: a resumePause that throws must not swallow the operator notification.
+    expect(w.ops).toEqual(['needsHuman', 'resumePause']);
+  });
+
+  it('QUIESCE timeout MID-ROTATION: some members already relaunched stays BLOCKED — the pause is NOT lifted', async () => {
+    // The abort branch is RE-ENTRANT: a tick that already killed+relaunched part of the roster can come
+    // back here on a later tick and read !ready. Lifting the pause then resumes a HALF-ROTATED fleet
+    // (members split across accounts), so this must escalate and hold like the VERIFY timeout.
+    w.pauseId = 1;
+    w.intent = { target: 'acct2', from: 'acct1', roster: ['R', 'S', 'V'] };
+    w.marks = new Set(['R']);                       // R carries a durable relaunch marker: progress was made
+    w.live = ['R', 'S', 'V'];
+    w.ready = false; w.blockers = ['1 live agent(s) have not acked: V'];
+    w.quiesceTimedOut = true;
+    const step = await tick(deps(w));
+    expect(step.phase).toBe('blocked');
+    expect(step.reason).toMatch(/mid-rotation/);
+    expect(w.resumed).toEqual([]);                  // THE point: the pause is HELD, not lifted
+    expect(w.killed).toEqual([]);
+    expect(w.relaunched).toEqual([]);
+    expect(w.needsHumanMsgs).toHaveLength(1);
+    expect(w.needsHumanMsgs[0]).toMatch(/HALF-ROTATED/);
+    expect(w.needsHumanMsgs[0]).toMatch(/1 of 3 member\(s\) already relaunched/);
+  });
+
+  it('QUIESCE timeout with a roster member NOT live stays BLOCKED — kill succeeded, relaunch failed leaves no mark', async () => {
+    // A member killed by an earlier tick whose relaunch FAILED carries no marker, so a marks-only check
+    // reads "nothing relaunched" and would abort past a DEAD member. killSession unregisters the presence
+    // row, so the missing member is exactly what the liveness clause catches.
+    w.pauseId = 1;
+    w.intent = { target: 'acct2', from: 'acct1', roster: ['R', 'S', 'V'] };
+    w.marks = new Set<string>();                    // zero marks — indistinguishable from "nothing killed"
+    w.live = ['R', 'S'];                            // ...except V is GONE: killed, relaunch failed
+    w.ready = false; w.blockers = ['1 in-flight dispatch'];   // an INDEPENDENT blocker holds the fleet !ready
+    w.quiesceTimedOut = true;
+    const step = await tick(deps(w));
+    expect(step.phase).toBe('blocked');
+    expect(w.resumed).toEqual([]);                  // THE point: never lift the pause around a dead member
+    expect(w.killed).toEqual([]);
+    expect(w.needsHumanMsgs).toHaveLength(1);
+    expect(w.needsHumanMsgs[0]).toMatch(/not live/);
+  });
+
+  it('QUIESCE: before the deadline, a not-yet-quiet fleet just waits — no abort, no resume (unchanged behavior)', async () => {
+    w.pauseId = 1;
+    w.intent = { target: 'acct2', from: 'acct1', roster: ['R', 'S', 'V'] };
+    w.ready = false; w.blockers = ['2 live agent(s) have not acked: S, V'];
+    w.quiesceTimedOut = false;                      // still within the window
+    const step = await tick(deps(w));
+    expect(step.phase).toBe('quiescing');
+    expect(w.resumed).toEqual([]);
+    expect(w.needsHumanMsgs).toEqual([]);
+    expect(w.killed).toEqual([]);
+  });
+
+  it('QUIESCE timeout is NOT consulted once the fleet is ready — a quiet fleet proceeds to the kill', async () => {
+    // Ordering guard: the timeout lives INSIDE the !ready branch. If it were checked before the
+    // readiness gate, a rotation that went quiet slowly would abort instead of rotating.
+    w.pauseId = 1;
+    w.intent = { target: 'acct2', from: 'acct1', roster: ['R', 'S', 'V'] };
+    w.ready = true;
+    w.quiesceTimedOut = true;                       // stale-but-quiet: past the deadline AND ready
+    const step = await tick(deps(w));
+    expect(step.phase).toBe('relaunching');
+    expect(w.killed.sort()).toEqual(['R', 'S', 'V']);
+    expect(w.resumed).toEqual([]);                  // no abort — readiness wins
   });
 
 });
