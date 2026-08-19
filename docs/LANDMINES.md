@@ -211,10 +211,31 @@ flags churn monthly.
   project root" by walking up therefore lands in the CANONICAL checkout. Observed: an agy docs
   worker dispatched with `--cwd <repo>/.worktrees/agentv` wrote its edit into `<repo>/docs/COMMS.md`,
   leaving shared `main` dirty for every other agent.
-- **No provider gives a verified write fence.** codex's `--sandbox workspace-write` is the closest;
-  agy's `--sandbox` documents only "terminal restrictions" and heddle has NOT tested whether it
-  confines file writes, so heddle does not pass it and does not claim it. cursor/claude have no
-  equivalent knob.
+- **No provider gives a write fence heddle can rely on ACROSS the fleet.** codex's `--sandbox
+  workspace-write` is a real one (characterized below), but agy's `--sandbox` documents only "terminal
+  restrictions" and heddle has NOT tested whether it confines file writes, so heddle does not pass it
+  and does not claim it. cursor/claude have no equivalent knob. Detection (below) is therefore still
+  the guarantee, because it needs no provider cooperation and covers the providers that have no fence.
+- **codex `workspace-write` write-boundary — VERIFIED (HED-71, live-verified 2026-08-19, codex-cli
+  0.147.0, macOS).** Under heddle's exact worker invocation (`--sandbox workspace-write
+  --ignore-user-config`, no exclude flags → codex built-in defaults), writes are ALLOWED to the cwd
+  subtree, `/tmp`, and `$TMPDIR` (`/var/folders/.../T` on macOS), and BLOCKED (EPERM) for every other
+  `$HOME`-rooted path — a *sibling* of the cwd included — and any absolute path outside those roots.
+  Two consequences:
+  - The common assumption "workspace-write blocks `$TMPDIR`" is **FALSE**. `std::env::temp_dir()` /
+    `tempfile` tests write to `$TMPDIR` and PASS under a worker — so a worker reporting temp-dir tests
+    as "sandbox failures" is wrong (this was the mistaken premise of HED-71's own filing). A test that
+    fails ONLY inside the sandbox is writing to a `$HOME` path outside cwd/tmp (`CARGO_HOME=~/.cargo`,
+    `~/.config`, `~/Library/…`) — or needs the network (off by default, above).
+  - Recipe when a worker's verification legitimately needs to write outside cwd/tmp, least-privilege
+    first: point the tool's home/cache env INTO the cwd (`CARGO_HOME=$cwd/.cargo`,
+    `XDG_CACHE_HOME=$cwd/.cache`) so its writes land in the already-writable workspace. The explicit
+    escape hatch is `-c 'sandbox_workspace_write.writable_roots=["<dir>"]'` (validated: flips a blocked
+    `$HOME` write to OK, and works even with `--ignore-user-config`) — but naming a broad root like
+    `$HOME` is near `danger-full-access`, so name the exact dir. Trusted verification only may use
+    `--sandbox danger-full-access`. (This boundary also means a codex worker physically cannot write
+    into the canonical checkout — the worktree's PARENT is outside cwd — but agy, with no fence, still
+    can, which is why the escape DETECTION below stays load-bearing.)
 - **So heddle DETECTS instead** (`src/worktree.ts`), which needs no provider cooperation and is
   exact: a linked worktree has `git rev-parse --git-dir` != `--git-common-dir`, and the canonical
   checkout is `dirname(common-dir)` (verified 2026-08-16). One `git status --porcelain` on the

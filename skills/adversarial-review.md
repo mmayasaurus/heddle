@@ -19,6 +19,13 @@ author's worktree to find what they missed. Your mandate is FIND ONLY:
      Name every test that would still pass if the feature were silently broken.
   4. docs & messages (comments, docs, user-facing strings that contradict the code)
   5. anything the author's own PR description claims that you could not verify in the code.
+  6. **verification claims reproduce (HED-71).** When the PR rests on a claim someone else's run
+     produced — a dispatched worker's "tests pass" / "N unrelated failures", a CI note, "verified
+     locally" — REPRODUCE it, don't trust it: re-run the named tests yourself (read-only) and confirm
+     the claim holds. Flag any claim that is unnamed (a bare failure count with no test names or
+     command) or that does not reproduce. A worker's sandbox can make real code look broken and broken
+     code look fine (e.g. codex `workspace-write` blocks `$HOME` writes and the network) — so an
+     unreproduced verification is a finding, not a pass.
 - **Report format** — a numbered list, most severe first; per finding: `severity (high|med|low) —
   file:line — the problem — why it matters — how you would prove it (a concrete input, a failing
   test, a repro)`. Then one line per lens with nothing found: `<lens>: nothing`. Finish with a
