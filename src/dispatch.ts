@@ -1196,6 +1196,24 @@ function refuseInSession(
   const id = ctx.ledger.refuse(
     record, 'claude-in-session', reason, 'in-session',
   );
+  // This review row links to dispatch id `id`; it counts only once the handoff is CONFIRMED
+  // (report_in_session clears the refusal), so an unreported handoff never inflates the pair
+  // stats — mirroring how the dispatch row itself stays a refusal until reported (HED-122/HED-99).
+  if (ctx.review) {
+    // The review row is a SECONDARY audit artifact; the refusal row above is already committed, so a
+    // recordReview failure (e.g. a caller-supplied malformed authorDispatchId) must NOT orphan that
+    // handoff or throw away the whole dispatch — the two writes are not atomic (codeant/codex). Keep
+    // the handoff whole and skip only the review-pair audit for this one row.
+    try {
+      ctx.ledger.recordReview({
+        dispatchId: id, authorProvider: ctx.review.authorProvider, authorModel: ctx.review.authorModel,
+        authorDispatchId: ctx.review.authorDispatchId, reviewerProvider: route.provider, reviewerModel: route.model,
+      });
+    } catch (err) {
+      process.stderr.write(`heddle: could not record the in-session review row for dispatch #${id} ` +
+        `(${err instanceof Error ? err.message : String(err)}) — the handoff stands; only its review-pair audit is skipped\n`);
+    }
+  }
   const instruction =
     `Use your own Agent tool with model "${route.model}" and skills [${skills.join(', ')}]` +
     (mcp.length ? ` and MCP [${mcp.join(', ')}]` : '') + `.` + alt +
