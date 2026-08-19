@@ -140,6 +140,14 @@ flags churn monthly.
 - **Never** use the reverse-engineered OpenCode↔Antigravity OAuth plugins: the flagship plugin is
   archived with an explicit ToS-violation + real-account-ban warning in its own README, corroborated
   by ban threads on Google's official forum. Not with a primary Google account, not ever here.
+- **`--effort` CONFLICTS with an effort-suffixed model slug (HED-28, live-verified agy 1.1.15,
+  2026-08-19).** agy's catalog is entirely suffixed (`gemini-3.6-flash-{low,medium,high}`,
+  `gemini-3.1-pro-{low,high}`) and effort rides that suffix. Passing BOTH a suffixed slug AND
+  `--effort` hard-errors — `"invalid model selection (--model gemini-3.6-flash-low --effort high): …
+  conflicts with --effort"`, status ERROR, zero output; the two no-`--effort` controls SUCCEED and
+  echo the slug's own effort. So `src/adapters/agy.ts` `buildArgs` emits `--effort` ONLY for an
+  unsuffixed id, and routing keeps gemini classes effort-free. `--effort low|medium|high` IS a real
+  flag (per `agy --help`) — but only for a base/unsuffixed model, of which the live catalog has none.
 
 ## Account rotation (multiple subscriptions per provider)
 

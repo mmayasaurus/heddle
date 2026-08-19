@@ -113,7 +113,9 @@ get a temporary `AGENTS.md` block (restored after dispatch).
    `never_via_cursor`; not Ollama Cloud; official binary only.
 4. Add the id under `providers.<name>.models` in `routing.v0.yaml`, then a
    task class or fallback. Note effort encoding (Codex `-c
-   model_reasoning_effort`, Cursor baked into the id, agy `--effort`).
+   model_reasoning_effort`, Cursor baked into the id, agy the model-slug SUFFIX
+   (`…-low/-medium/-high`) — agy's `--effort` flag exists but CONFLICTS with a suffixed slug and
+   errors, so effort rides the slug and the adapter omits `--effort` for suffixed ids (HED-28)).
 5. Log the latency snapshot in the YAML comment (existing ✅ style) and any
    LANDMINES gotcha.
 
