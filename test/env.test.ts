@@ -21,6 +21,9 @@ describe('buildWorkerEnv — subscription-billing worker isolation (HED-30 allow
       process.env.VERTEXAI_PROJECT = 'p';
       process.env.AWS_BEARER_TOKEN_BEDROCK = 'x';
       process.env.CURSOR_BASE_URL = 'http://evil';
+      process.env.GEMINI_BASE_URL = 'http://evil';           // GEMINI_ prefix
+      process.env.GCLOUD_ACCESS_TOKEN = 'x';                 // GCLOUD_ prefix
+      process.env.CLAUDE_CODE_USE_NEW_BACKEND = 'true';      // CLAUDE_CODE_USE_ prefix
       process.env.ANTHROPIC_SOMETHING_BRAND_NEW = 'x'; // future var the exact denylist never listed
       process.env.CODEX_API_KEY = 'x';                  // explicit list (no bare CODEX_ prefix — CODEX_HOME is a selector)
       process.env.PATH = '/usr/bin';
@@ -28,7 +31,8 @@ describe('buildWorkerEnv — subscription-billing worker isolation (HED-30 allow
       const { env, stripped } = buildWorkerEnv();
       for (const k of ['ANTHROPIC_BASE_URL', 'ANTHROPIC_CUSTOM_HEADERS', 'OPENAI_BASE_URL',
         'OPENAI_ORGANIZATION', 'GOOGLE_GENAI_USE_VERTEXAI', 'GOOGLE_CLOUD_PROJECT', 'VERTEXAI_PROJECT',
-        'AWS_BEARER_TOKEN_BEDROCK', 'CURSOR_BASE_URL', 'ANTHROPIC_SOMETHING_BRAND_NEW', 'CODEX_API_KEY']) {
+        'AWS_BEARER_TOKEN_BEDROCK', 'CURSOR_BASE_URL', 'GEMINI_BASE_URL', 'GCLOUD_ACCESS_TOKEN',
+        'CLAUDE_CODE_USE_NEW_BACKEND', 'ANTHROPIC_SOMETHING_BRAND_NEW', 'CODEX_API_KEY']) {
         expect(env[k], `${k} must be stripped`).toBeUndefined();
         expect(stripped).toContain(k);
       }
