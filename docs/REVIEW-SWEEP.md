@@ -69,8 +69,7 @@ Certain operational automated outputs should be recognized as non-findings, docu
 - "rate limit exceeded" review bodies (e.g. codereviewbot.ai free tier limit of 2–3 reviews per 4 h per repo).
 - cr-gpt failure messages stating "OPENAI_API_KEY not set".
 - Gitar reports of "CI failed" when the underlying failure is the by-design `lint` job.
-- Skipped **deterministic-review** runs for `pull_request: edited` events — that workflow sends title/body edits to a `noop` concurrency slot and skips them (see [CI.md](CI.md)). (The `gate` workflow does NOT skip edits; it names them separately — next line.)
-- A `gate (edit — non-required …)` context showing cancelled or red — it is the non-required name a title/body-edit run publishes so it can never touch the required `gate` context (HED-142); a bot-edit storm at PR-open cancels those edit-slot runs, which is cosmetic. The REQUIRED `gate` is published only by commit-driven and base-retarget runs; read that one.
+- A **pending** `gate`, `semgrep`, or `gitleaks` title/body-edit echo while its matching commit-path leaf is still running. Confirm the job summary says it is waiting for the SHA-bound verdict, then wait for its final conclusion. A final skipped, cancelled, or red public check is a finding, not noise.
 
 Read these notices to confirm their status, then move on without treating them as findings.
 
@@ -130,7 +129,7 @@ Batch fixes for a round into one push (each push spawns reviewer runs — some i
 
 - **No workflow runs at HEAD after a push?** Check `gh pr view $N --json mergeable,mergeStateStatus` first: GitHub silently skips `pull_request` workflows on a conflicting PR; fix by merging `origin/main` into the branch (never force-push).
 - **A green scanner check is not proof a scan happened.** Read the job log for the scanned volume (our gitleaks step now fails closed on an empty scan; see [CI.md](CI.md)).
-- **A skipped "noop" Deterministic Review run per push** is the `edited`-event guard operating normally, not a failure.
+- **A skipped title/body-edit semgrep or gitleaks check at HEAD is a finding, not expected noise.** Title/body edits now publish the real scanner conclusion by echoing the head SHA's `*-verdict`; re-run Deterministic Review or push a commit if either public scanner check is skipped or has no real verdict.
 - **Bots auto-resolve their own threads when the code changes.** The sweep still lists them; check `isResolved`, not memory.
 
 ## Standing rules from the maintainer
@@ -149,4 +148,3 @@ The authoritative wording lives in [CI.md](CI.md#standing-rules-maya-2026-08-15-
 ## Fleet tooling
 
 The maintainers' fleet automates channels (a)–(e) with a sweep script kept outside this repo. Contributors without it use the commands above — the procedure is the same.
-

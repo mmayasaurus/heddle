@@ -50,36 +50,35 @@ on:
   pull_request:
     # `edited` is here for ONE reason: retargeting the PR's base branch moves
     # semgrep's baseline and gitleaks' commit range, so the scans must re-run.
-    # `edited` also fires on title/body edits — the job guards below skip those.
+    # `edited` also fires on title/body edits — those runs echo the head SHA's
+    # last real scanner verdict instead of scanning or publishing `skipped`.
     types: [opened, reopened, synchronize, ready_for_review, edited]
   push:
     branches: [main]
 
 permissions: {}
 
-# Superseded runs are cancelled (hosted minutes are free but finite, and only
-# the latest commit's results matter — nothing here maintains a living comment).
-# `edited` events that are NOT a base-branch change get their own `noop`
-# group: cancellation happens at run creation, before the job-level guards
-# skip them, so without this a title edit would kill an in-flight scan of the
-# same PR (cubic, dashboard#5 r2).
+# TWO SLOTS (HED-131). Commit-driven events and base retargets take the `scan`
+# slot, where newer work cancels stale work. Title/body edits take the `noop`
+# slot with cancellation disabled: their verdict echoes must never cancel an
+# in-flight real scan or one another.
 concurrency:
-  group: det-review-${{ github.event.pull_request.number || github.ref }}-${{ (github.event.action != 'edited' || github.event.changes.base.ref.from != '') && 'scan' || 'noop' }}
-  cancel-in-progress: true
+  group: det-review-${{ github.event.pull_request.number || github.ref }}-${{ (github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base.ref.from != '') && 'scan' || 'noop' }}
+  cancel-in-progress: ${{ github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base.ref.from != '' }}
 
 jobs:
-  semgrep:
-    name: semgrep (diff-aware on PRs · full on main)
+  semgrep-scan:
+    name: semgrep scan (diff-aware on PRs · full on main)
     # Every push to main is scanned. PRs: skip drafts and Dependabot's own PRs
     # (Dependabot gets a read-only token that cannot upload SARIF — semgrep's
     # sample config skips them too); the guard is PR-only so a main push whose
-    # actor happens to be dependabot is still scanned. `edited` events run only
-    # when the BASE branch changed (payload carries changes.base) — title/body
-    # edits do not move the baseline.
+    # actor happens to be dependabot is still scanned. Like gate.yml's `build`,
+    # title/body edits skip this leaf; base retargets run it because the
+    # baseline moved.
     if: >-
       github.event_name == 'push' ||
       (github.event.pull_request.draft == false &&
-       github.actor != 'dependabot[bot]' &&
+       github.event.pull_request.user.login != 'dependabot[bot]' &&
        (github.event.action != 'edited' || github.event.changes.base.ref.from != ''))
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -188,8 +187,128 @@ jobs:
           sarif_file: semgrep.sarif
           category: semgrep
 
-  gitleaks:
-    name: gitleaks (secrets in the PR's commits)
+  semgrep:
+    # Stable public check context. Commit paths publish the semgrep-scan result;
+    # title/body edits echo the head SHA's last real semgrep verdict.
+    name: semgrep (diff-aware on PRs · full on main)
+    needs: [semgrep-scan]
+    # Runs whenever semgrep-scan runs (push, or a non-draft non-Dependabot PR)
+    # PLUS eligible title/body edits (to echo) — i.e. SKIPS exactly when
+    # semgrep-scan skips (draft / Dependabot). Its skip predicate MUST stay
+    # equivalent to semgrep-scan's `if` (change one, change both). `always()` is
+    # LOAD-BEARING: without it, `needs: [semgrep-scan]` would SKIP this job when
+    # the scan fails/cancels — masking a real failure as `skipped`. With it, an
+    # eligible event always runs this job, which then publishes the real verdict
+    # (success OR failure) from needs.<scan>.result.
+    if: >-
+      always() &&
+      (github.event_name == 'push' ||
+       (github.event_name == 'pull_request' &&
+        github.event.pull_request.draft == false &&
+        github.event.pull_request.user.login != 'dependabot[bot]'))
+    runs-on: ubuntu-24.04
+    # INVARIANT: timeout-minutes MUST exceed the leaf timeout
+    # (`semgrep-scan` = 15), because an edit echo waits while that scan is in
+    # flight. If the leaf timeout rises, raise this above it too. 25 > 15.
+    timeout-minutes: 25
+    permissions:
+      checks: write
+    steps:
+      - name: Verdict (commit) or echo (edit)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          IS_EDIT: ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.base.ref.from == '' }}
+          SCAN_RESULT: ${{ needs.semgrep-scan.result }}
+        run: |
+          set -eu
+          if [ "$IS_EDIT" = "true" ]; then
+            echo "edit event — echoing the last real verdict (semgrep-verdict marker) for $SHA"
+            CONC=none; DRY=0
+            # WAIT for this SHA's real verdict; never fail closed on a timer. A
+            # premature red would land in a check-suite NEWER than the commit
+            # run's own semgrep, and GitHub resolves a required check from the
+            # newest SUITE, so it would block the PR until another edit superseded
+            # it. The ONLY fail-closed trigger is the commit-path semgrep scan
+            # being verifiably GONE — no leaf job in flight — with still no
+            # marker, sustained past a startup grace. Invariant: this job's
+            # timeout exceeds the leaf timeout, so the scan cannot remain in
+            # flight past its own timeout. The loop bound is a belt sized just
+            # under this job's 25-minute timeout (~24m50s at the backoff cadence)
+            # and above the leaf timeout; it cannot end on iteration count while
+            # a real leaf is still in flight. Poll fast for ~2 min, then back off
+            # to 30s to spare the API rate limit on a long scan.
+            for i in $(seq 1 57); do
+              if ! CR=$(gh api "repos/$REPO/commits/$SHA/check-runs" --paginate --slurp 2>/dev/null); then
+                echo "  could not read check runs for ${SHA}; scan liveness is unknown — retrying"
+                if [ "$i" -lt 12 ]; then sleep 10; else sleep 30; fi
+                continue
+              fi
+              CONC=$(printf '%s\n' "$CR" | jq -r '[.[].check_runs[]] | [ .[] | select(.name=="semgrep-verdict") ] | sort_by(.started_at) | last | .conclusion // "none"')
+              INFLIGHT=$(printf '%s\n' "$CR" | jq -r '[.[].check_runs[]] | [ .[] | select((.name|test("^semgrep scan")) and .status!="completed") ] | length')
+              # Four states: a marker is usable only after the matching scan is
+              # gone; any in-flight scan resets the dry proof, with or without a
+              # stale marker; only no-marker + no-inflight advances fail-closed.
+              if [ "$CONC" != "none" ] && [ "$INFLIGHT" = "0" ]; then
+                break
+              fi
+              if [ "$CONC" = "none" ] && [ "$INFLIGHT" = "0" ]; then
+                DRY=$((DRY + 1))
+              else
+                DRY=0
+              fi
+              # Fail closed only when the scan is verifiably gone AND still no
+              # marker, sustained a few polls past the 90s grace — this bridges
+              # the brief gap between the leaf finishing and the commit-path
+              # aggregator publishing the marker.
+              if [ "$i" -gt 9 ] && [ "$DRY" -ge 6 ]; then
+                echo "  semgrep scan is no longer in flight and no semgrep-verdict marker appeared — the commit aggregator did not publish (cancelled / never ran)."
+                break
+              fi
+              if [ -z "${WAITED:-}" ]; then
+                WAITED=1
+                {
+                  echo "### semgrep — waiting for the commit-path verdict on \`${SHA}\`"
+                  echo "This edit run is holding \`semgrep\` **pending** until the commit-path scan for this commit publishes its \`semgrep-verdict\`, which the echo then reflects. Pending here means *blocked-while-scanning*, not failed."
+                } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+              fi
+              echo "  waiting for the commit run's verdict on ${SHA} (poll ${i}; marker=${CONC}, commit-path jobs in flight=${INFLIGHT}, dry=${DRY})"
+              if [ "$i" -lt 12 ]; then sleep 10; else sleep 30; fi
+            done
+            case "$CONC" in
+              success)
+                echo "real verdict for ${SHA} = success — semgrep green"
+                exit 0 ;;
+              none)
+                echo "::error::no semgrep-verdict marker for ${SHA} — the commit 'semgrep' run never published a verdict for this commit (it was cancelled or never ran; the scan is no longer in flight). Re-run 'Deterministic Review' on this PR, or push a commit. Failing closed."
+                exit 1 ;;
+              *)
+                echo "::error::real verdict for ${SHA} was '${CONC}' — echoing it. An edit never masks a real failure; fix the code and push a commit."
+                exit 1 ;;
+            esac
+          fi
+          # Commit / retarget / push: the real verdict IS the leaf result.
+          case "$SCAN_RESULT" in
+            success) MARK=success ;;
+            *)       MARK=failure ;;
+          esac
+          # Record the verdict as a non-required marker on the head SHA so future
+          # edit runs can echo it. Best-effort: on a fork-head PR GITHUB_TOKEN is
+          # read-only regardless of `permissions:`, so this POST 403s — the
+          # aggregator still reflects the real result below; only later EDIT runs
+          # on a fork degrade (they fail closed, never mask). Same-repo branches
+          # always publish.
+          if ! gh api "repos/$REPO/check-runs" -X POST -f name=semgrep-verdict \
+                -f head_sha="$SHA" -f status=completed -f conclusion="$MARK" >/dev/null 2>&1; then
+            echo "::warning::could not publish the semgrep-verdict marker for ${SHA} (read-only token / fork PR?) — edit runs on this commit will fail closed until a commit run can publish one."
+          fi
+          echo "real verdict = ${MARK} (semgrep-scan=${SCAN_RESULT}); recorded as semgrep-verdict marker for ${SHA}"
+          # Make THIS job's conclusion the scanner verdict.
+          [ "$MARK" = success ]
+
+  gitleaks-scan:
+    name: gitleaks scan (secrets in the PR's commits)
     # PRs only — drafts INCLUDED (a leaked secret does not wait for
     # ready_for_review); `edited` only when the base branch changed (the
     # scanned range moves). Push-to-main coverage is GitHub secret scanning.
@@ -267,3 +386,118 @@ jobs:
         with:
           sarif_file: gitleaks-delta.sarif
           category: gitleaks-merge-delta
+
+  gitleaks:
+    # Stable public check context. Commit paths publish the gitleaks-scan result;
+    # title/body edits echo the head SHA's last real gitleaks verdict.
+    name: gitleaks (secrets in the PR's commits)
+    needs: [gitleaks-scan]
+    # Runs on every PR event (drafts included — a leaked secret does not wait for
+    # ready_for_review; edits included, to echo); SKIPS on push (gitleaks-scan is
+    # PR-only — push coverage is native GitHub secret scanning). Its skip
+    # predicate MUST stay equivalent to gitleaks-scan's `if`. `always()` is
+    # LOAD-BEARING: without it, `needs: [gitleaks-scan]` would SKIP this job when
+    # the scan FAILS (a secret hit) — masking the leak as `skipped`. With it, a PR
+    # event always runs this job, which publishes the real verdict.
+    if: >-
+      always() && github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    # INVARIANT: timeout-minutes MUST exceed the leaf timeout
+    # (`gitleaks-scan` = 10), because an edit echo waits while that scan is in
+    # flight. If the leaf timeout rises, raise this above it too. 25 > 10.
+    timeout-minutes: 25
+    permissions:
+      checks: write
+    steps:
+      - name: Verdict (commit) or echo (edit)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          IS_EDIT: ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.base.ref.from == '' }}
+          SCAN_RESULT: ${{ needs.gitleaks-scan.result }}
+        run: |
+          set -eu
+          if [ "$IS_EDIT" = "true" ]; then
+            echo "edit event — echoing the last real verdict (gitleaks-verdict marker) for $SHA"
+            CONC=none; DRY=0
+            # WAIT for this SHA's real verdict; never fail closed on a timer. A
+            # premature red would land in a check-suite NEWER than the commit
+            # run's own gitleaks, and GitHub resolves a required check from the
+            # newest SUITE, so it would block the PR until another edit superseded
+            # it. The ONLY fail-closed trigger is the commit-path gitleaks scan
+            # being verifiably GONE — no leaf job in flight — with still no
+            # marker, sustained past a startup grace. Invariant: this job's
+            # timeout exceeds the leaf timeout, so the scan cannot remain in
+            # flight past its own timeout. The loop bound is a belt sized just
+            # under this job's 25-minute timeout (~24m50s at the backoff cadence)
+            # and above the leaf timeout; it cannot end on iteration count while
+            # a real leaf is still in flight. Poll fast for ~2 min, then back off
+            # to 30s to spare the API rate limit on a long scan.
+            for i in $(seq 1 57); do
+              if ! CR=$(gh api "repos/$REPO/commits/$SHA/check-runs" --paginate --slurp 2>/dev/null); then
+                echo "  could not read check runs for ${SHA}; scan liveness is unknown — retrying"
+                if [ "$i" -lt 12 ]; then sleep 10; else sleep 30; fi
+                continue
+              fi
+              CONC=$(printf '%s\n' "$CR" | jq -r '[.[].check_runs[]] | [ .[] | select(.name=="gitleaks-verdict") ] | sort_by(.started_at) | last | .conclusion // "none"')
+              INFLIGHT=$(printf '%s\n' "$CR" | jq -r '[.[].check_runs[]] | [ .[] | select((.name|test("^gitleaks scan")) and .status!="completed") ] | length')
+              # Four states: a marker is usable only after the matching scan is
+              # gone; any in-flight scan resets the dry proof, with or without a
+              # stale marker; only no-marker + no-inflight advances fail-closed.
+              if [ "$CONC" != "none" ] && [ "$INFLIGHT" = "0" ]; then
+                break
+              fi
+              if [ "$CONC" = "none" ] && [ "$INFLIGHT" = "0" ]; then
+                DRY=$((DRY + 1))
+              else
+                DRY=0
+              fi
+              # Fail closed only when the scan is verifiably gone AND still no
+              # marker, sustained a few polls past the 90s grace — this bridges
+              # the brief gap between the leaf finishing and the commit-path
+              # aggregator publishing the marker.
+              if [ "$i" -gt 9 ] && [ "$DRY" -ge 6 ]; then
+                echo "  gitleaks scan is no longer in flight and no gitleaks-verdict marker appeared — the commit aggregator did not publish (cancelled / never ran)."
+                break
+              fi
+              if [ -z "${WAITED:-}" ]; then
+                WAITED=1
+                {
+                  echo "### gitleaks — waiting for the commit-path verdict on \`${SHA}\`"
+                  echo "This edit run is holding \`gitleaks\` **pending** until the commit-path scan for this commit publishes its \`gitleaks-verdict\`, which the echo then reflects. Pending here means *blocked-while-scanning*, not failed."
+                } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+              fi
+              echo "  waiting for the commit run's verdict on ${SHA} (poll ${i}; marker=${CONC}, commit-path jobs in flight=${INFLIGHT}, dry=${DRY})"
+              if [ "$i" -lt 12 ]; then sleep 10; else sleep 30; fi
+            done
+            case "$CONC" in
+              success)
+                echo "real verdict for ${SHA} = success — gitleaks green"
+                exit 0 ;;
+              none)
+                echo "::error::no gitleaks-verdict marker for ${SHA} — the commit 'gitleaks' run never published a verdict for this commit (it was cancelled or never ran; the scan is no longer in flight). Re-run 'Deterministic Review' on this PR, or push a commit. Failing closed."
+                exit 1 ;;
+              *)
+                echo "::error::real verdict for ${SHA} was '${CONC}' — echoing it. An edit never masks a real failure; fix the code and push a commit."
+                exit 1 ;;
+            esac
+          fi
+          # Commit / retarget / push: the real verdict IS the leaf result.
+          case "$SCAN_RESULT" in
+            success) MARK=success ;;
+            *)       MARK=failure ;;
+          esac
+          # Record the verdict as a non-required marker on the head SHA so future
+          # edit runs can echo it. Best-effort: on a fork-head PR GITHUB_TOKEN is
+          # read-only regardless of `permissions:`, so this POST 403s — the
+          # aggregator still reflects the real result below; only later EDIT runs
+          # on a fork degrade (they fail closed, never mask). Same-repo branches
+          # always publish.
+          if ! gh api "repos/$REPO/check-runs" -X POST -f name=gitleaks-verdict \
+                -f head_sha="$SHA" -f status=completed -f conclusion="$MARK" >/dev/null 2>&1; then
+            echo "::warning::could not publish the gitleaks-verdict marker for ${SHA} (read-only token / fork PR?) — edit runs on this commit will fail closed until a commit run can publish one."
+          fi
+          echo "real verdict = ${MARK} (gitleaks-scan=${SCAN_RESULT}); recorded as gitleaks-verdict marker for ${SHA}"
+          # Make THIS job's conclusion the scanner verdict.
+          [ "$MARK" = success ]
