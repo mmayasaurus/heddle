@@ -202,15 +202,34 @@ export async function tick(deps: RotatorDeps): Promise<RotatorStep> {
   if (needsRelaunch.length > 0) {
     // Hold until the fleet is genuinely quiet, THEN do the irreversible half.
     if (!readiness.ready) {
-      // HED-186: bound the PRE-KILL wait. Nothing irreversible has happened yet, so on timeout LIFT
-      // the pause (safe) and escalate — never hang the fleet paused forever on a stuck agent. This is
-      // the OPPOSITE of the VERIFY timeout (post-kill), which stays blocked because resuming a
-      // half-rotated fleet is worse than waiting for a human.
+      // HED-186: bound the PRE-KILL wait. When nothing irreversible has happened yet, a timeout LIFTS
+      // the pause (safe) and escalates — never hang the fleet paused forever on a stuck agent. But this
+      // branch is RE-ENTRANT: a later tick can read !ready with the fleet already part-rotated, and then
+      // lifting is UNSAFE, so the guard below falls back to the VERIFY timeout's resolution (stay
+      // blocked) — resuming a half-rotated fleet is worse than waiting for a human.
       const timeout = deps.quiesceTimeout();
       if (timeout.timedOut) {
-        await deps.resumePause(`rotation to ${intent.target} ABORTED — fleet did not go quiet within ${timeout.timeoutMs}ms; no session was killed`);
-        await deps.needsHuman(`rotation ${readiness.pauseId}: fleet did not quiesce within ${timeout.timeoutMs}ms (blockers: ${readiness.blockers.join(', ') || 'none reported'}) — pause LIFTED, nothing killed. Investigate the stuck agent(s); until the blocker clears the rotator may re-attempt on a later tick.`);
-        return { phase: 'aborted', reason: `quiesce timed out; pause lifted (blockers: ${readiness.blockers.join(', ') || 'none'})` };
+        // Safe to auto-abort (lift the pause) ONLY if genuinely nothing has been killed: no roster
+        // member relaunched yet AND every roster member still live. killSession unregisters, so a killed
+        // member cannot appear in `live` — the liveness clause catches a kill-succeeded-relaunch-failed
+        // member (no mark, absent from live) that a mark-only check would miss when an INDEPENDENT
+        // blocker (a crashed+restarted agent, a new in-flight dispatch, an unconsultable ledger) makes
+        // the fleet !ready. Residual: a crash between relaunch and markRelaunched leaves a live-but-
+        // unmarked member the guard aborts past — alive on the target, so messy-not-destructive.
+        const noProgress = needsRelaunch.length === intent.roster.length
+          && intent.roster.every((a) => live.includes(a));
+        if (!noProgress) {
+          // Something has been killed and/or relaunched → the fleet may be HALF-ROTATED. Lifting the pause
+          // is unsafe; escalate and stay BLOCKED, like the VERIFY timeout (resuming a half-rotated fleet is
+          // worse than waiting for a human).
+          const done = intent.roster.length - needsRelaunch.length;
+          await deps.needsHuman(`rotation ${readiness.pauseId}: quiesce timed out mid-rotation — ${done} of ${intent.roster.length} member(s) already relaunched, or a roster member is not live; the fleet may be HALF-ROTATED. Pause HELD; resolve manually, then resume_pause.`);
+          return { phase: 'blocked', reason: `quiesce timed out mid-rotation (${done}/${intent.roster.length} relaunched or a member not live)`, target: intent.target };
+        }
+        // Nothing killed. Safe to lift. Notify FIRST so the escalation survives a resume-post failure.
+        await deps.needsHuman(`rotation ${readiness.pauseId}: fleet did not quiesce within ${timeout.timeoutMs}ms (blockers: ${readiness.blockers.join(', ') || 'none reported'}) — aborting, nothing killed. Lifting the pause; the rotator may re-attempt on a later tick.`);
+        await deps.resumePause(`rotation ${readiness.pauseId} to ${intent.target} ABORTED — fleet did not go quiet within ${timeout.timeoutMs}ms; no session was killed`);
+        return { phase: 'aborted', reason: `quiesce timed out with no progress; pause lifted (blockers: ${readiness.blockers.join(', ') || 'none'})` };
       }
       return { phase: 'quiescing', reason: 'waiting for the fleet to go quiet', blockers: readiness.blockers };
     }
