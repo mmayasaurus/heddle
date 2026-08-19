@@ -6,8 +6,11 @@ import { lastResultJson } from './parse.js';
 
 /**
  * Fail-safe belt-and-suspenders — the AUTHORITATIVE, tunable policy is never_via_cursor enforced
- * at route resolution (routing.ts). Intentionally over-restrictive (refusing a family the policy
- * might later allow is fail-safe for billing).
+ * at route resolution (routing.ts). This floor is DELIBERATELY NOT derived from the loaded table
+ * (cubic #63): it is a hardcoded billing-safety guard over the known direct-subscription families,
+ * so mis-tuning the YAML to allow, say, gemini through Cursor cannot silently reach production
+ * billing — that change must be made in code AND YAML, which is the intended friction. A NEW family
+ * added only via YAML is still enforced at resolveRoute; this floor just covers claude/gpt/gemini.
  */
 const DIRECT_SUBSCRIPTION_PREFIXES = Object.values(FAMILY_PREFIXES).flat();
 
@@ -31,8 +34,9 @@ export class CursorAdapter implements WorkerAdapter {
     if (DIRECT_SUBSCRIPTION_PREFIXES.some((p) => opts.model.toLowerCase().startsWith(p))) {
       return {
         ok: false, output: '', exitCode: null,
-        error: `policy: "${opts.model}" belongs to a family with a direct subscription — ` +
-          `route it to that provider's adapter, not through Cursor`,
+        error: `billing-safety: "${opts.model}" belongs to a family with a direct subscription — ` +
+          `route it to that provider's adapter, not through Cursor (hardcoded fail-safe floor; the ` +
+          `tunable policy is never_via_cursor in routing.ts)`,
       };
     }
 
