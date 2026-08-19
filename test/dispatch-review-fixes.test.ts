@@ -118,4 +118,23 @@ describe('dispatch — review fixes', () => {
     );
     expect(directOutcome.execution).toBe('headless');
   });
+
+  it('records a reviews row for an IN-SESSION review handoff, linked to the refusal ledger id (HED-122)', async () => {
+    const ledger = tempLedger();
+    const fake = fakeAdapter();
+    // A reviewer-pool class (adversarial-review) explicitly routed to a Claude reviewer + in-session
+    // returns via refuseInSession BEFORE runTarget — the review row must still be recorded there, or
+    // the pair scoreboard misses in-session reviews entirely.
+    const outcome = await dispatch(
+      { taskClass: 'adversarial-review', provider: 'claude', model: 'opus', inSession: true,
+        authorProvider: 'codex', prompt: 'x', cwd: tempDir() },
+      ledger, () => fake.adapter,
+    );
+    expect(outcome.refusal?.code).toBe('claude-in-session');
+    expect(fake.calls).toHaveLength(0); // in-session handoff — no subprocess adapter call
+    const review = ledger.getReview(outcome.ledgerId!);
+    expect(review).toMatchObject({ author_provider: 'codex', reviewer_provider: 'claude', reviewer_model: 'opus' });
+    // ...but it must NOT count until report_in_session confirms the handoff (dispatch is still a refusal).
+    expect(ledger.reviewPairStats()).toEqual([]);
+  });
 });
