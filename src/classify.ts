@@ -53,11 +53,25 @@ function adapterFor(cfg: ClassifierConfig): WorkerAdapter {
 }
 
 export interface ClassifyResult {
-  /** The chosen label (falls back to labels[0] if the model's reply didn't match any). */
-  label: string;
+  /** The matched label, or `undefined` if the model's reply matched no label. It NEVER silently
+   *  falls back to labels[0] — that once pinned effort='minimal' / result='done' on a no-match
+   *  (HED-20). The caller decides the fallback and should check `matched`. */
+  label: string | undefined;
   /** True only if the model actually returned a recognizable label. */
   matched: boolean;
   raw: string;
+}
+
+/** Match a classifier's free-text reply to one of `labels`: whole-word (hyphen/space tolerant) first,
+ *  then any substring; `label: undefined` when none match. Pure + exported so the matching rules are
+ *  unit-testable without a live dispatch. Preserves the prior matching behavior EXCEPT the no-match
+ *  fallback, which no longer returns labels[0] (HED-20). Labels are trusted constants (letters/hyphens). */
+export function matchLabel(output: string, labels: string[]): { label: string | undefined; matched: boolean } {
+  const out = (output || '').toLowerCase();
+  const wordMatch = labels.find((l) =>
+    new RegExp(`\\b${l.toLowerCase().replace(/-/g, '[- ]')}\\b`).test(out));
+  const anyMatch = wordMatch ?? labels.find((l) => out.includes(l.toLowerCase()));
+  return { label: anyMatch, matched: Boolean(anyMatch) };
 }
 
 export async function classify(
@@ -103,27 +117,29 @@ export async function classify(
   } catch (err) {
     process.stderr.write(`heddle: could not ledger the ${kind} classification (${err instanceof Error ? err.message : String(err)})\n`);
   }
-  const out = (res.output || '').toLowerCase();
-  // Prefer a whole-word match (hyphen or space tolerant), else any substring occurrence.
-  const wordMatch = labels.find((l) =>
-    new RegExp(`\\b${l.toLowerCase().replace(/-/g, '[- ]')}\\b`).test(out));
-  const anyMatch = wordMatch ?? labels.find((l) => out.includes(l.toLowerCase()));
-  return { label: anyMatch ?? labels[0], matched: Boolean(anyMatch), raw: res.output };
+  const { label, matched } = matchLabel(res.output, labels);
+  return { label, matched, raw: res.output };
 }
 
 export const EFFORT_LABELS = ['minimal', 'low', 'medium', 'high', 'xhigh'] as const;
 
-/** PRE-dispatch: pick a reasoning-effort level for a sub-task. */
-export async function classifyEffort(taskClass: string, task: string, cwd?: string, ledger?: Ledger): Promise<string> {
+/** PRE-dispatch: pick a reasoning-effort level for a sub-task.
+ *  Returns `undefined` when the classifier produced no recognizable level (rambled, errored) — the
+ *  caller MUST then fall back to the route/default effort, and must NOT assume `minimal` (HED-20: the
+ *  old labels[0] fallback silently pinned minimal effort on possibly-hard tasks). */
+export async function classifyEffort(taskClass: string, task: string, cwd?: string, ledger?: Ledger): Promise<string | undefined> {
   const r = await classify(
     `You are a reasoning-effort classifier for a coding sub-task in the "${taskClass}" class. ` +
     `Judge how much reasoning it needs: minimal (trivial/mechanical, e.g. a rename) up through ` +
     `xhigh (subtle, multi-step, cross-cutting, or high-stakes). Sub-task:\n${task}`,
     [...EFFORT_LABELS], cwd, DEFAULT_CLASSIFIER, 120_000, 'classify-effort', ledger);
-  return r.label;
+  return r.label;  // undefined on no-match → caller uses the route/default effort
 }
 
 export const RESULT_LABELS = ['done', 'needs-rework', 'needs-human'] as const;
+/** `matched` is false when the classifier produced no recognizable verdict — then `label` is the
+ *  conservative `needs-human` fallback (surface it), NOT `done`: a no-match must never silently
+ *  accept unknown work (HED-20). Callers should treat a false `matched` as "review, don't auto-act". */
 export type ResultAssessment = { label: string; matched: boolean };
 
 /** POST-dispatch: judge a worker's result. `needs-human` is the needs-human-queue trigger. */
@@ -141,5 +157,6 @@ export async function assessResult(
     `Default to "done" when the worker reports success with specifics and nothing indicates a problem.\n\n` +
     `Sub-task:\n${task}\n\nWorker reported success=${workerOk}. Worker result:\n${output.slice(0, 4000)}`,
     [...RESULT_LABELS], cwd, ASSESS_CLASSIFIER, 120_000, 'assess-result', ledger);
-  return { label: r.label, matched: r.matched };
+  // No-match → 'needs-human' (surface for review), NEVER the old labels[0]='done' silent-accept (HED-20).
+  return { label: r.label ?? 'needs-human', matched: r.matched };
 }

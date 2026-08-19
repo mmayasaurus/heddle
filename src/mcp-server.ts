@@ -160,15 +160,19 @@ server.tool(
 server.tool(
   'classify_effort',
   'Classify a sub-task\'s difficulty with a cheap model and return the reasoning-effort level ' +
-    '(minimal|low|medium|high|xhigh). Use when unsure what effort a delegated task needs.',
+    '(minimal|low|medium|high|xhigh). Use when unsure what effort a delegated task needs. If the ' +
+    'classifier can\'t decide, `effort` is null and `matched` is false — fall back to the route/' +
+    'default effort, do NOT assume minimal (HED-20).',
   {
     task: z.string().describe('The sub-task to classify.'),
     task_class: z.string().optional().describe('The routing task class, for context.'),
     cwd: z.string().optional(),
   },
   async (a) => {
-    try { return text({ effort: await classifyEffort(a.task_class ?? 'general', a.task, a.cwd) }); }
-    catch (err) { return errorText(`classify_effort failed: ${(err as Error).message ?? String(err)}`); }
+    try {
+      const effort = await classifyEffort(a.task_class ?? 'general', a.task, a.cwd);
+      return text({ effort: effort ?? null, matched: effort !== undefined });
+    } catch (err) { return errorText(`classify_effort failed: ${(err as Error).message ?? String(err)}`); }
   },
 );
 
@@ -176,7 +180,9 @@ server.tool(
   'assess_result',
   'Judge a worker\'s result with a cheap model: done | needs-rework | needs-human. `needs-human` ' +
     'means it is blocked on a decision/permission/ambiguity only the operator can resolve. Use to ' +
-    'decide whether to accept, re-dispatch, or escalate a delegated result.',
+    'decide whether to accept, re-dispatch, or escalate a delegated result. Check `matched`: when it ' +
+    'is false the classifier\'s reply was ambiguous and `label` is a conservative `needs-human` ' +
+    'fallback (never a silent `done`) — review it yourself, don\'t auto-act on the label (HED-20).',
   {
     task: z.string().describe('The sub-task the worker was given.'),
     output: z.string().describe("The worker's result/output."),
