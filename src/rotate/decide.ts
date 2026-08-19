@@ -1,5 +1,5 @@
 import { readClaudeAccounts, currentClaudeAccount, pickClaudeAccount, type ClaudeAccount } from '../capaware.js';
-import { readLimitsMirror } from '../usage.js';
+import { readProviderCaps } from '../usage.js';
 import type { ProviderCaps } from '../usage.js';
 
 /**
@@ -101,6 +101,14 @@ export function readAndDecide(opts: {
 }): RotateAction {
   const env = opts.env ?? process.env;
   const accounts = readClaudeAccounts(opts.accountsPath);
-  const caps = readLimitsMirror(opts.usageDir, Math.floor(opts.nowMs / 1000))?.['claude'];
+  // Read the SAME merged source the dispatch router uses (readProviderCaps), NOT readLimitsMirror
+  // alone (HED-165). The limits.json mirror carries idle accounts as usedPercentage:null + stale:true,
+  // but readClaudeTap's keeper anchors normalize a keeper-pinged idle account to 0% (fresh) and
+  // readProviderCaps merges that over the stale mirror row — so pickClaudeAccount can actually SELECT
+  // the idle accounts the rotator must rotate TO. Reading the mirror only made the rotator blind to
+  // exactly those accounts and disagree with the dispatch router this module's selection is meant to
+  // mirror. readProviderCaps always returns a 'claude' entry (source:'none' when nothing is usable),
+  // which decideRotation's capsUsable guard treats as unknown — same as the old undefined.
+  const caps = readProviderCaps({ usageDir: opts.usageDir, nowS: Math.floor(opts.nowMs / 1000) })['claude'];
   return decideRotation(caps, accounts, env, opts.thresholds);
 }

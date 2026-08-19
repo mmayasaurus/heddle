@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { decideRotation, DEFAULT_THRESHOLDS } from '../../src/rotate/decide.js';
+import { writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { decideRotation, readAndDecide, DEFAULT_THRESHOLDS } from '../../src/rotate/decide.js';
+import { useTempResources } from '../helpers.js';
 import type { ClaudeAccount } from '../../src/capaware.js';
 import type { ProviderCaps, AccountCaps } from '../../src/usage.js';
 
@@ -146,5 +149,99 @@ describe('decideRotation', () => {
     const strict = { softPct: 50, hardPct: 60 };
     expect(decideRotation(caps([acctCaps('acct1', 55)]), accounts, envOn(accounts[0]!), strict).action).toBe('watch');
     expect(decideRotation(caps([acctCaps('acct1', 55)]), accounts, envOn(accounts[0]!), DEFAULT_THRESHOLDS).action).toBe('idle');
+  });
+});
+
+/**
+ * readAndDecide reads the LIVE files. HED-165: it must read `readProviderCaps` (the SAME merged source
+ * the dispatch router uses), NOT `readLimitsMirror` alone. The limits.json mirror carries a keeper-pinged
+ * IDLE account as usedPercentage:null + stale:true, but `readClaudeTap`'s keeper anchor normalizes it to
+ * 0% (fresh) and `readProviderCaps` merges that over the stale mirror row. Reading the mirror only made
+ * the rotator blind to exactly the idle accounts it must rotate TO — it would declare `exhausted` with a
+ * perfectly fresh account sitting right there, disagreeing with the dispatch router this module mirrors.
+ * These tests write the real file shapes into a temp usageDir and prove the rotator now SEES them.
+ */
+describe('readAndDecide (file integration, HED-165)', () => {
+  const { tempDir } = useTempResources('heddle-rotate-');
+  const NOW_S = 1_800_000_000;
+  const NOW_MS = NOW_S * 1000;
+
+  // ~/.heddle/accounts.json shape: { claude: [{ id, configDir, loggedIn? }] }. configDir:null = default login.
+  const writeAccounts = (dir: string, rows: Array<{ id: string; configDir: string | null; loggedIn?: boolean }>): string => {
+    const p = join(dir, 'accounts.json');
+    writeFileSync(p, JSON.stringify({ claude: rows }));
+    return p;
+  };
+
+  // limits.json mirror (readLimitsMirror): a keeper-pinged idle account is usedPercentage:null + stale:true here.
+  const writeLimits = (dir: string, accounts: Array<Record<string, unknown>>, activeAccount: string): void => {
+    writeFileSync(join(dir, 'limits.json'), JSON.stringify({
+      writtenAt: NOW_S,
+      limits: [{
+        provider: 'claude', capturedAt: NOW_S, staleAfterSecs: 600, stale: false, activeAccount,
+        fiveHour: { usedPercentage: null, resetsAt: null }, sevenDay: { usedPercentage: null, resetsAt: null },
+        accounts,
+      }],
+    }));
+  };
+
+  const mirrorRow = (id: string, usedPct: number | null, stale: boolean): Record<string, unknown> => ({
+    id, stale,
+    fiveHour: { usedPercentage: usedPct, resetsAt: NOW_S + 3600 },
+    sevenDay: { usedPercentage: null, resetsAt: null },
+  });
+
+  // claude-<id>.keeper.json (readKeeperAnchor): a headless ping that STARTED a 5h window — used ≈ 0 while
+  // resets_at is in the future. This is the row the mirror-only read could never see.
+  const writeKeeper = (dir: string, id: string): void => {
+    writeFileSync(join(dir, `claude-${id}.keeper.json`), JSON.stringify({
+      account: id, startedAt: NOW_S - 60, resets_at: NOW_S + 3600, source: 'keeper-ping', used: null,
+    }));
+  };
+
+  it('ROTATES to a keeper-anchored idle account the mirror alone would have hidden', () => {
+    // acct2 active + over the hard cap; acct1 idle (null+stale in the mirror) with a LIVE keeper anchor.
+    // Mirror-only → acct1 invisible → `exhausted`. readProviderCaps → acct1 normalized to 0% → `rotate`.
+    const dir = tempDir();
+    writeLimits(dir, [mirrorRow('acct2', 95, false), mirrorRow('acct1', null, true)], 'acct2');
+    writeKeeper(dir, 'acct1');
+    const accountsPath = writeAccounts(dir, [
+      { id: 'acct2', configDir: null }, { id: 'acct1', configDir: '/h/.claude-acct1' },
+    ]);
+
+    const d = readAndDecide({ usageDir: dir, nowMs: NOW_MS, env: {}, accountsPath });
+    expect(d.action).toBe('rotate');
+    if (d.action !== 'rotate') throw new Error('unreachable');
+    expect(d.current).toBe('acct2');
+    expect(d.target.id).toBe('acct1');
+    expect(d.targetEnv.env).toEqual({ CLAUDE_CONFIG_DIR: '/h/.claude-acct1' });
+  });
+
+  it('is unknown (never crashes) when no usage files exist at all', () => {
+    // readProviderCaps returns a claude entry with source:'none' (not undefined) — capsUsable treats it as
+    // unknown, identical to the old missing-mirror path.
+    const dir = tempDir();
+    const accountsPath = writeAccounts(dir, [{ id: 'acct2', configDir: null }]);
+    const d = readAndDecide({ usageDir: dir, nowMs: NOW_MS, env: {}, accountsPath });
+    expect(d.action).toBe('unknown');
+  });
+
+  it('excludes a logged-out account even with a fresh keeper anchor, and picks a logged-in one', () => {
+    // acct1 has a live keeper anchor (0%) but loggedIn:false → not addressable; acct3 (also keeper 0%,
+    // logged in) is the correct target. Proves the loggedIn guard survives the keeper-anchor path.
+    const dir = tempDir();
+    writeLimits(dir, [mirrorRow('acct2', 95, false), mirrorRow('acct1', null, true), mirrorRow('acct3', null, true)], 'acct2');
+    writeKeeper(dir, 'acct1');
+    writeKeeper(dir, 'acct3');
+    const accountsPath = writeAccounts(dir, [
+      { id: 'acct2', configDir: null },
+      { id: 'acct1', configDir: '/h/.claude-acct1', loggedIn: false },
+      { id: 'acct3', configDir: '/h/.claude-acct3' },
+    ]);
+
+    const d = readAndDecide({ usageDir: dir, nowMs: NOW_MS, env: {}, accountsPath });
+    expect(d.action).toBe('rotate');
+    if (d.action !== 'rotate') throw new Error('unreachable');
+    expect(d.target.id).toBe('acct3'); // acct1 excluded despite its fresh keeper anchor
   });
 });
