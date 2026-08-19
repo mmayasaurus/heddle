@@ -57,11 +57,17 @@ const softPct = Number(env.HEDDLE_ROTATE_SOFT_PCT);
 const hardPct = Number(env.HEDDLE_ROTATE_HARD_PCT);
 const soft7dPct = Number(env.HEDDLE_ROTATE_SOFT_PCT_7D);
 const hard7dPct = Number(env.HEDDLE_ROTATE_HARD_PCT_7D);
+// A cap percentage is 0–100 by definition (usage.ts `CapWindow.usedPercentage`), so a threshold
+// ABOVE 100 can never be reached: it would start the rotator cleanly and silently disable the very
+// protection it configures (qodo, HED-190 review). Out-of-range → the default, same as any other
+// unusable value. Applied to the 5h pair too — the bound is a property of the percentage, not of
+// which window it describes.
+const pct = (v: number, dflt: number): number => (Number.isFinite(v) && v > 0 && v <= 100 ? v : dflt);
 const thresholds = {
-  softPct: Number.isFinite(softPct) && softPct > 0 ? softPct : DEFAULT_THRESHOLDS.softPct,
-  hardPct: Number.isFinite(hardPct) && hardPct > 0 ? hardPct : DEFAULT_THRESHOLDS.hardPct,
-  soft7dPct: Number.isFinite(soft7dPct) && soft7dPct > 0 ? soft7dPct : DEFAULT_THRESHOLDS.soft7dPct,
-  hard7dPct: Number.isFinite(hard7dPct) && hard7dPct > 0 ? hard7dPct : DEFAULT_THRESHOLDS.hard7dPct,
+  softPct: pct(softPct, DEFAULT_THRESHOLDS.softPct),
+  hardPct: pct(hardPct, DEFAULT_THRESHOLDS.hardPct),
+  soft7dPct: pct(soft7dPct, DEFAULT_THRESHOLDS.soft7dPct),
+  hard7dPct: pct(hard7dPct, DEFAULT_THRESHOLDS.hard7dPct),
 };
 if (thresholds.hardPct <= thresholds.softPct) {
   warn(`refusing to run: hard threshold (${thresholds.hardPct}%) must be ABOVE soft (${thresholds.softPct}%) — a value between them would never trigger a rotation.`);

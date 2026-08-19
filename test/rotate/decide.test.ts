@@ -172,7 +172,7 @@ describe('decideRotation', () => {
     );
     expect(d.action).toBe('rotate');
     if (d.action !== 'rotate') throw new Error('unreachable');
-    expect(d.target.id).toBe('acct2'); // most 5h headroom — target selection stays 5h-based
+    expect(d.target.id).toBe('acct2'); // most WEEKLY headroom (7d 20%); its 5h is lowest too
     expect(d.reason).toMatch(/7d/);
   });
 
@@ -200,6 +200,95 @@ describe('decideRotation', () => {
   it('is unknown when both 5h and 7d are unavailable', () => {
     const d = decideRotation(caps([acctCaps('acct1', null, /*stale*/ true, null)]), accounts, envOn(accounts[0]!));
     expect(d.action).toBe('unknown');
+  });
+
+  // HED-190 review (P1, four reviewers): a rotation TRIGGERED by the weekly cap used to pick its
+  // target by 5h headroom alone, so the fleet could be relaunched onto an account that was itself at
+  // the weekly wall — 5h-idle today, out of weekly allowance — and hit it again on the first turn.
+  it('picks the target by WEEKLY headroom when the 7d cap triggered the rotation', () => {
+    // The reviewers' example: acct2 has the most 5h headroom but only 5% of its week left; acct3 is
+    // the healthy account. Before the fix this rotated onto acct2.
+    const d = decideRotation(
+      caps([acctCaps('acct1', 22, false, 92), acctCaps('acct2', 10, false, 95), acctCaps('acct3', 40, false, 30)]),
+      accounts, envOn(accounts[0]!),
+    );
+    expect(d.action).toBe('rotate');
+    if (d.action !== 'rotate') throw new Error('unreachable');
+    expect(d.target.id).toBe('acct3');
+    expect(d.reason).toMatch(/weekly-headroom/);
+  });
+
+  it('is EXHAUSTED when the best WEEKLY alternative is itself at/over the 7d hard cap', () => {
+    // Every account is weekly-dead; 5h is healthy everywhere, so the 5h guard alone sees nothing
+    // wrong and would have rotated the fleet onto an account with no weekly allowance left.
+    const d = decideRotation(
+      caps([acctCaps('acct1', 20, false, 92), acctCaps('acct2', 10, false, 95), acctCaps('acct3', 15, false, 91)]),
+      accounts, envOn(accounts[0]!),
+    );
+    expect(d.action).toBe('exhausted');
+    expect(d.reason).toMatch(/best alternative acct3 is also at 7d 91%.*near the weekly cap/);
+  });
+
+  it('is EXHAUSTED (weekly wording) when the current account still has the most weekly headroom', () => {
+    const d = decideRotation(
+      caps([acctCaps('acct1', 20, false, 91), acctCaps('acct2', 10, false, 95), acctCaps('acct3', 15, false, 97)]),
+      accounts, envOn(accounts[0]!),
+    );
+    expect(d.action).toBe('exhausted');
+    expect(d.reason).toMatch(/all Claude accounts are near the weekly \(7d\) cap/);
+  });
+
+  it('rotates to a target with NO 7d reading rather than refusing — unknown never decides', () => {
+    // The accounts the rotator must rotate TO are usually keeper-anchored idles, and a keeper anchor
+    // carries NO 7d number at all (usage.ts readClaudeTap). Ranking a missing 7d last would leave the
+    // weekly trigger unable to find any target and turn every weekly rotation into `exhausted`.
+    const d = decideRotation(
+      caps([acctCaps('acct1', 20, false, 92), acctCaps('acct2', 0, false, null)]),
+      accounts, envOn(accounts[0]!),
+    );
+    expect(d.action).toBe('rotate');
+    if (d.action !== 'rotate') throw new Error('unreachable');
+    expect(d.target.id).toBe('acct2');
+    expect(d.reason).toMatch(/7d unknown/);
+  });
+
+  it('prefers a VERIFIED low 7d over an unknown 7d when the weekly cap triggered', () => {
+    // acct2 has more 5h headroom but no weekly reading; acct3 is measured at 20% of its week.
+    const d = decideRotation(
+      caps([acctCaps('acct1', 20, false, 92), acctCaps('acct2', 0, false, null), acctCaps('acct3', 40, false, 20)]),
+      accounts, envOn(accounts[0]!),
+    );
+    expect(d.action).toBe('rotate');
+    if (d.action !== 'rotate') throw new Error('unreachable');
+    expect(d.target.id).toBe('acct3');
+  });
+
+  it('never picks a 5h-dead target while ranking by weekly headroom', () => {
+    // acct2 has the emptiest week but is over the 5h hard cap — rotating there is blocked right now.
+    // The 5h constraint survives the weekly ranking; acct3 (5h fine, 7d 85% but under hard) wins.
+    const d = decideRotation(
+      caps([acctCaps('acct1', 20, false, 92), acctCaps('acct2', 95, false, 5), acctCaps('acct3', 20, false, 85)]),
+      accounts, envOn(accounts[0]!),
+    );
+    expect(d.action).toBe('rotate');
+    if (d.action !== 'rotate') throw new Error('unreachable');
+    expect(d.target.id).toBe('acct3');
+  });
+
+  it('keeps 5h-headroom selection when the 5h window is what triggered', () => {
+    // Deliberate scope boundary: only a WEEKLY-triggered rotation ranks (and rejects) on the weekly
+    // window. Here the 5h cap fired, so the target is still the most-5h-headroom account even though
+    // its week is nearly spent — and the weekly guard does NOT fire, because a 5h-ranked pick says
+    // nothing about the other accounts' weekly state (rejecting it would be a false `exhausted`).
+    // The next tick re-bands acct2 as a weekly rotate and moves the fleet on, so this cannot loop.
+    const d = decideRotation(
+      caps([acctCaps('acct1', 95, false, 10), acctCaps('acct2', 10, false, 95), acctCaps('acct3', 40, false, 20)]),
+      accounts, envOn(accounts[0]!),
+    );
+    expect(d.action).toBe('rotate');
+    if (d.action !== 'rotate') throw new Error('unreachable');
+    expect(d.target.id).toBe('acct2');
+    expect(d.reason).not.toMatch(/weekly-headroom/);
   });
 
   it('honours custom 7d thresholds', () => {

@@ -41,6 +41,69 @@ describe('pickClaudeAccount', () => {
   });
 });
 
+/**
+ * HED-190 review: `prefer7d` is what the rotator passes when the WEEKLY cap is the reason it is
+ * rotating. Ranking by 5h headroom there can hand the fleet an account that is idle this hour and
+ * out of weekly allowance, so the relaunched fleet hits the weekly wall immediately.
+ */
+describe('pickClaudeAccount — weekly (7d) headroom ranking', () => {
+  const caps7d = (rows: Array<{ id: string; used: number | null; used7d?: number | null; stale?: boolean }>): ProviderCaps => ({
+    provider: 'claude', source: 'limits.json', stale: false, capturedAt: 1,
+    fiveHour: { usedPercentage: null, resetsAt: null }, sevenDay: { usedPercentage: null, resetsAt: null },
+    windows: {}, noteCodes: [], activeAccount: null,
+    accounts: rows.map(({ id, used, used7d = null, stale = false }) => ({
+      id, fiveHour: { usedPercentage: used, resetsAt: null }, sevenDay: { usedPercentage: used7d, resetsAt: null },
+      windows: {}, noteCodes: [], limitReached: false, stale,
+    })),
+  });
+  const weekly = { prefer7d: true, routeAwayAtPct: 90, routeAwayAt7dPct: 90 };
+
+  it('ranks by weekly headroom, not 5h, and reports both windows', () => {
+    const pick = pickClaudeAccount(
+      caps7d([{ id: 'acct1', used: 10, used7d: 95 }, { id: 'acct2', used: 40, used7d: 30 }]), registry, weekly,
+    )!;
+    expect(pick).toMatchObject({ account: { id: 'acct2' }, usedPct: 40, usedPct7d: 30 });
+    expect(pick.reason).toContain('account:acct2 weekly-headroom (7d 30%, 5h 40%');
+  });
+
+  it('reports the weekly reading on the ordinary 5h path too', () => {
+    // The rotator's weekly EXHAUSTED guard reads `usedPct7d` off the pick, so every path must carry it.
+    const pick = pickClaudeAccount(caps7d([{ id: 'acct1', used: 10, used7d: 44 }]), registry)!;
+    expect(pick).toMatchObject({ account: { id: 'acct1' }, usedPct: 10, usedPct7d: 44 });
+  });
+
+  it('prefers a KNOWN low 7d over an unknown one, but still picks an unknown 7d over nothing', () => {
+    // A keeper-anchored idle account has no 7d reading at all (usage.ts readClaudeTap), so an unknown
+    // 7d must never be ranked last — it would leave a weekly-triggered rotation with no target.
+    expect(pickClaudeAccount(
+      caps7d([{ id: 'acct1', used: 0, used7d: null }, { id: 'acct2', used: 40, used7d: 20 }]), registry, weekly,
+    )!.account.id).toBe('acct2');
+    const only = pickClaudeAccount(caps7d([{ id: 'acct2', used: 0, used7d: null }]), registry, weekly)!;
+    expect(only).toMatchObject({ account: { id: 'acct2' }, usedPct7d: null });
+    expect(only.reason).toContain('7d unknown');
+  });
+
+  it('sorts an account that is dead in EITHER window last, and says so', () => {
+    // acct1 is weekly-dead, acct2 is 5h-dead; acct3 is usable in both and must win.
+    expect(pickClaudeAccount(
+      caps7d([{ id: 'acct1', used: 1, used7d: 92 }, { id: 'acct2', used: 95, used7d: 1 }, { id: 'acct3', used: 50, used7d: 60 }]),
+      registry, weekly,
+    )!.account.id).toBe('acct3');
+    // Everything weekly-dead → the least-dead is still RETURNED (never null), flagged, so the caller
+    // can declare `exhausted` instead of silently rotating into the wall.
+    const pick = pickClaudeAccount(
+      caps7d([{ id: 'acct1', used: 1, used7d: 95 }, { id: 'acct2', used: 2, used7d: 91 }]), registry, weekly,
+    )!;
+    expect(pick).toMatchObject({ account: { id: 'acct2' }, usedPct7d: 91 });
+    expect(pick.reason).toContain('every fresh account is at/over a hard cap');
+  });
+
+  it('falls back to the no-fresh-caps path when nothing is rankable', () => {
+    const pick = pickClaudeAccount(caps7d([{ id: 'acct1', used: null, used7d: 20, stale: true }]), registry, weekly)!;
+    expect(pick.reason).toContain('default (no fresh per-account caps)');
+  });
+});
+
 describe('pickClaudeAccount — logged-out accounts are not addressable', () => {
   const registry = [
     { id: 'acct1', configDir: '/x/.claude-acct1', loggedIn: false },
