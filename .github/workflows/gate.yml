@@ -171,8 +171,9 @@ jobs:
     # workflow (`build` = 15). The edit-path echo waits (pending) for the build's
     # verdict, so it must be able to outlast a full build rather than fail closed
     # into a newer suite (see the echo step). If you raise a leaf timeout, raise
-    # this above it. 20 > 15.
-    timeout-minutes: 20
+    # this above it. 25 > 15. (Matched to Deterministic Review's echo aggregators
+    # so this loop is byte-comparable to that live-proven reference — HED-182.)
+    timeout-minutes: 25
     permissions:
       checks: write
     steps:
@@ -203,16 +204,39 @@ jobs:
             # longest leaf timeout in THIS workflow, so a leaf cannot be in flight
             # past its own timeout — either the marker appears (the echo reflects
             # it, including a timed-out build's failure) or the build is gone (fail
-            # closed correctly). The loop bound is a belt sized just under the job
-            # timeout and above the longest leaf timeout; it is unreachable while a
-            # real leaf runs. Poll fast for ~2 min, then back off to 30s to spare
-            # the API rate limit on a long build.
-            for i in $(seq 1 40); do
-              CR=$(gh api "repos/$REPO/commits/$SHA/check-runs" --paginate 2>/dev/null || echo '{}')
-              CONC=$(echo "$CR" | jq -r '[.check_runs[] | select(.name=="gate-verdict")] | sort_by(.started_at) | last | .conclusion // "none"')
-              [ "$CONC" != "none" ] && break
-              INFLIGHT=$(echo "$CR" | jq -r '[.check_runs[] | select((.name|test("^(build|web|rust)")) and .status != "completed")] | length')
-              if [ "${INFLIGHT:-1}" = "0" ]; then DRY=$((DRY + 1)); else DRY=0; fi
+            # closed correctly). The loop bound is a belt sized just under this
+            # job's 25-minute timeout (~24m50s at the backoff cadence) and above
+            # the longest leaf timeout; it cannot end on iteration count while a
+            # real leaf is still in flight. Poll fast for ~2 min, then back off to
+            # 30s to spare the API rate limit on a long build.
+            for i in $(seq 1 57); do
+              # F4: a failed check-runs read leaves liveness UNKNOWN and retries —
+              # NEVER coerce it to an empty `{}` (that jq-errors under `set -eu`
+              # and reds the required gate on a single transient API blip, and it
+              # also fakes "no leaf in flight", advancing the fail-closed proof).
+              if ! CR=$(gh api "repos/$REPO/commits/$SHA/check-runs" --paginate --slurp 2>/dev/null); then
+                echo "  could not read check runs for ${SHA}; build liveness is unknown — retrying"
+                if [ "$i" -lt 12 ]; then sleep 10; else sleep 30; fi
+                continue
+              fi
+              # F3: --paginate --slurp yields a JSON ARRAY of pages; flatten every
+              # page's check_runs with [.[].check_runs[]] so a SHA with >30 checks
+              # (bot-edit storms grow the count) can't split CONC across pages.
+              CONC=$(printf '%s\n' "$CR" | jq -r '[.[].check_runs[]] | [ .[] | select(.name=="gate-verdict") ] | sort_by(.started_at) | last | .conclusion // "none"')
+              INFLIGHT=$(printf '%s\n' "$CR" | jq -r '[.[].check_runs[]] | [ .[] | select((.name|test("^(build|web|rust)")) and .status!="completed") ] | length')
+              # F2 — four states: a marker is usable only after the matching build
+              # is gone; any in-flight leaf resets the dry proof, WITH OR WITHOUT a
+              # stale marker (so a same-SHA recompute's fresh verdict is never
+              # pre-empted by an older marker landing in a newer suite); only
+              # no-marker + no-inflight advances the fail-closed proof.
+              if [ "$CONC" != "none" ] && [ "$INFLIGHT" = "0" ]; then
+                break
+              fi
+              if [ "$CONC" = "none" ] && [ "$INFLIGHT" = "0" ]; then
+                DRY=$((DRY + 1))
+              else
+                DRY=0
+              fi
               # Fail closed only when the build is verifiably gone AND still no
               # marker, sustained a few polls past the 90s grace — this bridges the
               # brief gap between the leaf jobs finishing and the commit gate
@@ -228,7 +252,7 @@ jobs:
                   echo "This edit run is holding the required \`gate\` **pending** until the commit-path build for this commit publishes its \`gate-verdict\`, which the echo then reflects. Pending here means *blocked-while-building*, not failed."
                 } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
               fi
-              echo "  waiting for the commit run's verdict on ${SHA} (poll ${i}; marker absent, commit-path jobs in flight=${INFLIGHT:-?}, dry=${DRY})"
+              echo "  waiting for the commit run's verdict on ${SHA} (poll ${i}; marker=${CONC}, commit-path jobs in flight=${INFLIGHT}, dry=${DRY})"
               if [ "$i" -lt 12 ]; then sleep 10; else sleep 30; fi
             done
             case "$CONC" in
