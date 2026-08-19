@@ -305,26 +305,49 @@ describe('createRotatorDeps — testable parts', () => {
           { from: 'operator', to: 'operator', kind: 'status', body: String(m.body), meta: m.meta as Record<string, unknown> },
           operatorDecision('operator'),
         );
+        return { outcome: 'sent', code: 'delivered' };
       },
     } as unknown as Broker);
 
-    it('recordAbort posts an operator SELF-DM carrying the target — the shape latestAbort() pins on', async () => {
+    /** A broker that REFUSES — the real refusal shape: it resolves, and appends nothing. */
+    const refusingBroker = (posted: Record<string, unknown>[]) => ({
+      post: async (m: Record<string, unknown>) => {
+        posted.push(m);
+        return { outcome: 'refused', code: 'rate-limited', reason: 'too many posts' };
+      },
+    } as unknown as Broker);
+
+    it('recordAbort posts an operator SELF-DM carrying the target AND the pause it aborted', async () => {
       const posted: Record<string, unknown>[] = [];
       const d = createRotatorDeps({ log, broker: recordingBroker(posted), inFlight: null, usageDir: dir, scriptsDir: dir, now: () => nowMs });
-      await d.recordAbort('acct2');
+      await d.recordAbort('acct2', 7);
       expect(posted).toHaveLength(1);
       // from/to BOTH operator matters: latestAbort() pins sender AND target, so a marker posted
       // anywhere else would be written but never read — a cooldown that silently never engages.
       expect(posted[0]).toMatchObject({ from: 'operator', to: 'operator', kind: 'status' });
-      expect(posted[0]?.meta).toEqual({ rotationAborted: { target: 'acct2' } });
-      expect(String(posted[0]?.body)).toMatch(/acct2/);
+      // pauseId ties the marker to the pause it aborted (like rotationRelaunched's {pauseId, address});
+      // latestAbort() still matches on `rotationAborted` PRESENCE, so it just rides along.
+      expect(posted[0]?.meta).toEqual({ rotationAborted: { target: 'acct2', pauseId: 7 } });
+      expect(String(posted[0]?.body)).toMatch(/rotation 7 to acct2/);
     });
 
     it('recordAbort → abortCooldownActive round-trips: the write and the read agree', async () => {
       const d = createRotatorDeps({ log, broker: recordingBroker([]), inFlight: null, usageDir: dir, scriptsDir: dir, now: () => nowMs });
       expect(d.abortCooldownActive()).toBe(false);   // nothing stamped yet
-      await d.recordAbort('acct2');
+      await d.recordAbort('acct2', 7);
       expect(d.abortCooldownActive()).toBe(true);    // the marker it just posted is the one it reads
+    });
+
+    it('a REFUSED marker post throws and leaves the cooldown OFF — never a silent no-op', async () => {
+      // The silent-failure trap: broker.post RESOLVES on a refusal (rate limit, body cap) and appends no
+      // row. Discarding that result would report "abort recorded" with no marker in the log, so
+      // abortCooldownActive() stays false and the next tick re-rotates — the sawtooth, restored. Throwing
+      // is what makes the supervisor hold the pause and retry (mirrors requestPause/resumePause).
+      const posted: Record<string, unknown>[] = [];
+      const d = createRotatorDeps({ log, broker: refusingBroker(posted), inFlight: null, usageDir: dir, scriptsDir: dir, now: () => nowMs });
+      await expect(d.recordAbort('acct2', 7)).rejects.toThrow(/refused \(rate-limited\).*not persisted/);
+      expect(posted).toHaveLength(1);                // it did attempt the post...
+      expect(d.abortCooldownActive()).toBe(false);   // ...and the refusal really left NO marker behind
     });
 
     it('is inactive when no abort has ever been recorded', () => {

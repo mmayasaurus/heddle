@@ -246,10 +246,13 @@ export function createRotatorDeps(o: LiveRotatorOptions): RotatorDeps {
       return { timedOut: now() - baseMs > timeoutMs, timeoutMs };
     },
 
-    recordAbort: async (target) => {
-      await o.broker.post({ from: OPERATOR, to: OPERATOR, kind: 'status',
-        body: `rotation to ${target} aborted at quiesce — post-abort cooldown started`,
-        meta: { rotationAborted: { target } } });
+    recordAbort: async (target, pauseId) => {
+      const posted = await o.broker.post({ from: OPERATOR, to: OPERATOR, kind: 'status',
+        body: `rotation ${pauseId} to ${target} aborted at quiesce — post-abort cooldown started`,
+        meta: { rotationAborted: { target, pauseId } } });
+      // A refused post appended NO marker row → the cooldown would not engage and the sawtooth resumes.
+      // Throw so the tick reschedules and retries (mirrors requestPause/resumePause refusal handling).
+      if (posted.outcome === 'refused') throw new Error(`recordAbort refused (${posted.code}) — cooldown marker not persisted`);
     },
 
     abortCooldownActive: (): boolean => {

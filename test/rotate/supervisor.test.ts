@@ -37,8 +37,9 @@ describe('rotator supervisor tick', () => {
     needsHumanMsgs: string[] = [];
     paused: { reason: string; intent: RotationIntent }[] = [];
     resumed: string[] = [];
-    abortsRecorded: string[] = [];  // HED-200: targets stamped with a durable abort marker
-    ops: string[] = [];  // call order across resumePause/needsHuman/recordAbort (the abort path escalates, lifts, THEN stamps)
+    abortsRecorded: { target: string; pauseId: number }[] = [];  // HED-200: durable abort markers stamped
+    recordAbortFails = false;       // HED-200 review: the marker post was refused (rate limit / body cap)
+    ops: string[] = [];  // call order across resumePause/needsHuman/recordAbort (the abort path escalates, STAMPS, then lifts)
   }
 
   const readinessOf = (w: World): PauseReadiness => ({
@@ -66,7 +67,12 @@ describe('rotator supervisor tick', () => {
       if (r.ok) { w.live.push(a); w.relaunched_set.add(a); }
       return r;
     },
-    recordAbort: async (t) => { w.ops.push('recordAbort'); w.abortsRecorded.push(t); },
+    recordAbort: async (t, pauseId) => {
+      w.ops.push('recordAbort');
+      // A refused broker post throws WITHOUT persisting the marker — the live adapter's contract.
+      if (w.recordAbortFails) throw new Error('recordAbort refused (rate-limited) — cooldown marker not persisted');
+      w.abortsRecorded.push({ target: t, pauseId });
+    },
     abortCooldownActive: () => w.abortCooldown,
     needsHuman: async (m) => { w.ops.push('needsHuman'); w.needsHumanMsgs.push(m); },
   });
@@ -286,10 +292,11 @@ describe('rotator supervisor tick', () => {
     expect(w.needsHumanMsgs).toHaveLength(1);
     expect(w.needsHumanMsgs[0]).toMatch(/did not quiesce within 1200000ms/);
     expect(w.needsHumanMsgs[0]).toContain('have not acked: S, V');   // the blockers reach the human
-    // Escalate FIRST, then lift, then stamp: a resumePause that throws must not swallow the operator
-    // notification, and the HED-200 marker lands only once the lift actually succeeded.
-    expect(w.ops).toEqual(['needsHuman', 'resumePause', 'recordAbort']);
-    expect(w.abortsRecorded).toEqual(['acct2']);    // HED-200: the durable marker names the target
+    // Escalate FIRST, then STAMP, then lift: a resumePause that throws must not swallow the operator
+    // notification, and the HED-200 cooldown marker must be durable BEFORE the pause is durably lifted —
+    // a crash in between would otherwise free the fleet with no cooldown and re-arm the sawtooth.
+    expect(w.ops).toEqual(['needsHuman', 'recordAbort', 'resumePause']);
+    expect(w.abortsRecorded).toEqual([{ target: 'acct2', pauseId: 1 }]);  // target AND the pause it aborted
   });
 
   it('QUIESCE timeout MID-ROTATION: some members already relaunched stays BLOCKED — the pause is NOT lifted', async () => {
@@ -406,6 +413,25 @@ describe('rotator supervisor tick', () => {
     expect(step.phase).toBe('blocked');
     expect(w.abortsRecorded).toEqual([]);
     expect(w.ops).toEqual(['needsHuman']);          // no lift, so no stamp
+  });
+
+  it('a recordAbort that FAILS aborts the abort: the tick throws and the pause is NEVER lifted', async () => {
+    // The fail-CLOSED half of stamping before the lift. A refused marker post (rate limit, body cap) means
+    // no cooldown exists; lifting anyway would free the fleet with decide() still saying 'rotate', i.e. the
+    // sawtooth this whole issue is about. Throwing instead leaves the pause IN FORCE — the next tick
+    // re-enters this branch and retries the marker (or, if a roster member has since gone not-live, takes
+    // the blocked path and holds for a human). Either way: never a lifted pause with no marker.
+    w.pauseId = 1;
+    w.intent = { target: 'acct2', from: 'acct1', roster: ['R', 'S', 'V'] };
+    w.live = ['R', 'S', 'V'];                       // nothing killed → this IS the abort path
+    w.ready = false; w.blockers = ['2 live agent(s) have not acked: S, V'];
+    w.quiesceTimedOut = true;
+    w.recordAbortFails = true;                      // the broker refuses the marker post
+    await expect(tick(deps(w))).rejects.toThrow(/cooldown marker not persisted/);
+    expect(w.resumed).toEqual([]);                  // THE point: no lift without a durable marker
+    expect(w.ops).toEqual(['needsHuman', 'recordAbort']);  // ...and it stopped exactly there
+    expect(w.abortsRecorded).toEqual([]);           // the marker really did not land
+    expect(w.killed).toEqual([]);                   // still nothing irreversible
   });
 
 });
