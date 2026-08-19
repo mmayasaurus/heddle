@@ -560,19 +560,26 @@ def main() -> None:
         sys.exit(1)
 
     mode = sys.argv[1]
-    data = read_hook_input()
+    try:
+        data = read_hook_input()
 
-    if mode == "record":
-        record_memtrace(data)
-    elif mode == "deny-recursive-search":
-        deny_recursive_search(data)
-    elif mode == "enforce-query":
-        enforce_query_order(data)
-    elif mode == "stop":
-        stop_guard(data)
-    else:
-        print(f"Unknown mode: {mode}", file=sys.stderr)
-        sys.exit(1)
+        if mode == "record":
+            record_memtrace(data)
+        elif mode == "deny-recursive-search":
+            deny_recursive_search(data)
+        elif mode == "enforce-query":
+            enforce_query_order(data)
+        elif mode == "stop":
+            stop_guard(data)
+        else:
+            print(f"Unknown mode: {mode}", file=sys.stderr)
+            sys.exit(1)
+    except SystemExit:
+        raise  # a legitimate allow/deny/usage exit must pass through untouched
+    except Exception as e:  # fail-open — a gate hook must never block a tool call on its own bug
+        print(f"heddle: discipline gate require-memtrace-first errored — running WITHOUT it: {e}",
+              file=sys.stderr)
+        sys.exit(0)
 
 
 if __name__ == "__main__":

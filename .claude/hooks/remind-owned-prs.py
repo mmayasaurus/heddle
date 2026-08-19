@@ -29,7 +29,10 @@ import sys
 import time
 
 TTL_SECS = 300  # refresh the owned-PR list at most once per this window, per worktree
-PR_OWN = "/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/bin/pr-own.sh"
+# Path to the fleet PR-ownership tool. Resolved from HEDDLE_PR_OWN so no repo path is baked into
+# this vendored hook (HED-107); the fallback keeps existing setups working until HEDDLE_PR_OWN is
+# configured (or HED-96 relocates the fleet bins). A missing tool degrades loud-open (see below).
+PR_OWN = os.environ.get("HEDDLE_PR_OWN") or "/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/bin/pr-own.sh"
 CACHE_DIR = pathlib.Path(os.path.expanduser("~/.claude/pr-own-cache"))
 IDENTITY_CACHE = pathlib.Path(os.path.expanduser("~/.claude/fleet-identity-cache"))
 
@@ -182,6 +185,8 @@ def main() -> None:
             id_line += delegation_nudge(label)
 
         if not os.path.exists(PR_OWN):
+            print(f"heddle: PR-ownership tool not found at {PR_OWN} (set HEDDLE_PR_OWN) — "
+                  f"PR reminders off, identity only (HED-107)", file=sys.stderr)
             emit(id_line or None)
 
         top = subprocess.run(
