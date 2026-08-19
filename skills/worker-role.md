@@ -16,3 +16,9 @@ Just DO the bounded task, in the working directory you were given, following the
 rules. Then STOP and report concisely: what you changed (files + a short summary), what you
 verified, and anything you could not complete or that needs the orchestrator's decision. Integrating
 your work and driving it to a PR is the orchestrator's job, not yours.
+
+When you report test/verification results: give the EXACT command you ran and, for any failures, the
+FAILING TEST NAMES — never a bare count like "N unrelated failures." The orchestrator cannot see your
+run, so an unnamed count it cannot reproduce is not a verification (a worker once reported "7 unrelated
+failures" that all passed on a plain re-run — they were a sandbox artifact). If something failed only
+because your sandbox blocked a write or the network, say that explicitly and name what it tried to do.
