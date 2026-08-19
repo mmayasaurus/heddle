@@ -247,7 +247,7 @@ jobs:
             # ~2 min, then back off to 30s to spare the API rate limit on a long
             # scan.
             for i in $(seq 1 57); do
-              if ! CR=$(gh api "repos/$REPO/commits/$SHA/check-runs" --paginate --slurp 2>/dev/null); then
+              if ! CR=$(gh api "repos/$REPO/commits/$SHA/check-runs?filter=all" --paginate --slurp 2>/dev/null); then
                 echo "  could not read check runs for ${SHA}; scan liveness is unknown — retrying"
                 DRY=0
                 if [ "$i" -lt 12 ]; then sleep 10; else sleep 30; fi
@@ -461,7 +461,7 @@ jobs:
             # ~2 min, then back off to 30s to spare the API rate limit on a long
             # scan.
             for i in $(seq 1 57); do
-              if ! CR=$(gh api "repos/$REPO/commits/$SHA/check-runs" --paginate --slurp 2>/dev/null); then
+              if ! CR=$(gh api "repos/$REPO/commits/$SHA/check-runs?filter=all" --paginate --slurp 2>/dev/null); then
                 echo "  could not read check runs for ${SHA}; scan liveness is unknown — retrying"
                 DRY=0
                 if [ "$i" -lt 12 ]; then sleep 10; else sleep 30; fi

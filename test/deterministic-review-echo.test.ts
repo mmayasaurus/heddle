@@ -120,6 +120,12 @@ describe('regression HED-193 — scanner edit echoes fail closed', () => {
       // scanner's verdict — that would let a newer other-scanner success mask this
       // scanner's failure (for gitleaks, a leaked secret).
       expect(shell).toContain(`select(.name == "${scanner}-verdict")`);
+      // filter=all (qodo #61): read EVERY run — incl. queued / in_progress duplicates
+      // the default filter=latest omits — so INFLIGHT and freshness never miss an
+      // in-flight scan. Monotone-safe: a superset of runs can only raise INFLIGHT and
+      // can't pick an older marker. The fake gh ignores query params, so this is the
+      // only place the query can be pinned.
+      expect(shell).toContain('filter=all');
       expect(shell).toMatch(/could not read check runs[\s\S]*?DRY=0[\s\S]*?continue/);
     });
 
