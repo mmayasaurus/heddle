@@ -5,9 +5,10 @@ import { CommsLog, DEFAULT_COMMS_PATH } from '../comms/log.js';
 import { Broker } from '../comms/broker.js';
 import { ChannelTransport, errorMessage } from '../comms/bridge.js';
 import { resolveCommsIdentity, openLedgerIfPresent, OPERATOR_TOKEN_PATH, operatorTokenMatches } from '../comms/server.js';
-import { createRotatorDeps } from './live.js';
+import { createRotatorDeps, DEFAULT_VERIFY_TIMEOUT_MS } from './live.js';
 import { tick } from './supervisor.js';
 import { DEFAULT_THRESHOLDS } from './decide.js';
+import { acquireLock, releaseLock, LOCK_REQUIRED_MODES } from './lock.js';
 
 /**
  * heddle-rotator bin — the standalone interactive-session account rotator (HED-117).
@@ -25,9 +26,13 @@ import { DEFAULT_THRESHOLDS } from './decide.js';
  * (HEDDLE_COMMS_ROLE=operator + HEDDLE_COMMS_OPERATOR_TOKEN). This is Maya's deliberate automation,
  * but the binding is enforced here, not assumed.
  *
+ * HED-157: --once / --run also take a single-instance pidfile lock (~/.heddle/rotator.lock, see
+ * lock.ts) before touching pause/kill/relaunch — a stray --run daemon and a manual --once must
+ * never both drive the state machine at once. --status never takes it (read-only).
+ *
  * Env: HEDDLE_FLEET_SCRIPTS (dir with fleet-kill.sh/fleet-relaunch.sh) · HEDDLE_USAGE_DIR
  * (default ~/.heddle/usage) · HEDDLE_ROTATE_SOFT_PCT / HEDDLE_ROTATE_HARD_PCT · HEDDLE_ROTATE_INTERVAL_MS
- * (default 60000) · HEDDLE_COMMS_DB · HEDDLE_LEDGER_DB.
+ * (default 60000) · HEDDLE_ROTATE_VERIFY_TIMEOUT_MS (default 300000) · HEDDLE_COMMS_DB · HEDDLE_LEDGER_DB.
  */
 
 const warn = (m: string) => process.stderr.write(`heddle-rotator: ${m}\n`);
@@ -58,6 +63,10 @@ if (thresholds.hardPct <= thresholds.softPct) {
   process.exit(1);
 }
 
+// HED-157: how long VERIFY waits for a relaunched roster member to re-register before escalating.
+const rawVerifyTimeout = Number(env.HEDDLE_ROTATE_VERIFY_TIMEOUT_MS);
+const verifyTimeoutMs = Number.isFinite(rawVerifyTimeout) && rawVerifyTimeout > 0 ? rawVerifyTimeout : DEFAULT_VERIFY_TIMEOUT_MS;
+
 const scriptsDir = env.HEDDLE_FLEET_SCRIPTS;
 if ((mode === 'run' || mode === 'once') && !scriptsDir) {
   warn('refusing to run: set HEDDLE_FLEET_SCRIPTS to the directory holding fleet-kill.sh and fleet-relaunch.sh.');
@@ -67,11 +76,14 @@ if ((mode === 'run' || mode === 'once') && !scriptsDir) {
 // Optional single-/multi-subject scope (HED-117): the supervised first run rotates ONE idle agent.
 const only = (env.HEDDLE_ROTATE_ONLY ?? '').split(',').map((x) => x.trim().toUpperCase()).filter(Boolean);
 const deps = createRotatorDeps({
-  log, broker, inFlight: ledger, thresholds,
+  log, broker, inFlight: ledger, thresholds, verifyTimeoutMs,
   usageDir: env.HEDDLE_USAGE_DIR || join(homedir(), '.heddle', 'usage'),
   scriptsDir: scriptsDir ?? '', // only reached for active modes, which required it above
   ...(only.length ? { only } : {}),
 });
+
+/** Single-instance advisory lock path (HED-157) — fixed, not env-overridable (see lock.ts). */
+const LOCK_PATH = join(homedir(), '.heddle', 'rotator.lock');
 
 const stamp = () => new Date().toISOString();
 
@@ -94,7 +106,24 @@ async function runOnce(): Promise<void> {
 
 async function main(): Promise<void> {
   if (mode === 'status') { await statusOnce(); log.close(); return; }
-  if (mode === 'once') { await runOnce(); log.close(); return; }
+
+  // HED-157: --run/--once only, before any pause/kill. Two active-mode rotators (a stray --run
+  // daemon plus a manual --once, say) both deciding to pause/kill the fleet at once is a race the
+  // state machine was never built to survive — refuse a second instance outright rather than risk it.
+  if (LOCK_REQUIRED_MODES.has(mode)) {
+    const lock = acquireLock(LOCK_PATH, process.pid);
+    if (!lock.ok) {
+      warn(`refusing to run: another rotator (pid ${lock.heldBy}) is running — refusing a second instance.`);
+      log.close();
+      process.exit(1);
+    }
+  }
+
+  if (mode === 'once') {
+    try { await runOnce(); } finally { releaseLock(LOCK_PATH); }
+    log.close();
+    return;
+  }
 
   // --run: one tick per interval, self-scheduling so a slow tick never overlaps the next.
   // A bad env value (negative is truthy) would clamp the timer to ~0 and spin — validate it.
@@ -105,12 +134,12 @@ async function main(): Promise<void> {
     if (stopping) return;
     // A token rotation revokes the operator everywhere (like the comms server's per-call check) —
     // a daemon that keeps pausing/killing after its authority was revoked would be dangerous.
-    if (!operatorTokenMatches(env)) { warn('operator token no longer matches (rotated?) — stopping.'); stopping = true; try { log.close(); } catch { /* closing */ } process.exit(1); }
+    if (!operatorTokenMatches(env)) { warn('operator token no longer matches (rotated?) — stopping.'); stopping = true; releaseLock(LOCK_PATH); try { log.close(); } catch { /* closing */ } process.exit(1); }
     try { await runOnce(); } catch (err) { warn(`tick failed: ${errorMessage(err)}`); }
     // NOT unref()'d: the timer is the daemon's only event-loop reference; unref would exit after the first tick.
     if (!stopping) setTimeout(() => void loop(), intervalMs);
   };
-  const bye = () => { stopping = true; try { log.close(); } catch { /* closing */ } process.exit(0); };
+  const bye = () => { stopping = true; releaseLock(LOCK_PATH); try { log.close(); } catch { /* closing */ } process.exit(0); };
   process.on('SIGTERM', bye); process.on('SIGINT', bye);
   warn(`started (interval ${intervalMs}ms, soft ${thresholds.softPct}% / hard ${thresholds.hardPct}%)`);
   void loop();

@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CommsLog } from '../../src/comms/log.js';
 import { seal } from '../../src/comms/seal.js';
-import { createRotatorDeps } from '../../src/rotate/live.js';
+import { createRotatorDeps, DEFAULT_VERIFY_TIMEOUT_MS } from '../../src/rotate/live.js';
 import type { Broker } from '../../src/comms/broker.js';
 
 /**
@@ -147,5 +147,104 @@ describe('createRotatorDeps — testable parts', () => {
     log.append({ from: 'operator', to: 'operator', kind: 'needs-human', body: 'kill refused for V' }, operatorDecision('operator'));
     await d.needsHuman('kill refused for V');   // matches the latest alert since the pause → must de-dupe
     expect(posted).toEqual([]);                  // buggy code compared vs the ancient one and WOULD have posted
+  });
+
+  it('needsHuman: two distinct alerts alternating across ticks each post ONCE, not spam every tick (HED-157)', async () => {
+    const posted: string[] = [];
+    // Stub broker that records AND appends to the log, so each de-dupe scan sees prior posts.
+    const broker = { post: async (m: { body: string }) => {
+      posted.push(m.body);
+      log.append({ from: 'operator', to: 'operator', kind: 'needs-human', body: m.body }, operatorDecision('operator'));
+    } } as unknown as Broker;
+    const d = createRotatorDeps({ log, broker, inFlight: null, usageDir: dir, scriptsDir: dir, now: () => nowMs });
+    log.append(
+      { from: 'operator', to: '@all', kind: 'status', body: 'pause',
+        meta: { fleetPause: { reason: 'r', rotation: { target: 'acct2', from: 'acct1', roster: ['V'] } } } },
+      operatorDecision(),
+    );
+    // A VERIFY-timeout warning (item 1) and a late-joiner warning (item 2) alternate tick-to-tick. A
+    // last-only de-dupe re-posts BOTH every round (each looks new against the other); `.some` posts each once.
+    for (let round = 0; round < 3; round++) {
+      await d.needsHuman('timeout: X did not come back');
+      await d.needsHuman('joiner: Y joined during the pause');
+    }
+    expect(posted).toEqual(['timeout: X did not come back', 'joiner: Y joined during the pause']);
+  });
+
+  describe('verifyTimeout (HED-157)', () => {
+    it('is never timed out when no pause is in force', () => {
+      expect(deps().verifyTimeout()).toEqual({ timedOut: false, timeoutMs: DEFAULT_VERIFY_TIMEOUT_MS });
+    });
+
+    it('anchors the deadline to the LATEST relaunch-marker time, not the pause start', () => {
+      // Quiesce (waiting for every live agent to ack + park) is unbounded, so the relaunch marker for
+      // V doesn't land until 6 minutes after the pause — already past a 5-minute window if (wrongly)
+      // measured from the pause start. "Now" is only 1 minute after the MARKER.
+      log.append(
+        { from: 'operator', to: '@all', kind: 'status', body: 'pause',
+          meta: { fleetPause: { reason: 'r', rotation: { target: 'acct2', from: 'acct1', roster: ['V'] } } } },
+        operatorDecision(),
+      );
+      const pause = log.latestFleetPause()!;
+      nowMs += 6 * 60_000; // the marker lands 6 minutes after the pause
+      log.append(
+        { from: 'operator', to: 'operator', kind: 'status', body: `rotation ${pause.id}: relaunched V`,
+          meta: { rotationRelaunched: { pauseId: pause.id, address: 'V' } } },
+        operatorDecision('operator'),
+      );
+      nowMs += 60_000; // "now" is 1 minute after the MARKER (7 minutes after the pause)
+      const result = deps().verifyTimeout();
+      expect(result.timedOut).toBe(false); // would be TRUE if (wrongly) anchored to the pause start
+    });
+
+    it('times out once elapsed time SINCE THE MARKER exceeds the configured timeout', () => {
+      log.append(
+        { from: 'operator', to: '@all', kind: 'status', body: 'pause',
+          meta: { fleetPause: { reason: 'r', rotation: { target: 'acct2', from: 'acct1', roster: ['V'] } } } },
+        operatorDecision(),
+      );
+      const pause = log.latestFleetPause()!;
+      nowMs += 60_000; // the marker lands 1 minute after the pause
+      log.append(
+        { from: 'operator', to: 'operator', kind: 'status', body: `rotation ${pause.id}: relaunched V`,
+          meta: { rotationRelaunched: { pauseId: pause.id, address: 'V' } } },
+        operatorDecision('operator'),
+      );
+      nowMs += 6 * 60_000; // 6 minutes after the MARKER — past the 5-minute default
+      const result = deps().verifyTimeout();
+      expect(result.timedOut).toBe(true);
+      expect(result.timeoutMs).toBe(DEFAULT_VERIFY_TIMEOUT_MS);
+    });
+
+    it('falls back to the pause time when no relaunch marker exists yet (defensive — not the real tick() path)', () => {
+      log.append(
+        { from: 'operator', to: '@all', kind: 'status', body: 'pause',
+          meta: { fleetPause: { reason: 'r', rotation: { target: 'acct2', from: 'acct1', roster: ['V'] } } } },
+        operatorDecision(),
+      );
+      nowMs += 6 * 60_000; // 6 minutes after the pause, no marker ever posted
+      expect(deps().verifyTimeout().timedOut).toBe(true);
+    });
+
+    it('honours a custom verifyTimeoutMs', () => {
+      log.append(
+        { from: 'operator', to: '@all', kind: 'status', body: 'pause',
+          meta: { fleetPause: { reason: 'r', rotation: { target: 'acct2', from: 'acct1', roster: ['V'] } } } },
+        operatorDecision(),
+      );
+      const pause = log.latestFleetPause()!;
+      log.append(
+        { from: 'operator', to: 'operator', kind: 'status', body: `rotation ${pause.id}: relaunched V`,
+          meta: { rotationRelaunched: { pauseId: pause.id, address: 'V' } } },
+        operatorDecision('operator'),
+      );
+      nowMs += 2_000; // 2 seconds after the marker
+      const custom = createRotatorDeps({
+        log, broker: dummyBroker, inFlight: null, usageDir: dir, scriptsDir: dir, now: () => nowMs, verifyTimeoutMs: 1_000,
+      });
+      const result = custom.verifyTimeout();
+      expect(result.timeoutMs).toBe(1_000);
+      expect(result.timedOut).toBe(true); // 2s elapsed > 1s timeout
+    });
   });
 });

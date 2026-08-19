@@ -21,6 +21,10 @@ import type { RotatorDeps, RotationIntent } from './supervisor.js';
  * only an operator-bound process may legitimately do that. This module assumes that binding; it does
  * not re-check the token (the bin owns that).
  */
+
+/** Default VERIFY boot-timeout (HED-157), overridable via `LiveRotatorOptions.verifyTimeoutMs`. */
+export const DEFAULT_VERIFY_TIMEOUT_MS = 300_000;
+
 export interface LiveRotatorOptions {
   log: CommsLog;
   broker: Broker;
@@ -41,6 +45,8 @@ export interface LiveRotatorOptions {
    */
   only?: string[];
   thresholds?: RotateThresholds;
+  /** VERIFY boot-timeout in ms (HED-157). Default `DEFAULT_VERIFY_TIMEOUT_MS` (5 minutes). */
+  verifyTimeoutMs?: number;
   now?: () => number;
   warn?: (m: string) => void;
 }
@@ -87,6 +93,25 @@ export function createRotatorDeps(o: LiveRotatorOptions): RotatorDeps {
     if (!p) return null;
     const ms = Date.parse(p.ts);
     return Number.isFinite(ms) ? ms : null;
+  };
+
+  /**
+   * The latest relaunch-marker timestamp for pause `pauseId`, across ALL roster members — or null if
+   * none exist yet. `verifyTimeout` (HED-157) anchors its deadline here, NOT to the pause's own start:
+   * quiesce (waiting for every live agent to ack + park) is unbounded, so a rotation that simply took
+   * a while to go quiet must not look "overdue" the instant VERIFY begins. Same scan window as
+   * `wasRelaunched` (sinceId:pauseId — see that dep for why a bare `{limit}` would miss markers once
+   * the operator inbox grows), just not filtered to one address.
+   */
+  const latestRelaunchMarkerMs = (pauseId: number): number | null => {
+    let latest: number | null = null;
+    for (const m of o.log.transcript({ inbox: OPERATOR }, { sinceId: pauseId, limit: 500 })) {
+      const rr = (m.meta as { rotationRelaunched?: { pauseId?: number } } | null)?.rotationRelaunched;
+      if (rr?.pauseId !== pauseId) continue;
+      const ms = Date.parse(m.ts);
+      if (Number.isFinite(ms) && (latest === null || ms > latest)) latest = ms;
+    }
+    return latest;
   };
 
   return {
@@ -190,17 +215,30 @@ export function createRotatorDeps(o: LiveRotatorOptions): RotatorDeps {
       });
     },
 
+    verifyTimeout: (): { timedOut: boolean; timeoutMs: number } => {
+      const timeoutMs = o.verifyTimeoutMs ?? DEFAULT_VERIFY_TIMEOUT_MS;
+      const p = o.log.latestFleetPause();
+      if (!p) return { timedOut: false, timeoutMs };
+      // Defensive fallback only: `tick` calls `verifyTimeout` exclusively once every roster member is
+      // already marked relaunched, so a marker always exists on the real path. If one is somehow
+      // missing, fall back to the pause time rather than treating "no data" as "never times out".
+      const baseMs = latestRelaunchMarkerMs(p.id) ?? pauseTimeMs();
+      if (baseMs === null) return { timedOut: false, timeoutMs };
+      return { timedOut: now() - baseMs > timeoutMs, timeoutMs };
+    },
+
     needsHuman: async (message) => {
-      // De-dupe: a persistent block (e.g. a kill that keeps refusing) re-enters this every tick.
-      // fleet-kill REFUSES rather than guesses, so re-attempting is safe — but re-posting the same
-      // needs-human each interval would spam the operator. The spam is per-rotation, so scope to the
-      // active pause; transcript() is oldest-first, so take the LAST match — never {limit:1}, which
-      // returns the OLDEST message in the whole inbox and so almost never de-dupes.
+      // De-dupe: a persistent block (a kill that keeps refusing) re-enters this every tick, and one
+      // rotation can have SEVERAL distinct needs-human live at once (a VERIFY timeout AND a late-joiner
+      // warning, HED-157) that alternate tick-to-tick. Scope to the active pause and skip if this EXACT
+      // body was already posted since it — `.some`, NOT just the last match: two alternating bodies each
+      // look "new" against the other under a last-only check and would spam the operator, eventually
+      // overflowing the sinceId:pause marker-scan window wasRelaunched relies on.
       const p = o.log.latestFleetPause();
       if (p) {
         const seen = o.log.transcript({ inbox: OPERATOR }, { sinceId: p.id, limit: 500 })
           .filter((m) => m.kind === 'needs-human' && m.from === OPERATOR);
-        if (seen[seen.length - 1]?.body === message) return;
+        if (seen.some((m) => m.body === message)) return;
       }
       await o.broker.post({ from: OPERATOR, to: OPERATOR, kind: 'needs-human', body: message });
     },

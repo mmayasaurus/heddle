@@ -92,6 +92,15 @@ export interface RotatorDeps {
   markRelaunched(address: string): Promise<void>;
   /** Has `address` been marked relaunched for the pause in force? */
   wasRelaunched(address: string): boolean;
+  /**
+   * How long the VERIFY wait (for the pause in force) has been running, against the configured
+   * boot-timeout (HED-157). `timedOut` bounds `tick`'s VERIFY loop — without it a relaunch that
+   * crashed on boot (never re-registers) leaves the fleet paused forever, since `pending` would
+   * never empty. The deadline math (wall-clock "now", the relaunch-marker timestamps, the
+   * env-configured threshold) lives in the adapter, the same reason `isRelaunched` is
+   * adapter-derived rather than computed here from raw timestamps.
+   */
+  verifyTimeout(): { timedOut: boolean; timeoutMs: number };
   /** Post a needs-human to the operator (rotation cannot proceed unattended). */
   needsHuman(message: string): Promise<void>;
 }
@@ -166,6 +175,14 @@ export async function tick(deps: RotatorDeps): Promise<RotatorStep> {
   }
 
   const live = deps.liveAddresses();
+
+  // NOTE: handling a session that JOINS the fleet DURING the pause (a live address absent from the
+  // captured roster) was attempted here (HED-157) and REVERTED — a warn-only exclusion cannot let the
+  // rotation proceed: pauseReadiness() counts every live session, so an un-acked joiner would wedge the
+  // quiesce gate below forever; and heartbeat-based liveness cannot distinguish a genuine joiner from a
+  // returning stale session. The correct fix (reconcile the joiner with readiness, or a roster-scoped
+  // readiness) is deferred to a follow-up. Until then the fleet-wide quiesce gate carries joiners.
+
   // A roster member still needs (kill+)relaunch until it carries a DURABLE relaunch marker. This is
   // the source of truth, not the live set: a member killed-but-not-relaunched by a mid-rotation
   // crash has no marker, so it is re-handled; a member already relaunched has a marker, so it is
@@ -185,6 +202,16 @@ export async function tick(deps: RotatorDeps): Promise<RotatorStep> {
   // back is a needs-human, not a silent drop.
   const pending = intent.roster.filter((a) => !(live.includes(a) && deps.isRelaunched(a)));
   if (pending.length > 0) {
+    // HED-157: bound the wait. A relaunch that crashed on boot (never re-registers) must not pause
+    // the fleet forever — DECISION: never auto-resume past the deadline (resuming while a roster
+    // member is down is worse than staying paused for a human), so this escalates and stays blocked.
+    const timeout = deps.verifyTimeout();
+    if (timeout.timedOut) {
+      await deps.needsHuman(
+        `rotation ${readiness.pauseId}: ${pending.join(', ')} did not come back within ${timeout.timeoutMs}ms — manual check needed`,
+      );
+      return { phase: 'blocked', reason: `VERIFY timed out waiting for ${pending.join(', ')}`, target: intent.target };
+    }
     return { phase: 'verifying', reason: `waiting for ${pending.join(', ')} to boot on ${intent.target}`, pending };
   }
   await deps.resumePause(`rotation complete: fleet on ${intent.target}`);
