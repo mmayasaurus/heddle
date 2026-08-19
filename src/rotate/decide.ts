@@ -49,6 +49,17 @@ export function decideRotation(
   // A provider snapshot that is stale/absent at the PROVIDER level is unusable regardless of the
   // per-row flags — mirrors adviseClaudeAccount. Never rotate (or declare idle) on it.
   const capsUsable = caps !== undefined && !caps.stale && caps.source !== 'none';
+  // HED-165 (codex P1): a tap-only snapshot — mirror absent OR stale, so readProviderCaps fell back to
+  // readClaudeTap wholesale — NEVER names the fleet's active account (readClaudeTap sets activeAccount
+  // null). The only "current" we could then derive is the rotator DAEMON's own CLAUDE_CONFIG_DIR, which
+  // (see the next comment) is unrelated to the fleet — so acting on it could pause/kill/relaunch the
+  // WRONG account. With usable caps but no authoritative fleet account, refuse to guess. NOTE: because
+  // idle-account visibility now flows through the keeper anchors in this same merged source, a
+  // persistently `unknown`/empty result here can mean the KEEPER is down (stale anchors) or the MIRROR
+  // is down — not necessarily that the accounts are exhausted.
+  if (capsUsable && caps.activeAccount === null && caps.source === 'claude-tap') {
+    return { action: 'unknown', current: null, usedPct: null, reason: 'usable tap-only caps but no authoritative active account (mirror absent/stale) — cannot identify the fleet account to rotate' };
+  }
   // The FLEET's active account, from the tap (authoritative), NOT the rotator's own CLAUDE_CONFIG_DIR
   // — the rotator is a standalone process whose env account is unrelated to the fleet's. Fall back to
   // the env-derived account only when the tap does not name one.

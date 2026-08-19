@@ -125,6 +125,16 @@ describe('decideRotation', () => {
     expect(d.action).toBe('unknown');
   });
 
+  it('does NOT rotate on a tap-only snapshot with no authoritative active account (codex P1)', () => {
+    // Mirror absent/stale → readProviderCaps yields source:'claude-tap' + activeAccount:null. The only
+    // derivable "current" would be the rotator daemon's OWN env account, unrelated to the fleet — acting
+    // on it could pause/kill the WRONG account. Must be unknown, never a rotate.
+    const tapOnly = { ...caps([acctCaps('acct1', 95), acctCaps('acct2', 10)]), source: 'claude-tap' as const, activeAccount: null };
+    const d = decideRotation(tapOnly, accounts, envOn(accounts[0]!)); // env points at acct1 (95%)
+    expect(d.action).toBe('unknown');
+    expect(d.reason).toMatch(/no authoritative active account/i);
+  });
+
   it('is EXHAUSTED when the best OTHER account is itself over the hard cap', () => {
     // acct1 (current) 91%, acct2 90% is the best alternative but also over the 90% hard cap.
     const d = decideRotation(
