@@ -167,13 +167,17 @@ jobs:
     needs: [build]
     if: always()
     runs-on: ubuntu-24.04
-    # INVARIANT: timeout-minutes MUST exceed the longest leaf timeout in this
-    # workflow (`build` = 15). The edit-path echo waits (pending) for the build's
-    # verdict, so it must be able to outlast a full build rather than fail closed
-    # into a newer suite (see the echo step). If you raise a leaf timeout, raise
-    # this above it. 25 > 15. (Matched to Deterministic Review's echo aggregators
-    # so this loop is byte-comparable to that live-proven reference — HED-182.)
-    timeout-minutes: 25
+    # INVARIANT (HED-182), two rules that size this echo:
+    #   (1) the loop's sleep-sum > longest leaf timeout (`build` = 15) + a publish
+    #       grace, so the echo can't run out of polls while a leaf legitimately
+    #       runs;  seq 1 57 at the backoff cadence ≈ 24m50s > 15.
+    #   (2) timeout-minutes > the loop's sleep-sum + an API/startup allowance, so a
+    #       stuck echo exits CLEANLY via the loop's own fail-closed rather than as
+    #       a `timed_out` red in a NEWER suite;  30 > 24m50s + ~3-4min of 57
+    #       paginated API reads.  (25 left only ~10s of API headroom — the latent
+    #       margin defect the det-review reference also has; fixed here.)
+    # Raise a leaf timeout and you must re-check BOTH rules.
+    timeout-minutes: 30
     permissions:
       checks: write
     steps:
@@ -192,23 +196,20 @@ jobs:
           set -eu
           if [ "$IS_EDIT" = "true" ]; then
             echo "edit event — echoing the last real verdict (gate-verdict marker) for $SHA"
-            CONC=none; DRY=0
-            # WAIT for this SHA's real verdict; never fail closed on a timer. A
-            # premature red would land in a check-suite NEWER than the commit
-            # run's own gate, and GitHub resolves a required check from the newest
-            # SUITE, so it would block the PR until another edit superseded it
-            # (measured live on dashboard#45). The ONLY fail-closed trigger is the
-            # commit-path build being verifiably GONE — no leaf job in flight —
-            # with still no marker, sustained past a startup grace; there is NO
-            # iteration ceiling. Invariant: this job's timeout-minutes exceeds the
-            # longest leaf timeout in THIS workflow, so a leaf cannot be in flight
-            # past its own timeout — either the marker appears (the echo reflects
-            # it, including a timed-out build's failure) or the build is gone (fail
-            # closed correctly). The loop bound is a belt sized just under this
-            # job's 25-minute timeout (~24m50s at the backoff cadence) and above
-            # the longest leaf timeout; it cannot end on iteration count while a
-            # real leaf is still in flight. Poll fast for ~2 min, then back off to
-            # 30s to spare the API rate limit on a long build.
+            CONC=none; DRY=0; VERDICT=""
+            # WAIT for this SHA's real verdict; do not fail closed on a wall-clock
+            # timer. A premature red would land in a check-suite NEWER than the
+            # commit run's own gate, and GitHub resolves a required check from the
+            # newest SUITE, so it would block the PR until another edit superseded
+            # it (measured live on dashboard#45). Fail-closed is reached two ways,
+            # both leaving VERDICT empty: the commit-path build is verifiably GONE
+            # (no leaf in flight) with still no FRESH marker for a sustained dry
+            # window, OR the loop exhausts its belt. The belt (seq 1 57 at the
+            # backoff cadence ≈ 24m50s) is sized ABOVE the longest leaf timeout
+            # (build = 15) so it cannot run out while a leaf legitimately runs; the
+            # job timeout (30) is sized ABOVE the belt so a stuck echo exits cleanly
+            # via the loop, not as a `timed_out` red. Poll fast for ~2 min, then
+            # back off to 30s to spare the API rate limit on a long build.
             for i in $(seq 1 57); do
               # F4: a failed check-runs read leaves liveness UNKNOWN and retries —
               # NEVER coerce it to an empty `{}` (that jq-errors under `set -eu`
@@ -220,17 +221,33 @@ jobs:
                 continue
               fi
               # F3: --paginate --slurp yields a JSON ARRAY of pages; flatten every
-              # page's check_runs with [.[].check_runs[]] so a SHA with >30 checks
-              # (bot-edit storms grow the count) can't split CONC across pages.
-              CONC=$(printf '%s\n' "$CR" | jq -r '[.[].check_runs[]] | [ .[] | select(.name=="gate-verdict") ] | sort_by(.started_at) | last | .conclusion // "none"')
+              # page's check_runs with [.[].check_runs[]] so a SHA whose check-run
+              # list spans >1 page (each edit echo adds a `gate` run to the SHA, and
+              # the list is returned across suites — verified on heddle#57) can't
+              # split the lookup across pages.
+              # D1: emit the latest gate-verdict conclusion ONLY IF the marker is
+              # newer than the newest commit-path leaf on this SHA — i.e. posted by
+              # the CURRENT run, not left over from a prior same-SHA run (reopen /
+              # re-run). A stale marker reads as "none", so a same-SHA recompute's
+              # fresh verdict is never pre-empted by the old one. The ISO-8601-Z
+              # timestamps compare correctly as strings INSIDE jq (POSIX `test` has
+              # no portable string `>`, so the comparison stays in jq).
+              CONC=$(printf '%s\n' "$CR" | jq -r '
+                [.[].check_runs[]] as $all
+                | ([$all[] | select(.name | test("^(build|web|rust)")) | .started_at] | max) as $leaf
+                | ([$all[] | select(.name == "gate-verdict")] | sort_by(.started_at) | last) as $m
+                | if $m == null or $leaf == null then "none"
+                  elif $m.started_at >= $leaf then ($m.conclusion // "none")
+                  else "none" end')
               INFLIGHT=$(printf '%s\n' "$CR" | jq -r '[.[].check_runs[]] | [ .[] | select((.name|test("^(build|web|rust)")) and .status!="completed") ] | length')
-              # F2 — four states: a marker is usable only after the matching build
-              # is gone; any in-flight leaf resets the dry proof, WITH OR WITHOUT a
-              # stale marker (so a same-SHA recompute's fresh verdict is never
-              # pre-empted by an older marker landing in a newer suite); only
-              # no-marker + no-inflight advances the fail-closed proof.
+              # F2 — four states over the FRESH marker: accept only when a fresh
+              # marker exists and no leaf is in flight; any in-flight leaf resets
+              # the dry proof (with or without a marker); only fresh-none +
+              # no-inflight advances the fail-closed proof. D2: the accept-break is
+              # the ONLY path that records a VERDICT, so a retained CONC can never
+              # green the gate via loop exhaustion (see the case after the loop).
               if [ "$CONC" != "none" ] && [ "$INFLIGHT" = "0" ]; then
-                break
+                VERDICT="$CONC"; break
               fi
               if [ "$CONC" = "none" ] && [ "$INFLIGHT" = "0" ]; then
                 DRY=$((DRY + 1))
@@ -238,11 +255,11 @@ jobs:
                 DRY=0
               fi
               # Fail closed only when the build is verifiably gone AND still no
-              # marker, sustained a few polls past the 90s grace — this bridges the
-              # brief gap between the leaf jobs finishing and the commit gate
-              # publishing the marker.
+              # FRESH marker, sustained a few polls past the 90s grace — this
+              # bridges the brief gap between the leaf jobs finishing and the commit
+              # gate publishing the marker.
               if [ "$i" -gt 9 ] && [ "$DRY" -ge 6 ]; then
-                echo "  build is no longer in flight and no gate-verdict marker appeared — the commit gate did not publish (cancelled / never ran)."
+                echo "  build is no longer in flight and no fresh gate-verdict marker appeared — the commit gate did not publish (cancelled / never ran)."
                 break
               fi
               if [ -z "${WAITED:-}" ]; then
@@ -252,18 +269,23 @@ jobs:
                   echo "This edit run is holding the required \`gate\` **pending** until the commit-path build for this commit publishes its \`gate-verdict\`, which the echo then reflects. Pending here means *blocked-while-building*, not failed."
                 } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
               fi
-              echo "  waiting for the commit run's verdict on ${SHA} (poll ${i}; marker=${CONC}, commit-path jobs in flight=${INFLIGHT}, dry=${DRY})"
+              echo "  waiting for the commit run's verdict on ${SHA} (poll ${i}; fresh marker=${CONC}, commit-path jobs in flight=${INFLIGHT}, dry=${DRY})"
               if [ "$i" -lt 12 ]; then sleep 10; else sleep 30; fi
             done
-            case "$CONC" in
+            # D2: exit 0 is reachable ONLY via the accept-break above (a poll that
+            # saw a FRESH marker with no leaf in flight → VERDICT set). Loop
+            # exhaustion, the DRY fail-closed break, and an all-API-failure loop all
+            # leave VERDICT empty → fail closed here. A retained stale CONC can
+            # never green the required gate.
+            case "$VERDICT" in
               success)
                 echo "real verdict for ${SHA} = success — gate green"
                 exit 0 ;;
-              none)
-                echo "::error::no gate-verdict marker for ${SHA} — the commit 'gate' run never published a verdict for this commit (it was cancelled or never ran; the build is no longer in flight). Re-run the 'gate' workflow on this PR, or push a commit. Failing closed."
+              "")
+                echo "::error::no confirmed gate verdict for ${SHA} — never saw a fresh gate-verdict marker with no commit-path leaf in flight (the commit 'gate' run was cancelled / never ran / still queued, or the check-runs API was unreachable). Re-run the 'gate' workflow on this PR, or push a commit. Failing closed."
                 exit 1 ;;
               *)
-                echo "::error::real verdict for ${SHA} was '${CONC}' — echoing it. An edit never masks a real failure; fix the code and push a commit."
+                echo "::error::real verdict for ${SHA} was '${VERDICT}' — echoing it. An edit never masks a real failure; fix the code and push a commit."
                 exit 1 ;;
             esac
           fi

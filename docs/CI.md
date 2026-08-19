@@ -143,12 +143,16 @@ Residuals, by design:
   the commit run's own gate, and since GitHub resolves the required check from the newest suite, it
   would block the PR until another edit superseded it (matrix row 7). Instead the echo stays
   **pending**, polling for the marker *for as long as a commit-path job for the SHA is in flight*, and
-  self-describing that pending state in its job summary. The only fail-closed trigger is the build
-  being verifiably gone (no leaf job in flight) with still no marker — never an elapsed-time ceiling.
-  The wait bound is an **invariant, not a constant**: the `gate` job's `timeout-minutes` exceeds the
-  longest leaf timeout in its workflow (core 25 > 15; dashboard 50 > 45), so a leaf cannot outlive its
-  own timeout — the marker always appears first (a timed-out build publishes its failure, which the
-  echo echoes). Two earlier *fixed* timeouts (150 s, then a ~20 min ceiling) were each falsified live
+  self-describing that pending state in its job summary. Fail-closed is reached only when the build is
+  verifiably gone (no leaf in flight) with still no FRESH marker for a sustained dry window, or when
+  the loop exhausts its belt — either way the post-loop guard has recorded no verdict and reds. The
+  wait bound is an **invariant, not a constant**, sized by two rules: the loop's sleep-sum exceeds the
+  longest leaf timeout (core ≈24m50s > 15; dashboard ≈48m50s > 45) so the echo can't run out of polls
+  while a leaf legitimately runs, and the job `timeout-minutes` exceeds that sleep-sum plus an API
+  allowance (core 30; dashboard 55) so a stuck echo fails closed cleanly via the loop, not as a
+  `timed_out` red. (A leaf that sits *queued* far past the belt is the residual edge — it reds, and a
+  re-run clears it; safe, because the direction is fail-closed.) Two earlier *fixed* timeouts (150 s,
+  then a ~20 min ceiling) were each falsified live
   on dashboard#45 by a build that outran them; the invariant closes the class. A pending required check
   correctly blocks merge *while the build runs*, then resolves to the real verdict; it fails closed only
   if the marker never appears (commit run cancelled or never ran), with a self-describing remedy (re-run
@@ -161,12 +165,16 @@ Residuals, by design:
   warns); only later *edit* runs on a fork degrade — and they **fail closed, never mask**. The fleet
   uses same-repo branches, where the marker always publishes.
 - **Echo read hardening (HED-182).** The edit echo reads the SHA's check-runs with `gh api --paginate
-  --slurp` and flattens every page (`[.[].check_runs[]]`), so a SHA with >30 check-runs (bot-edit
-  storms grow the count) can't split the marker lookup across pages; a failed read leaves liveness
-  *unknown* and retries rather than coercing to an empty `{}` (which reds the required gate on a single
-  API blip under `set -eu`); and a marker is accepted only when no commit-path leaf is in flight, so a
-  same-SHA recompute's fresh verdict is never pre-empted by an older marker landing in a newer suite.
-  The same hardening backs `deterministic-review.yml`'s scanner echoes.
+  --slurp` and flattens every page (`[.[].check_runs[]]`): the list is returned *across suites*, so a
+  heavily-reviewed SHA (each edit echo adds its own `gate` run — 4 were live on heddle#57) really does
+  span pages, and a single-page read would miss the marker. A failed read leaves liveness *unknown* and
+  retries rather than coercing to an empty `{}` (which reds the required gate on one API blip under
+  `set -eu`). The marker is accepted only when it is **fresher than the newest commit-path leaf**
+  (`marker.started_at >= max(leaf.started_at)`, compared in jq) AND no leaf is in flight — so a prior
+  same-SHA run's stale marker is never echoed into a newer suite (the false-GREEN a reopen / re-run
+  would otherwise open). Exit 0 is reachable **only** through that accept path (a `VERDICT` the loop
+  sets there and nowhere else), so neither loop exhaustion nor a retained value can green the gate.
+  `deterministic-review.yml`'s scanner echoes carry the same hardening (tracked in HED-193).
 
 ## The review sweep (before anything is called clean)
 

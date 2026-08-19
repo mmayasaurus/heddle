@@ -44,7 +44,7 @@ describe('regression HED-182 — gate edit echo fails closed', () => {
 
     expect(gate).toContain('    needs: [build]');
     expect(gate).toContain('    if: always()');
-    expect(gate).toContain('    timeout-minutes: 25');
+    expect(gate).toContain('    timeout-minutes: 30');
     expect(gate).toContain('      checks: write');
     expect(shell).toContain('for i in $(seq 1 57); do');
     expect(shell).toContain('--paginate --slurp');
@@ -53,6 +53,13 @@ describe('regression HED-182 — gate edit echo fails closed', () => {
     expect(shell).not.toContain("|| echo '{}'");
     expect(shell).toContain('if [ "$CONC" != "none" ] && [ "$INFLIGHT" = "0" ]; then');
     expect(shell).toContain('if [ "$CONC" = "none" ] && [ "$INFLIGHT" = "0" ]; then');
+    // D2: exit 0 is reachable only via the accept-break's VERDICT, never a
+    // retained CONC at loop exhaustion.
+    expect(shell).toContain('VERDICT="$CONC"; break');
+    expect(shell).toContain('case "$VERDICT" in');
+    // D1: a gate-verdict marker is accepted only when it is newer than the newest
+    // commit-path leaf (freshness folded into the CONC jq filter).
+    expect(shell).toContain('$m.started_at >= $leaf');
   });
 
   it.skipIf(!hasJq)('accepts only the gate leaf display name in its in-flight regex (requires jq on PATH)', () => {
@@ -109,43 +116,79 @@ fi
     };
 
     const checkPage = (...checkRuns: object[]) => ({ check_runs: checkRuns });
-    const marker = (conclusion: string) => ({
+    const pages = (...page: object[]) => JSON.stringify(page);
+    const T = (m: number) => `2026-08-19T00:${String(m).padStart(2, '0')}:00Z`;
+    // Marker/leaf carry explicit timestamps — the D1 freshness filter accepts a
+    // gate-verdict marker only when it is NEWER than the newest commit-path leaf.
+    const marker = (conclusion: string, ts: string) => ({
       name: 'gate-verdict',
-      started_at: '2026-08-19T00:00:00Z',
+      started_at: ts,
       status: 'completed',
       conclusion,
     });
-    const buildInFlight = {
+    const leaf = (status: string, ts: string, conclusion: string | null = null) => ({
       name: 'build (typecheck + test + build + smoke)',
-      started_at: '2026-08-19T00:01:00Z',
-      status: 'in_progress',
-      conclusion: null,
-    };
-    const pages = (...page: object[]) => JSON.stringify(page);
+      started_at: ts,
+      status,
+      conclusion,
+    });
 
-    // F3: the marker appears only on page 2 of the slurped response.
-    expect(run(pages(checkPage(), checkPage(marker('success')))).status).toBe(0);
+    // A FRESH success (leaf completed, marker posted after it) → gate green.
+    expect(run(pages(checkPage(leaf('completed', T(0), 'success'), marker('success', T(5))))).status).toBe(0);
 
-    // F2: a stale success marker is unusable while the real build is in flight.
-    const race = run('', [
-      pages(checkPage(marker('success'), buildInFlight)),
-      pages(checkPage(marker('failure'))),
+    // F3: the same fresh pair split across two slurped pages → still green.
+    expect(
+      run(pages(checkPage(leaf('completed', T(0), 'success')), checkPage(marker('success', T(5))))).status,
+    ).toBe(0);
+
+    // D1 (freshness isolation — THE GAP that would false-green): the new build has
+    // completed/FAILURE but its fresh failure marker has NOT posted yet; only the
+    // OLD success marker exists on the SHA. Freshness rejects the stale success
+    // (older than the completed leaf) → CONC="none" every poll → fail closed,
+    // never "gate green". WITHOUT the freshness filter, INFLIGHT=0 + a success
+    // marker is accepted here → the false green this fix closes. Repeated past the
+    // DRY threshold and the 57-poll belt.
+    const staleGap = run('', Array.from({ length: 70 }, () =>
+      pages(checkPage(marker('success', T(0)), leaf('completed', T(10), 'failure'))),
+    ));
+    expect(staleGap.status).not.toBe(0);
+    expect(staleGap.stdout).not.toContain('gate green');
+
+    // D1 (transition): poll 1 the new build is still in flight and the old marker
+    // is not fresh → keep waiting; poll 2 the new build completed and a fresh
+    // FAILURE marker exists → echo the failure. RED, "was 'failure'".
+    const staleRace = run('', [
+      pages(checkPage(marker('success', T(0)), leaf('in_progress', T(10)))),
+      pages(checkPage(marker('success', T(0)), leaf('completed', T(10), 'failure'), marker('failure', T(15)))),
     ]);
-    expect(race.status).not.toBe(0);
-    expect(race.stdout).toContain("real verdict for 0123456789abcdef was 'failure'");
+    expect(staleRace.status).not.toBe(0);
+    expect(staleRace.stdout).toContain("real verdict for 0123456789abcdef was 'failure'");
 
-    // F4: transient check-runs API failures remain unknown and retry.
+    // D2 (exhaustion false-GREEN guard): a FRESH success marker is read alongside
+    // an in-flight leaf (an eventual-consistency race), then the API is out for the
+    // rest of the loop. The accept-break never fires (a leaf was in flight), so
+    // VERDICT stays empty and the loop exhausts → fail closed, NOT green. (Without
+    // the VERDICT flag, the retained CONC=success greens the gate.) The __FAIL__
+    // padding runs past the 57-poll belt so `sed` never returns empty past EOF.
+    const staleThenOutage = run('', [
+      pages(checkPage(leaf('in_progress', T(0)), marker('success', T(5)))),
+      ...Array.from({ length: 70 }, () => '__FAIL__'),
+    ]);
+    expect(staleThenOutage.status).not.toBe(0);
+
+    // F4: a transient API outage then a FRESH success → green.
     const outageThenSuccess = run('', [
       ...Array.from({ length: 10 }, () => '__FAIL__'),
-      pages(checkPage(marker('success'))),
+      pages(checkPage(leaf('completed', T(0), 'success'), marker('success', T(5)))),
     ]);
     expect(outageThenSuccess.status).toBe(0);
 
-    expect(run(pages(checkPage(marker('failure')))).status).not.toBe(0);
-    expect(run(pages(checkPage())).status).not.toBe(0);
+    // A fresh FAILURE marker → red; no marker at all → red; malformed → red.
+    expect(run(pages(checkPage(leaf('completed', T(0), 'failure'), marker('failure', T(5))))).status).not.toBe(0);
+    expect(run(pages(checkPage(leaf('completed', T(0), 'success')))).status).not.toBe(0);
     expect(run('{malformed').status).not.toBe(0);
-    // Generous timeout: this case spawns gh+jq per poll and does a ~10-poll
-    // fail-closed accumulation; under full-suite concurrency on a loaded machine
-    // subprocess-spawn latency can exceed vitest's 30s default (HED-182).
+    // Generous timeout: each case spawns gh+jq per poll and the D2/no-marker cases
+    // do a long fail-closed accumulation; under full-suite concurrency on a loaded
+    // machine subprocess-spawn latency can exceed vitest's 30s default (HED-182).
   }, 120000);
 });
