@@ -225,26 +225,30 @@ flags churn monthly.
   metadata) read-only even though cwd is writable — verified: a write to `.git/*` and `git add` (needs
   `.git/index.lock`) both EPERM. So a codex worker under workspace-write physically CANNOT `git
   add`/commit in its worktree — which is fine, it matches the worker-never-commits rule
-  (`worker-role.md`), but a worker that tries will see a git error, not a product bug.
+  (`skills/worker-role.md`), but a worker that tries will see a git error, not a product bug.
   - The common assumption "workspace-write blocks `$TMPDIR`" is **FALSE**. `std::env::temp_dir()` /
     `tempfile` tests write to `$TMPDIR` and PASS under a worker — so a worker reporting temp-dir tests
     as "sandbox failures" is wrong (this was the mistaken premise of HED-71's own filing). A test that
     fails ONLY inside the sandbox is writing to a `$HOME` path outside cwd/tmp (`~/.cargo` via
     `CARGO_HOME`, `~/.rustup` via `RUSTUP_HOME`, `~/.npm`, `~/.config`, `~/Library/…`), or to `.git`
     (above), or needs the network (off by default, above).
-  - Fixing such a worker — but note the split between **what codex-CLI supports** and **what heddle's
-    `dispatch_worker` exposes today** (the reason criterion 3 exists):
-    - `dispatch_worker` today exposes only `capabilities` (`net`; `exec-privileged` → no sandbox at
-      all, `danger-full-access`), `cwd`, and `codex_home`. It does NOT pass arbitrary `env` or `-c`
-      to the worker, so **the only heddle-level fix today** for a worker that must write outside
-      cwd/tmp is `exec-privileged` (heavyweight, trusted-only), or arranging its cwd so its writes
-      land inside it.
-    - codex-CLI *itself* also supports env-redirect (`CARGO_HOME=$cwd/.cargo`,
-      `XDG_CACHE_HOME=$cwd/.cache` — but NOT `RUSTUP_HOME`, `~/.npm`, or `~/Library`, which need their
-      own vars) and `-c 'sandbox_workspace_write.writable_roots=["<exact-dir>"]'` (validated: flips a
-      blocked `$HOME` write to OK, even with `--ignore-user-config`; a broad root like `$HOME` is near
-      `danger-full-access`, so name the exact dir). These are NOT reachable through `dispatch_worker`
-      yet — wiring an env/writable-roots passthrough is criterion 3 (sandbox-widening → held for Maya).
+  - Fixing such a worker — three mechanisms, at different layers:
+    - **Route-level, available TODAY (operator-controlled):** a codex task class in `routing.v0.yaml`
+      can carry `codex_flags`, which `toTarget` (`src/routing.ts`) maps to `extraFlags` and
+      `src/dispatch.ts` forwards into the codex argv (`src/adapters/codex.ts`). So an operator editing
+      the routing table CAN add `-c 'sandbox_workspace_write.writable_roots=["<exact-dir>"]'` to a
+      class right now — auditable in the yaml. It widens the sandbox, so treat it like a capability
+      grant: name the exact dir; a broad root like `$HOME` is near `danger-full-access`.
+    - **Caller-level (`dispatch_worker`):** the tool exposes `capabilities` (`net`; `exec-privileged`
+      → no sandbox at all, `danger-full-access`), `cwd`, `codex_home`, plus `skills`/`mcp`/`effort`/
+      `model` — but NOT an arbitrary `env` or per-call `-c` passthrough. So a caller that is NOT
+      editing the route has, for a worker that must write outside cwd/tmp, only `exec-privileged`
+      (heavyweight, trusted-only) or arranging the cwd so writes land inside it. A first-class
+      env/writable-roots passthrough on `dispatch_worker` is criterion 3 (sandbox-widening → held for Maya).
+    - **codex-CLI env-redirect** (whichever layer sets the env): point a tool's home/cache into the
+      cwd — `CARGO_HOME=<cwd>/.cargo`, `XDG_CACHE_HOME=<cwd>/.cache` — but NOT `RUSTUP_HOME`, `~/.npm`,
+      or `~/Library`, which need their own vars. `-c writable_roots` (validated: flips a blocked `$HOME`
+      write to OK even with `--ignore-user-config`) is the route-level knob above.
   - This boundary also means that under **default** workspace-write a codex worker whose cwd is a
     *linked* worktree cannot write into the canonical checkout (the worktree's PARENT is outside cwd).
     It is NOT an absolute fence: `exec-privileged` (`danger-full-access`) removes it, and a worker

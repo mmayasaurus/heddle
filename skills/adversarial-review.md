@@ -22,14 +22,18 @@ author's worktree to find what they missed. Your mandate is FIND ONLY:
   6. **verification claims reproduce (HED-71).** When the PR rests on a claim someone else's run
      produced — a dispatched worker's "tests pass" / "N unrelated failures", a CI note, "verified
      locally" — don't trust it at face value. First: is it NAMED (specific test names + the exact
-     command) or a bare count? An unnamed count you cannot check is itself a finding. Then reproduce
-     WHERE YOUR OWN read-only sandbox allows — but note your review sandbox is `read-only`, so a test
-     that writes (build artifacts under `target/`, coverage, caches) will EPERM for YOU too; do NOT
-     read that as "does not reproduce" (that would be a false finding — the very trap this lens exists
-     to avoid). When you cannot run it, reason from the code/diff about whether the claim is plausible
-     and say "unverified here — <why>". A worker's sandbox can make real code look broken and broken
-     code look fine (e.g. codex `workspace-write` blocks `$HOME` writes, `.git`, and the network) — so
-     an unnamed or code-implausible verification is a finding; a merely un-runnable one is a caveat.
+     command) or a bare count? An unnamed count nobody can check is itself a finding. Second, note you
+     are find-only and must NOT run write-producing commands (the mandate above) — and most test suites
+     WRITE (build artifacts under `target/`, coverage, caches), so you generally cannot re-execute them
+     to confirm. (On codex your sandbox ENFORCES this with EPERM; a Cursor or Gemini reviewer does NOT
+     get a read-only filesystem — `--dangerously-skip-permissions` / no `readOnly` — which is exactly
+     why you must SELF-restrain and never rely on the sandbox to stop you mutating the author's tree.)
+     A command you were blocked from, or correctly declined to run, is NOT evidence the claim "does not
+     reproduce" — never report that as a failed repro. Instead reason from the code/diff about whether
+     the claim is plausible and say "unverified here — <why>". A worker's sandbox can make real code
+     look broken and broken code look fine (e.g. codex `workspace-write` blocks `$HOME` writes, `.git`,
+     and the network by default) — so an unnamed or code-implausible verification is a finding; a merely
+     un-runnable one is a caveat.
 - **Report format** — a numbered list, most severe first; per finding: `severity (high|med|low) —
   file:line — the problem — why it matters — how you would prove it (a concrete input, a failing
   test, a repro)`. Then one line per lens with nothing found: `<lens>: nothing`. Finish with a
