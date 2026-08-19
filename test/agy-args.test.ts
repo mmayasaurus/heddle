@@ -26,20 +26,37 @@ describe('AgyAdapter.buildArgs — invocation contract', () => {
   });
 });
 
-describe('regression HED-28 — agy --effort must not be combined with an effort-suffixed slug', () => {
-  // agy hard-errors: "invalid model selection (--model gemini-3.6-flash-low --effort high):
-  // conflicts with --effort" (live-verified, agy 1.1.15, 2026-08-19). The catalog is entirely
-  // effort-suffixed, so a dispatch that also sets opts.effort (e.g. via auto_effort) must NOT emit
-  // --effort or every gemini worker with effort set would error out.
-  it('omits --effort when the model slug already encodes effort (-low/-medium/-high)', () => {
-    for (const model of ['gemini-3.6-flash-low', 'gemini-3.7-flash-medium', 'gemini-3.1-pro-high']) {
-      const args = new AgyAdapter().buildArgs('x', { model, cwd: '/tmp', effort: 'high' });
-      expect(args).not.toContain('--effort');
-    }
+describe('regression HED-28 — reconcile effort override with agy slug-suffix effort', () => {
+  // agy hard-errors on a suffixed slug + --effort ("invalid model selection … conflicts with
+  // --effort", live-verified agy 1.1.15, 2026-08-19). So an explicit opts.effort (e.g. via
+  // auto_effort) must be HONORED by rewriting the slug suffix — NOT dropped (which would silently run
+  // the routed effort and ignore the request; codeant/codex #59 P1) and NEVER emitted as --effort.
+  const modelOf = (args: string[]) => args[args.indexOf('--model') + 1];
+
+  it('honors an effort override by rewriting the slug suffix, and never emits --effort', () => {
+    const hi = new AgyAdapter().buildArgs('x', { model: 'gemini-3.6-flash-low', cwd: '/tmp', effort: 'high' });
+    expect(modelOf(hi)).toBe('gemini-3.6-flash-high');   // effort HONORED, not the routed -low
+    expect(hi).not.toContain('--effort');
+    const lo = new AgyAdapter().buildArgs('x', { model: 'gemini-3.1-pro-high', cwd: '/tmp', effort: 'low' });
+    expect(modelOf(lo)).toBe('gemini-3.1-pro-low');
+    expect(lo).not.toContain('--effort');
   });
 
-  it('still passes --effort for an unsuffixed model id (forward-compat, no conflict)', () => {
+  it('leaves the routed slug untouched when no effort override is set', () => {
+    const args = new AgyAdapter().buildArgs('x', { model: 'gemini-3.6-flash-low', cwd: '/tmp' });
+    expect(modelOf(args)).toBe('gemini-3.6-flash-low');
+    expect(args).not.toContain('--effort');
+  });
+
+  it('leaves a suffixed slug untouched for a non-gemini level (e.g. codex xhigh) — can\'t honor, don\'t error', () => {
+    const args = new AgyAdapter().buildArgs('x', { model: 'gemini-3.6-flash-medium', cwd: '/tmp', effort: 'xhigh' });
+    expect(modelOf(args)).toBe('gemini-3.6-flash-medium');
+    expect(args).not.toContain('--effort');
+  });
+
+  it('passes --effort for an unsuffixed model id (forward-compat, no conflict)', () => {
     const args = new AgyAdapter().buildArgs('x', { model: 'gemini-9.9-flash', cwd: '/tmp', effort: 'medium' });
+    expect(modelOf(args)).toBe('gemini-9.9-flash');
     expect(args.slice(args.indexOf('--effort'), args.indexOf('--effort') + 2)).toEqual(['--effort', 'medium']);
   });
 });

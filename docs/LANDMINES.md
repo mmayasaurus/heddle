@@ -145,9 +145,12 @@ flags churn monthly.
   `gemini-3.1-pro-{low,high}`) and effort rides that suffix. Passing BOTH a suffixed slug AND
   `--effort` hard-errors — `"invalid model selection (--model gemini-3.6-flash-low --effort high): …
   conflicts with --effort"`, status ERROR, zero output; the two no-`--effort` controls SUCCEED and
-  echo the slug's own effort. So `src/adapters/agy.ts` `buildArgs` emits `--effort` ONLY for an
-  unsuffixed id, and routing keeps gemini classes effort-free. `--effort low|medium|high` IS a real
-  flag (per `agy --help`) — but only for a base/unsuffixed model, of which the live catalog has none.
+  echo the slug's own effort. So `src/adapters/agy.ts` `resolveModel` HONORS an explicit `opts.effort`
+  (e.g. from `auto_effort`) by REWRITING the slug suffix (`-low` + `effort:high` → `-high`) rather than
+  silently dropping it (codeant/codex #59 P1), and `buildArgs` emits `--effort` ONLY for an unsuffixed
+  id (the live catalog has none) with a gemini-valid level. A non-gemini level (codex's `minimal`/
+  `xhigh`) has no slug and is left to the routed suffix. `--effort low|medium|high` IS a real flag
+  (per `agy --help`), never combined with a suffixed slug.
 
 ## Account rotation (multiple subscriptions per provider)
 

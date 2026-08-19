@@ -58,7 +58,7 @@ choice, MCP tool-gating) are IN.
 |---|---|---|---|---|
 | **Claude** | Anthropic subscription | In-session subagents of the interactive orchestrator (NOT a spawned `claude -p`) — shares the orchestrator's prompt cache, flat pool | fable/opus/sonnet/haiku | `--effort` / thinking |
 | **Codex** | ChatGPT subscription | `codex exec --json` subprocess | gpt-5.6-sol/terra/luna | `-c model_reasoning_effort` (minimal…xhigh) |
-| **Gemini** | Google subscription | Antigravity `agy -p --output-format stream-json` subprocess | gemini-3.6-flash / 3.5-flash / 3.1-pro (low/med/high) | effort baked into model slug (`-low/-medium/-high`); bare `--effort` conflicts with a suffixed slug (HED-28) |
+| **Gemini** | Google subscription | Antigravity `agy -p --output-format stream-json` subprocess | gemini-3.6-flash / 3.5-flash / 3.1-pro (low/medium/high) | effort baked into model slug (`-low/-medium/-high`); an effort override rewrites the suffix (bare `--effort` conflicts with a suffixed slug — HED-28) |
 | **Cursor (supplemental only)** | Cursor subscription (browser login — NOT an API key) | `cursor-agent -p --output-format json` subprocess | kimi-k3, composer-2.5, cursor-grok-4.5 | effort baked into model id (`-low/-medium/-high`) |
 | ~~Ollama Cloud~~ | — | EXCLUDED (reserved for the PR-reviewer fleet; account-scoped limits must not contend) | — | — |
 
