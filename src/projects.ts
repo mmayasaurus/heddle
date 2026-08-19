@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join, resolve, sep } from 'node:path';
+import { isAbsolute, join, resolve, sep } from 'node:path';
 
 /**
  * Project↔fleet registry (HED-160) — binds a project (a named set of workspace roots) to its
@@ -37,36 +37,65 @@ export interface ProjectRegistry {
 export const DEFAULT_PROJECTS_PATH = join(homedir(), '.heddle', 'projects.json');
 
 /** A required string field — loud on missing/wrong-type, same discipline as routing.ts's listField. */
-function requireString(node: any, key: string, where: string): string {
+function requireString(node: any, key: string, where: string, path: string): string {
   const v = node[key];
   if (typeof v !== 'string' || !v) {
-    throw new Error(`projects.json: ${where}.${key} must be a non-empty string (got ${JSON.stringify(v)})`);
+    throw new Error(`projects.json at ${path}: ${where}.${key} must be a non-empty string (got ${JSON.stringify(v)})`);
   }
   return v;
 }
 
-/** A required string-array field — loud on non-array or a non-string element. */
-function requireStringArray(node: any, key: string, where: string): string[] {
+/** A required string-array field — loud on non-array, empty array, or any blank/non-string element
+ *  (an empty workspaceRoot resolves to cwd — dangerous, so blank elements are rejected outright). */
+function requireStringArray(node: any, key: string, where: string, path: string): string[] {
   const v = node[key];
-  if (!Array.isArray(v) || !v.every((x) => typeof x === 'string')) {
-    throw new Error(`projects.json: ${where}.${key} must be an array of strings (got ${JSON.stringify(v)})`);
+  if (!Array.isArray(v) || v.length === 0 || !v.every((x) => typeof x === 'string' && x.trim() !== '')) {
+    throw new Error(`projects.json at ${path}: ${where}.${key} must be a non-empty array of non-blank strings (got ${JSON.stringify(v)})`);
   }
   return v;
 }
 
-function toProject(node: any, index: number): Project {
+function toProject(node: any, index: number, path: string): Project {
   if (!node || typeof node !== 'object') {
-    throw new Error(`projects.json: projects[${index}] must be an object (got ${JSON.stringify(node)})`);
+    throw new Error(`projects.json at ${path}: projects[${index}] must be an object (got ${JSON.stringify(node)})`);
   }
   const where = typeof node.name === 'string' && node.name ? `project "${node.name}"` : `projects[${index}]`;
+  const name = requireString(node, 'name', where, path);
+  const workspaceRoots = requireStringArray(node, 'workspaceRoots', where, path);
+  for (const root of workspaceRoots) {
+    if (!isAbsolute(root)) {
+      throw new Error(
+        `projects.json at ${path}: ${where}.workspaceRoots contains a non-absolute path "${root}" — workspace roots must be absolute`,
+      );
+    }
+  }
   return {
-    name: requireString(node, 'name', where),
-    workspaceRoots: requireStringArray(node, 'workspaceRoots', where),
-    agentIds: requireStringArray(node, 'agentIds', where),
-    linearTeam: requireString(node, 'linearTeam', where),
-    defaultRoom: requireString(node, 'defaultRoom', where),
-    launcher: requireString(node, 'launcher', where),
+    name,
+    // Normalized once here so projectForCwd never resolves inside its matching loop.
+    workspaceRoots: workspaceRoots.map((root) => resolve(root)),
+    agentIds: requireStringArray(node, 'agentIds', where, path),
+    linearTeam: requireString(node, 'linearTeam', where, path),
+    defaultRoom: requireString(node, 'defaultRoom', where, path),
+    launcher: requireString(node, 'launcher', where, path),
   };
+}
+
+/** Loud when the same agent id (case-insensitive) is claimed by more than one project — a hand-edit
+ *  collision must be caught, not silently resolved by first-wins lookup order. */
+function checkNoDuplicateAgents(projects: Project[], path: string): void {
+  const owner = new Map<string, Project>();
+  for (const project of projects) {
+    for (const agentId of project.agentIds) {
+      const key = agentId.toLowerCase();
+      const existing = owner.get(key);
+      if (existing && existing !== project) {
+        throw new Error(
+          `projects.json at ${path}: agent id "${agentId}" is claimed by both "${existing.name}" and "${project.name}" — an agent must belong to exactly one project`,
+        );
+      }
+      if (!existing) owner.set(key, project);
+    }
+  }
 }
 
 /**
@@ -76,16 +105,25 @@ function toProject(node: any, index: number): Project {
  * file returns an empty registry and lets consumers fall back to cwd inference.
  *
  * LOUD on corruption: this is config Maya edits by hand, not generated output — same philosophy as
- * routing.ts's listField. Unparseable JSON, a missing/mismatched schemaVersion, or a project missing
- * a required field / with a non-array workspaceRoots|agentIds all throw a clear Error naming the
- * problem, since every consumer parses this file and a version drift must be caught, not silently
- * mishandled.
+ * routing.ts's listField. An unreadable-but-present file, unparseable JSON, a missing/mismatched
+ * schemaVersion, a project missing a required field, an empty/blank array element, a non-absolute
+ * workspaceRoot, or an agent id claimed by more than one project all throw a clear Error naming the
+ * problem, since every consumer parses this file and a version drift — or a hand-edit slip — must be
+ * caught, not silently mishandled.
  */
 export function loadProjectRegistry(path: string = DEFAULT_PROJECTS_PATH): ProjectRegistry {
+  // Absence is FAIL-SOFT (empty registry); a PRESENT-but-unreadable file must not fall through to
+  // that same path — it needs its own loud error, distinct from "absent" and from "not valid JSON".
   if (!existsSync(path)) return { schemaVersion: PROJECTS_SCHEMA_VERSION, projects: [] };
+  let contents: string;
+  try {
+    contents = readFileSync(path, 'utf8');
+  } catch (err) {
+    throw new Error(`projects.json at ${path} exists but could not be read: ${(err as Error).message}`);
+  }
   let raw: any;
   try {
-    raw = JSON.parse(readFileSync(path, 'utf8'));
+    raw = JSON.parse(contents);
   } catch (err) {
     throw new Error(`projects.json at ${path} is not valid JSON: ${(err as Error).message}`);
   }
@@ -100,23 +138,33 @@ export function loadProjectRegistry(path: string = DEFAULT_PROJECTS_PATH): Proje
   if (!Array.isArray(raw.projects)) {
     throw new Error(`projects.json at ${path}: "projects" must be an array (got ${JSON.stringify(raw.projects)})`);
   }
+  const projects = raw.projects.map((p: any, i: number) => toProject(p, i, path));
+  checkNoDuplicateAgents(projects, path);
   return {
     schemaVersion: raw.schemaVersion,
-    projects: raw.projects.map((p: any, i: number) => toProject(p, i)),
+    projects,
   };
 }
 
-/** True when `target` equals `root` or sits under it on a path SEGMENT boundary (`/a/foo` must not match `/a/foobar`). */
+/**
+ * True when `target` equals `root` or sits under it on a path SEGMENT boundary (`/a/foo` must not
+ * match `/a/foobar`). Compared case-insensitively (deliberate tradeoff: on a case-sensitive Linux FS
+ * this could over-match two roots differing only by case — an acceptable, negligible risk for a
+ * project registry, versus the real macOS/Windows cwd-casing miss it prevents).
+ */
 function isAncestorOrEqual(root: string, target: string): boolean {
-  if (root === target) return true;
-  const prefix = root.endsWith(sep) ? root : root + sep;
-  return target.startsWith(prefix);
+  const rootLower = root.toLowerCase();
+  const targetLower = target.toLowerCase();
+  if (rootLower === targetLower) return true;
+  const prefix = rootLower.endsWith(sep) ? rootLower : rootLower + sep;
+  return targetLower.startsWith(prefix);
 }
 
 /**
- * The project one of whose `workspaceRoots` is an ancestor of (or equal to) `cwd`. Both sides are
- * resolved/normalized before comparing. When more than one root matches (nested workspace roots,
- * possibly across different projects), the LONGEST matching root wins. null when nothing matches.
+ * The project one of whose `workspaceRoots` is an ancestor of (or equal to) `cwd`. workspaceRoots
+ * are normalized to absolute paths once at load time (toProject); `cwd` is resolved here. When more
+ * than one root matches (nested workspace roots, possibly across different projects), the LONGEST
+ * matching root wins. null when nothing matches.
  */
 export function projectForCwd(reg: ProjectRegistry, cwd: string): Project | null {
   const target = resolve(cwd);
@@ -124,11 +172,10 @@ export function projectForCwd(reg: ProjectRegistry, cwd: string): Project | null
   let bestRootLength = -1;
   for (const project of reg.projects) {
     for (const root of project.workspaceRoots) {
-      const normalizedRoot = resolve(root);
-      if (!isAncestorOrEqual(normalizedRoot, target)) continue;
-      if (normalizedRoot.length > bestRootLength) {
+      if (!isAncestorOrEqual(root, target)) continue;
+      if (root.length > bestRootLength) {
         best = project;
-        bestRootLength = normalizedRoot.length;
+        bestRootLength = root.length;
       }
     }
   }

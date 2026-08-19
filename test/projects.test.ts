@@ -79,7 +79,7 @@ describe('loadProjectRegistry', () => {
       schemaVersion: 1,
       projects: [{ name: 'X', workspaceRoots: '/x', agentIds: ['A'], linearTeam: 'X', defaultRoom: '#x', launcher: 'x.sh' }],
     }));
-    expect(() => loadProjectRegistry(path)).toThrow(/project "X"\.workspaceRoots must be an array of strings/);
+    expect(() => loadProjectRegistry(path)).toThrow(/project "X"\.workspaceRoots must be a non-empty array of non-blank strings/);
   });
 
   it('throws when a project has a non-array agentIds', () => {
@@ -88,7 +88,83 @@ describe('loadProjectRegistry', () => {
       schemaVersion: 1,
       projects: [{ name: 'X', workspaceRoots: ['/x'], agentIds: 'A', linearTeam: 'X', defaultRoom: '#x', launcher: 'x.sh' }],
     }));
-    expect(() => loadProjectRegistry(path)).toThrow(/project "X"\.agentIds must be an array of strings/);
+    expect(() => loadProjectRegistry(path)).toThrow(/project "X"\.agentIds must be a non-empty array of non-blank strings/);
+  });
+
+  it('throws when a workspaceRoots element is an empty/blank string', () => {
+    const path = join(tempDir(), 'blank-root.json');
+    writeFileSync(path, JSON.stringify({
+      schemaVersion: 1,
+      projects: [{ name: 'X', workspaceRoots: ['/x', '   '], agentIds: ['A'], linearTeam: 'X', defaultRoom: '#x', launcher: 'x.sh' }],
+    }));
+    // A blank element must be rejected outright — an empty/blank workspaceRoot resolves to cwd, which is dangerous.
+    expect(() => loadProjectRegistry(path)).toThrow(/project "X"\.workspaceRoots must be a non-empty array of non-blank strings/);
+  });
+
+  it('throws when an agentIds element is an empty string', () => {
+    const path = join(tempDir(), 'blank-agent.json');
+    writeFileSync(path, JSON.stringify({
+      schemaVersion: 1,
+      projects: [{ name: 'X', workspaceRoots: ['/x'], agentIds: ['A', ''], linearTeam: 'X', defaultRoom: '#x', launcher: 'x.sh' }],
+    }));
+    expect(() => loadProjectRegistry(path)).toThrow(/project "X"\.agentIds must be a non-empty array of non-blank strings/);
+  });
+
+  it('throws naming a non-absolute workspaceRoot', () => {
+    const path = join(tempDir(), 'relative-root.json');
+    writeFileSync(path, JSON.stringify({
+      schemaVersion: 1,
+      projects: [{ name: 'X', workspaceRoots: ['relative/path'], agentIds: ['A'], linearTeam: 'X', defaultRoom: '#x', launcher: 'x.sh' }],
+    }));
+    expect(() => loadProjectRegistry(path)).toThrow(/project "X"\.workspaceRoots contains a non-absolute path "relative\/path"/);
+  });
+
+  it('normalizes workspaceRoots to resolved absolute paths at load', () => {
+    const path = join(tempDir(), 'unnormalized-root.json');
+    writeFileSync(path, JSON.stringify({
+      schemaVersion: 1,
+      projects: [{ name: 'X', workspaceRoots: ['/a/./b/../c'], agentIds: ['A'], linearTeam: 'X', defaultRoom: '#x', launcher: 'x.sh' }],
+    }));
+    expect(loadProjectRegistry(path).projects[0].workspaceRoots).toEqual(['/a/c']);
+  });
+
+  it('throws when an agent id is claimed by more than one project', () => {
+    const path = join(tempDir(), 'dup-agent.json');
+    writeFileSync(path, JSON.stringify({
+      schemaVersion: 1,
+      projects: [
+        { name: 'X', workspaceRoots: ['/x'], agentIds: ['A'], linearTeam: 'X', defaultRoom: '#x', launcher: 'x.sh' },
+        { name: 'Y', workspaceRoots: ['/y'], agentIds: ['A'], linearTeam: 'Y', defaultRoom: '#y', launcher: 'y.sh' },
+      ],
+    }));
+    expect(() => loadProjectRegistry(path)).toThrow(/agent id "A" is claimed by both "X" and "Y"/);
+  });
+
+  it('throws on a case-only-differing duplicate agent id across projects', () => {
+    const path = join(tempDir(), 'dup-agent-case.json');
+    writeFileSync(path, JSON.stringify({
+      schemaVersion: 1,
+      projects: [
+        { name: 'X', workspaceRoots: ['/x'], agentIds: ['A'], linearTeam: 'X', defaultRoom: '#x', launcher: 'x.sh' },
+        { name: 'Y', workspaceRoots: ['/y'], agentIds: ['a'], linearTeam: 'Y', defaultRoom: '#y', launcher: 'y.sh' },
+      ],
+    }));
+    expect(() => loadProjectRegistry(path)).toThrow(/agent id "a" is claimed by both "X" and "Y"/);
+  });
+
+  it('throws a distinct error for a present-but-unreadable file (not "not valid JSON", not an empty registry)', () => {
+    // A directory at `path` makes existsSync true (present) but readFileSync throw EISDIR (unreadable).
+    const dirPath = tempDir();
+    expect(() => loadProjectRegistry(dirPath)).toThrow(/exists but could not be read/);
+    expect(() => loadProjectRegistry(dirPath)).not.toThrow(/not valid JSON/);
+  });
+
+  it('returns an empty registry (indistinguishable from absent) when the file is present with zero projects', () => {
+    // Documents why cli.ts's `projects` case needs its own existsSync check: the loader alone
+    // cannot tell "absent" from "present but empty" apart — both come back as { projects: [] }.
+    const path = join(tempDir(), 'empty-projects.json');
+    writeFileSync(path, JSON.stringify({ schemaVersion: 1, projects: [] }));
+    expect(loadProjectRegistry(path)).toEqual({ schemaVersion: 1, projects: [] });
   });
 });
 
@@ -124,6 +200,10 @@ describe('projectForCwd', () => {
 
   it('returns null when nothing matches', () => {
     expect(projectForCwd(reg, '/z/unrelated')).toBeNull();
+  });
+
+  it('matches a differently-cased cwd against a registered root (case-insensitive filesystem tradeoff)', () => {
+    expect(projectForCwd(reg, '/A/x')?.name).toBe('Outer');
   });
 });
 
