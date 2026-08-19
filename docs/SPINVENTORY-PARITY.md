@@ -32,7 +32,7 @@ live in the Notes & receipt column.
 | protect-workspace.py (path guard for _vault/, CONTEXT.md, AGENTS.md…) | Global destructive-command hook covers rm/force-push everywhere; **no heddle-specific critical-path list** (docs/, .claude/, .github/workflows) | **GAP** | Minor. HED-104 |
 | require-vault-search.py (knowledge lookup gated before app edits) | No heddle vault → nothing to gate | **GAP** | HED-101 |
 | auto-reindex-vault.py | n/a without vault | **GAP** | HED-101 |
-| — (cross-cutting, surfaced by this audit) | Hook DISTRIBUTION: heddle's entire hook layer resolves through ONE hard-coded absolute path to the Spinventory workspace checkout, behind silent file-existence guards — if that checkout moves/retires, identity, gates, and telemetry vanish invisibly | **GAP** | HED-107 (vendor / relocatable resolution / hard-fail bootstrap). Reproduce: `jq -r '.hooks' .claude/settings.json` in either heddle repo shows the absolute prefix. Caught by codex review on heddle#22 |
+| — (cross-cutting, surfaced by this audit) | Hook DISTRIBUTION: the SILENT file-existence guards are gone — every hook now runs behind a loud-fail-open guard (absent → stderr banner + skip, never a silent vanish). All 5 hooks still resolve to the Spinventory canonical (behavior-neutral); vendoring / self-containment is deferred to HED-96, where the canonical is relocated to `~/.heddle` and its pre-existing findings fixed first (vendoring canonical code as-is imports its scanner findings — see HED-107 sweep) | **PARTIAL** | HED-107 (loud-fail-open bridge — done) → HED-96 (canonical → ~/.heddle, hook vendoring, deliberate enforce-flip). Caught by codex review on heddle#22 |
 
 ## Rules (binding constraints)
 
