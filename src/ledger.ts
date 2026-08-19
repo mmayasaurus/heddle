@@ -608,20 +608,27 @@ export class Ledger {
     return (this.db.prepare('SELECT * FROM reviews WHERE dispatch_id = ?').get(dispatchId) as Record<string, unknown> | undefined) ?? null;
   }
 
-  /** Per author→reviewer provider pair: reviews, scored reviews, findings, accepted, acceptance rate, mandate violations. */
+  /**
+   * Per author→reviewer provider pair: reviews, scored reviews, findings, accepted, acceptance rate,
+   * mandate violations. CONFIRMED reviews only (HED-122): a review row whose dispatch is still an
+   * unreported in-session refusal (refusal IS NOT NULL) is excluded, so a claude-in-session handoff
+   * that was never confirmed via report_in_session cannot inflate the pair scoreboard. Headless
+   * reviews are unaffected — their dispatch row's refusal is NULL from the moment it starts.
+   */
   reviewPairStats(): Record<string, unknown>[] {
     return this.db.prepare(`
-      SELECT author_provider, reviewer_provider,
+      SELECT r.author_provider, r.reviewer_provider,
              COUNT(*) AS reviews,
-             SUM(CASE WHEN outcome_at IS NOT NULL THEN 1 ELSE 0 END) AS scored,
-             SUM(COALESCE(findings_total, 0)) AS findings_total,
-             SUM(COALESCE(findings_accepted, 0)) AS findings_accepted,
-             CASE WHEN SUM(COALESCE(findings_total, 0)) > 0
-                  THEN ROUND(1.0 * SUM(COALESCE(findings_accepted, 0)) / SUM(COALESCE(findings_total, 0)), 3)
+             SUM(CASE WHEN r.outcome_at IS NOT NULL THEN 1 ELSE 0 END) AS scored,
+             SUM(COALESCE(r.findings_total, 0)) AS findings_total,
+             SUM(COALESCE(r.findings_accepted, 0)) AS findings_accepted,
+             CASE WHEN SUM(COALESCE(r.findings_total, 0)) > 0
+                  THEN ROUND(1.0 * SUM(COALESCE(r.findings_accepted, 0)) / SUM(COALESCE(r.findings_total, 0)), 3)
                   ELSE NULL END AS acceptance_rate,
-             SUM(CASE WHEN mandate_ok = 0 THEN 1 ELSE 0 END) AS mandate_violations
-      FROM reviews
-      GROUP BY author_provider, reviewer_provider
+             SUM(CASE WHEN r.mandate_ok = 0 THEN 1 ELSE 0 END) AS mandate_violations
+      FROM reviews r JOIN dispatches d ON d.id = r.dispatch_id
+      WHERE d.refusal IS NULL
+      GROUP BY r.author_provider, r.reviewer_provider
       ORDER BY reviews DESC, acceptance_rate DESC
     `).all() as Record<string, unknown>[];
   }

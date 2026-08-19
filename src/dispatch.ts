@@ -1196,6 +1196,15 @@ function refuseInSession(
   const id = ctx.ledger.refuse(
     record, 'claude-in-session', reason, 'in-session',
   );
+  // This review row links to dispatch id `id`; it counts only once the handoff is CONFIRMED
+  // (report_in_session clears the refusal), so an unreported handoff never inflates the pair
+  // stats — mirroring how the dispatch row itself stays a refusal until reported (HED-122/HED-99).
+  if (ctx.review) {
+    ctx.ledger.recordReview({
+      dispatchId: id, authorProvider: ctx.review.authorProvider, authorModel: ctx.review.authorModel,
+      authorDispatchId: ctx.review.authorDispatchId, reviewerProvider: route.provider, reviewerModel: route.model,
+    });
+  }
   const instruction =
     `Use your own Agent tool with model "${route.model}" and skills [${skills.join(', ')}]` +
     (mcp.length ? ` and MCP [${mcp.join(', ')}]` : '') + `.` + alt +

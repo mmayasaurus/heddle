@@ -72,4 +72,45 @@ describe('ledger adversarial reviews', () => {
     expect(rows.map((r) => r.dispatch_id)).toEqual([3, 2]);
     expect(rows[0]).toMatchObject({ ok: 1, started_at: expect.any(String) });
   });
+
+  describe('regression HED-122 — in-session review rows only count once confirmed', () => {
+    function refusedInSession(db: Ledger): number {
+      return db.refuse(
+        { orchestrator: null, taskClass: 'adversarial-review', provider: 'claude', model: 'opus-review', skills: null, issue: null, pr: null, cwd: '/tmp/x', promptPreview: 'p', sessionId: null, fellBackFrom: null },
+        'claude-in-session', 'runs as an in-session subagent, not a subprocess heddle can spawn', 'in-session',
+      );
+    }
+
+    it('excludes an unconfirmed in-session review from reviewPairStats, then includes it once report_in_session confirms the handoff', () => {
+      const db = ledger();
+      const id = refusedInSession(db);
+      review(db, id, 'cursor', 'claude');
+      db.recordReviewOutcome(id, { findingsTotal: 3, findingsAccepted: 2 });
+
+      // Still a refusal — report_in_session has not run — so it must not inflate the pair scoreboard.
+      expect(db.reviewPairStats()).toEqual([]);
+
+      expect(db.reportInSession(id, { ok: true })).toBe(true);
+      expect(db.reviewPairStats()).toEqual([
+        expect.objectContaining({
+          author_provider: 'cursor', reviewer_provider: 'claude', reviews: 1, scored: 1,
+          findings_total: 3, findings_accepted: 2, acceptance_rate: 0.667, mandate_violations: 0,
+        }),
+      ]);
+    });
+
+    it('still counts an existing headless review (dispatch refusal NULL) with unchanged aggregates', () => {
+      const db = ledger();
+      const id = finished(db, 1);
+      review(db, id, 'claude', 'cursor');
+      db.recordReviewOutcome(id, { findingsTotal: 4, findingsAccepted: 3 });
+      db.setReviewMandate(id, false);
+      expect(db.reviewPairStats()).toEqual([
+        expect.objectContaining({
+          author_provider: 'claude', reviewer_provider: 'cursor', reviews: 1, scored: 1,
+          findings_total: 4, findings_accepted: 3, acceptance_rate: 0.75, mandate_violations: 1,
+        }),
+      ]);
+    });
+  });
 });
