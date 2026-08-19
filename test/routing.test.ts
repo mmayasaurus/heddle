@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { loadRouting, listTaskClasses, resolveRoute, directRoute, neverViaCursorPrefixes, providerExecution } from '../src/routing.js';
+import { loadRouting, listTaskClasses, resolveRoute, directRoute, neverViaCursorPrefixes, isNeverViaCursor, providerExecution } from '../src/routing.js';
 
 /**
  * Behavioral checks on the SHIPPED routing table (routing/routing.v0.yaml) — the file Maya tunes by
@@ -124,6 +124,31 @@ describe('resolveRoute / directRoute — policy fences', () => {
   it('rejects a fallback provider that is held', () => {
     const routedTable = { ...table, providers: { ...table.providers, held: { status: 'held' } }, taskClasses: { ...table.taskClasses, 'fallback-held': { provider: 'codex', model: 'gpt-5.6-luna', fallback: { provider: 'held', model: 'm1' } } } };
     expect(() => resolveRoute(routedTable, 'fallback-held')).toThrow(/fallback provider "held" is on hold and not routable yet/);
+  });
+
+  it('refuses a DIFFERENTLY-CASED direct-subscription id through Cursor (case-insensitive — gitar #63)', () => {
+    for (const model of ['GPT-5.6', 'Claude-3', 'Gemini-3-pro', 'O3-mini']) {
+      const className = `cursor-upper-${model}`;
+      const routedTable = { ...table, taskClasses: { ...table.taskClasses, [className]: { provider: 'cursor', model } } };
+      expect(() => resolveRoute(routedTable, className)).toThrow(/direct-subscription family/);
+      expect(() => directRoute(table, 'cursor', model)).toThrow(/direct-subscription family/);
+    }
+    expect(isNeverViaCursor(table, 'GPT-5.6')).toBe(true);
+    expect(isNeverViaCursor(table, 'cursor-grok-4.6-high')).toBe(false);
+  });
+
+  it('FAILS SAFE on a malformed never_via_cursor — refuses ALL families, not none (codeant #63)', () => {
+    for (const badPolicy of [{}, { never_via_cursor: 'claude' }, { never_via_cursor: null }]) {
+      const bad = { ...table, policy: badPolicy as any };
+      expect(new Set(neverViaCursorPrefixes(bad))).toEqual(new Set(['claude-', 'gpt-', 'o1-', 'o3-', 'gemini-']));
+      const rt = { ...bad, taskClasses: { ...table.taskClasses, x: { provider: 'cursor', model: 'gpt-5.6' } } };
+      expect(() => resolveRoute(rt, 'x')).toThrow(/direct-subscription family/);
+    }
+  });
+
+  it('rejects a task class whose PRIMARY provider is unknown (copilot #63)', () => {
+    const rt = { ...table, taskClasses: { ...table.taskClasses, bad: { provider: 'openrouter', model: 'x' } } };
+    expect(() => resolveRoute(rt, 'bad')).toThrow(/names unknown provider "openrouter"/);
   });
 
   it('a direct route carries the caller\'s skills/mcp and a self-describing task class', () => {

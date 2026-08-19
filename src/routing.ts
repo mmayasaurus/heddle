@@ -108,13 +108,16 @@ export function resolveRoute(table: RoutingTable, taskClass: string): Route {
     throw new Error(`task class "${taskClass}" is missing provider or model`);
   }
   const providerCfg = table.providers[primary.provider];
-  if (providerCfg?.status === 'excluded') {
+  if (!providerCfg) {
+    throw new Error(`task class "${taskClass}" names unknown provider "${primary.provider}"`);
+  }
+  if (providerCfg.status === 'excluded') {
     throw new Error(`task class "${taskClass}" routes to excluded provider "${primary.provider}"`);
   }
-  if (providerCfg?.status === 'held') {
+  if (providerCfg.status === 'held') {
     throw new Error(`task class "${taskClass}": provider "${primary.provider}" is on hold and not routable yet`);
   }
-  if (primary.provider === 'cursor' && neverViaCursorPrefixes(table).some((p) => primary.model.startsWith(p))) {
+  if (primary.provider === 'cursor' && isNeverViaCursor(table, primary.model)) {
     throw new Error(`task class "${taskClass}": model "${primary.model}" is a direct-subscription family — never route it through Cursor (policy.never_via_cursor)`);
   }
   // The fallback is a different ROUTE for the same CLASS, so class-level policy (skill packs, MCP
@@ -136,7 +139,7 @@ export function resolveRoute(table: RoutingTable, taskClass: string): Route {
     if (fbCfg.status === 'held') {
       throw new Error(`task class "${taskClass}": fallback provider "${fb.provider}" is on hold and not routable yet`);
     }
-    if (fb.provider === 'cursor' && neverViaCursorPrefixes(table).some((p) => fb.model.startsWith(p))) {
+    if (fb.provider === 'cursor' && isNeverViaCursor(table, fb.model)) {
       throw new Error(`task class "${taskClass}": model "${fb.model}" is a direct-subscription family — never route it through Cursor (policy.never_via_cursor)`);
     }
   }
@@ -175,10 +178,19 @@ export const FAMILY_PREFIXES: Record<string, string[]> = {
 };
 
 export function neverViaCursorPrefixes(table: RoutingTable): string[] {
-  const fams = Array.isArray((table.policy as any)?.never_via_cursor)
-    ? (table.policy as any).never_via_cursor as string[]
-    : [];
+  const raw = (table.policy as any)?.never_via_cursor;
+  // Fail SAFE: a missing/malformed never_via_cursor defaults to ALL known direct-subscription families
+  // (refuse them), NEVER [] — [] would silently disable the billing guard at route resolution (codeant #63).
+  const fams = Array.isArray(raw) ? (raw as string[]) : Object.keys(FAMILY_PREFIXES);
   return fams.flatMap((f) => FAMILY_PREFIXES[f] ?? [`${f}-`]);
+}
+
+/** True if `model` must never route through Cursor (a direct-subscription family). CASE-INSENSITIVE —
+ *  model ids come from external callers (directRoute takes req.model), so `GPT-5.6` / `Claude-3` must
+ *  not slip past both this check AND the adapter fail-safe, which shared the same case logic (gitar #63). */
+export function isNeverViaCursor(table: RoutingTable, model: string): boolean {
+  const m = model.toLowerCase();
+  return neverViaCursorPrefixes(table).some((p) => m.startsWith(p));
 }
 
 export function structuralCaps(table: RoutingTable): StructuralCaps {
@@ -289,7 +301,7 @@ export function directRoute(
   }
   if (cfg.status === 'excluded') throw new Error(`provider "${provider}" is excluded from orchestration`);
   if (cfg.status === 'held') throw new Error(`provider "${provider}" is on hold and not routable yet`);
-  if (provider === 'cursor' && neverViaCursorPrefixes(table).some((p) => model.startsWith(p))) {
+  if (provider === 'cursor' && isNeverViaCursor(table, model)) {
     throw new Error(`model "${model}" is a direct-subscription family — never route it through Cursor (policy.never_via_cursor)`);
   }
   return { taskClass: `direct:${provider}/${model}`, provider, model, skills, mcp, editsCode: false, dispatchable: true, readOnly: false, autoAssess: false };

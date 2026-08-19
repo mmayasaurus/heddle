@@ -28,7 +28,7 @@ export class CursorAdapter implements WorkerAdapter {
   constructor(private readonly bin = 'cursor-agent') {}
 
   async dispatch(prompt: string, opts: DispatchOptions): Promise<WorkerResult> {
-    if (DIRECT_SUBSCRIPTION_PREFIXES.some((p) => opts.model.startsWith(p))) {
+    if (DIRECT_SUBSCRIPTION_PREFIXES.some((p) => opts.model.toLowerCase().startsWith(p))) {
       return {
         ok: false, output: '', exitCode: null,
         error: `policy: "${opts.model}" belongs to a family with a direct subscription — ` +
