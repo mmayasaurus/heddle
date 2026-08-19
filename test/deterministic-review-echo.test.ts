@@ -187,6 +187,9 @@ fi
         pages(checkPage(marker('success'))),
       ]);
       expect(outageThenSuccess.status).toBe(0);
-    });
+      // Generous timeout: spawns gh+jq per poll; under full-suite concurrency on
+      // a loaded machine subprocess-spawn latency can exceed vitest's 30s default.
+      // Hardened alongside the new gate-echo twin, which adds concurrent load (HED-182).
+    }, 120000);
   }
 });

@@ -146,7 +146,7 @@ Residuals, by design:
   self-describing that pending state in its job summary. The only fail-closed trigger is the build
   being verifiably gone (no leaf job in flight) with still no marker — never an elapsed-time ceiling.
   The wait bound is an **invariant, not a constant**: the `gate` job's `timeout-minutes` exceeds the
-  longest leaf timeout in its workflow (core 20 > 15; dashboard 50 > 45), so a leaf cannot outlive its
+  longest leaf timeout in its workflow (core 25 > 15; dashboard 50 > 45), so a leaf cannot outlive its
   own timeout — the marker always appears first (a timed-out build publishes its failure, which the
   echo echoes). Two earlier *fixed* timeouts (150 s, then a ~20 min ceiling) were each falsified live
   on dashboard#45 by a build that outran them; the invariant closes the class. A pending required check
@@ -160,6 +160,13 @@ Residuals, by design:
   marker POST 403s. The commit path still reports the real verdict (the POST is best-effort and only
   warns); only later *edit* runs on a fork degrade — and they **fail closed, never mask**. The fleet
   uses same-repo branches, where the marker always publishes.
+- **Echo read hardening (HED-182).** The edit echo reads the SHA's check-runs with `gh api --paginate
+  --slurp` and flattens every page (`[.[].check_runs[]]`), so a SHA with >30 check-runs (bot-edit
+  storms grow the count) can't split the marker lookup across pages; a failed read leaves liveness
+  *unknown* and retries rather than coercing to an empty `{}` (which reds the required gate on a single
+  API blip under `set -eu`); and a marker is accepted only when no commit-path leaf is in flight, so a
+  same-SHA recompute's fresh verdict is never pre-empted by an older marker landing in a newer suite.
+  The same hardening backs `deterministic-review.yml`'s scanner echoes.
 
 ## The review sweep (before anything is called clean)
 
