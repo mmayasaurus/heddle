@@ -64,13 +64,19 @@ export function acquireLock(
   return { ok: true };
 }
 
-/** Release the lock. Idempotent — a missing file (already released, or never acquired) is not an error;
- *  any OTHER unlink failure (e.g. a permission problem) is real and rethrown rather than silently hidden. */
+/**
+ * Release the lock. Best-effort cleanup — called from a `finally` and from signal handlers, so it must
+ * NOT throw: a throw here would mask the tick's outcome or crash the exit path (gitar review). A missing
+ * file is the normal idempotent case; any other failure is deliberately swallowed, because a lock LEFT
+ * BEHIND is harmless — the next rotator's stale-takeover reclaims it (the holder pid is gone). A release
+ * is not the place to surface fs errors, and a permission error is unreachable anyway (the process
+ * created this file in a dir it can write).
+ */
 export function releaseLock(lockPath: string): void {
   try {
     unlinkSync(lockPath);
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') throw err;
+  } catch {
+    /* deliberately swallowed — see above; a leftover lock self-heals via stale-takeover */
   }
 }
 
