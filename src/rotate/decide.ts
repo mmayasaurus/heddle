@@ -12,15 +12,21 @@ import type { ProviderCaps } from '../usage.js';
  * relaunch → resume) lives in the supervisor; this module only decides.
  */
 
-/** 5h utilisation thresholds, in percent. Defaults match Maya's ask: watch at 80, rotate at 90. */
+/** Utilisation thresholds, in percent, for the 5h and 7d (weekly) caps. Defaults match Maya's ask:
+ *  watch at 80, rotate at 90, for both windows. */
 export interface RotateThresholds {
   /** At/above this the fleet is close — logged, and (once wired) new dispatches are discouraged. */
   softPct: number;
   /** At/above this the fleet MUST rotate before the cap is hit mid-turn. */
   hardPct: number;
+  /** Same as softPct, for the WEEKLY (7-day) cap — the window-keeper's staggering can keep 5h
+   *  healthy while the weekly climbs, so it must be checked independently (HED-190). */
+  soft7dPct: number;
+  /** Same as hardPct, for the WEEKLY (7-day) cap. */
+  hard7dPct: number;
 }
 
-export const DEFAULT_THRESHOLDS: RotateThresholds = { softPct: 80, hardPct: 90 };
+export const DEFAULT_THRESHOLDS: RotateThresholds = { softPct: 80, hardPct: 90, soft7dPct: 80, hard7dPct: 90 };
 
 export type RotateAction =
   | { action: 'idle'; current: string | null; usedPct: number | null; reason: string }
@@ -28,6 +34,27 @@ export type RotateAction =
   | { action: 'rotate'; current: string; usedPct: number; target: ClaudeAccount; targetEnv: { env: Record<string, string>; envUnset: string[] }; reason: string }
   | { action: 'exhausted'; current: string; usedPct: number; reason: string }
   | { action: 'unknown'; current: string | null; usedPct: null; reason: string };
+
+/** The ladder the two windows are compared on — the higher number is the more urgent action. */
+const URGENCY = { idle: 0, watch: 1, rotate: 2 } as const;
+type Urgency = keyof typeof URGENCY;
+type Band = { urgency: Urgency; pct: number; by7d: boolean };
+
+/**
+ * Band the 5h and WEEKLY windows INDEPENDENTLY and return the more urgent of the two (HED-190).
+ * A null 7d contributes no band at all: it can neither trigger nor block. A TIE keeps the 5h band —
+ * the two are then asking for the same action anyway, and `by7d` decides how the target is chosen,
+ * so the weekly path is entered only when the weekly window is what actually escalated.
+ * (Extracted from `decideRotation` on review — codacy flagged the length/complexity delta.)
+ */
+function mostUrgentBand(usedPct: number, usedPct7d: number | null, t: RotateThresholds): Band {
+  const band = (pct: number, soft: number, hard: number): Urgency =>
+    pct >= hard ? 'rotate' : pct >= soft ? 'watch' : 'idle';
+  const fiveHour: Band = { urgency: band(usedPct, t.softPct, t.hardPct), pct: usedPct, by7d: false };
+  if (usedPct7d === null) return fiveHour;
+  const sevenDay: Band = { urgency: band(usedPct7d, t.soft7dPct, t.hard7dPct), pct: usedPct7d, by7d: true };
+  return URGENCY[sevenDay.urgency] > URGENCY[fiveHour.urgency] ? sevenDay : fiveHour;
+}
 
 /**
  * Decide from already-loaded caps + registry. Split from `readAndDecide` so tests drive it with
@@ -39,6 +66,13 @@ export type RotateAction =
  *  - at/above hard → pick the best account. If the picker returns the account we are already on,
  *    every account is near the cap, so this is `exhausted` (a needs-human), NOT a pointless
  *    self-rotate onto an equally-dead account.
+ *
+ * HED-190: the same idle/watch/rotate bands are also evaluated against the WEEKLY (7-day) cap, and
+ * the OVERALL action is the more urgent of the two — the window-keeper's staggering can keep 5h
+ * healthy while the weekly climbs, so a 5h-only trigger would miss that case. A null 7d reading
+ * never moves the decision either way. Target selection FOLLOWS the window that triggered: a
+ * weekly-triggered rotation ranks candidates by weekly headroom and refuses a weekly-dead target
+ * (see the `pickClaudeAccount` call below).
  */
 export function decideRotation(
   caps: ProviderCaps | undefined,
@@ -66,39 +100,77 @@ export function decideRotation(
   const currentId = (capsUsable && caps.activeAccount) ? caps.activeAccount : (currentClaudeAccount(accounts, env)?.id ?? null);
   const usedRow = currentId && capsUsable ? caps.accounts.find((r) => r.id === currentId) : undefined;
   const usedPct = usedRow && !usedRow.stale ? usedRow.fiveHour.usedPercentage : null;
+  // Same read as usedPct, for the WEEKLY cap (HED-190) — gated by the SAME staleness flag as the 5h
+  // read. Never its own signal for "unknown": a null 7d simply means no 7d sub-decision below.
+  const usedPct7d = usedRow && !usedRow.stale ? usedRow.sevenDay.usedPercentage : null;
 
   if (currentId === null) {
     return { action: 'unknown', current: null, usedPct: null, reason: 'current account not resolvable from the tap activeAccount or CLAUDE_CONFIG_DIR / registry' };
   }
   if (usedPct === null) {
     // A stale or absent 5h reading is NOT zero — rotating (or declaring idle) on unknown data is
-    // exactly the blind decision this must avoid. Wait for a fresh capture from the tap/keeper.
+    // exactly the blind decision this must avoid. Wait for a fresh capture from the tap/keeper. A
+    // 7d reading (fresh or not) never overrides this: without a fresh 5h capture the row is untrusted.
     return { action: 'unknown', current: currentId, usedPct: null, reason: `no fresh 5h capture for ${currentId} — not deciding` };
   }
-  if (usedPct < thresholds.softPct) {
+
+  // Band each window independently, then the OVERALL action is the MORE URGENT of the two
+  // (rotate > watch > idle) — the weekly cap must be able to force a rotation the 5h view alone
+  // would miss, and vice versa. A null 7d contributes no band: it can neither trigger nor block.
+  const winner = mostUrgentBand(usedPct, usedPct7d, thresholds);
+  const by7d = winner.by7d;
+
+  if (winner.urgency === 'idle') {
     return { action: 'idle', current: currentId, usedPct, reason: `${currentId} at ${usedPct.toFixed(0)}% (< ${thresholds.softPct}% soft)` };
   }
-  if (usedPct < thresholds.hardPct) {
+  if (winner.urgency === 'watch') {
+    if (by7d) {
+      return { action: 'watch', current: currentId, usedPct, reason: `${currentId} at ${winner.pct.toFixed(0)}% 7d (>= ${thresholds.soft7dPct}% soft 7d, < ${thresholds.hard7dPct}% hard 7d)` };
+    }
     return { action: 'watch', current: currentId, usedPct, reason: `${currentId} at ${usedPct.toFixed(0)}% (>= ${thresholds.softPct}% soft, < ${thresholds.hardPct}% hard)` };
   }
 
-  const pick = pickClaudeAccount(caps, accounts, { routeAwayAtPct: thresholds.hardPct });
+  // winner.urgency === 'rotate'. Target selection follows the window that TRIGGERED (HED-190 review,
+  // flagged P1 by four reviewers): picking by 5h headroom alone when the WEEKLY cap fired can hand the
+  // fleet an account that is itself at the weekly wall — 5h-idle today, out of weekly allowance — and
+  // the relaunched fleet hits that wall on its first turn. `prefer7d` ranks by weekly headroom (5h
+  // stays a hard constraint and the tie-break) and `routeAwayAt7dPct` marks a weekly-dead target so
+  // the guard below can see it. A 5h-triggered rotate keeps the 5h ranking exactly as before.
+  const pick = pickClaudeAccount(caps, accounts, {
+    routeAwayAtPct: thresholds.hardPct,
+    ...(by7d ? { prefer7d: true, routeAwayAt7dPct: thresholds.hard7dPct } : {}),
+  });
+  const trigger = by7d ? `7d ${winner.pct.toFixed(0)}%` : `${usedPct.toFixed(0)}%`;
+  // Which cap the operator-facing "everything is full" wording should name (codacy: saying "near the
+  // cap" on a weekly-triggered decision reads as though the 5h window were the problem).
+  const cap = by7d ? 'the weekly (7d) cap' : 'the cap';
   if (!pick) {
-    return { action: 'exhausted', current: currentId, usedPct, reason: `${currentId} at ${usedPct.toFixed(0)}% and no account is selectable` };
+    return { action: 'exhausted', current: currentId, usedPct, reason: `${currentId} at ${trigger} and no account is selectable` };
   }
   if (pick.account.id === currentId) {
     // The best account IS the current one — every alternative is worse or unusable. Rotating would
-    // land us back where we are (or somewhere equally dead), so the operator must decide.
-    return { action: 'exhausted', current: currentId, usedPct, reason: `${currentId} at ${usedPct.toFixed(0)}% is still the best account — all Claude accounts are near the cap` };
+    // land us back where we are (or somewhere equally dead), so the operator must decide. Under a
+    // weekly trigger the ranking above is weekly-first, so "still the best" now means it genuinely
+    // has the most WEEKLY headroom, not merely the most 5h headroom of a weekly-dead field.
+    return { action: 'exhausted', current: currentId, usedPct, reason: `${currentId} at ${trigger} is still the best account — all Claude accounts are near ${cap}` };
   }
   // The best OTHER account is itself at/over the hard cap — rotating there just hits the wall again.
   if (pick.usedPct !== null && pick.usedPct >= thresholds.hardPct) {
-    return { action: 'exhausted', current: currentId, usedPct, reason: `${currentId} at ${usedPct.toFixed(0)}%; best alternative ${pick.account.id} is also at ${pick.usedPct.toFixed(0)}% (>= ${thresholds.hardPct}% hard) — all accounts near the cap` };
+    return { action: 'exhausted', current: currentId, usedPct, reason: `${currentId} at ${trigger}; best alternative ${pick.account.id} is also at ${pick.usedPct.toFixed(0)}% (>= ${thresholds.hardPct}% hard) — all accounts near the cap` };
+  }
+  // The same guard for the WEEKLY window, and deliberately ONLY under a weekly trigger: the pick was
+  // then ranked weekly-first, so a target still at/over the 7d hard threshold proves EVERY addressable
+  // account is (the tiers above it were empty) — the all-accounts-weekly-exhausted edge the 5h guard
+  // cannot see, and a needs-human rather than a rotation that changes nothing. On a 5h-triggered
+  // rotate the ranking is 5h-first, so a weekly-dead pick says nothing about the other accounts and
+  // rejecting it here would be a FALSE exhausted (the mirror image of the bug this fix removes).
+  if (by7d && pick.usedPct7d !== null && pick.usedPct7d >= thresholds.hard7dPct) {
+    return { action: 'exhausted', current: currentId, usedPct, reason: `${currentId} at ${trigger}; best alternative ${pick.account.id} is also at 7d ${pick.usedPct7d.toFixed(0)}% (>= ${thresholds.hard7dPct}% hard 7d) — all accounts are near the weekly cap` };
   }
   return {
     action: 'rotate', current: currentId, usedPct, target: pick.account,
     targetEnv: { env: pick.env, envUnset: pick.envUnset },
-    reason: `rotate ${currentId} (${usedPct.toFixed(0)}%) → ${pick.account.id} (${pick.reason})`,
+    reason: `rotate ${currentId} (${trigger}) → ${pick.account.id} (${pick.reason})`,
   };
 }
 

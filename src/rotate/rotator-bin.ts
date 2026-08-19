@@ -31,7 +31,8 @@ import { acquireLock, releaseLock, LOCK_REQUIRED_MODES } from './lock.js';
  * never both drive the state machine at once. --status never takes it (read-only).
  *
  * Env: HEDDLE_FLEET_SCRIPTS (dir with fleet-kill.sh/fleet-relaunch.sh) · HEDDLE_USAGE_DIR
- * (default ~/.heddle/usage) · HEDDLE_ROTATE_SOFT_PCT / HEDDLE_ROTATE_HARD_PCT · HEDDLE_ROTATE_INTERVAL_MS
+ * (default ~/.heddle/usage) · HEDDLE_ROTATE_SOFT_PCT / HEDDLE_ROTATE_HARD_PCT · HEDDLE_ROTATE_SOFT_PCT_7D /
+ * HEDDLE_ROTATE_HARD_PCT_7D (weekly-cap thresholds, HED-190) · HEDDLE_ROTATE_INTERVAL_MS
  * (default 60000) · HEDDLE_ROTATE_VERIFY_TIMEOUT_MS (default 300000) · HEDDLE_COMMS_DB · HEDDLE_LEDGER_DB.
  */
 
@@ -54,12 +55,26 @@ const broker = new Broker({ log, ledger, transport: new ChannelTransport(log), o
 
 const softPct = Number(env.HEDDLE_ROTATE_SOFT_PCT);
 const hardPct = Number(env.HEDDLE_ROTATE_HARD_PCT);
+const soft7dPct = Number(env.HEDDLE_ROTATE_SOFT_PCT_7D);
+const hard7dPct = Number(env.HEDDLE_ROTATE_HARD_PCT_7D);
+// A cap percentage is 0–100 by definition (usage.ts `CapWindow.usedPercentage`), so a threshold
+// ABOVE 100 can never be reached: it would start the rotator cleanly and silently disable the very
+// protection it configures (qodo, HED-190 review). Out-of-range → the default, same as any other
+// unusable value. Applied to the 5h pair too — the bound is a property of the percentage, not of
+// which window it describes.
+const pct = (v: number, dflt: number): number => (Number.isFinite(v) && v > 0 && v <= 100 ? v : dflt);
 const thresholds = {
-  softPct: Number.isFinite(softPct) && softPct > 0 ? softPct : DEFAULT_THRESHOLDS.softPct,
-  hardPct: Number.isFinite(hardPct) && hardPct > 0 ? hardPct : DEFAULT_THRESHOLDS.hardPct,
+  softPct: pct(softPct, DEFAULT_THRESHOLDS.softPct),
+  hardPct: pct(hardPct, DEFAULT_THRESHOLDS.hardPct),
+  soft7dPct: pct(soft7dPct, DEFAULT_THRESHOLDS.soft7dPct),
+  hard7dPct: pct(hard7dPct, DEFAULT_THRESHOLDS.hard7dPct),
 };
 if (thresholds.hardPct <= thresholds.softPct) {
   warn(`refusing to run: hard threshold (${thresholds.hardPct}%) must be ABOVE soft (${thresholds.softPct}%) — a value between them would never trigger a rotation.`);
+  process.exit(1);
+}
+if (thresholds.hard7dPct <= thresholds.soft7dPct) {
+  warn(`refusing to run: 7d hard threshold (${thresholds.hard7dPct}%) must be ABOVE 7d soft (${thresholds.soft7dPct}%) — a value between them would never trigger a rotation.`);
   process.exit(1);
 }
 
@@ -141,7 +156,7 @@ async function main(): Promise<void> {
   };
   const bye = () => { stopping = true; releaseLock(LOCK_PATH); try { log.close(); } catch { /* closing */ } process.exit(0); };
   process.on('SIGTERM', bye); process.on('SIGINT', bye);
-  warn(`started (interval ${intervalMs}ms, soft ${thresholds.softPct}% / hard ${thresholds.hardPct}%)`);
+  warn(`started (interval ${intervalMs}ms, soft ${thresholds.softPct}% / hard ${thresholds.hardPct}%, 7d soft ${thresholds.soft7dPct}% / hard ${thresholds.hard7dPct}%)`);
   void loop();
 }
 

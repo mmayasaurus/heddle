@@ -314,6 +314,10 @@ export interface AccountPick {
   account: ClaudeAccount;
   /** 5h used% behind the choice, null when unknown. */
   usedPct: number | null;
+  /** WEEKLY (7d) used% for the chosen account, null when unknown. Reported on EVERY path (not only
+   *  the `prefer7d` one) so a caller rotating because of the weekly cap can reject a target that is
+   *  itself at the weekly wall without re-reading `caps` (HED-190 review). */
+  usedPct7d: number | null;
   /** Ledger-friendly reason, e.g. `account:acct2 (5h 12%)`, `account:acct1 pinned`, `account:acct1 default (no fresh caps)`. */
   reason: string;
   /** Env to apply: CLAUDE_CONFIG_DIR set for a non-default account; UNSET for the default login. */
@@ -378,7 +382,19 @@ export function bestFableWeekly(
 }
 
 export function pickClaudeAccount(
-  caps: ProviderCaps | undefined, accounts: ClaudeAccount[], opts: { pin?: string; routeAwayAtPct?: number; forFable?: boolean } = {},
+  caps: ProviderCaps | undefined,
+  accounts: ClaudeAccount[],
+  opts: {
+    pin?: string;
+    routeAwayAtPct?: number;
+    forFable?: boolean;
+    /** Rank by WEEKLY (7d) headroom instead of 5h — for a caller whose rotation was triggered BY the
+     *  weekly cap (HED-190). 5h remains a hard constraint and the tie-break; see the block below. */
+    prefer7d?: boolean;
+    /** The 7d counterpart of `routeAwayAtPct`: a candidate at/over it is weekly-dead and sorts last
+     *  under `prefer7d`. Unset = no weekly threshold (pure ranking). */
+    routeAwayAt7dPct?: number;
+  } = {},
 ): AccountPick | null {
   if (accounts.length === 0) return null;
   const envFor = (a: ClaudeAccount): { env: Record<string, string>; envUnset: string[] } => a.configDir
@@ -387,6 +403,11 @@ export function pickClaudeAccount(
   const usedOf = (id: string): number | null => {
     const row = caps?.accounts.find((r) => r.id === id);
     return row && !row.stale ? row.fiveHour.usedPercentage : null;
+  };
+  /** Same read as `usedOf`, for the WEEKLY window — gated by the SAME staleness flag. */
+  const used7dOf = (id: string): number | null => {
+    const row = caps?.accounts.find((r) => r.id === id);
+    return row && !row.stale ? row.sevenDay.usedPercentage : null;
   };
   if (opts.pin) {
     const a = accounts.find((x) => x.id === opts.pin);
@@ -398,7 +419,7 @@ export function pickClaudeAccount(
       );
     }
     const used = usedOf(a.id);
-    return { account: a, usedPct: used, reason: `account:${a.id} pinned${used !== null ? ` (5h ${used.toFixed(0)}%)` : ''}`, ...envFor(a) };
+    return { account: a, usedPct: used, usedPct7d: used7dOf(a.id), reason: `account:${a.id} pinned${used !== null ? ` (5h ${used.toFixed(0)}%)` : ''}`, ...envFor(a) };
   }
   // A logged-out account is not addressable, whatever its caps say (a fresh keeper anchor for a dir
   // whose credential was replaced would otherwise make the picker choose an account that 401s).
@@ -417,11 +438,46 @@ export function pickClaudeAccount(
       const best = fable[0];
       const note = best.pct >= FABLE_SOFT_CAP_ADVISE_PCT ? ` — every known account is at/over the ${FABLE_SOFT_CAP_ADVISE_PCT}% Fable act threshold` : '';
       return {
-        account: best.a, usedPct: best.used,
+        account: best.a, usedPct: best.used, usedPct7d: used7dOf(best.a.id),
         reason: `account:${best.a.id} fable-headroom (fable-weekly ${fmtPct(best.pct)}%, lowest of ${fable.length} known)${note}`,
         ...envFor(best.a),
       };
     }
+  }
+  // HED-190 review (4 reviewers): when the caller rotates because the WEEKLY cap fired, 5h headroom
+  // alone picks the wrong target — an account can be idle THIS hour and still sit at the weekly wall,
+  // so the fleet would be relaunched straight into it. Rank the same fresh candidates in three tiers:
+  //   0. a KNOWN 7d below `routeAwayAt7dPct` — verified weekly headroom, lowest 7d first;
+  //   1. an UNKNOWN 7d — unverified, and it must NOT sort last: the idle accounts the rotator rotates
+  //      TO usually come only from keeper anchors, which carry no 7d reading at all (usage.ts
+  //      `readClaudeTap`), so demoting a missing number would leave the weekly trigger with no target;
+  //   2. dead in EITHER window (5h at/over `routeAwayAtPct`, or a known 7d at/over the weekly one) —
+  //      still returned rather than dropped, so the caller sees WHY and can declare exhausted.
+  // 5h is the tie-break inside every tier, so this never loosens the 5h ordering. The 7d key is only
+  // ever compared within a tier, where both sides are known (tier 1 is all-null) — the `?? 0` below
+  // is unreachable arithmetic, present solely to keep the comparator a total order.
+  if (opts.prefer7d) {
+    const away5h = opts.routeAwayAtPct ?? DEFAULT_CAP_AWARE_POLICY.routeAwayAtPct;
+    const away7d = opts.routeAwayAt7dPct ?? Infinity;
+    const tierOf = (used: number, used7d: number | null): 0 | 1 | 2 =>
+      used >= away5h || (used7d !== null && used7d >= away7d) ? 2 : used7d === null ? 1 : 0;
+    const ranked = addressable
+      .map((a) => ({ a, used: usedOf(a.id), used7d: used7dOf(a.id) }))
+      .filter((x): x is { a: ClaudeAccount; used: number; used7d: number | null } => x.used !== null)
+      .sort((x, y) =>
+        tierOf(x.used, x.used7d) - tierOf(y.used, y.used7d) || (x.used7d ?? 0) - (y.used7d ?? 0) || x.used - y.used);
+    if (ranked.length) {
+      const best = ranked[0];
+      const note = tierOf(best.used, best.used7d) === 2 ? ` — every fresh account is at/over a hard cap (5h ${away5h}%, 7d ${away7d}%)` : '';
+      const week = best.used7d === null ? 'unknown' : `${best.used7d.toFixed(0)}%`;
+      return {
+        account: best.a, usedPct: best.used, usedPct7d: best.used7d,
+        reason: `account:${best.a.id} weekly-headroom (7d ${week}, 5h ${best.used.toFixed(0)}%, best of ${ranked.length} fresh)${note}`,
+        ...envFor(best.a),
+      };
+    }
+    // Nothing fresh to rank — fall through to the shared no-fresh-caps path below, exactly as the 5h
+    // picker does (the `fresh` filter below is the same one, so it is empty here too).
   }
   const fresh = addressable
     .map((a) => ({ a, used: usedOf(a.id) }))
@@ -431,11 +487,11 @@ export function pickClaudeAccount(
     const best = fresh[0];
     const threshold = opts.routeAwayAtPct ?? DEFAULT_CAP_AWARE_POLICY.routeAwayAtPct;
     const note = best.used >= threshold ? ` — every fresh account is at/over ${threshold}%` : '';
-    return { account: best.a, usedPct: best.used, reason: `account:${best.a.id} (5h ${best.used.toFixed(0)}%, most headroom of ${fresh.length} fresh)${note}`, ...envFor(best.a) };
+    return { account: best.a, usedPct: best.used, usedPct7d: used7dOf(best.a.id), reason: `account:${best.a.id} (5h ${best.used.toFixed(0)}%, most headroom of ${fresh.length} fresh)${note}`, ...envFor(best.a) };
   }
   // Every registered account logged out → NO pick: inheriting the caller's own login beats
   // selecting a credential we KNOW 401s (the old `?? accounts[0]` escape hatch did exactly that).
   const dflt = addressable.find((a) => a.configDir === null) ?? addressable[0];
   if (!dflt) return null;
-  return { account: dflt, usedPct: null, reason: `account:${dflt.id} default (no fresh per-account caps)`, ...envFor(dflt) };
+  return { account: dflt, usedPct: null, usedPct7d: used7dOf(dflt.id), reason: `account:${dflt.id} default (no fresh per-account caps)`, ...envFor(dflt) };
 }
