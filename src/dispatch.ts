@@ -1010,6 +1010,7 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
             const cfg = table.providers[provider];
             if (!cfg) return 'unknown provider';
             if (cfg.status === 'excluded') return 'provider excluded by policy';
+            if (cfg.status === 'held') return 'provider on hold and not routable yet'; // uniform held check (qodo #63)
             if (Array.isArray(cfg.models) && cfg.models.length && !cfg.models.includes(model)) return 'model not in provider list';
             return null;
           })
