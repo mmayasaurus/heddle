@@ -51,7 +51,7 @@ function verdictShell(job: string): string {
   return `${shell.join('\n')}\n`;
 }
 
-describe('regression HED-131 — scanner edit echoes fail closed', () => {
+describe('regression HED-193 — scanner edit echoes fail closed', () => {
   const { tempDir } = useTempResources('heddle-det-review-echo-');
   const hasJq = spawnSync('jq', ['--version'], { stdio: 'ignore' }).status === 0;
 
@@ -103,7 +103,7 @@ describe('regression HED-131 — scanner edit echoes fail closed', () => {
       const verdict = jobBlock(scanner);
       const shell = verdictShell(scanner);
 
-      expect(verdict).toContain('    timeout-minutes: 25');
+      expect(verdict).toContain('    timeout-minutes: 30');
       expect(shell).toContain('for i in $(seq 1 57); do');
       expect(shell).toContain('--paginate --slurp');
       expect(shell).toContain('[.[].check_runs[]]');
@@ -111,9 +111,25 @@ describe('regression HED-131 — scanner edit echoes fail closed', () => {
       expect(shell).not.toContain("|| echo '{}'");
       expect(shell).toContain('if [ "$CONC" != "none" ] && [ "$INFLIGHT" = "0" ]; then');
       expect(shell).toContain('if [ "$CONC" = "none" ] && [ "$INFLIGHT" = "0" ]; then');
+      expect(shell).toContain('VERDICT="$CONC"; break');
+      expect(shell).toContain('case "$VERDICT" in');
+      expect(shell).toContain('$m.started_at >= $leaf');
+      expect(shell).toContain('and .conclusion != "skipped"');
+      // Marker isolation (grok finding 2): the freshness filter must select the
+      // EXACT marker name, never a substring/regex that could also match the OTHER
+      // scanner's verdict — that would let a newer other-scanner success mask this
+      // scanner's failure (for gitleaks, a leaked secret).
+      expect(shell).toContain(`select(.name == "${scanner}-verdict")`);
+      // filter=all (qodo #61): read EVERY run — incl. queued / in_progress duplicates
+      // the default filter=latest omits — so INFLIGHT and freshness never miss an
+      // in-flight scan. Monotone-safe: a superset of runs can only raise INFLIGHT and
+      // can't pick an older marker. The fake gh ignores query params, so this is the
+      // only place the query can be pinned.
+      expect(shell).toContain('filter=all');
+      expect(shell).toMatch(/could not read check runs[\s\S]*?DRY=0[\s\S]*?continue/);
     });
 
-    it.skipIf(!hasJq)(`${scanner} exits zero only for a jq-parsed success marker (requires jq on PATH)`, () => {
+    it.skipIf(!hasJq)(`${scanner} fails closed across freshness gaps, races, outages, and invalid data (requires jq on PATH)`, () => {
       const dir = tempDir();
       const bin = join(dir, 'bin');
       const summary = join(dir, 'summary.md');
@@ -156,40 +172,85 @@ fi
       };
 
       const checkPage = (...checkRuns: object[]) => ({ check_runs: checkRuns });
-      const marker = (conclusion: string) => ({
+      const T = (m: number) => `2026-08-19T00:${String(m).padStart(2, '0')}:00Z`;
+      const marker = (conclusion: string, ts: string) => ({
         name: `${scanner}-verdict`,
-        started_at: '2026-08-19T00:00:00Z',
+        started_at: ts,
         status: 'completed',
         conclusion,
       });
-      const inFlight = {
+      const leaf = (status: string, ts: string, conclusion: string | null = null) => ({
         name: `${scanner} scan (test)`,
-        started_at: '2026-08-19T00:01:00Z',
-        status: 'in_progress',
-        conclusion: null,
-      };
+        started_at: ts,
+        status,
+        conclusion,
+      });
       const pages = (...page: object[]) => JSON.stringify(page);
 
-      expect(run(pages(checkPage(), checkPage(marker('success')))).status).toBe(0);
-      expect(run(pages(checkPage(marker('failure')))).status).not.toBe(0);
-      expect(run(pages(checkPage())).status).not.toBe(0);
-      expect(run('{malformed').status).not.toBe(0);
+      expect(run(pages(checkPage(leaf('completed', T(0), 'success'), marker('success', T(5))))).status).toBe(0);
+      expect(
+        run(pages(checkPage(leaf('completed', T(0), 'success')), checkPage(marker('success', T(5))))).status,
+      ).toBe(0);
+      expect(run(pages(checkPage(
+        leaf('completed', T(0), 'success'),
+        marker('success', T(5)),
+        leaf('completed', T(20), 'skipped'),
+      ))).status).toBe(0);
+      expect(run(pages(checkPage(leaf('completed', T(0), 'success'), marker('success', T(0))))).status).toBe(0);
 
-      const race = run('', [
-        pages(checkPage(marker('success'), inFlight)),
-        pages(checkPage(marker('failure'))),
+      const staleGap = run('', Array.from({ length: 70 }, () =>
+        pages(checkPage(marker('success', T(0)), leaf('completed', T(10), 'failure'))),
+      ));
+      expect(staleGap.status).not.toBe(0);
+      expect(staleGap.stdout).not.toContain(`${scanner} green`);
+
+      const staleRace = run('', [
+        pages(checkPage(marker('success', T(0)), leaf('in_progress', T(10)))),
+        pages(checkPage(marker('success', T(0)), leaf('completed', T(10), 'failure'), marker('failure', T(15)))),
       ]);
-      expect(race.status).not.toBe(0);
-      expect(race.stdout).toContain('real verdict for 0123456789abcdef was \'failure\'');
+      expect(staleRace.status).not.toBe(0);
+      expect(staleRace.stdout).toContain("real verdict for 0123456789abcdef was 'failure'");
+
+      const staleThenOutage = run('', [
+        pages(checkPage(leaf('in_progress', T(0)), marker('success', T(5)))),
+        ...Array.from({ length: 70 }, () => '__FAIL__'),
+      ]);
+      expect(staleThenOutage.status).not.toBe(0);
 
       const outageThenSuccess = run('', [
         ...Array.from({ length: 10 }, () => '__FAIL__'),
-        pages(checkPage(marker('success'))),
+        pages(checkPage(leaf('completed', T(0), 'success'), marker('success', T(5)))),
       ]);
       expect(outageThenSuccess.status).toBe(0);
-      // Generous timeout: spawns gh+jq per poll; under full-suite concurrency on
-      // a loaded machine subprocess-spawn latency can exceed vitest's 30s default.
-      // Hardened alongside the new gate-echo twin, which adds concurrent load (HED-182).
+
+      const dryStreakBrokenByOutage = run('', [
+        ...Array.from({ length: 5 }, () => pages(checkPage())),
+        ...Array.from({ length: 7 }, () => '__FAIL__'),
+        pages(checkPage()),
+        pages(checkPage(leaf('completed', T(0), 'success'), marker('success', T(5)))),
+        ...Array.from({ length: 60 }, () => '__FAIL__'),
+      ]);
+      expect(dryStreakBrokenByOutage.status).toBe(0);
+
+      expect(run(pages(checkPage(leaf('completed', T(0), 'failure'), marker('failure', T(5))))).status).not.toBe(0);
+      expect(run(pages(checkPage(leaf('completed', T(0), 'success')))).status).not.toBe(0);
+      expect(run('{malformed').status).not.toBe(0);
+
+      // Marker isolation (grok finding 2): this scanner's marker is FAILURE, and
+      // the OTHER scanner's marker is a NEWER SUCCESS. The echo must echo ITS OWN
+      // failure (never the newer other-scanner success). A too-broad matcher would
+      // exit 0 here and mask this scanner's failure.
+      const otherVerdict = {
+        name: `${scanner === 'semgrep' ? 'gitleaks' : 'semgrep'}-verdict`,
+        started_at: T(35),
+        status: 'completed',
+        conclusion: 'success',
+      };
+      const isolation = run(
+        pages(checkPage(leaf('completed', T(0), 'failure'), marker('failure', T(5)), otherVerdict)),
+      );
+      expect(isolation.status).not.toBe(0);
+      expect(isolation.stdout).toContain("real verdict for 0123456789abcdef was 'failure'");
     }, 120000);
   }
 });

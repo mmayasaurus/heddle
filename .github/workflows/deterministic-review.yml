@@ -207,10 +207,16 @@ jobs:
         github.event.pull_request.draft == false &&
         github.event.pull_request.user.login != 'dependabot[bot]'))
     runs-on: ubuntu-24.04
-    # INVARIANT: timeout-minutes MUST exceed the leaf timeout
-    # (`semgrep-scan` = 15), because an edit echo waits while that scan is in
-    # flight. If the leaf timeout rises, raise this above it too. 25 > 15.
-    timeout-minutes: 25
+    # INVARIANT (HED-182), two rules that size this echo:
+    #   (1) the loop's sleep-sum > longest leaf timeout (`semgrep-scan` = 15) + a
+    #       publish grace, so the echo can't run out of polls while a leaf
+    #       legitimately runs; seq 1 57 at the backoff cadence ≈ 24m50s > 15.
+    #   (2) timeout-minutes > the loop's sleep-sum + an API/startup allowance, so
+    #       a stuck echo exits CLEANLY via the loop's own fail-closed rather than
+    #       as a `timed_out` red in a NEWER suite; 30 > 24m50s + ~3-4min of 57
+    #       paginated API reads. (25 left only ~10s of API headroom.)
+    # Raise a leaf timeout and you must re-check BOTH rules.
+    timeout-minutes: 30
     permissions:
       checks: write
     steps:
@@ -225,33 +231,46 @@ jobs:
           set -eu
           if [ "$IS_EDIT" = "true" ]; then
             echo "edit event — echoing the last real verdict (semgrep-verdict marker) for $SHA"
-            CONC=none; DRY=0
+            CONC=none; DRY=0; VERDICT=""
             # WAIT for this SHA's real verdict; never fail closed on a timer. A
             # premature red would land in a check-suite NEWER than the commit
             # run's own semgrep, and GitHub resolves a required check from the
             # newest SUITE, so it would block the PR until another edit superseded
-            # it. The ONLY fail-closed trigger is the commit-path semgrep scan
-            # being verifiably GONE — no leaf job in flight — with still no
-            # marker, sustained past a startup grace. Invariant: this job's
-            # timeout exceeds the leaf timeout, so the scan cannot remain in
-            # flight past its own timeout. The loop bound is a belt sized just
-            # under this job's 25-minute timeout (~24m50s at the backoff cadence)
-            # and above the leaf timeout; it cannot end on iteration count while
-            # a real leaf is still in flight. Poll fast for ~2 min, then back off
-            # to 30s to spare the API rate limit on a long scan.
+            # it. Fail-closed is reached two ways, both leaving VERDICT empty: the
+            # commit-path scan is verifiably GONE (no leaf in flight) with still no
+            # FRESH marker for a sustained dry window, OR the loop exhausts its
+            # belt. The belt (seq 1 57 at the backoff cadence ≈ 24m50s) is sized
+            # ABOVE the longest leaf timeout (semgrep-scan = 15) so it cannot run
+            # out while a leaf legitimately runs; the job timeout (30) is sized
+            # ABOVE the belt so a stuck echo exits cleanly via the fail-closed
+            # case below, never a `timed_out` red in a newer suite. Poll fast for
+            # ~2 min, then back off to 30s to spare the API rate limit on a long
+            # scan.
             for i in $(seq 1 57); do
-              if ! CR=$(gh api "repos/$REPO/commits/$SHA/check-runs" --paginate --slurp 2>/dev/null); then
+              if ! CR=$(gh api "repos/$REPO/commits/$SHA/check-runs?filter=all" --paginate --slurp 2>/dev/null); then
                 echo "  could not read check runs for ${SHA}; scan liveness is unknown — retrying"
+                DRY=0
                 if [ "$i" -lt 12 ]; then sleep 10; else sleep 30; fi
                 continue
               fi
-              CONC=$(printf '%s\n' "$CR" | jq -r '[.[].check_runs[]] | [ .[] | select(.name=="semgrep-verdict") ] | sort_by(.started_at) | last | .conclusion // "none"')
+              # A marker is fresh only when it follows the newest REAL scan leaf.
+              # The != "skipped" guard is LOAD-BEARING: a title/body edit skips
+              # semgrep-scan, producing a newer skipped check-run; counting that
+              # makes every marker stale and reds every bot edit. In-progress
+              # leaves retain null conclusions, so they still count.
+              CONC=$(printf '%s\n' "$CR" | jq -r '
+                [.[].check_runs[]] as $all
+                | ([$all[] | select((.name | test("^semgrep scan")) and .conclusion != "skipped") | .started_at] | max) as $leaf
+                | ([$all[] | select(.name == "semgrep-verdict")] | sort_by(.started_at) | last) as $m
+                | if $m == null or $leaf == null then "none"
+                  elif $m.started_at >= $leaf then ($m.conclusion // "none")
+                  else "none" end')
               INFLIGHT=$(printf '%s\n' "$CR" | jq -r '[.[].check_runs[]] | [ .[] | select((.name|test("^semgrep scan")) and .status!="completed") ] | length')
               # Four states: a marker is usable only after the matching scan is
               # gone; any in-flight scan resets the dry proof, with or without a
               # stale marker; only no-marker + no-inflight advances fail-closed.
               if [ "$CONC" != "none" ] && [ "$INFLIGHT" = "0" ]; then
-                break
+                VERDICT="$CONC"; break
               fi
               if [ "$CONC" = "none" ] && [ "$INFLIGHT" = "0" ]; then
                 DRY=$((DRY + 1))
@@ -276,15 +295,15 @@ jobs:
               echo "  waiting for the commit run's verdict on ${SHA} (poll ${i}; marker=${CONC}, commit-path jobs in flight=${INFLIGHT}, dry=${DRY})"
               if [ "$i" -lt 12 ]; then sleep 10; else sleep 30; fi
             done
-            case "$CONC" in
+            case "$VERDICT" in
               success)
                 echo "real verdict for ${SHA} = success — semgrep green"
                 exit 0 ;;
-              none)
-                echo "::error::no semgrep-verdict marker for ${SHA} — the commit 'semgrep' run never published a verdict for this commit (it was cancelled or never ran; the scan is no longer in flight). Re-run 'Deterministic Review' on this PR, or push a commit. Failing closed."
+              "")
+                echo "::error::no confirmed semgrep verdict for ${SHA} — never saw a fresh semgrep-verdict marker with no commit-path scan in flight (the commit 'semgrep' run was cancelled / never ran / still queued, or the check-runs API was unreachable). Re-run 'Deterministic Review' on this PR, or push a commit. Failing closed."
                 exit 1 ;;
               *)
-                echo "::error::real verdict for ${SHA} was '${CONC}' — echoing it. An edit never masks a real failure; fix the code and push a commit."
+                echo "::error::real verdict for ${SHA} was '${VERDICT}' — echoing it. An edit never masks a real failure; fix the code and push a commit."
                 exit 1 ;;
             esac
           fi
@@ -402,10 +421,16 @@ jobs:
     if: >-
       always() && github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
-    # INVARIANT: timeout-minutes MUST exceed the leaf timeout
-    # (`gitleaks-scan` = 10), because an edit echo waits while that scan is in
-    # flight. If the leaf timeout rises, raise this above it too. 25 > 10.
-    timeout-minutes: 25
+    # INVARIANT (HED-182), two rules that size this echo:
+    #   (1) the loop's sleep-sum > longest leaf timeout (`gitleaks-scan` = 10) + a
+    #       publish grace, so the echo can't run out of polls while a leaf
+    #       legitimately runs; seq 1 57 at the backoff cadence ≈ 24m50s > 10.
+    #   (2) timeout-minutes > the loop's sleep-sum + an API/startup allowance, so
+    #       a stuck echo exits CLEANLY via the loop's own fail-closed rather than
+    #       as a `timed_out` red in a NEWER suite; 30 > 24m50s + ~3-4min of 57
+    #       paginated API reads. (25 left only ~10s of API headroom.)
+    # Raise a leaf timeout and you must re-check BOTH rules.
+    timeout-minutes: 30
     permissions:
       checks: write
     steps:
@@ -420,33 +445,46 @@ jobs:
           set -eu
           if [ "$IS_EDIT" = "true" ]; then
             echo "edit event — echoing the last real verdict (gitleaks-verdict marker) for $SHA"
-            CONC=none; DRY=0
+            CONC=none; DRY=0; VERDICT=""
             # WAIT for this SHA's real verdict; never fail closed on a timer. A
             # premature red would land in a check-suite NEWER than the commit
             # run's own gitleaks, and GitHub resolves a required check from the
             # newest SUITE, so it would block the PR until another edit superseded
-            # it. The ONLY fail-closed trigger is the commit-path gitleaks scan
-            # being verifiably GONE — no leaf job in flight — with still no
-            # marker, sustained past a startup grace. Invariant: this job's
-            # timeout exceeds the leaf timeout, so the scan cannot remain in
-            # flight past its own timeout. The loop bound is a belt sized just
-            # under this job's 25-minute timeout (~24m50s at the backoff cadence)
-            # and above the leaf timeout; it cannot end on iteration count while
-            # a real leaf is still in flight. Poll fast for ~2 min, then back off
-            # to 30s to spare the API rate limit on a long scan.
+            # it. Fail-closed is reached two ways, both leaving VERDICT empty: the
+            # commit-path scan is verifiably GONE (no leaf in flight) with still no
+            # FRESH marker for a sustained dry window, OR the loop exhausts its
+            # belt. The belt (seq 1 57 at the backoff cadence ≈ 24m50s) is sized
+            # ABOVE the longest leaf timeout (gitleaks-scan = 10) so it cannot run
+            # out while a leaf legitimately runs; the job timeout (30) is sized
+            # ABOVE the belt so a stuck echo exits cleanly via the fail-closed
+            # case below, never a `timed_out` red in a newer suite. Poll fast for
+            # ~2 min, then back off to 30s to spare the API rate limit on a long
+            # scan.
             for i in $(seq 1 57); do
-              if ! CR=$(gh api "repos/$REPO/commits/$SHA/check-runs" --paginate --slurp 2>/dev/null); then
+              if ! CR=$(gh api "repos/$REPO/commits/$SHA/check-runs?filter=all" --paginate --slurp 2>/dev/null); then
                 echo "  could not read check runs for ${SHA}; scan liveness is unknown — retrying"
+                DRY=0
                 if [ "$i" -lt 12 ]; then sleep 10; else sleep 30; fi
                 continue
               fi
-              CONC=$(printf '%s\n' "$CR" | jq -r '[.[].check_runs[]] | [ .[] | select(.name=="gitleaks-verdict") ] | sort_by(.started_at) | last | .conclusion // "none"')
+              # A marker is fresh only when it follows the newest REAL scan leaf.
+              # The != "skipped" guard is LOAD-BEARING: a title/body edit skips
+              # gitleaks-scan, producing a newer skipped check-run; counting that
+              # makes every marker stale and reds every bot edit. In-progress
+              # leaves retain null conclusions, so they still count.
+              CONC=$(printf '%s\n' "$CR" | jq -r '
+                [.[].check_runs[]] as $all
+                | ([$all[] | select((.name | test("^gitleaks scan")) and .conclusion != "skipped") | .started_at] | max) as $leaf
+                | ([$all[] | select(.name == "gitleaks-verdict")] | sort_by(.started_at) | last) as $m
+                | if $m == null or $leaf == null then "none"
+                  elif $m.started_at >= $leaf then ($m.conclusion // "none")
+                  else "none" end')
               INFLIGHT=$(printf '%s\n' "$CR" | jq -r '[.[].check_runs[]] | [ .[] | select((.name|test("^gitleaks scan")) and .status!="completed") ] | length')
               # Four states: a marker is usable only after the matching scan is
               # gone; any in-flight scan resets the dry proof, with or without a
               # stale marker; only no-marker + no-inflight advances fail-closed.
               if [ "$CONC" != "none" ] && [ "$INFLIGHT" = "0" ]; then
-                break
+                VERDICT="$CONC"; break
               fi
               if [ "$CONC" = "none" ] && [ "$INFLIGHT" = "0" ]; then
                 DRY=$((DRY + 1))
@@ -471,15 +509,15 @@ jobs:
               echo "  waiting for the commit run's verdict on ${SHA} (poll ${i}; marker=${CONC}, commit-path jobs in flight=${INFLIGHT}, dry=${DRY})"
               if [ "$i" -lt 12 ]; then sleep 10; else sleep 30; fi
             done
-            case "$CONC" in
+            case "$VERDICT" in
               success)
                 echo "real verdict for ${SHA} = success — gitleaks green"
                 exit 0 ;;
-              none)
-                echo "::error::no gitleaks-verdict marker for ${SHA} — the commit 'gitleaks' run never published a verdict for this commit (it was cancelled or never ran; the scan is no longer in flight). Re-run 'Deterministic Review' on this PR, or push a commit. Failing closed."
+              "")
+                echo "::error::no confirmed gitleaks verdict for ${SHA} — never saw a fresh gitleaks-verdict marker with no commit-path scan in flight (the commit 'gitleaks' run was cancelled / never ran / still queued, or the check-runs API was unreachable). Re-run 'Deterministic Review' on this PR, or push a commit. Failing closed."
                 exit 1 ;;
               *)
-                echo "::error::real verdict for ${SHA} was '${CONC}' — echoing it. An edit never masks a real failure; fix the code and push a commit."
+                echo "::error::real verdict for ${SHA} was '${VERDICT}' — echoing it. An edit never masks a real failure; fix the code and push a commit."
                 exit 1 ;;
             esac
           fi

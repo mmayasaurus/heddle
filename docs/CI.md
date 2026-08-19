@@ -165,6 +165,11 @@ Residuals, by design:
   read that marker as fresh — a false-GREEN needing a same-SHA re-run whose result FLIPS *and* an edit
   firing inside that window (the triple-coincidence rarity of the class the freshness filter closes); it
   self-corrects the instant the new leaf is visible. Fully closing it would need check-suite inspection.
+  The same generation-ambiguity has a second-precision face: `started_at` is 1-second resolution and a
+  marker is not tied to a workflow generation, so an old success marker sharing a second with a newer
+  failing leaf's start satisfies the `>=` check — and the boundary cannot tighten to `>`, since a marker
+  and its OWN leaf legitimately share a second. Tracked in **HED-203** (tie freshness to the check-suite
+  generation rather than `started_at` ordering).
 - **Fork PRs.** On a fork-head PR `GITHUB_TOKEN` is read-only regardless of `permissions:`, so the
   marker POST 403s. The commit path still reports the real verdict (the POST is best-effort and only
   warns); only later *edit* runs on a fork degrade — and they **fail closed, never mask**. The fleet
@@ -182,7 +187,13 @@ Residuals, by design:
   the edit run's (newer) time — counting them would read every marker as stale and RED the gate on every
   bot edit (caught live in review). Exit 0 is reachable **only** through that accept path (a `VERDICT`
   the loop sets there and nowhere else), so neither loop exhaustion nor a retained value can green the gate.
-  `deterministic-review.yml`'s scanner echoes carry the same hardening (tracked in HED-193).
+  `deterministic-review.yml`'s scanner echoes carry the same hardening (HED-193), and additionally read
+  with **`?filter=all`** so a queued / in-progress duplicate that the default `filter=latest` omits can
+  never hide an in-flight scan from INFLIGHT (proven on heddle#61: `filter=latest` dropped a *queued*
+  `semgrep-cloud-platform/scan` and an *in-progress* Codacy run — 33 rows vs 35 under `filter=all`).
+  Monotone-safe: a superset of runs can only raise INFLIGHT (the fail-closed direction) and cannot make
+  `max(started_at)` fall or `sort_by|last` pick an older marker. The same belt for gate.yml's echo is
+  tracked in **HED-202**.
 
 ## The review sweep (before anything is called clean)
 
