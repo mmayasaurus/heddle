@@ -221,21 +221,36 @@ flags churn monthly.
   --ignore-user-config`, no exclude flags → codex built-in defaults), writes are ALLOWED to the cwd
   subtree, `/tmp`, and `$TMPDIR` (`/var/folders/.../T` on macOS), and BLOCKED (EPERM) for every other
   `$HOME`-rooted path — a *sibling* of the cwd included — and any absolute path outside those roots.
-  Two consequences:
+  **One carve-out INSIDE the writable cwd:** codex pins `.git` (and its own `.codex`/`.agents`
+  metadata) read-only even though cwd is writable — verified: a write to `.git/*` and `git add` (needs
+  `.git/index.lock`) both EPERM. So a codex worker under workspace-write physically CANNOT `git
+  add`/commit in its worktree — which is fine, it matches the worker-never-commits rule
+  (`worker-role.md`), but a worker that tries will see a git error, not a product bug.
   - The common assumption "workspace-write blocks `$TMPDIR`" is **FALSE**. `std::env::temp_dir()` /
     `tempfile` tests write to `$TMPDIR` and PASS under a worker — so a worker reporting temp-dir tests
     as "sandbox failures" is wrong (this was the mistaken premise of HED-71's own filing). A test that
-    fails ONLY inside the sandbox is writing to a `$HOME` path outside cwd/tmp (`CARGO_HOME=~/.cargo`,
-    `~/.config`, `~/Library/…`) — or needs the network (off by default, above).
-  - Recipe when a worker's verification legitimately needs to write outside cwd/tmp, least-privilege
-    first: point the tool's home/cache env INTO the cwd (`CARGO_HOME=$cwd/.cargo`,
-    `XDG_CACHE_HOME=$cwd/.cache`) so its writes land in the already-writable workspace. The explicit
-    escape hatch is `-c 'sandbox_workspace_write.writable_roots=["<dir>"]'` (validated: flips a blocked
-    `$HOME` write to OK, and works even with `--ignore-user-config`) — but naming a broad root like
-    `$HOME` is near `danger-full-access`, so name the exact dir. Trusted verification only may use
-    `--sandbox danger-full-access`. (This boundary also means a codex worker physically cannot write
-    into the canonical checkout — the worktree's PARENT is outside cwd — but agy, with no fence, still
-    can, which is why the escape DETECTION below stays load-bearing.)
+    fails ONLY inside the sandbox is writing to a `$HOME` path outside cwd/tmp (`~/.cargo` via
+    `CARGO_HOME`, `~/.rustup` via `RUSTUP_HOME`, `~/.npm`, `~/.config`, `~/Library/…`), or to `.git`
+    (above), or needs the network (off by default, above).
+  - Fixing such a worker — but note the split between **what codex-CLI supports** and **what heddle's
+    `dispatch_worker` exposes today** (the reason criterion 3 exists):
+    - `dispatch_worker` today exposes only `capabilities` (`net`; `exec-privileged` → no sandbox at
+      all, `danger-full-access`), `cwd`, and `codex_home`. It does NOT pass arbitrary `env` or `-c`
+      to the worker, so **the only heddle-level fix today** for a worker that must write outside
+      cwd/tmp is `exec-privileged` (heavyweight, trusted-only), or arranging its cwd so its writes
+      land inside it.
+    - codex-CLI *itself* also supports env-redirect (`CARGO_HOME=$cwd/.cargo`,
+      `XDG_CACHE_HOME=$cwd/.cache` — but NOT `RUSTUP_HOME`, `~/.npm`, or `~/Library`, which need their
+      own vars) and `-c 'sandbox_workspace_write.writable_roots=["<exact-dir>"]'` (validated: flips a
+      blocked `$HOME` write to OK, even with `--ignore-user-config`; a broad root like `$HOME` is near
+      `danger-full-access`, so name the exact dir). These are NOT reachable through `dispatch_worker`
+      yet — wiring an env/writable-roots passthrough is criterion 3 (sandbox-widening → held for Maya).
+  - This boundary also means that under **default** workspace-write a codex worker whose cwd is a
+    *linked* worktree cannot write into the canonical checkout (the worktree's PARENT is outside cwd).
+    It is NOT an absolute fence: `exec-privileged` (`danger-full-access`) removes it, and a worker
+    dispatched with its cwd set AT the canonical checkout is not fenced from it. agy/cursor/claude have
+    no fence at all — which is why the escape DETECTION below (`src/worktree.ts`, provider-independent)
+    stays load-bearing.
 - **So heddle DETECTS instead** (`src/worktree.ts`), which needs no provider cooperation and is
   exact: a linked worktree has `git rev-parse --git-dir` != `--git-common-dir`, and the canonical
   checkout is `dirname(common-dir)` (verified 2026-08-16). One `git status --porcelain` on the

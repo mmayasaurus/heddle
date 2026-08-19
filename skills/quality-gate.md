@@ -18,7 +18,9 @@ Rules:
   the worker (HED-71) — they were a sandbox artifact, not real failures. If failures look
   environmental, say so AND name them with the command, so the orchestrator can reproduce; a claim the
   orchestrator cannot check is not a verification. (Sandbox note: codex `workspace-write` allows writes
-  to cwd/`/tmp`/`$TMPDIR` but blocks other `$HOME` paths and disables the network — a test that fails
-  only under the worker is usually hitting one of those, not a real bug. See docs/LANDMINES.md.)
+  to cwd/`/tmp`/`$TMPDIR` but blocks other `$HOME` paths — `~/.cargo`, `~/.rustup`, `~/.npm`,
+  `~/Library`, and even `.git` inside cwd — and disables the network. A test failing only under the
+  worker MAY be hitting one of those rather than a real bug — but it also may not; NAME it with its
+  command so the orchestrator can tell which, don't assume. See docs/LANDMINES.md.)
 - Tests never live under `app/` (expo-router bundles `*.test` as a route and web-export goes red).
   Put them in `components/` or the repo's test directories.

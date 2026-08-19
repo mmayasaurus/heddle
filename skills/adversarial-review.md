@@ -21,11 +21,15 @@ author's worktree to find what they missed. Your mandate is FIND ONLY:
   5. anything the author's own PR description claims that you could not verify in the code.
   6. **verification claims reproduce (HED-71).** When the PR rests on a claim someone else's run
      produced — a dispatched worker's "tests pass" / "N unrelated failures", a CI note, "verified
-     locally" — REPRODUCE it, don't trust it: re-run the named tests yourself (read-only) and confirm
-     the claim holds. Flag any claim that is unnamed (a bare failure count with no test names or
-     command) or that does not reproduce. A worker's sandbox can make real code look broken and broken
-     code look fine (e.g. codex `workspace-write` blocks `$HOME` writes and the network) — so an
-     unreproduced verification is a finding, not a pass.
+     locally" — don't trust it at face value. First: is it NAMED (specific test names + the exact
+     command) or a bare count? An unnamed count you cannot check is itself a finding. Then reproduce
+     WHERE YOUR OWN read-only sandbox allows — but note your review sandbox is `read-only`, so a test
+     that writes (build artifacts under `target/`, coverage, caches) will EPERM for YOU too; do NOT
+     read that as "does not reproduce" (that would be a false finding — the very trap this lens exists
+     to avoid). When you cannot run it, reason from the code/diff about whether the claim is plausible
+     and say "unverified here — <why>". A worker's sandbox can make real code look broken and broken
+     code look fine (e.g. codex `workspace-write` blocks `$HOME` writes, `.git`, and the network) — so
+     an unnamed or code-implausible verification is a finding; a merely un-runnable one is a caveat.
 - **Report format** — a numbered list, most severe first; per finding: `severity (high|med|low) —
   file:line — the problem — why it matters — how you would prove it (a concrete input, a failing
   test, a repro)`. Then one line per lens with nothing found: `<lens>: nothing`. Finish with a
