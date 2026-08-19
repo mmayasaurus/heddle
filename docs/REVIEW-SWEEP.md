@@ -130,7 +130,7 @@ Batch fixes for a round into one push (each push spawns reviewer runs — some i
 
 - **No workflow runs at HEAD after a push?** Check `gh pr view $N --json mergeable,mergeStateStatus` first: GitHub silently skips `pull_request` workflows on a conflicting PR; fix by merging `origin/main` into the branch (never force-push).
 - **A green scanner check is not proof a scan happened.** Read the job log for the scanned volume (our gitleaks step now fails closed on an empty scan; see [CI.md](CI.md)).
-- **A skipped "noop" Deterministic Review run per push** is the `edited`-event guard operating normally, not a failure.
+- **A skipped title/body-edit semgrep or gitleaks check at HEAD is a finding, not expected noise.** Those edits now echo the scanner's SHA-bound `*-verdict`; re-run Deterministic Review or push a commit if either edit-path scanner is skipped or lacks a real verdict.
 - **Bots auto-resolve their own threads when the code changes.** The sweep still lists them; check `isResolved`, not memory.
 
 ## Standing rules from the maintainer
@@ -149,4 +149,3 @@ The authoritative wording lives in [CI.md](CI.md#standing-rules-maya-2026-08-15-
 ## Fleet tooling
 
 The maintainers' fleet automates channels (a)–(e) with a sweep script kept outside this repo. Contributors without it use the commands above — the procedure is the same.
-
