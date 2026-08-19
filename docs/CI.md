@@ -10,7 +10,7 @@ installs) are tracked in Linear **HED-13**.
 | Workflow | Trigger | Jobs | Posture |
 |---|---|---|---|
 | `gate.yml` | push `main`, **PRs to any base** (stacked PRs included) incl. base retargets + title/body edits, manual | **`build`** (`npm ci` → `npm run typecheck` src+test → `npm test` vitest → `npm run build` → smoke the built CLI, `classes`/`packs --json` non-empty) → **`gate`** aggregates it and records a `gate-verdict` marker; a title/body edit makes `gate` **echo** that marker instead of rebuilding | the **required** merge check (job name `gate` is the ruleset's context string — don't rename); edit-safe via the verdict echo (HED-142 — see below) |
-| `deterministic-review.yml` | PRs (incl. drafts for gitleaks; base-branch retargets), push `main` | **semgrep** (`p/typescript` + `p/nodejs`, diff-aware vs the PR base, full on `main`, SARIF → code scanning) · **gitleaks** (official CLI over exactly `base.sha..head.sha`). gitleaks' shell lives in `.github/scripts/gitleaks-range-scan.sh` (HED-113) so the fixture matrix can exercise it directly. | semgrep report-only · gitleaks red on a hit (not required) |
+| `deterministic-review.yml` | PRs (incl. drafts for gitleaks, base retargets, and title/body edits), push `main` | **`semgrep-scan` → `semgrep`** (`p/typescript` + `p/nodejs`, diff-aware vs the PR base, full on `main`, SARIF → code scanning) · **`gitleaks-scan` → `gitleaks`** (official CLI over exactly `base.sha..head.sha`). The plain-runner public jobs aggregate real scan results into SHA-bound `*-verdict` markers; title/body edits echo those markers instead of rescanning or skipping. gitleaks' shell lives in `.github/scripts/gitleaks-range-scan.sh` (HED-113) so the fixture matrix can exercise it directly. | semgrep report-only · gitleaks red on a hit (not required); edit-safe via real verdict echoes (HED-131) |
 | `actions-hygiene.yml` | PRs / `main` pushes touching `.github/**` | **actionlint** · **zizmor** (SARIF → code scanning) | actionlint red on findings · zizmor report (same-repo) / red (forks) |
 | `.github/dependabot.yml` | weekly | grouped bumps of the hash-pinned actions, 7-day cooldown | — |
 | `.deepsource.toml` | (DeepSource app, once installed — HED-13) | JS/TS + secrets analyzers, repo-accurate config | merged *before* the app so it doesn't invent work |
@@ -47,12 +47,15 @@ exists because an unconfigured DeepSource opened ~118 non-defect threads on one 
   `MANUAL BUMP` note). Runners are pinned to an Ubuntu series, never `-latest`.
 - **Least privilege.** Workflow-level `permissions: {}`, per-job grants with a comment on each,
   `persist-credentials: false` on every checkout, no PR-controlled string expanded into a `run:`.
+  The container scanner jobs check out PR code with only `contents: read` + `security-events: write`;
+  only the separate plain-runner aggregator jobs hold `checks: write`, and they never check out PR code.
 - **Fork PRs get scanned too**; only the SARIF-upload steps (write token) are same-repo-guarded.
-- `pull_request: edited` in **`deterministic-review.yml`** is handled *only* for base-branch retargets
-  (the baseline/range moves); title/body edits are skipped by the job guards and get their own
-  concurrency group so they never cancel an in-flight scan. The required **`gate`** check handles edits
-  differently — it *echoes* the last real verdict rather than skipping (skipping would mask a red); see
-  the verdict echo below.
+- `pull_request: edited` uses the same safe distinction in **`gate.yml`** and
+  **`deterministic-review.yml`**. A base retarget re-runs real work because the merge result,
+  semgrep baseline, and gitleaks range moved. A title/body edit skips only the leaf work; the public
+  `gate`, `semgrep`, and `gitleaks` jobs publish a **real echoed verdict** from the head SHA's marker.
+  The edit concurrency slot has cancellation disabled, so an echo cannot cancel an in-flight build or
+  scan. A skipped public scanner check is not an accepted noop.
 
 ## GitHub required-status-check semantics — observed (HED-142)
 
@@ -115,6 +118,23 @@ Two mechanisms keep it honest:
 
 The `gate-verdict` marker is deliberately **not** required — requiring it would recreate the row-4 block
 (it exists only on commit runs). Do not add it to the ruleset.
+
+### Scanner verdict echoes (HED-131)
+
+`deterministic-review.yml` applies the same proven build/aggregator shape independently to semgrep and
+gitleaks. On commit-driven events, the containerized `<scanner>-scan` leaf performs the unchanged real
+scan and SARIF uploads. A separate plain `ubuntu-24.04` `<scanner>` job reads the leaf result, publishes
+`<scanner>-verdict` on the head SHA best-effort, and exits with the real result. The leaf never holds
+`checks: write`; the aggregator never checks out or executes PR code.
+
+On a title/body edit, the leaf is skipped but the public `semgrep` / `gitleaks` job is not: it reads the
+latest SHA-bound marker with `gh` + `jq` and exits 0 **only** for a positively parsed `success`. A missing,
+unparseable, or non-success marker fails closed. If the marker has not appeared because the matching
+`semgrep scan…` or `gitleaks scan…` leaf is still in flight, the echo stays pending and describes that
+state in its job summary. It fails closed only after the leaf is verifiably gone for the sustained dry
+window. Each aggregator's timeout exceeds its leaf's timeout, preserving the same wait invariant as
+`gate.yml`. Scanner commit runs use the cancellable `scan` concurrency slot; title/body echoes use the
+non-cancelling `noop` slot.
 
 Residuals, by design:
 
