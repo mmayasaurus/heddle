@@ -4,13 +4,15 @@
 # the Spinventory canonical it was copied from. Tolerant of the canonical being absent
 # (exits 0 either way). Exit code is always 0 -- this is advisory, never a gate.
 #
-# Two classes of hook (HED-107 vendors 5, of which 2 are intentionally modified):
+# HED-107 vendors only the 3 SAFE hooks (the 2 deep hooks — require-memtrace-first,
+# require-pr-sweep — stay at the Spinventory canonical, behavior-neutral, deferred to
+# HED-96, so they are NOT checked here). Two classes of vendored hook:
 #   PASS-THROUGH  - byte-identical copies. A diff here is REAL drift: the canonical
 #                   evolved and the vendored copy should be re-synced (plain cp).
-#   LOCALLY-MODIFIED - de-hardcoded / loud-fail-open-wrapped for HED-107, so they diverge
-#                   from canonical BY DESIGN. A diff is expected. The check instead warns
-#                   if the expected divergence is MISSING (a lost local mod), and reminds
-#                   that a changed canonical must be reconciled by hand (not a blind cp).
+#   LOCALLY-MODIFIED - de-hardcoded for HED-107, so it diverges from canonical BY DESIGN.
+#                   A diff is expected; the check instead warns if the expected divergence
+#                   is MISSING (a lost local mod), and reminds that a changed canonical
+#                   must be reconciled by hand (not a blind cp).
 set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -18,8 +20,8 @@ REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 VENDORED_DIR="$REPO_ROOT/.claude/hooks"
 CANONICAL_DIR="${SPINVENTORY_HOOKS_DIR:-/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks}"
 
-PASSTHROUGH="agent-identity.py delegation-nudge.py require-pr-sweep.py"
-LOCALLY_MODIFIED="remind-owned-prs.py require-memtrace-first.py"
+PASSTHROUGH="agent-identity.py delegation-nudge.py"
+LOCALLY_MODIFIED="remind-owned-prs.py"
 
 if [ ! -d "$CANONICAL_DIR" ]; then
   echo "check-vendored-hook-drift: canonical dir not found at $CANONICAL_DIR -- skipping (set SPINVENTORY_HOOKS_DIR to override)"

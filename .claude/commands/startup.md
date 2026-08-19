@@ -9,8 +9,9 @@ cannot rot — they are the state.
 
 **Tooling:** `lin.sh` and `pr-own.sh` live in the workspace bin — the one canonical location is
 `.claude/rules/issue-tracking.md` (currently the absolute path
-`/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/bin/`; making that relocatable is the
-open gap HED-107). The steps below name the tools without repeating the path — run them from that
+`/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/bin/`; relocating the fleet bins to
+`~/.heddle` is HED-96 — HED-107 vendored the discipline HOOKS and made their resolution
+loud-fail-open). The steps below name the tools without repeating the path — run them from that
 bin, or with the full path on first use.
 
 Execute in order and report as you go.

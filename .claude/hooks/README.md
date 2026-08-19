@@ -1,32 +1,52 @@
 # Vendored discipline hooks (HED-107)
 
-These five hooks are vendored bridge copies of the fleet discipline hooks, copied from the
-Spinventory canonical so heddle's discipline layer keeps working even if that checkout moves
-or is unavailable — instead of silently vanishing (the bug HED-107 fixes).
+The heddle repos' `.claude/settings.json` invoked the fleet discipline hooks via a guard that
+SILENTLY skipped them if the Spinventory checkout moved — invisibly dropping the whole discipline
+layer. HED-107 fixes that with a loud-fail-open wrapper on **every** hook invocation, and vendors
+the SAFE hooks into this directory so they are self-contained.
+
+## What is vendored here (the 3 safe hooks)
 
 - `agent-identity.py` — SessionStart identity primer
 - `delegation-nudge.py` — Edit/Write delegation nudge
-- `remind-owned-prs.py` — UserPromptSubmit owned-PR reminder
-- `require-memtrace-first.py` — PreToolUse memtrace discipline gate (record-only today)
-- `require-pr-sweep.py` — Stop/PostToolUse sweep discipline
+- `remind-owned-prs.py` — UserPromptSubmit owned-PR reminder (PR-ownership tool path comes from
+  `HEDDLE_PR_OWN`, not a baked-in repo path)
 
-This is a **bridge, not the final home**: HED-96 relocates the canonical copy to `~/.heddle`.
-Until then, check for drift against the Spinventory canonical with:
+These run from `$CLAUDE_PROJECT_DIR/.claude/hooks/` and survive the Spinventory checkout moving.
 
-    scripts/check-vendored-hook-drift.sh
+## What is NOT vendored (the 2 deep hooks — deferred to HED-96)
 
-`hook_utils` (imported by `require-memtrace-first.py` and `require-pr-sweep.py`) intentionally
-stays at the stable, home-relative `~/.claude/lib` — it is NOT vendored here (it already survives
-the checkout moving). If HED-96 relocates `~/.claude/lib`, that is a one-line `sys.path` edit
-fleet-wide, not this ticket's job.
+`require-memtrace-first.py` and `require-pr-sweep.py` stay wired to the **Spinventory canonical**
+(absolute path in `settings.json`), still wrapped in the loud-else guard so a missing canonical
+screams and fails open rather than vanishing silently.
+
+They are deliberately NOT vendored here because they are **location-coupled**: their behaviour
+depends on `PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent`. Copying them into this
+repo would flip `PROJECT_ROOT` to the heddle checkout, which — combined with
+`ENFORCEMENT_ROOTS[~/Developer/heddle] = True` — would ACTIVATE the memtrace-first hard-gate for
+every heddle session (deny Grep/Read/Glob until Memtrace is queried). That is a real, tested,
+announced, Maya-tier decision — never a silent side-effect of a vendoring PR. Verified head-to-head:
+the vendored copy denies a heddle-cwd Grep where the Spinventory copy allows it.
+
+HED-96 relocates the canonical to `~/.heddle`, does the repo-discovery refactor that makes vendoring
+these two behaviour-neutral, and is where the deliberate enforcement flip lives (Maya's call).
+
+## hook_utils
+
+`hook_utils` (imported by the two deep hooks) is NOT here either — it lives at the stable,
+home-relative `~/.claude/lib` and already survives the checkout moving. If HED-96 relocates it, that
+is a one-line `sys.path` edit fleet-wide, not this ticket's job.
 
 ## The loud-fail-open contract (HED-107)
 
-Two layers ensure a missing OR broken discipline hook screams but never bricks a tool call:
+`.claude/settings.json` invokes every hook as
+`if [ -f "$DIR/X.py" ]; then python3 "$DIR/X.py" ARGS; else echo "… MISSING …" >&2; fi`
+(`$DIR` = `$CLAUDE_PROJECT_DIR/.claude/hooks` for the vendored 3, the Spinventory canonical for the
+deep 2). An ABSENT hook prints a loud banner to stderr and is skipped (exit 0) — never blocks a tool
+call, never silently disappears.
 
-1. `.claude/settings.json` invokes each hook as
-   `if [ -f "$CLAUDE_PROJECT_DIR/.claude/hooks/X.py" ]; then python3 … ; else echo "… MISSING …" >&2; fi`
-   — an **absent** hook file prints a loud banner and is skipped (exit 0), never blocks.
-2. The two gate hooks (`require-memtrace-first`, `require-pr-sweep`) wrap their body in try/except:
-   any internal error (ImportError, traceback) prints a loud banner and exits 0 — a gate hook must
-   never block a tool call on its own bug (`except SystemExit: raise` preserves a legitimate deny).
+## Drift
+
+`scripts/check-vendored-hook-drift.sh` (advisory, local-only) checks the 3 vendored copies against
+the Spinventory canonical, separating real pass-through drift from the one intentional local mod
+(`remind-owned-prs.py`). The 2 deep hooks are not checked — they ARE the canonical.
