@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join, resolve, sep } from 'node:path';
 
@@ -36,6 +36,25 @@ export interface ProjectRegistry {
 
 export const DEFAULT_PROJECTS_PATH = join(homedir(), '.heddle', 'projects.json');
 
+/**
+ * Canonical absolute form of a path for cross-checking a root against a cwd: dereferences symlinks
+ * via realpathSync (so a root registered as `/tmp/x` matches a cwd of `/private/tmp/x`, and a
+ * symlinked checkout matches its real path). FALLS BACK to lexical resolve() when the path does not
+ * yet exist on disk — realpathSync throws on a missing path, and a workspace root may legitimately
+ * point at a not-yet-created checkout; failing soft there matches the loader's fail-soft-on-absence
+ * philosophy (a still-absent root simply won't match any cwd, exactly as before). The catch is a
+ * deliberate fallback, not a swallowed error. Both a project's roots (once, at load) and the cwd
+ * (per lookup) pass through here so the two sides are always compared in the same canonical space.
+ */
+function canonicalize(p: string): string {
+  try {
+    return realpathSync.native(p);
+  } catch {
+    // Path absent (or unreadable) → lexical resolve keeps it absolute without touching the FS.
+    return resolve(p);
+  }
+}
+
 /** A required string field — loud on missing/wrong-type, same discipline as routing.ts's listField. */
 function requireString(node: any, key: string, where: string, path: string): string {
   const v = node[key];
@@ -71,8 +90,9 @@ function toProject(node: any, index: number, path: string): Project {
   }
   return {
     name,
-    // Normalized once here so projectForCwd never resolves inside its matching loop.
-    workspaceRoots: workspaceRoots.map((root) => resolve(root)),
+    // Canonicalized once here (symlinks dereferenced, made absolute) so projectForCwd never touches
+    // the filesystem inside its matching loop, and both sides of every comparison share one space.
+    workspaceRoots: workspaceRoots.map((root) => canonicalize(root)),
     agentIds: requireStringArray(node, 'agentIds', where, path),
     linearTeam: requireString(node, 'linearTeam', where, path),
     defaultRoom: requireString(node, 'defaultRoom', where, path),
@@ -162,12 +182,13 @@ function isAncestorOrEqual(root: string, target: string): boolean {
 
 /**
  * The project one of whose `workspaceRoots` is an ancestor of (or equal to) `cwd`. workspaceRoots
- * are normalized to absolute paths once at load time (toProject); `cwd` is resolved here. When more
- * than one root matches (nested workspace roots, possibly across different projects), the LONGEST
- * matching root wins. null when nothing matches.
+ * are canonicalized to absolute paths once at load time (toProject); `cwd` is canonicalized here the
+ * same way, so a symlinked cwd matches its real registered root. When more than one root matches
+ * (nested workspace roots, possibly across different projects), the LONGEST matching root wins. null
+ * when nothing matches.
  */
 export function projectForCwd(reg: ProjectRegistry, cwd: string): Project | null {
-  const target = resolve(cwd);
+  const target = canonicalize(cwd);
   let best: Project | null = null;
   let bestRootLength = -1;
   for (const project of reg.projects) {

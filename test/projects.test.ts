@@ -1,4 +1,4 @@
-import { writeFileSync } from 'node:fs';
+import { mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { loadProjectRegistry, projectForAgent, projectForCwd } from '../src/projects.js';
@@ -169,6 +169,7 @@ describe('loadProjectRegistry', () => {
 });
 
 describe('projectForCwd', () => {
+  const { tempDir } = useTempResources('heddle-projectforcwd-test-');
   const reg: ProjectRegistry = {
     schemaVersion: 1,
     projects: [
@@ -204,6 +205,30 @@ describe('projectForCwd', () => {
 
   it('matches a differently-cased cwd against a registered root (case-insensitive filesystem tradeoff)', () => {
     expect(projectForCwd(reg, '/A/x')?.name).toBe('Outer');
+  });
+
+  it('canonicalizes symlinks so a symlinked cwd matches its real registered root', () => {
+    // Portable — no reliance on the OS's own /tmp→/private or /var symlink (CI is Linux): build a
+    // real dir plus a symlink pointing at it, both inside the temp dir. Register the REAL dir as the
+    // root; look it up through the SYMLINK path. Both sides realpath to the same place → they match.
+    const base = tempDir();
+    const realRoot = join(base, 'real-project');
+    const linkRoot = join(base, 'linked-project');
+    mkdirSync(join(realRoot, 'sub'), { recursive: true });
+    symlinkSync(realRoot, linkRoot); // linkRoot → realRoot
+
+    // Register through the real loader so the root is canonicalized at load, exactly like production
+    // (a literal registry would skip toProject's canonicalize and defeat the point of the test).
+    const path = join(base, 'projects.json');
+    writeFileSync(path, JSON.stringify({
+      schemaVersion: 1,
+      projects: [{ name: 'Real', workspaceRoots: [realRoot], agentIds: ['A'], linearTeam: 'R', defaultRoom: '#r', launcher: 'r.sh' }],
+    }));
+    const symlinkReg = loadProjectRegistry(path);
+
+    // Exact symlinked root, and a real path reached through the symlink, both resolve to realRoot.
+    expect(projectForCwd(symlinkReg, linkRoot)?.name).toBe('Real');
+    expect(projectForCwd(symlinkReg, join(linkRoot, 'sub'))?.name).toBe('Real');
   });
 });
 
