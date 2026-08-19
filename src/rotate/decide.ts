@@ -1,5 +1,5 @@
 import { readClaudeAccounts, currentClaudeAccount, pickClaudeAccount, type ClaudeAccount } from '../capaware.js';
-import { readLimitsMirror } from '../usage.js';
+import { readProviderCaps } from '../usage.js';
 import type { ProviderCaps } from '../usage.js';
 
 /**
@@ -49,6 +49,17 @@ export function decideRotation(
   // A provider snapshot that is stale/absent at the PROVIDER level is unusable regardless of the
   // per-row flags — mirrors adviseClaudeAccount. Never rotate (or declare idle) on it.
   const capsUsable = caps !== undefined && !caps.stale && caps.source !== 'none';
+  // HED-165 (codex P1): a tap-only snapshot — mirror absent OR stale, so readProviderCaps fell back to
+  // readClaudeTap wholesale — NEVER names the fleet's active account (readClaudeTap sets activeAccount
+  // null). The only "current" we could then derive is the rotator DAEMON's own CLAUDE_CONFIG_DIR, which
+  // (see the next comment) is unrelated to the fleet — so acting on it could pause/kill/relaunch the
+  // WRONG account. With usable caps but no authoritative fleet account, refuse to guess. NOTE: because
+  // idle-account visibility now flows through the keeper anchors in this same merged source, a
+  // persistently `unknown`/empty result here can mean the KEEPER is down (stale anchors) or the MIRROR
+  // is down — not necessarily that the accounts are exhausted.
+  if (capsUsable && caps.activeAccount === null && caps.source === 'claude-tap') {
+    return { action: 'unknown', current: null, usedPct: null, reason: 'usable tap-only caps but no authoritative active account (mirror absent/stale) — cannot identify the fleet account to rotate' };
+  }
   // The FLEET's active account, from the tap (authoritative), NOT the rotator's own CLAUDE_CONFIG_DIR
   // — the rotator is a standalone process whose env account is unrelated to the fleet's. Fall back to
   // the env-derived account only when the tap does not name one.
@@ -101,6 +112,14 @@ export function readAndDecide(opts: {
 }): RotateAction {
   const env = opts.env ?? process.env;
   const accounts = readClaudeAccounts(opts.accountsPath);
-  const caps = readLimitsMirror(opts.usageDir, Math.floor(opts.nowMs / 1000))?.['claude'];
+  // Read the SAME merged source the dispatch router uses (readProviderCaps), NOT readLimitsMirror
+  // alone (HED-165). The limits.json mirror carries idle accounts as usedPercentage:null + stale:true,
+  // but readClaudeTap's keeper anchors normalize a keeper-pinged idle account to 0% (fresh) and
+  // readProviderCaps merges that over the stale mirror row — so pickClaudeAccount can actually SELECT
+  // the idle accounts the rotator must rotate TO. Reading the mirror only made the rotator blind to
+  // exactly those accounts and disagree with the dispatch router this module's selection is meant to
+  // mirror. readProviderCaps always returns a 'claude' entry (source:'none' when nothing is usable),
+  // which decideRotation's capsUsable guard treats as unknown — same as the old undefined.
+  const caps = readProviderCaps({ usageDir: opts.usageDir, nowS: Math.floor(opts.nowMs / 1000) })['claude'];
   return decideRotation(caps, accounts, env, opts.thresholds);
 }
