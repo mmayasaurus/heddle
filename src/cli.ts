@@ -199,7 +199,8 @@ try {
       const task = arg('--task') ?? (await readStdin());
       if (!task) { console.error('classify-effort requires --task (or piped stdin)'); process.exit(2); }
       const effort = await classifyEffort(taskClass, task, arg('--cwd') ?? process.cwd());
-      out(json, { taskClass, effort }, () => effort);
+      out(json, { taskClass, effort: effort ?? null, matched: effort !== undefined },
+        () => effort ?? '(unclassified — route/default effort applies)');
       break;
     }
 
