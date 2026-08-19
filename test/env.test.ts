@@ -24,6 +24,11 @@ describe('buildWorkerEnv — subscription-billing worker isolation (HED-30 allow
       process.env.GEMINI_BASE_URL = 'http://evil';           // GEMINI_ prefix
       process.env.GCLOUD_ACCESS_TOKEN = 'x';                 // GCLOUD_ prefix
       process.env.CLAUDE_CODE_USE_NEW_BACKEND = 'true';      // CLAUDE_CODE_USE_ prefix
+      process.env.AWS_ACCESS_KEY_ID = 'x';                   // AWS_ prefix (was leaking — codeant/codacy #64)
+      process.env.AWS_SECRET_ACCESS_KEY = 'x';
+      process.env.BEDROCK_BASE_URL = 'http://evil';          // BEDROCK_ prefix
+      process.env.VERTEX_PROJECT = 'p';                      // VERTEX_ prefix
+      process.env.FOUNDRY_API_KEY = 'x';                     // FOUNDRY_ prefix
       process.env.ANTHROPIC_SOMETHING_BRAND_NEW = 'x'; // future var the exact denylist never listed
       process.env.CODEX_API_KEY = 'x';                  // explicit list (no bare CODEX_ prefix — CODEX_HOME is a selector)
       process.env.PATH = '/usr/bin';
@@ -32,12 +37,24 @@ describe('buildWorkerEnv — subscription-billing worker isolation (HED-30 allow
       for (const k of ['ANTHROPIC_BASE_URL', 'ANTHROPIC_CUSTOM_HEADERS', 'OPENAI_BASE_URL',
         'OPENAI_ORGANIZATION', 'GOOGLE_GENAI_USE_VERTEXAI', 'GOOGLE_CLOUD_PROJECT', 'VERTEXAI_PROJECT',
         'AWS_BEARER_TOKEN_BEDROCK', 'CURSOR_BASE_URL', 'GEMINI_BASE_URL', 'GCLOUD_ACCESS_TOKEN',
-        'CLAUDE_CODE_USE_NEW_BACKEND', 'ANTHROPIC_SOMETHING_BRAND_NEW', 'CODEX_API_KEY']) {
+        'CLAUDE_CODE_USE_NEW_BACKEND', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'BEDROCK_BASE_URL',
+        'VERTEX_PROJECT', 'FOUNDRY_API_KEY', 'ANTHROPIC_SOMETHING_BRAND_NEW', 'CODEX_API_KEY']) {
         expect(env[k], `${k} must be stripped`).toBeUndefined();
         expect(stripped).toContain(k);
       }
       expect(env.PATH).toBe('/usr/bin');
       expect(env.HOME).toBe('/home/x');
+    });
+
+    it('strips lower/mixed-case vendor vars too (Windows case-insensitivity bypass — qodo/codex #64)', () => {
+      process.env.openai_base_url = 'http://evil';
+      process.env.Anthropic_Api_Key = 'x';
+      process.env.cursor_base_url = 'http://evil';
+      const { env, stripped } = buildWorkerEnv();
+      expect(env.openai_base_url).toBeUndefined();
+      expect(env.Anthropic_Api_Key).toBeUndefined();
+      expect(env.cursor_base_url).toBeUndefined();
+      expect(stripped).toEqual(expect.arrayContaining(['openai_base_url', 'Anthropic_Api_Key', 'cursor_base_url']));
     });
 
     it('strips an inherited CLAUDE_CODE_OAUTH_TOKEN (would pin every worker to one account)', () => {
