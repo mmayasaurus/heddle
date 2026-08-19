@@ -57,6 +57,14 @@ describe('matchLabel — classifier reply → label', () => {
       .toEqual({ label: 'high', matched: true });
     expect(matchLabel('minimalistic', EFFORT)).toEqual({ label: 'minimal', matched: true });
   });
+
+  it('treats regex metacharacters in a label literally (escaping — corgea/codacy #60)', () => {
+    // '.' must be a literal dot, not "any char": "a.b" matches "a.b" but NOT "axb".
+    expect(matchLabel('the code is a.b here', ['a.b'])).toEqual({ label: 'a.b', matched: true });
+    expect(matchLabel('the code is axb here', ['a.b'])).toEqual({ label: undefined, matched: false });
+    // A pathological label must not throw when compiled into a RegExp.
+    expect(() => matchLabel('anything', ['c++', '(x)', 'a[b'])).not.toThrow();
+  });
 });
 
 // Guards the WIRING at classify()'s return boundary + the fallbacks — a regression re-adding
@@ -84,5 +92,12 @@ describe('classifyEffort / assessResult — no-match wiring (HED-20)', () => {
   it('assessResult returns the matched verdict on a clean reply', async () => {
     canned('done');
     expect(await assessResult('task', 'output', true)).toEqual({ label: 'done', matched: true });
+  });
+
+  it('does NOT match a FAILED dispatch whose error output happens to contain a label (codacy #60)', async () => {
+    dispatchMock.mockResolvedValue({ ok: false, output: 'error: nothing to do, minimal effort wasted', durationMs: 1, error: 'boom' });
+    expect(await classifyEffort('implementation', 'x')).toBeUndefined();          // not 'minimal'
+    dispatchMock.mockResolvedValue({ ok: false, output: 'crashed before it was done', durationMs: 1, error: 'boom' });
+    expect(await assessResult('t', 'o', false)).toEqual({ label: 'needs-human', matched: false }); // not 'done'
   });
 });

@@ -68,8 +68,13 @@ export interface ClassifyResult {
  *  fallback, which no longer returns labels[0] (HED-20). Labels are trusted constants (letters/hyphens). */
 export function matchLabel(output: string, labels: string[]): { label: string | undefined; matched: boolean } {
   const out = (output || '').toLowerCase();
-  const wordMatch = labels.find((l) =>
-    new RegExp(`\\b${l.toLowerCase().replace(/-/g, '[- ]')}\\b`).test(out));
+  const wordMatch = labels.find((l) => {
+    // Escape regex metacharacters FIRST — matchLabel is exported and takes dynamic labels, so a
+    // future label like "v1.0" must match literally, never as a pattern (corgea/codacy #60) — THEN
+    // make hyphens hyphen/space tolerant. Today's labels are letters+hyphens, so this is defensive.
+    const escaped = l.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`\\b${escaped.replace(/-/g, '[- ]')}\\b`).test(out);
+  });
   const anyMatch = wordMatch ?? labels.find((l) => out.includes(l.toLowerCase()));
   return { label: anyMatch, matched: Boolean(anyMatch) };
 }
@@ -117,7 +122,10 @@ export async function classify(
   } catch (err) {
     process.stderr.write(`heddle: could not ledger the ${kind} classification (${err instanceof Error ? err.message : String(err)})\n`);
   }
-  const { label, matched } = matchLabel(res.output, labels);
+  // A FAILED dispatch must not produce a label: its error/empty output could incidentally contain a
+  // label word and yield a false match. Failed → no match → the caller falls back (codacy #60),
+  // consistent with HED-20's no-silent-floor intent.
+  const { label, matched } = res.ok ? matchLabel(res.output, labels) : { label: undefined, matched: false };
   return { label, matched, raw: res.output };
 }
 
