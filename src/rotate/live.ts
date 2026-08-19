@@ -25,6 +25,9 @@ import type { RotatorDeps, RotationIntent } from './supervisor.js';
 /** Default VERIFY boot-timeout (HED-157), overridable via `LiveRotatorOptions.verifyTimeoutMs`. */
 export const DEFAULT_VERIFY_TIMEOUT_MS = 300_000;
 
+/** Default PRE-KILL quiesce timeout (HED-186), overridable via `LiveRotatorOptions.quiesceTimeoutMs`. */
+export const DEFAULT_QUIESCE_TIMEOUT_MS = 1_200_000; // 20 min: quiesce waits on the DISPATCH LEDGER, and a deep-implementation (opus) worker can outlive 10 min — 20 accommodates a typical in-flight worker so a HEALTHY rotation isn't aborted. Wedge-breaker, not an SLA.
+
 export interface LiveRotatorOptions {
   log: CommsLog;
   broker: Broker;
@@ -47,6 +50,8 @@ export interface LiveRotatorOptions {
   thresholds?: RotateThresholds;
   /** VERIFY boot-timeout in ms (HED-157). Default `DEFAULT_VERIFY_TIMEOUT_MS` (5 minutes). */
   verifyTimeoutMs?: number;
+  /** PRE-KILL quiesce timeout in ms (HED-186). Default `DEFAULT_QUIESCE_TIMEOUT_MS` (20 minutes). */
+  quiesceTimeoutMs?: number;
   now?: () => number;
   warn?: (m: string) => void;
 }
@@ -223,6 +228,15 @@ export function createRotatorDeps(o: LiveRotatorOptions): RotatorDeps {
       // already marked relaunched, so a marker always exists on the real path. If one is somehow
       // missing, fall back to the pause time rather than treating "no data" as "never times out".
       const baseMs = latestRelaunchMarkerMs(p.id) ?? pauseTimeMs();
+      if (baseMs === null) return { timedOut: false, timeoutMs };
+      return { timedOut: now() - baseMs > timeoutMs, timeoutMs };
+    },
+
+    quiesceTimeout: (): { timedOut: boolean; timeoutMs: number } => {
+      const timeoutMs = o.quiesceTimeoutMs ?? DEFAULT_QUIESCE_TIMEOUT_MS;
+      // Anchor to the pause START: quiescing runs from the pause until the fleet goes quiet.
+      // (verifyTimeout anchors to the relaunch marker instead, because quiesce — its predecessor — is unbounded.)
+      const baseMs = pauseTimeMs();
       if (baseMs === null) return { timedOut: false, timeoutMs };
       return { timedOut: now() - baseMs > timeoutMs, timeoutMs };
     },

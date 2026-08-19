@@ -42,7 +42,8 @@ export type RotatorStep =
   | { phase: 'verifying'; reason: string; pending: string[] }
   | { phase: 'resumed'; reason: string }         // rotation complete, pause lifted
   | { phase: 'exhausted'; reason: string }       // needs-human: no account to rotate to
-  | { phase: 'blocked'; reason: string; target?: string }; // needs-human: a relaunch/verify failure
+  | { phase: 'blocked'; reason: string; target?: string } // needs-human: a relaunch/verify failure
+  | { phase: 'aborted'; reason: string }; // quiesce timed out PRE-kill: pause lifted, human notified, nothing killed
 
 /**
  * Everything the state machine touches, injected so the machine is testable without a live fleet,
@@ -101,6 +102,15 @@ export interface RotatorDeps {
    * adapter-derived rather than computed here from raw timestamps.
    */
   verifyTimeout(): { timedOut: boolean; timeoutMs: number };
+  /**
+   * How long the PRE-KILL quiesce wait (for the pause in force) has run, against the configured
+   * quiesce-timeout. Bounds `tick`'s quiescing loop — without it a fleet that never goes quiet (an
+   * agent that never acks, or an in-flight dispatch that never clears) wedges the rotation forever.
+   * UNLIKE verifyTimeout, on timeout the supervisor LIFTS the pause (nothing killed yet, so aborting
+   * is safe) rather than staying blocked. Deadline math (now, the pause start, the env threshold)
+   * lives in the adapter, same as verifyTimeout.
+   */
+  quiesceTimeout(): { timedOut: boolean; timeoutMs: number };
   /** Post a needs-human to the operator (rotation cannot proceed unattended). */
   needsHuman(message: string): Promise<void>;
 }
@@ -192,6 +202,16 @@ export async function tick(deps: RotatorDeps): Promise<RotatorStep> {
   if (needsRelaunch.length > 0) {
     // Hold until the fleet is genuinely quiet, THEN do the irreversible half.
     if (!readiness.ready) {
+      // HED-186: bound the PRE-KILL wait. Nothing irreversible has happened yet, so on timeout LIFT
+      // the pause (safe) and escalate — never hang the fleet paused forever on a stuck agent. This is
+      // the OPPOSITE of the VERIFY timeout (post-kill), which stays blocked because resuming a
+      // half-rotated fleet is worse than waiting for a human.
+      const timeout = deps.quiesceTimeout();
+      if (timeout.timedOut) {
+        await deps.resumePause(`rotation to ${intent.target} ABORTED — fleet did not go quiet within ${timeout.timeoutMs}ms; no session was killed`);
+        await deps.needsHuman(`rotation ${readiness.pauseId}: fleet did not quiesce within ${timeout.timeoutMs}ms (blockers: ${readiness.blockers.join(', ') || 'none reported'}) — pause LIFTED, nothing killed. Investigate the stuck agent(s); until the blocker clears the rotator may re-attempt on a later tick.`);
+        return { phase: 'aborted', reason: `quiesce timed out; pause lifted (blockers: ${readiness.blockers.join(', ') || 'none'})` };
+      }
       return { phase: 'quiescing', reason: 'waiting for the fleet to go quiet', blockers: readiness.blockers };
     }
     return killRelaunchMark(deps, needsRelaunch, intent);
