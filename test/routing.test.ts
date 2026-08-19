@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { loadRouting, listTaskClasses, resolveRoute, directRoute, providerExecution } from '../src/routing.js';
+import { loadRouting, listTaskClasses, resolveRoute, directRoute, neverViaCursorPrefixes, providerExecution } from '../src/routing.js';
 
 /**
  * Behavioral checks on the SHIPPED routing table (routing/routing.v0.yaml) — the file Maya tunes by
@@ -55,10 +55,12 @@ describe('routing.v0.yaml — shipped table invariants', () => {
     expect(table.policy.never_via_cursor).toEqual(['claude', 'gpt', 'gemini']);
   });
 
+  it('expands never_via_cursor families to the unchanged Cursor-refusal prefix set', () => {
+    expect(new Set(neverViaCursorPrefixes(table))).toEqual(new Set(['claude-', 'gpt-', 'o1-', 'o3-', 'gemini-']));
+  });
+
   it.each(classes)('%s: never routes a never_via_cursor family through cursor', (c) => {
-    // Derived from the table's own policy so this guard can't drift from the YAML it validates.
-    // Cursor's catalog ids carry the family as a prefix (claude-…, gpt-…, gemini-…).
-    const banned = (table.policy.never_via_cursor as string[]).map((family) => `${family}-`);
+    const banned = neverViaCursorPrefixes(table);
     for (const t of targetsOf(c)) {
       if (t.provider !== 'cursor') continue;
       for (const p of banned) {
@@ -76,6 +78,8 @@ describe('routing.v0.yaml — shipped table invariants', () => {
 
 describe('resolveRoute / directRoute — policy fences', () => {
   const table = loadRouting(TABLE_PATH);
+  const directSubscriptionModels = ['claude-opus-4.6', 'gpt-5.6', 'gemini-3-pro', 'o1-preview', 'o3-mini'];
+  const cursorModels = ['cursor-grok-4.6-high', 'composer-2.5', 'kimi-k3-high'];
 
   it('rejects an unknown class and lists every known class in the message', () => {
     let message = '';
@@ -90,6 +94,36 @@ describe('resolveRoute / directRoute — policy fences', () => {
 
   it('refuses a direct route to a provider the table does not know', () => {
     expect(() => directRoute(table, 'openrouter', 'x')).toThrow(/unknown provider "openrouter"/);
+  });
+
+  it.each(directSubscriptionModels)('rejects %s through Cursor in both class and direct routing', (model) => {
+    const className = `cursor-${model}`;
+    const routedTable = { ...table, taskClasses: { ...table.taskClasses, [className]: { provider: 'cursor', model } } };
+    expect(() => resolveRoute(routedTable, className)).toThrow(/direct-subscription family/);
+    expect(() => directRoute(table, 'cursor', model)).toThrow(/direct-subscription family/);
+  });
+
+  it.each(directSubscriptionModels)('rejects %s through Cursor as a class fallback', (model) => {
+    const className = `cursor-fallback-${model}`;
+    const routedTable = { ...table, taskClasses: { ...table.taskClasses, [className]: { provider: 'codex', model: 'gpt-5.6-luna', fallback: { provider: 'cursor', model } } } };
+    expect(() => resolveRoute(routedTable, className)).toThrow(/direct-subscription family/);
+  });
+
+  it.each(cursorModels)('allows the Cursor-native model %s through both class and direct routing', (model) => {
+    const className = `cursor-${model}`;
+    const routedTable = { ...table, taskClasses: { ...table.taskClasses, [className]: { provider: 'cursor', model } } };
+    expect(() => resolveRoute(routedTable, className)).not.toThrow();
+    expect(() => directRoute(table, 'cursor', model)).not.toThrow();
+  });
+
+  it('rejects a primary provider that is held', () => {
+    const routedTable = { ...table, providers: { ...table.providers, held: { status: 'held' } }, taskClasses: { ...table.taskClasses, held: { provider: 'held', model: 'm1' } } };
+    expect(() => resolveRoute(routedTable, 'held')).toThrow(/provider "held" is on hold and not routable yet/);
+  });
+
+  it('rejects a fallback provider that is held', () => {
+    const routedTable = { ...table, providers: { ...table.providers, held: { status: 'held' } }, taskClasses: { ...table.taskClasses, 'fallback-held': { provider: 'codex', model: 'gpt-5.6-luna', fallback: { provider: 'held', model: 'm1' } } } };
+    expect(() => resolveRoute(routedTable, 'fallback-held')).toThrow(/fallback provider "held" is on hold and not routable yet/);
   });
 
   it('a direct route carries the caller\'s skills/mcp and a self-describing task class', () => {

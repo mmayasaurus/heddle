@@ -1,14 +1,15 @@
 import { spawn } from 'node:child_process';
 import { buildWorkerEnv } from '../env.js';
+import { FAMILY_PREFIXES } from '../routing.js';
 import type { DispatchOptions, WorkerAdapter, WorkerResult, TokenUsage } from '../types.js';
 import { lastResultJson } from './parse.js';
 
 /**
- * Model families Cursor carries that Maya holds a DIRECT subscription for. Routing these through
- * Cursor would spend the wrong pool (policy: routing/routing.v0.yaml `never_via_cursor`).
- * Enforced here so a bad routing-table entry can't silently misbill.
+ * Fail-safe belt-and-suspenders — the AUTHORITATIVE, tunable policy is never_via_cursor enforced
+ * at route resolution (routing.ts). Intentionally over-restrictive (refusing a family the policy
+ * might later allow is fail-safe for billing).
  */
-const DIRECT_SUBSCRIPTION_PREFIXES = ['claude-', 'gpt-', 'gemini-', 'o1-', 'o3-'];
+const DIRECT_SUBSCRIPTION_PREFIXES = Object.values(FAMILY_PREFIXES).flat();
 
 /**
  * Cursor CLI adapter — `cursor-agent -p --output-format json`.

@@ -111,6 +111,12 @@ export function resolveRoute(table: RoutingTable, taskClass: string): Route {
   if (providerCfg?.status === 'excluded') {
     throw new Error(`task class "${taskClass}" routes to excluded provider "${primary.provider}"`);
   }
+  if (providerCfg?.status === 'held') {
+    throw new Error(`task class "${taskClass}": provider "${primary.provider}" is on hold and not routable yet`);
+  }
+  if (primary.provider === 'cursor' && neverViaCursorPrefixes(table).some((p) => primary.model.startsWith(p))) {
+    throw new Error(`task class "${taskClass}": model "${primary.model}" is a direct-subscription family — never route it through Cursor (policy.never_via_cursor)`);
+  }
   // The fallback is a different ROUTE for the same CLASS, so class-level policy (skill packs, MCP
   // servers) carries over unless the fallback node sets its own. Effort deliberately does not: its
   // vocabulary is per provider (codex minimal…xhigh vs agy low|medium|high; cursor bakes it into
@@ -126,6 +132,12 @@ export function resolveRoute(table: RoutingTable, taskClass: string): Route {
     if (!fbCfg) throw new Error(`task class "${taskClass}": fallback names unknown provider "${fb.provider}"`);
     if (fbCfg.status === 'excluded') {
       throw new Error(`task class "${taskClass}": fallback routes to excluded provider "${fb.provider}"`);
+    }
+    if (fbCfg.status === 'held') {
+      throw new Error(`task class "${taskClass}": fallback provider "${fb.provider}" is on hold and not routable yet`);
+    }
+    if (fb.provider === 'cursor' && neverViaCursorPrefixes(table).some((p) => fb.model.startsWith(p))) {
+      throw new Error(`task class "${taskClass}": model "${fb.model}" is a direct-subscription family — never route it through Cursor (policy.never_via_cursor)`);
     }
   }
   const fallback = fb ? { ...fb, skills: fb.skills ?? primary.skills, mcp: fb.mcp ?? primary.mcp } : undefined;
@@ -154,7 +166,24 @@ export interface StructuralCaps {
 }
 export const DEFAULT_STRUCTURAL_CAPS: StructuralCaps = { max: 8, staleAfterMs: 3 * 60 * 60 * 1000 };
 
+// policy.never_via_cursor lists FAMILIES; FAMILY_PREFIXES maps each to its model-id prefixes
+// (o1-/o3- are OpenAI 'gpt' family).
+export const FAMILY_PREFIXES: Record<string, string[]> = {
+  claude: ['claude-'],
+  gpt: ['gpt-', 'o1-', 'o3-'],
+  gemini: ['gemini-'],
+};
+
+export function neverViaCursorPrefixes(table: RoutingTable): string[] {
+  const fams = Array.isArray((table.policy as any)?.never_via_cursor)
+    ? (table.policy as any).never_via_cursor as string[]
+    : [];
+  return fams.flatMap((f) => FAMILY_PREFIXES[f] ?? [`${f}-`]);
+}
+
 export function structuralCaps(table: RoutingTable): StructuralCaps {
+  // route_away_at_pct under metered_pool_guard is declared intent only: enforcement needs the
+  // Cursor usage source (HED-9). reviewer_fleet_isolation and official_binaries_only remain declared-intent.
   const node = (table.policy as any)?.structural_caps ?? {};
   const max = Number(node.max_children_per_orchestrator);
   const stale = Number(node.in_flight_stale_after_ms);
@@ -248,9 +277,8 @@ export function describeTaskClasses(
 /**
  * Direct route — the orchestrator names a provider+model itself instead of a task class.
  * This is the "call whatever model is best for the job" escape hatch: full dynamic choice,
- * but still fenced by the subscription policy (excluded/held providers refuse here, and the
- * per-adapter misbilling guards — e.g. no claude/gpt/gemini ids through Cursor — still apply
- * at dispatch time). No fallback and no opt-in gate: naming a model IS the opt-in.
+ * but still fenced by the subscription policy (excluded/held providers and direct-subscription
+ * families through Cursor refuse here). No fallback and no opt-in gate: naming a model IS the opt-in.
  */
 export function directRoute(
   table: RoutingTable, provider: string, model: string, skills?: string[], mcp?: string[],
@@ -261,5 +289,8 @@ export function directRoute(
   }
   if (cfg.status === 'excluded') throw new Error(`provider "${provider}" is excluded from orchestration`);
   if (cfg.status === 'held') throw new Error(`provider "${provider}" is on hold and not routable yet`);
+  if (provider === 'cursor' && neverViaCursorPrefixes(table).some((p) => model.startsWith(p))) {
+    throw new Error(`model "${model}" is a direct-subscription family — never route it through Cursor (policy.never_via_cursor)`);
+  }
   return { taskClass: `direct:${provider}/${model}`, provider, model, skills, mcp, editsCode: false, dispatchable: true, readOnly: false, autoAssess: false };
 }
