@@ -1,11 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, readFileSync, statSync, existsSync, chmodSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, readFileSync, writeFileSync, statSync, existsSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { createCommsServer, initOperatorToken, operatorTokenMatches, resolveCommsIdentity, type CommsServer } from '../../src/comms/server.js';
+import { createCommsServer, initOperatorToken, operatorTokenMatches, resolveCommsIdentity, resolveFleetIdentity, type CommsServer } from '../../src/comms/server.js';
 import { CommsLog } from '../../src/comms/log.js';
 
 /**
@@ -61,6 +61,46 @@ describe('heddle-comms server (in-process)', () => {
     expect(resolveCommsIdentity({ ...baseEnv(), HEDDLE_AGENT: 'operator' }, dir, (m) => w.push(m), tokenPath)).toEqual({ identity: null, isOperator: false });
     expect(w.some((m) => m.includes('refusing to bind the operator identity'))).toBe(true);
     expect(resolveCommsIdentity({ ...baseEnv() }, dir, (m) => w.push(m), tokenPath)).toEqual({ identity: null, isOperator: false });
+  });
+
+  // ── HED-187: the RAW fleet identity, extracted so the rotator can see through the operator binding ──
+
+  it('resolveFleetIdentity: the raw chain (HEDDLE_AGENT → FLEET_AGENT → HEDDLE_COMMS_ADDRESS → .fleet-agent → null)', () => {
+    const w: string[] = [];
+    const warn = (m: string) => w.push(m);
+    expect(resolveFleetIdentity({ ...baseEnv(), HEDDLE_AGENT: 'V' }, dir, warn)).toBe('V');
+    expect(resolveFleetIdentity({ ...baseEnv(), FLEET_AGENT: 'K.2' }, dir, warn)).toBe('K.2');
+    expect(resolveFleetIdentity({ ...baseEnv(), HEDDLE_COMMS_ADDRESS: 'R.1' }, dir, warn)).toBe('R.1');
+    // Precedence, not merely presence: HEDDLE_AGENT wins over the two later sources.
+    expect(resolveFleetIdentity({ ...baseEnv(), HEDDLE_AGENT: 'V', FLEET_AGENT: 'K', HEDDLE_COMMS_ADDRESS: 'R.1' }, dir, warn)).toBe('V');
+    // 'operator' is refused from these sources here too (same warning as resolveCommsIdentity).
+    expect(resolveFleetIdentity({ ...baseEnv(), HEDDLE_AGENT: 'operator' }, dir, warn)).toBeNull();
+    expect(w.some((m) => m.includes('refusing to bind the operator identity'))).toBe(true);
+    // No env, no file: the upward walk terminates at the filesystem root with null (never hangs).
+    expect(resolveFleetIdentity({ ...baseEnv() }, dir, warn)).toBeNull();
+
+    // A `.fleet-agent` file is found by walking UP from cwd, and matches resolveCommsIdentity.
+    const deep = join(dir, 'nested', 'deep');
+    mkdirSync(deep, { recursive: true });
+    writeFileSync(join(dir, '.fleet-agent'), 'V\n');
+    expect(resolveFleetIdentity({ ...baseEnv() }, deep, warn)).toBe('V');
+    expect(resolveCommsIdentity({ ...baseEnv() }, deep, warn, tokenPath)).toEqual({ identity: 'V', isOperator: false });
+  });
+
+  it('resolveFleetIdentity sees the fleet letter THROUGH the operator binding that masks it (the rotator guard)', () => {
+    // The masking problem HED-187's in-session guard exists for: a rotator started inside agent V's
+    // terminal binds as the operator, so `identity` reads 'operator' and the letter V is invisible.
+    // The raw resolution ignores HEDDLE_COMMS_ROLE entirely, so the guard can still see it.
+    initToken();
+    const token = readFileSync(tokenPath, 'utf8').trim();
+    const operatorEnv = { ...baseEnv(), HEDDLE_COMMS_ROLE: 'operator', HEDDLE_COMMS_OPERATOR_TOKEN: token, HEDDLE_AGENT: 'V' };
+    expect(resolveCommsIdentity(operatorEnv, dir, () => undefined, tokenPath)).toEqual({ identity: 'operator', isOperator: true });
+    expect(resolveFleetIdentity(operatorEnv, dir, () => undefined)).toBe('V');
+    // …and via a `.fleet-agent` file, which is how an agent's worktree carries its letter.
+    writeFileSync(join(dir, '.fleet-agent'), 'V\n');
+    const { HEDDLE_AGENT: _dropped, ...fileOnly } = operatorEnv;
+    expect(resolveCommsIdentity(fileOnly, dir, () => undefined, tokenPath)).toEqual({ identity: 'operator', isOperator: true });
+    expect(resolveFleetIdentity(fileOnly, dir, () => undefined)).toBe('V');
   });
 
   it('operator: binds ONLY with the matching token; env-only role is refused; the whole session then posts as operator', async () => {

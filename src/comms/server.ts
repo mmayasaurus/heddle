@@ -108,6 +108,41 @@ export function operatorTokenMatches(env: NodeJS.ProcessEnv, path: string = OPER
   return a.length === b.length && a.length > 0 && timingSafeEqual(a, b);
 }
 
+/**
+ * The raw fleet agent/child identity from the env chain or a `.fleet-agent` file, IGNORING
+ * HEDDLE_COMMS_ROLE — or null. Used both by resolveCommsIdentity's non-operator branch and by the
+ * rotator's in-session guard (HED-187), which needs the fleet letter even when the operator binding
+ * has masked it to 'operator'.
+ */
+export function resolveFleetIdentity(env: NodeJS.ProcessEnv, cwd: string, warn: (m: string) => void): string | null {
+  // TODO(HED-65/HED-2): switch to Agent U's src/identity.ts once it lands (same order, one module).
+  const bindable = (v: string | undefined): string | null => {
+    const s = v?.trim();
+    if (!s) return null;
+    const kind = parseAddress(s)?.kind;
+    if (kind === 'agent' || kind === 'child') return s;
+    if (kind === 'operator') warn('refusing to bind the operator identity from an env var / .fleet-agent — use HEDDLE_COMMS_ROLE=operator + the token');
+    return null;
+  };
+  const fromEnv = bindable(env.HEDDLE_AGENT) ?? bindable(env.FLEET_AGENT) ?? bindable(env.HEDDLE_COMMS_ADDRESS);
+  if (fromEnv) return fromEnv;
+  let dir = cwd;
+  for (;;) {
+    const f = join(dir, '.fleet-agent');
+    if (existsSync(f)) {
+      try {
+        const v = bindable(readFileSync(f, 'utf8'));
+        if (v) return v;
+      } catch (err) {
+        warn(`could not read ${f}: ${errorMessage(err)} — continuing unbound`);
+      }
+    }
+    const up = dirname(dir);
+    if (up === dir) return null;
+    dir = up;
+  }
+}
+
 /** Bind the comms identity from the environment (see the module doc). */
 export function resolveCommsIdentity(
   env: NodeJS.ProcessEnv, cwd: string, warn: (m: string) => void, tokenPath: string = OPERATOR_TOKEN_PATH,
@@ -124,32 +159,8 @@ export function resolveCommsIdentity(
       return { identity: null, isOperator: false };
     }
   }
-  // TODO(HED-65/HED-2): switch to Agent U's src/identity.ts once it lands (same order, one module).
-  const bindable = (v: string | undefined): string | null => {
-    const s = v?.trim();
-    if (!s) return null;
-    const kind = parseAddress(s)?.kind;
-    if (kind === 'agent' || kind === 'child') return s;
-    if (kind === 'operator') warn('refusing to bind the operator identity from an env var / .fleet-agent — use HEDDLE_COMMS_ROLE=operator + the token');
-    return null;
-  };
-  const fromEnv = bindable(env.HEDDLE_AGENT) ?? bindable(env.FLEET_AGENT) ?? bindable(env.HEDDLE_COMMS_ADDRESS);
-  if (fromEnv) return { identity: fromEnv, isOperator: false };
-  let dir = cwd;
-  for (;;) {
-    const f = join(dir, '.fleet-agent');
-    if (existsSync(f)) {
-      try {
-        const v = bindable(readFileSync(f, 'utf8'));
-        if (v) return { identity: v, isOperator: false };
-      } catch (err) {
-        warn(`could not read ${f}: ${errorMessage(err)} — continuing unbound`);
-      }
-    }
-    const up = dirname(dir);
-    if (up === dir) return { identity: null, isOperator: false };
-    dir = up;
-  }
+  const fleet = resolveFleetIdentity(env, cwd, warn);
+  return { identity: fleet, isOperator: false };
 }
 
 /** The dispatch ledger is consulted opportunistically for lineage; never created as a side effect. */

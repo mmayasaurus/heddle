@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { CommsLog, DEFAULT_COMMS_PATH } from '../comms/log.js';
 import { Broker } from '../comms/broker.js';
 import { ChannelTransport, errorMessage } from '../comms/bridge.js';
-import { resolveCommsIdentity, openLedgerIfPresent, OPERATOR_TOKEN_PATH, operatorTokenMatches } from '../comms/server.js';
+import { resolveCommsIdentity, resolveFleetIdentity, openLedgerIfPresent, OPERATOR_TOKEN_PATH, operatorTokenMatches } from '../comms/server.js';
 import { createRotatorDeps, DEFAULT_VERIFY_TIMEOUT_MS, DEFAULT_QUIESCE_TIMEOUT_MS, DEFAULT_ABORT_COOLDOWN_MS } from './live.js';
 import { tick } from './supervisor.js';
 import { DEFAULT_THRESHOLDS } from './decide.js';
@@ -54,6 +54,18 @@ if ((mode === 'run' || mode === 'once') && !(isOperator && operatorTokenMatches(
 const log = new CommsLog(env.HEDDLE_COMMS_DB || DEFAULT_COMMS_PATH);
 const ledger = openLedgerIfPresent(env, warn);
 const broker = new Broker({ log, ledger, transport: new ChannelTransport(log), onWarning: warn });
+
+// HED-187: the rotator must run STANDALONE, never inside a fleet session it may relaunch — an
+// in-session driver would sit in its own quiesce ack-set/roster. The operator binding masks the
+// fleet letter (identity === 'operator'), so resolve the RAW fleet identity and refuse on a live match.
+if (mode === 'run' || mode === 'once') {
+  const inSession = resolveFleetIdentity(env, process.cwd(), warn);
+  if (inSession && log.liveSessions().some((s) => s.address === inSession)) {
+    warn(`refusing to run: this process carries fleet identity ${inSession}, which has a LIVE comms session — the rotator must run STANDALONE, never inside a session it may relaunch. Start it from a plain shell (unset HEDDLE_AGENT/FLEET_AGENT, not a fleet agent's terminal).`);
+    log.close();
+    process.exit(1);
+  }
+}
 
 const softPct = Number(env.HEDDLE_ROTATE_SOFT_PCT);
 const hardPct = Number(env.HEDDLE_ROTATE_HARD_PCT);
