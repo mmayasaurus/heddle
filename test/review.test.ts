@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { diffInstruction, pickReviewer, sameSnapshot, snapshotWorktree } from '../src/review.js';
 import { loadRouting, resolveRoute } from '../src/routing.js';
-import { workerMcpSupported } from '../src/mcp.js';
+import { mcpAttachable } from '../src/mcp.js';
 import { useTempResources } from './helpers.js';
 
 function git(cwd: string, ...args: string[]): string {
@@ -56,7 +56,7 @@ describe('adversarial review helpers', () => {
     // keeps gemini out of mcp pools; a custom one might not).
     const route = { taskClass: 'r', provider: 'cursor', model: 'grok', mcp: ['memtrace'],
       reviewerPool: [{ provider: 'cursor', model: 'grok' }, { provider: 'gemini', model: 'pro' }, { provider: 'codex', model: 'sol' }] } as any;
-    const usable = (p: string) => ((route.mcp?.length ?? 0) > 0 && !workerMcpSupported(p) ? 'cannot attach the class mcp' : null);
+    const usable = (p: string) => ((route.mcp?.length ?? 0) > 0 && !mcpAttachable(p, route.mcp) ? 'cannot attach the class mcp' : null);
     // author=cursor (== primary) → pool pick: cursor is the author, gemini can't attach mcp → skip both → codex.
     expect(pickReviewer(route, 'cursor', usable)).toMatchObject({ provider: 'codex', model: 'sol' });
     // if the only mcp-capable different family is removed, there is no reviewer → refuse loudly.

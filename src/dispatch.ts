@@ -24,7 +24,7 @@ export function packsFor(provider: string, requested: readonly string[]): string
   const family = modelFamilyPack(provider);
   return family && !base.includes(family) ? [...base, family] : base;
 }
-import { materializeWorkerMcp, validateWorkerMcp, workerMcpSupported, codexMcpFlags, claudeMcpConfigFile } from './mcp.js';
+import { materializeWorkerMcp, validateWorkerMcp, mcpAttachable, codexMcpFlags, claudeMcpConfigFile } from './mcp.js';
 import { classifyEffort, assessResult, type ResultAssessment } from './classify.js';
 import { pickReviewer, snapshotWorktree, sameSnapshot, diffInstruction, embeddedDiff, normalizeProvider, type ReviewerPick } from './review.js';
 import { parentCheckoutOf, checkoutFingerprint, escapedPaths, destroyedWork } from './worktree.js';
@@ -1016,12 +1016,13 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
             if (!cfg) return 'unknown provider';
             if (cfg.status === 'excluded') return 'provider excluded by policy';
             if (cfg.status === 'held') return 'provider on hold and not routable yet'; // uniform held check (qodo #63)
-            // HED-249: a picked reviewer inherits the class mcp, so an mcp-carrying class must SKIP a
-            // reviewer that can't attach it (else pickReviewer selects it and validateWorkerMcp then
-            // hard-fails at dispatch). Skip → pick the next mcp-capable reviewer, or refuse if none —
-            // never run a reviewer without its discovery tools. The shipped table's CI invariant keeps
-            // gemini out of mcp pools; this covers a custom HEDDLE_ROUTING table too (cubic/codacy #73).
-            if ((route.mcp?.length ?? 0) > 0 && !workerMcpSupported(provider)) return 'cannot attach the class mcp';
+            // HED-249: a picked reviewer inherits the EFFECTIVE mcp (an explicit req.mcp overrides the
+            // class default — cubic #73), so an mcp-carrying dispatch must SKIP a reviewer that can't
+            // attach THAT list (else pickReviewer selects it and validateWorkerMcp then hard-fails).
+            // Skip → next capable reviewer, or refuse if none — never run a reviewer without discovery.
+            // Validates the actual list, so `['serena']` on cursor is caught, not just gemini+memtrace.
+            const effMcp = req.mcp ?? route.mcp ?? [];
+            if (effMcp.length > 0 && !mcpAttachable(provider, effMcp)) return 'cannot attach the class mcp';
             if (Array.isArray(cfg.models) && cfg.models.length && !cfg.models.includes(model)) return 'model not in provider list';
             return null;
           })

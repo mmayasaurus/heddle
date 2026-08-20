@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { loadRouting, listTaskClasses, resolveRoute, directRoute, neverViaCursorPrefixes, isNeverViaCursor, providerExecution } from '../src/routing.js';
-import { workerMcpSupported } from '../src/mcp.js';
+import { mcpAttachable } from '../src/mcp.js';
 import { normalizeProvider } from '../src/review.js';
 
 /**
@@ -48,7 +48,9 @@ describe('routing.v0.yaml — shipped table invariants', () => {
       // Normalize (trim + lowercase) exactly as dispatch does before attach, so a cased YAML entry
       // like " Codex " isn't falsely flagged (copilot/cubic #73).
       const provider = normalizeProvider(t.provider) ?? t.provider;
-      expect(workerMcpSupported(provider), `class "${c}" ${t.label} (${t.provider}) carries mcp [${t.mcp}] but is not worker-MCP-attachable`).toBe(true);
+      // Validate the DECLARED server list, not a generic memtrace probe — `['serena']` on cursor is
+      // unattachable even though cursor attaches memtrace (cubic #73).
+      expect(mcpAttachable(provider, t.mcp ?? []), `class "${c}" ${t.label} (${t.provider}) cannot attach its mcp [${t.mcp}]`).toBe(true);
     }
   });
 

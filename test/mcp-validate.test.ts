@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { codexMcpFlags, materializeWorkerMcp, validateWorkerMcp, workerMcpSupported } from '../src/mcp.js';
+import { codexMcpFlags, materializeWorkerMcp, validateWorkerMcp, workerMcpSupported, mcpAttachable } from '../src/mcp.js';
 import { dispatch } from '../src/dispatch.js';
 import { useTempResources, fakeAdapter, IDENTITIES } from './helpers.js';
 
@@ -45,6 +45,14 @@ describe('validateWorkerMcp — direct unit contract', () => {
       try { validateWorkerMcp(provider, ['memtrace']); } catch { threw = true; }
       expect(workerMcpSupported(provider)).toBe(!threw);
     }
+  });
+
+  it('mcpAttachable validates the ACTUAL requested server list, not just provider support (cubic #73)', () => {
+    expect(mcpAttachable('cursor', ['memtrace'])).toBe(true);
+    expect(mcpAttachable('cursor', ['serena'])).toBe(false); // serena is codex-only — cursor attaches memtrace but not serena
+    expect(mcpAttachable('codex', ['serena'])).toBe(true);   // codex knows serena via inline -c
+    expect(mcpAttachable('gemini', ['memtrace'])).toBe(false);
+    expect(mcpAttachable('cursor', [])).toBe(true);          // nothing to attach → any provider
   });
 
   it('is a no-op when no servers are requested, whatever the provider (not covered at the dispatch level)', () => {
