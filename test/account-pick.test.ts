@@ -247,6 +247,13 @@ describe('regression PR#176 — dispatch signals cover signal-only and all accou
     expect(adviseClaudeAccount(caps, accounts, {}).best?.id).toBe('acct1');
   });
 
+  it('returns null for a Fable pin on a freshly excluded account instead of ranking another', () => {
+    const dir = tempDir(); freshMirror(dir); signal(dir, 'acct2', 'billing');
+    const caps = readProviderCaps({ usageDir: dir, nowS }).claude;
+    // Excluded pin → null (matches pickClaudeAccount's pin refusal), NOT a silent fallthrough to acct1.
+    expect(bestFableWeekly(caps, accounts, 'acct2')).toBeNull();
+  });
+
   it('returns null when every registered account is freshly excluded', () => {
     const dir = tempDir(); signal(dir, 'acct1', 'billing'); signal(dir, 'acct2', 'logged-out');
     expect(pickClaudeAccount(readProviderCaps({ usageDir: dir, nowS }).claude, accounts)).toBeNull();
@@ -258,7 +265,9 @@ describe('regression PR#176 — dispatch signals cover signal-only and all accou
   });
 
   it('fails open for a billing signal checked in the future', () => {
-    const dir = tempDir(); freshMirror(dir); signal(dir, 'acct2', 'billing', nowS + 1);
+    // Robustly-future offset: isDispatchExcluded reads live Date.now(), so a +1s offset flakes once the
+    // suite runs a second past nowS capture (HED-176 review).
+    const dir = tempDir(); freshMirror(dir); signal(dir, 'acct2', 'billing', nowS + 3600);
     expect(pickClaudeAccount(readProviderCaps({ usageDir: dir, nowS }).claude, accounts)?.account.id).toBe('acct2');
   });
 

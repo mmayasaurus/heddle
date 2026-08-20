@@ -364,9 +364,11 @@ export function isDispatchExcluded(caps: ProviderCaps | undefined, id: string, n
 
 /**
  * The Fable-weekly estimate the soft cap must judge.
- * - PINNED dispatch → that account's own estimate: the pin is where the work WILL run, so another
- *   account's headroom is irrelevant (a pinned over-cap account previously escaped the cap because
- *   the fleet minimum was below it — PR #24, codeant + codex-connector).
+ * - PINNED dispatch → that account's own estimate, or null if the pin is dispatch-excluded or its
+ *   estimate is unknown: the pin is where the work WILL run, so another account's headroom is
+ *   irrelevant (a pinned over-cap account previously escaped the cap because the fleet minimum was
+ *   below it — PR #24, codeant + codex-connector). A dispatch-excluded pin returns null rather than
+ *   ranking a different account, matching pickClaudeAccount's pin refusal (HED-176 review).
  * - otherwise → the lowest estimate among ADDRESSABLE accounts, since the picker is free to choose.
  * null = nothing known (unknown never decides).
  */
@@ -375,7 +377,12 @@ export function bestFableWeekly(
 ): { id: string; pct: number; pinned?: true } | null {
   if (pin) {
     const pinned = accounts.find((a) => a.id === pin);
-    if (pinned && !isDispatchExcluded(caps, pinned.id)) {
+    if (pinned) {
+      // An excluded pin is not addressable — return null (pickClaudeAccount refuses the pin), preserving
+      // the "a pinned dispatch resolves to the pin or null" contract rather than silently ranking a
+      // DIFFERENT account (which would misjudge the soft cap for a dispatch about to be refused).
+      // Mirrors the pinned-unknown → null case below (HED-176 review).
+      if (isDispatchExcluded(caps, pinned.id)) return null;
       const pct = fableWeeklyOf(caps, pinned.id);
       return pct === null ? null : { id: pinned.id, pct, pinned: true };
     }

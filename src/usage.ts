@@ -234,6 +234,10 @@ export function readClaudeTap(usageDir: string, nowS: number): ProviderCaps | nu
   try { files = existsSync(usageDir) ? readdirSync(usageDir) : []; } catch { files = []; }
   const ids = new Set<string>();
   for (const f of files) {
+    // Skip HED-178 dispatch signals + keeper oauth-usage sidecars: same usage dir, but NOT taps
+    // (readDispatchSignals owns .dispatch.json). This reserves the `.dispatch` / `.oauth-usage`
+    // filename suffixes — a registry account id must not end in them (ids are acctN; the producer
+    // would write claude-<id>.dispatch.json, which for such an id would collide).
     if (/\.(dispatch|oauth-usage)\.json$/.test(f)) continue;
     const m = /^claude-([A-Za-z0-9_.-]+?)(\.keeper)?\.json$/.exec(f);
     if (m) ids.add(m[1]);
