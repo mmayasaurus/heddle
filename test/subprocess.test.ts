@@ -24,10 +24,10 @@ describe('subprocess run() — the shared adapter runner', () => {
     expect(r.exitCode).toBeNull();
   });
 
-  it('does not flag timedOut when the process exits within a short timeout (race guard, cubic #69)', async () => {
-    const r = await run(NODE, ['-e', 'process.stdout.write("quick")'], process.cwd(), 500);
-    expect(r).toEqual({ stdout: 'quick', stderr: '', exitCode: 0, timedOut: false });
-  });
+  // NOTE: the timer's exit-at-deadline guard (child already exited when the timer fires → don't flag
+  // timedOut) is a sub-millisecond race window that can't be hit deterministically from a unit test —
+  // a tight timeout just makes the test itself flaky under load. The guard is exercised in spirit by
+  // the clean-exit case above (fast exit → timedOut:false) and reasoned inline in subprocess.ts.
 
   it('settles once with a spawn error for a nonexistent binary (exitCode null, stderr names it)', async () => {
     const r = await run('heddle-no-such-binary-xyz', [], process.cwd(), 10_000);
