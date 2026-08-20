@@ -77,6 +77,19 @@ export function resolveMcpServers(names: string[]): Record<string, { command: st
  *   this path throws rather than write a guessed schema. (Tracked follow-up.)
  */
 /**
+ * Does this provider have an implemented worker-MCP attachment path at all? Mirrors validateWorkerMcp:
+ * only agy/gemini has none (it THROWS for any non-empty list). Used to filter a CLASS-DEFAULT mcp list
+ * (best-effort intent — "this class reads code, give it discovery") down to what the RESOLVED provider
+ * can take, so e.g. a gemini reviewer picked from an adversarial-review pool simply runs without
+ * memtrace instead of failing the dispatch. A caller's EXPLICIT req.mcp is NOT filtered — it stays a
+ * requirement and still throws here, so an impossible ask is loud, not a silent no-op. A drift-guard
+ * test asserts this stays in lock-step with validateWorkerMcp's throw. HED-205.
+ */
+export function workerMcpSupported(provider: string): boolean {
+  return provider !== 'gemini';
+}
+
+/**
  * Validate an MCP attachment request WITHOUT writing anything — the dispatcher calls this before it
  * opens a ledger row (HED-19: an unknown server / unsupported provider must fail fast, leaving no
  * orphan row and no mutated worktree). Same rules as materializeWorkerMcp + codexMcpFlags.
