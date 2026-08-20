@@ -133,7 +133,7 @@ export interface DispatchRequest {
  * `refusal` column.
  */
 export interface DispatchRefusal {
-  code: 'claude-in-session' | 'not-dispatchable' | 'depth-1' | 'max-children' | 'capability-denied' | 'metered-pool-exhausted' | 'same-provider-review' | 'override-reason-required' | 'fleet-paused';
+  code: 'claude-in-session' | 'no-dispatchable-account' | 'not-dispatchable' | 'depth-1' | 'max-children' | 'capability-denied' | 'metered-pool-exhausted' | 'same-provider-review' | 'override-reason-required' | 'fleet-paused';
   reason: string;
   /** What to do instead, when there is a clear alternative. */
   instruction?: string;
@@ -667,6 +667,20 @@ export async function dispatch(
     );
   }
 
+  // A non-empty registry is an explicit account-routing contract. If none of its accounts is
+  // addressable, never let a headless Claude worker fall through to the orchestrator's inherited
+  // login; an empty registry intentionally retains that legacy inherited-login behavior.
+  if (target.provider === 'claude' && !req.inSession && !plan.notDispatchable
+      && plan.claudeAccountCount > 0 && plan.accountPick === null) {
+    const suffix = plan.claudeAccountCount === 1 ? '' : 's';
+    return refusalOutcome(ctx, req, route.taskClass, target, skillsForRefusal, {
+      code: 'no-dispatchable-account',
+      reason: `no dispatchable Claude account — all ${plan.claudeAccountCount} registered account${suffix} are logged-out or non-dispatchable ` +
+        '(a billing/logged-out signal, or a replaced credential). Run `claude /login` on the affected account and update accounts.json, or wait for a keeper ping to clear the signal.',
+      instruction: 'An operator must restore a Claude account before this can dispatch.',
+    });
+  }
+
   // Auto-effort (opt-in): classify the sub-task's difficulty and pin the effort, unless the caller
   // already set one. Runs only after every plan-level refusal gate has passed — a refused dispatch
   // never spends a classifier (a max-children refusal can still waste one: that count is
@@ -744,9 +758,20 @@ export async function dispatch(
     try {
       // forFable on the RUNTIME fallback too: a claude/fable fallback must be picked by Fable
       // headroom, not 5h (PR #24, codeant).
-      ctx.claudeAccount = pickClaudeAccount(fbSnap.claude, req.accounts ?? readClaudeAccounts(),
+      const fallbackAccounts = req.accounts ?? readClaudeAccounts();
+      ctx.claudeAccount = pickClaudeAccount(fbSnap.claude, fallbackAccounts,
         { pin: req.accountPin, routeAwayAtPct: capAwarePolicy(table).routeAwayAtPct, forFable: fallback.model === 'fable' }) ?? null;
       ctx.account = ctx.claudeAccount?.account.id ?? null;
+      if (fallbackAccounts.length > 0 && ctx.claudeAccount === null) {
+        const suffix = fallbackAccounts.length === 1 ? '' : 's';
+        return refusalOutcome(ctx, req, route.taskClass, fallback,
+          packsFor(fallback.provider, req.skills ?? fallback.skills ?? []), {
+            code: 'no-dispatchable-account',
+            reason: `no dispatchable Claude account — all ${fallbackAccounts.length} registered account${suffix} are logged-out or non-dispatchable ` +
+              '(a billing/logged-out signal, or a replaced credential). Run `claude /login` on the affected account and update accounts.json, or wait for a keeper ping to clear the signal.',
+            instruction: 'An operator must restore a Claude account before this can dispatch.',
+          }, { extra: { usedFallback: true }, fellBackFrom: `${route.provider}/${route.model}` });
+      }
     } catch (err) {
       // A pinned-but-unaddressable account is a caller error, but the primary's outcome is already
       // ledgered — report the blocked fallback on it instead of throwing away the whole dispatch.
@@ -945,6 +970,8 @@ export interface DispatchPlan {
   accountAdvice?: AccountAdvice;
   /** HED-78: the Claude account a headless worker will run on (null = in-session / not Claude / no registry). */
   accountPick?: AccountPick | null;
+  /** Number of registered Claude accounts consulted for the effective Claude target. */
+  claudeAccountCount: number;
   /** True for a `dispatchable: false` class — dispatch() refuses before any route runs. */
   notDispatchable: boolean;
   /** HED-3: set when the class primary matched the author's provider and a pool entry was taken instead. */
@@ -1093,9 +1120,11 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
   let account: string | null = null;
   let accountAdvice: AccountAdvice | undefined;
   let accountPick: AccountPick | null | undefined;
+  let claudeAccountCount = 0;
   if (target.provider === 'codex' && req.env?.CODEX_HOME) account = basename(req.env.CODEX_HOME);
   if (target.provider === 'claude') {
     const accounts = claudeAccounts();
+    claudeAccountCount = accounts.length;
     accountAdvice = adviseClaudeAccount(caps.claude, accounts);
     if (!req.inSession && !notDispatchable) {
       accountPick = pickClaudeAccount(caps.claude, accounts, { pin: req.accountPin, routeAwayAtPct: capAwarePolicy(table).routeAwayAtPct, forFable: target.model === 'fable' });
@@ -1108,7 +1137,7 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
   // The dry run must mirror what dispatch() would do — including refusing a bare direct route.
   const gate = overrideReasonGate(req);
   const overrideReasonRequired = gate ? gate.refusal(table).reason : undefined;
-  return { route, target, fallback, origin, execution, decision, skillsForRefusal, account, accountAdvice, accountPick, notDispatchable, reviewerPick, sameProviderReview, overrideReasonRequired };
+  return { route, target, fallback, origin, execution, decision, skillsForRefusal, account, accountAdvice, accountPick, claudeAccountCount, notDispatchable, reviewerPick, sameProviderReview, overrideReasonRequired };
 }
 
 /** One shared dry-run summary for `heddle route` and the `plan_dispatch` MCP tool (identical fields). */
