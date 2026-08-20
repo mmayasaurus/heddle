@@ -8,6 +8,10 @@ export function run(bin: string, args: string[], cwd: string, timeoutMs: number,
     // stdin 'ignore' is load-bearing — every subprocess adapter must close stdin.
     const { env } = buildWorkerEnv({ overrides: envOverrides, unset: envUnset });
     const child = spawn(bin, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    // Decode as UTF-8 at the stream so a multi-byte char split across two chunks is not corrupted by
+    // `+= d` Buffer→string coercion (codacy/copilot #69 — a latent bug all four original runners shared).
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
     let stdout = '';
     let stderr = '';
     // 'error' and 'close' can BOTH fire (e.g. spawn failure then close) — settle exactly once.
