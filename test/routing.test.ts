@@ -5,6 +5,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { loadRouting, listTaskClasses, resolveRoute, directRoute, neverViaCursorPrefixes, isNeverViaCursor, providerExecution } from '../src/routing.js';
 import { workerMcpSupported } from '../src/mcp.js';
+import { normalizeProvider } from '../src/review.js';
 
 /**
  * Behavioral checks on the SHIPPED routing table (routing/routing.v0.yaml) — the file Maya tunes by
@@ -44,7 +45,10 @@ describe('routing.v0.yaml — shipped table invariants', () => {
     ];
     for (const t of targets) {
       if ((t.mcp ?? []).length === 0) continue; // no mcp to attach → any provider is fine
-      expect(workerMcpSupported(t.provider), `class "${c}" ${t.label} (${t.provider}) carries mcp [${t.mcp}] but is not worker-MCP-attachable`).toBe(true);
+      // Normalize (trim + lowercase) exactly as dispatch does before attach, so a cased YAML entry
+      // like " Codex " isn't falsely flagged (copilot/cubic #73).
+      const provider = normalizeProvider(t.provider) ?? t.provider;
+      expect(workerMcpSupported(provider), `class "${c}" ${t.label} (${t.provider}) carries mcp [${t.mcp}] but is not worker-MCP-attachable`).toBe(true);
     }
   });
 

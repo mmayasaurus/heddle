@@ -74,8 +74,9 @@ export function resolveMcpServers(names: string[]): Record<string, { command: st
  * Does this provider have an implemented worker-MCP attachment path at all? DERIVED from
  * validateWorkerMcp (not a parallel hardcoded check) so the two can never drift (gitar #67) — it
  * probes the attachment gate with the canonical, always-registered `memtrace` server and reports
- * whether it is accepted. Today only the `gemini` provider key (the agy / Antigravity CLI behind it)
- * lacks a path and throws. Used by the routing CI invariant (routing.test.ts): every provider an
+ * whether it is accepted. Among the routing providers `gemini` (the agy / Antigravity CLI) is the one
+ * without a path; any OTHER provider key lacking an attachment path (an unknown/custom entry) is
+ * likewise reported unsupported. Used by the routing CI invariant (routing.test.ts): every provider an
  * mcp-carrying task class can resolve to — primary, fallback, AND every reviewer_pool entry — must be
  * worker-MCP-attachable, so an mcp class can never route to a provider that would hard-fail the
  * dispatch. HED-249 replaced HED-205's runtime graceful-degrade (silently dropping mcp for a gemini
