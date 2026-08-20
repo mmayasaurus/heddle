@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { validateWorkerMcp } from '../src/mcp.js';
+import { validateWorkerMcp, workerMcpSupported } from '../src/mcp.js';
 import { dispatch } from '../src/dispatch.js';
 import { useTempResources, fakeAdapter, IDENTITIES } from './helpers.js';
 
@@ -26,6 +26,14 @@ describe('validateWorkerMcp — direct unit contract', () => {
 
   it('refuses gemini/agy attachment outright (schema unverified — heddle never writes guessed config)', () => {
     expect(() => validateWorkerMcp('gemini', ['memtrace'])).toThrow(/not implemented yet/);
+  });
+
+  it('keeps workerMcpSupported aligned with the validateWorkerMcp attachment gate (HED-205)', () => {
+    for (const provider of ['codex', 'claude', 'cursor', 'gemini', 'openrouter']) {
+      let threw = false;
+      try { validateWorkerMcp(provider, ['memtrace']); } catch { threw = true; }
+      expect(workerMcpSupported(provider)).toBe(!threw);
+    }
   });
 
   it('is a no-op when no servers are requested, whatever the provider (not covered at the dispatch level)', () => {

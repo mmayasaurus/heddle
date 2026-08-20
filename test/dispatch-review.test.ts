@@ -73,6 +73,24 @@ describe('adversarial review dispatch', () => {
     } finally { restore(); }
   });
 
+  it('HED-205 drops class-default memtrace for a gemini reviewer', async () => {
+    const restore = reviewRouting(tempDir); const ledger = tempLedger(); const fake = fakeAdapter();
+    try {
+      const outcome = await dispatch({ taskClass: 'adversarial-review', authorProvider: 'cursor', prompt: 'review', cwd: tempDir(), identity: unbound }, ledger, () => fake.adapter);
+      expect(fake.calls).toHaveLength(1); expect(fake.calls[0].opts.model).toBe('gemini-3.1-pro-high');
+      expect(outcome.routeReason).toContain('class-default mcp [memtrace] dropped: gemini has no worker-MCP path');
+    } finally { restore(); }
+  });
+
+  it('HED-205 retains class-default memtrace for a cursor reviewer', async () => {
+    const restore = reviewRouting(tempDir); const ledger = tempLedger(); const fake = fakeAdapter();
+    try {
+      const outcome = await dispatch({ taskClass: 'adversarial-review', authorProvider: 'claude', prompt: 'review', cwd: tempDir(), identity: unbound }, ledger, () => fake.adapter);
+      expect(outcome.routeReason ?? '').not.toContain('dropped');
+      expect(fake.calls[0].opts.model).toBe('cursor-grok-4.6-high');
+    } finally { restore(); }
+  });
+
   it('never retries a failed review on the author family, and a cap-routed primary still runs rather than routing to the author family', async () => {
     const restore = reviewRouting(tempDir); const failed = fakeAdapter({ ok: false, output: 'failed', exitCode: 1 });
     try {
