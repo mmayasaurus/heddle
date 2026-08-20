@@ -1,14 +1,18 @@
 import { spawn } from 'node:child_process';
 import { buildWorkerEnv } from '../env.js';
+import { FAMILY_PREFIXES } from '../routing.js';
 import type { DispatchOptions, WorkerAdapter, WorkerResult, TokenUsage } from '../types.js';
 import { lastResultJson } from './parse.js';
 
 /**
- * Model families Cursor carries that Maya holds a DIRECT subscription for. Routing these through
- * Cursor would spend the wrong pool (policy: routing/routing.v0.yaml `never_via_cursor`).
- * Enforced here so a bad routing-table entry can't silently misbill.
+ * Fail-safe belt-and-suspenders — the AUTHORITATIVE, tunable policy is never_via_cursor enforced
+ * at route resolution (routing.ts). This floor is DELIBERATELY NOT derived from the loaded table
+ * (cubic #63): it is a hardcoded billing-safety guard over the known direct-subscription families,
+ * so mis-tuning the YAML to allow, say, gemini through Cursor cannot silently reach production
+ * billing — that change must be made in code AND YAML, which is the intended friction. A NEW family
+ * added only via YAML is still enforced at resolveRoute; this floor just covers claude/gpt/gemini.
  */
-const DIRECT_SUBSCRIPTION_PREFIXES = ['claude-', 'gpt-', 'gemini-', 'o1-', 'o3-'];
+const DIRECT_SUBSCRIPTION_PREFIXES = Object.values(FAMILY_PREFIXES).flat();
 
 /**
  * Cursor CLI adapter — `cursor-agent -p --output-format json`.
@@ -27,11 +31,12 @@ export class CursorAdapter implements WorkerAdapter {
   constructor(private readonly bin = 'cursor-agent') {}
 
   async dispatch(prompt: string, opts: DispatchOptions): Promise<WorkerResult> {
-    if (DIRECT_SUBSCRIPTION_PREFIXES.some((p) => opts.model.startsWith(p))) {
+    if (DIRECT_SUBSCRIPTION_PREFIXES.some((p) => opts.model.toLowerCase().startsWith(p))) {
       return {
         ok: false, output: '', exitCode: null,
-        error: `policy: "${opts.model}" belongs to a family with a direct subscription — ` +
-          `route it to that provider's adapter, not through Cursor`,
+        error: `billing-safety: "${opts.model}" belongs to a family with a direct subscription — ` +
+          `route it to that provider's adapter, not through Cursor (hardcoded fail-safe floor; the ` +
+          `tunable policy is never_via_cursor in routing.ts)`,
       };
     }
 

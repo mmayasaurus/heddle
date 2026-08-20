@@ -28,10 +28,24 @@ describe('adversarial review helpers', () => {
 
   it('rejects reviewer pools that contain no model family different from the author', () => {
     const path = join(tempDir(), 'routing.yaml');
-    writeFileSync(path, `task_classes:\n  only-author:\n    provider: cursor\n    model: m\n    reviewer_pool:\n      - { provider: cursor, model: m }\n  empty-pool:\n    provider: cursor\n    model: m\n`);
+    writeFileSync(path, `providers:\n  cursor: {}\ntask_classes:\n  only-author:\n    provider: cursor\n    model: m\n    reviewer_pool:\n      - { provider: cursor, model: m }\n  empty-pool:\n    provider: cursor\n    model: m\n`);
     const table = loadRouting(path);
     expect(() => pickReviewer(resolveRoute(table, 'only-author'), 'cursor')).toThrow(/must be a different model family/);
     expect(() => pickReviewer(resolveRoute(table, 'empty-pool'), 'cursor')).toThrow(/must be a different model family/);
+  });
+
+  it('skips a reviewer_pool entry the usable callback rejects — e.g. a held provider (qodo #63)', () => {
+    const route = {
+      taskClass: 'r', provider: 'codex', model: 'sol', editsCode: false, dispatchable: true,
+      readOnly: false, autoAssess: false,
+      reviewerPool: [{ provider: 'cursor', model: 'grok' }, { provider: 'gemini', model: 'pro' }],
+    } as any;
+    // author matches the primary (codex) → pick from the pool; cursor is unusable (held) → skip to gemini.
+    const usable = (p: string) => (p === 'cursor' ? 'provider on hold and not routable yet' : null);
+    expect(pickReviewer(route, 'codex', usable)?.provider).toBe('gemini');
+    // when the ONLY different-family entry is unusable, there is no reviewer → throw (never dispatch it).
+    const single = { ...route, reviewerPool: [{ provider: 'cursor', model: 'grok' }] } as any;
+    expect(() => pickReviewer(single, 'codex', usable)).toThrow(/different model family/);
   });
 
   it('reports a non-git directory as unavailable for a mandate comparison', () => {

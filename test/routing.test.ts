@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { loadRouting, listTaskClasses, resolveRoute, directRoute, providerExecution } from '../src/routing.js';
+import { loadRouting, listTaskClasses, resolveRoute, directRoute, neverViaCursorPrefixes, isNeverViaCursor, providerExecution } from '../src/routing.js';
 
 /**
  * Behavioral checks on the SHIPPED routing table (routing/routing.v0.yaml) — the file Maya tunes by
@@ -55,10 +55,12 @@ describe('routing.v0.yaml — shipped table invariants', () => {
     expect(table.policy.never_via_cursor).toEqual(['claude', 'gpt', 'gemini']);
   });
 
+  it('expands never_via_cursor families to the unchanged Cursor-refusal prefix set', () => {
+    expect(new Set(neverViaCursorPrefixes(table))).toEqual(new Set(['claude-', 'gpt-', 'o1-', 'o3-', 'gemini-']));
+  });
+
   it.each(classes)('%s: never routes a never_via_cursor family through cursor', (c) => {
-    // Derived from the table's own policy so this guard can't drift from the YAML it validates.
-    // Cursor's catalog ids carry the family as a prefix (claude-…, gpt-…, gemini-…).
-    const banned = (table.policy.never_via_cursor as string[]).map((family) => `${family}-`);
+    const banned = neverViaCursorPrefixes(table);
     for (const t of targetsOf(c)) {
       if (t.provider !== 'cursor') continue;
       for (const p of banned) {
@@ -76,6 +78,8 @@ describe('routing.v0.yaml — shipped table invariants', () => {
 
 describe('resolveRoute / directRoute — policy fences', () => {
   const table = loadRouting(TABLE_PATH);
+  const directSubscriptionModels = ['claude-opus-4.6', 'gpt-5.6', 'gemini-3-pro', 'o1-preview', 'o3-mini'];
+  const cursorModels = ['cursor-grok-4.6-high', 'composer-2.5', 'kimi-k3-high'];
 
   it('rejects an unknown class and lists every known class in the message', () => {
     let message = '';
@@ -90,6 +94,94 @@ describe('resolveRoute / directRoute — policy fences', () => {
 
   it('refuses a direct route to a provider the table does not know', () => {
     expect(() => directRoute(table, 'openrouter', 'x')).toThrow(/unknown provider "openrouter"/);
+  });
+
+  it.each(directSubscriptionModels)('rejects %s through Cursor in both class and direct routing', (model) => {
+    const className = `cursor-${model}`;
+    const routedTable = { ...table, taskClasses: { ...table.taskClasses, [className]: { provider: 'cursor', model } } };
+    expect(() => resolveRoute(routedTable, className)).toThrow(/direct-subscription family/);
+    expect(() => directRoute(table, 'cursor', model)).toThrow(/direct-subscription family/);
+  });
+
+  it.each(directSubscriptionModels)('rejects %s through Cursor as a class fallback', (model) => {
+    const className = `cursor-fallback-${model}`;
+    const routedTable = { ...table, taskClasses: { ...table.taskClasses, [className]: { provider: 'codex', model: 'gpt-5.6-luna', fallback: { provider: 'cursor', model } } } };
+    expect(() => resolveRoute(routedTable, className)).toThrow(/direct-subscription family/);
+  });
+
+  it.each(cursorModels)('allows the Cursor-native model %s through both class and direct routing', (model) => {
+    const className = `cursor-${model}`;
+    const routedTable = { ...table, taskClasses: { ...table.taskClasses, [className]: { provider: 'cursor', model } } };
+    expect(() => resolveRoute(routedTable, className)).not.toThrow();
+    expect(() => directRoute(table, 'cursor', model)).not.toThrow();
+  });
+
+  it('rejects a primary provider that is held', () => {
+    const routedTable = { ...table, providers: { ...table.providers, held: { status: 'held' } }, taskClasses: { ...table.taskClasses, held: { provider: 'held', model: 'm1' } } };
+    expect(() => resolveRoute(routedTable, 'held')).toThrow(/provider "held" is on hold and not routable yet/);
+  });
+
+  it('rejects a fallback provider that is held', () => {
+    const routedTable = { ...table, providers: { ...table.providers, held: { status: 'held' } }, taskClasses: { ...table.taskClasses, 'fallback-held': { provider: 'codex', model: 'gpt-5.6-luna', fallback: { provider: 'held', model: 'm1' } } } };
+    expect(() => resolveRoute(routedTable, 'fallback-held')).toThrow(/fallback provider "held" is on hold and not routable yet/);
+  });
+
+  it('refuses a DIFFERENTLY-CASED direct-subscription id through Cursor (case-insensitive — gitar #63)', () => {
+    for (const model of ['GPT-5.6', 'Claude-3', 'Gemini-3-pro', 'O3-mini']) {
+      const className = `cursor-upper-${model}`;
+      const routedTable = { ...table, taskClasses: { ...table.taskClasses, [className]: { provider: 'cursor', model } } };
+      expect(() => resolveRoute(routedTable, className)).toThrow(/direct-subscription family/);
+      expect(() => directRoute(table, 'cursor', model)).toThrow(/direct-subscription family/);
+    }
+    expect(isNeverViaCursor(table, 'GPT-5.6')).toBe(true);
+    expect(isNeverViaCursor(table, 'cursor-grok-4.6-high')).toBe(false);
+  });
+
+  it('FAILS SAFE on a malformed never_via_cursor — refuses ALL families, not none (codeant #63)', () => {
+    for (const badPolicy of [{}, { never_via_cursor: 'claude' }, { never_via_cursor: null }]) {
+      const bad = { ...table, policy: badPolicy as any };
+      expect(new Set(neverViaCursorPrefixes(bad))).toEqual(new Set(['claude-', 'gpt-', 'o1-', 'o3-', 'gemini-']));
+      const rt = { ...bad, taskClasses: { ...table.taskClasses, x: { provider: 'cursor', model: 'gpt-5.6' } } };
+      expect(() => resolveRoute(rt, 'x')).toThrow(/direct-subscription family/);
+    }
+  });
+
+  it('rejects a task class whose PRIMARY provider is unknown (copilot #63)', () => {
+    const rt = { ...table, taskClasses: { ...table.taskClasses, bad: { provider: 'openrouter', model: 'x' } } };
+    expect(() => resolveRoute(rt, 'bad')).toThrow(/names unknown provider "openrouter"/);
+  });
+
+  it('treats a task class whose provider is an inherited property (`toString`) as UNKNOWN, never the prototype method (cubic #63)', () => {
+    const rt = { ...table, taskClasses: { ...table.taskClasses, proto: { provider: 'toString', model: 'x' } } };
+    expect(() => resolveRoute(rt, 'proto')).toThrow(/names unknown provider "toString"/);
+    // same prototype-key hole in the fallback slot and in a direct route
+    const rtf = { ...table, taskClasses: { ...table.taskClasses, protofb: { provider: 'codex', model: 'gpt-5.6-luna', fallback: { provider: 'constructor', model: 'x' } } } };
+    expect(() => resolveRoute(rtf, 'protofb')).toThrow(/fallback names unknown provider "constructor"/);
+    expect(() => directRoute(table, 'toString', 'x')).toThrow(/unknown provider "toString"/);
+  });
+
+  it('FAILS SAFE on an EMPTY or non-string never_via_cursor — refuses ALL families, never none (cubic #63)', () => {
+    for (const badPolicy of [{ never_via_cursor: [] }, { never_via_cursor: ['claude', 123] }, { never_via_cursor: [null] }]) {
+      const bad = { ...table, policy: badPolicy as any };
+      expect(new Set(neverViaCursorPrefixes(bad))).toEqual(new Set(['claude-', 'gpt-', 'o1-', 'o3-', 'gemini-']));
+      const rt = { ...bad, taskClasses: { ...table.taskClasses, x: { provider: 'cursor', model: 'gpt-5.6' } } };
+      expect(() => resolveRoute(rt, 'x')).toThrow(/direct-subscription family/);
+    }
+  });
+
+  it('case-folds a custom never_via_cursor family and expands upper-case GPT to its o1-/o3- ids (cubic #63)', () => {
+    // a synthesized prefix for a non-hardcoded family must be lowercased so a lowercased model still matches
+    const groq = { ...table, policy: { never_via_cursor: ['Groq'] } as any,
+      taskClasses: { ...table.taskClasses, g: { provider: 'cursor', model: 'groq-3' } } };
+    expect(() => resolveRoute(groq, 'g')).toThrow(/direct-subscription family/);
+    // the hardcoded-family lookup is case-folded too, so `GPT` still reaches o1-/o3-, not just gpt-
+    const gpt = { ...table, policy: { never_via_cursor: ['GPT'] } as any,
+      taskClasses: { ...table.taskClasses, o: { provider: 'cursor', model: 'o1-mini' } } };
+    expect(() => resolveRoute(gpt, 'o')).toThrow(/direct-subscription family/);
+    // a prototype-key family must not embed the inherited method (which would crash the compare)
+    const proto = { ...table, policy: { never_via_cursor: ['toString'] } as any };
+    expect(() => neverViaCursorPrefixes(proto)).not.toThrow();
+    expect(neverViaCursorPrefixes(proto)).toEqual(['tostring-']);
   });
 
   it('a direct route carries the caller\'s skills/mcp and a self-describing task class', () => {

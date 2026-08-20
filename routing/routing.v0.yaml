@@ -9,7 +9,7 @@ policy:
   never_via_cursor: [claude, gpt, gemini]  # direct subscriptions cover these families
   metered_pool_guard:
     cursor_other_models:
-      route_away_at_pct: 90           # near-exhaustion → reroute; NEVER on-demand overage
+      route_away_at_pct: 90           # DECLARED, not enforced until Cursor usage source (HED-9); near-exhaustion → reroute; NEVER on-demand overage
   reviewer_fleet_isolation:
     ollama_cloud: excluded            # reserved for PR reviewer bots (account-scoped limits)
   official_binaries_only: true        # each vendor's own CLI + own auth; never a third-party

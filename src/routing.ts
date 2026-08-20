@@ -97,6 +97,35 @@ function toTarget(node: any, where = 'task class'): RouteTarget | undefined {
   };
 }
 
+/**
+ * Own-property provider lookup. A task class, fallback, or reviewer_pool entry naming an INHERITED
+ * property (`toString`, `constructor`, …) must read as an UNKNOWN provider — never the prototype
+ * method that a bare `table.providers[name]` returns for it (a truthy function that passes a `!cfg`
+ * guard yet has no `.status`, so it slips every policy check and yields an invalid route). cubic #63.
+ */
+export function providerConfig(
+  table: RoutingTable, provider: string,
+): Record<string, unknown> | undefined {
+  return Object.hasOwn(table.providers, provider) ? table.providers[provider] : undefined;
+}
+
+/**
+ * Assert a (provider, model) target is routable under policy: the provider is a known OWN entry, not
+ * excluded and not held, and — for Cursor — not a direct-subscription family (policy.never_via_cursor).
+ * `subject` prefixes the error so primary / fallback callers get a self-describing message. Shared by
+ * both paths so the guard cannot drift between them (the +complexity/duplication codacy/copilot #63
+ * flagged lived in having these four checks written twice).
+ */
+function assertRoutableTarget(table: RoutingTable, provider: string, model: string, subject: string): void {
+  const cfg = providerConfig(table, provider);
+  if (!cfg) throw new Error(`${subject} names unknown provider "${provider}"`);
+  if (cfg.status === 'excluded') throw new Error(`${subject} routes to excluded provider "${provider}"`);
+  if (cfg.status === 'held') throw new Error(`${subject} provider "${provider}" is on hold and not routable yet`);
+  if (provider === 'cursor' && isNeverViaCursor(table, model)) {
+    throw new Error(`${subject} model "${model}" is a direct-subscription family — never route it through Cursor (policy.never_via_cursor)`);
+  }
+}
+
 export function resolveRoute(table: RoutingTable, taskClass: string): Route {
   const node = (table.taskClasses as any)[taskClass];
   if (!node) {
@@ -107,10 +136,7 @@ export function resolveRoute(table: RoutingTable, taskClass: string): Route {
   if (!primary.provider || !primary.model) {
     throw new Error(`task class "${taskClass}" is missing provider or model`);
   }
-  const providerCfg = table.providers[primary.provider];
-  if (providerCfg?.status === 'excluded') {
-    throw new Error(`task class "${taskClass}" routes to excluded provider "${primary.provider}"`);
-  }
+  assertRoutableTarget(table, primary.provider, primary.model, `task class "${taskClass}"`);
   // The fallback is a different ROUTE for the same CLASS, so class-level policy (skill packs, MCP
   // servers) carries over unless the fallback node sets its own. Effort deliberately does not: its
   // vocabulary is per provider (codex minimal…xhigh vs agy low|medium|high; cursor bakes it into
@@ -120,13 +146,8 @@ export function resolveRoute(table: RoutingTable, taskClass: string): Route {
     if (!fb.provider || !fb.model) {
       throw new Error(`task class "${taskClass}": fallback is missing provider or model`);
     }
-    // Same policy checks as the primary: a fallback into an unknown/excluded provider is a broken
-    // table, surfaced at resolve time — not after the primary already failed.
-    const fbCfg = table.providers[fb.provider];
-    if (!fbCfg) throw new Error(`task class "${taskClass}": fallback names unknown provider "${fb.provider}"`);
-    if (fbCfg.status === 'excluded') {
-      throw new Error(`task class "${taskClass}": fallback routes to excluded provider "${fb.provider}"`);
-    }
+    // Same policy checks as the primary, surfaced at resolve time — not after the primary failed.
+    assertRoutableTarget(table, fb.provider, fb.model, `task class "${taskClass}": fallback`);
   }
   const fallback = fb ? { ...fb, skills: fb.skills ?? primary.skills, mcp: fb.mcp ?? primary.mcp } : undefined;
   return {
@@ -154,7 +175,43 @@ export interface StructuralCaps {
 }
 export const DEFAULT_STRUCTURAL_CAPS: StructuralCaps = { max: 8, staleAfterMs: 3 * 60 * 60 * 1000 };
 
+// policy.never_via_cursor lists FAMILIES; FAMILY_PREFIXES maps each to its model-id prefixes
+// (o1-/o3- are OpenAI 'gpt' family).
+export const FAMILY_PREFIXES: Record<string, string[]> = {
+  claude: ['claude-'],
+  gpt: ['gpt-', 'o1-', 'o3-'],
+  gemini: ['gemini-'],
+};
+
+export function neverViaCursorPrefixes(table: RoutingTable): string[] {
+  const raw = (table.policy as any)?.never_via_cursor;
+  // Fail SAFE: only a NON-EMPTY, all-string list is honored as tuning; a missing / non-array / EMPTY /
+  // non-string-containing never_via_cursor defaults to ALL known direct-subscription families (refuse
+  // them), NEVER [] — an empty or malformed list would silently disable the billing guard at route
+  // resolution (codeant #63; the empty-list and non-string holes, cubic #63).
+  const fams = Array.isArray(raw) && raw.length > 0 && raw.every((x) => typeof x === 'string')
+    ? (raw as string[]) : Object.keys(FAMILY_PREFIXES);
+  // Case-fold each family and use an OWN-property lookup: a synthesized `${f}-` for an unknown family
+  // must be lowercased (else an uppercase policy family like `Groq` yields `Groq-` and never matches the
+  // lowercased model — cubic #63), and `FAMILY_PREFIXES[f]` for a prototype key like `toString` must not
+  // return the inherited method (which would embed a function in the prefix list and crash the compare).
+  return fams.flatMap((f) => {
+    const fam = f.toLowerCase();
+    return Object.hasOwn(FAMILY_PREFIXES, fam) ? FAMILY_PREFIXES[fam] : [`${fam}-`];
+  });
+}
+
+/** True if `model` must never route through Cursor (a direct-subscription family). CASE-INSENSITIVE —
+ *  model ids come from external callers (directRoute takes req.model), so `GPT-5.6` / `Claude-3` must
+ *  not slip past both this check AND the adapter fail-safe, which shared the same case logic (gitar #63). */
+export function isNeverViaCursor(table: RoutingTable, model: string): boolean {
+  const m = model.toLowerCase();
+  return neverViaCursorPrefixes(table).some((p) => m.startsWith(p));
+}
+
 export function structuralCaps(table: RoutingTable): StructuralCaps {
+  // route_away_at_pct under metered_pool_guard is declared intent only: enforcement needs the
+  // Cursor usage source (HED-9). reviewer_fleet_isolation and official_binaries_only remain declared-intent.
   const node = (table.policy as any)?.structural_caps ?? {};
   const max = Number(node.max_children_per_orchestrator);
   const stale = Number(node.in_flight_stale_after_ms);
@@ -248,18 +305,20 @@ export function describeTaskClasses(
 /**
  * Direct route — the orchestrator names a provider+model itself instead of a task class.
  * This is the "call whatever model is best for the job" escape hatch: full dynamic choice,
- * but still fenced by the subscription policy (excluded/held providers refuse here, and the
- * per-adapter misbilling guards — e.g. no claude/gpt/gemini ids through Cursor — still apply
- * at dispatch time). No fallback and no opt-in gate: naming a model IS the opt-in.
+ * but still fenced by the subscription policy (excluded/held providers and direct-subscription
+ * families through Cursor refuse here). No fallback and no opt-in gate: naming a model IS the opt-in.
  */
 export function directRoute(
   table: RoutingTable, provider: string, model: string, skills?: string[], mcp?: string[],
 ): Route {
-  const cfg = table.providers[provider];
+  const cfg = providerConfig(table, provider);
   if (!cfg) {
     throw new Error(`unknown provider "${provider}". Known: ${Object.keys(table.providers).join(', ')}`);
   }
   if (cfg.status === 'excluded') throw new Error(`provider "${provider}" is excluded from orchestration`);
   if (cfg.status === 'held') throw new Error(`provider "${provider}" is on hold and not routable yet`);
+  if (provider === 'cursor' && isNeverViaCursor(table, model)) {
+    throw new Error(`model "${model}" is a direct-subscription family — never route it through Cursor (policy.never_via_cursor)`);
+  }
   return { taskClass: `direct:${provider}/${model}`, provider, model, skills, mcp, editsCode: false, dispatchable: true, readOnly: false, autoAssess: false };
 }

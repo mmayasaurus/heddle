@@ -4,7 +4,7 @@ import { CursorAdapter } from './adapters/cursor.js';
 import { ClaudeAdapter } from './adapters/claude.js';
 import { Ledger, type DispatchStartRecord } from './ledger.js';
 import {
-  loadRouting, resolveRoute, directRoute, providerExecution, structuralCaps, listTaskClasses,
+  loadRouting, resolveRoute, directRoute, providerExecution, structuralCaps, listTaskClasses, providerConfig,
   type Route, type RouteTarget, type RoutingTable, type StructuralCaps,
 } from './routing.js';
 import { materializeAgentsMd, readPack, withMandatoryPacks, composePacks, modelFamilyPack, ALL_FAMILY_PACKS } from './skillpacks.js';
@@ -1007,9 +1007,10 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
       // HED-3: when the class primary is the author's provider, take the first differing pool entry.
       const pick = route.reviewerPool
         ? pickReviewer(route, author, (provider, model) => {
-            const cfg = table.providers[provider];
+            const cfg = providerConfig(table, provider); // own-property: a `toString` entry is unknown, not the prototype method (cubic #63)
             if (!cfg) return 'unknown provider';
             if (cfg.status === 'excluded') return 'provider excluded by policy';
+            if (cfg.status === 'held') return 'provider on hold and not routable yet'; // uniform held check (qodo #63)
             if (Array.isArray(cfg.models) && cfg.models.length && !cfg.models.includes(model)) return 'model not in provider list';
             return null;
           })
