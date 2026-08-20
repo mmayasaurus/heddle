@@ -56,7 +56,8 @@ So an unattended shell job cannot safely update the live graph today.
 
 ## The mechanism: detect, then re-index by hand
 
-`scripts/memtrace-staleness-check.sh` — read-only, non-destructive:
+`scripts/memtrace-staleness-check.sh` — non-destructive to the repo and the graph store (it only
+updates remote-tracking refs via `git fetch` and appends to its own log):
 
 1. `git fetch origin main` (remote-tracking refs only; no working-tree change).
 2. Compare `origin/main` to a **last-indexed marker** (`.memtrace-heddle-indexed-commit`, a gitignored
@@ -64,8 +65,8 @@ So an unattended shell job cannot safely update the live graph today.
 3. If they differ → **nag loudly** (log line + stderr + a best-effort macOS notification) and exit `1`.
    If equal → exit `0`. Setup error → exit `2`.
 
-It never writes a `.memdb` and never mutates the working tree. Run it ad-hoc, at agent `/startup`, or on
-the launchd timer.
+It never writes a `.memdb`, never changes the working tree, and never rewrites history — only
+remote-tracking refs (fetch) and its own log. Run it ad-hoc, at agent `/startup`, or on the launchd timer.
 
 ### When it nags — the re-index procedure (an agent runs this)
 
@@ -76,8 +77,9 @@ git -C /Users/mayatobi/Developer/heddle merge --ff-only origin/main
 # 2. re-index into the live :50051 store (MCP — agent-driven):
 index_directory(path="/Users/mayatobi/Developer/heddle", repo_id="heddle", incremental=true, branch="main")
 
-# 3. record what was indexed so the detector goes quiet:
-printf '%s' "$(git -C /Users/mayatobi/Developer/heddle rev-parse origin/main)" \
+# 3. record the commit ACTUALLY indexed — the checkout's HEAD after the ff, NOT a fresh
+#    origin/main (which may have advanced since the detector fetched), so the marker never over-claims:
+git -C /Users/mayatobi/Developer/heddle rev-parse HEAD \
   > /Users/mayatobi/Developer/heddle/.memtrace-heddle-indexed-commit
 ```
 
@@ -87,8 +89,8 @@ canonical root and is gitignored — it is machine-local runtime state, not trac
 ## Installing the launchd timer — Maya's call
 
 `scripts/com.heddle.memtrace-staleness.plist` is a **template, deliberately not loaded**. Installing it
-touches the machine's launchd and sits beside a still-pending decision about the shared memtrace
-data-dir (see the `reference_memtrace_dashboard_runtime` memory), so the install step is Maya's
+touches the machine's launchd and sits beside a still-pending operator decision about the shared
+memtrace data-dir (tracked in HED-234), so the install step is Maya's
 firsthand:
 
 ```sh
