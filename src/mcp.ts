@@ -58,7 +58,11 @@ export function resolveMcpServers(names: string[]): Record<string, { command: st
     const s = WORKER_MCP_SERVERS[n];
     if (!s) {
       throw new Error(
-        `unknown worker MCP server "${n}" for materialization. Materializable: ${Object.keys(WORKER_MCP_SERVERS).join(', ')}. (serena is available only for codex workers, attached via inline -c flags.)`,
+        `unknown worker MCP server "${n}". Available: ${Object.keys(WORKER_MCP_SERVERS).join(', ')}.` +
+          // Only claim serena is codex-only when serena is what was actually asked for — otherwise this
+          // misleads for any other unknown name (copilot/cubic #68). This fn is shared by claude
+          // (ephemeral --mcp-config) too, so keep the wording provider-neutral (codacy #68).
+          (n === 'serena' ? ' (serena is codex-only — attached via inline -c flags, never materialized.)' : ''),
       );
     }
     out[n] = s;
@@ -66,16 +70,6 @@ export function resolveMcpServers(names: string[]): Record<string, { command: st
   return out;
 }
 
-/**
- * Attach MCP servers for a worker in `cwd`. Returns a restore function.
- *
- * - codex: workers get their MCP servers from inline `-c mcp_servers.*` overrides emitted by
- *   codexMcpFlags at invocation. `--ignore-user-config` sheds global config, so this function
- *   writes no per-task file for codex.
- * - cursor: project `.cursor/mcp.json` (mcpServers key — verified format).
- * - gemini/agy: project `.agents/mcp_config.json` — format NOT yet verified against agy docs, so
- *   this path throws rather than write a guessed schema. (Tracked follow-up.)
- */
 /**
  * Does this provider have an implemented worker-MCP attachment path at all? DERIVED from
  * validateWorkerMcp (not a parallel hardcoded check) so the two can never drift (gitar #67) — it
@@ -136,13 +130,28 @@ export function claudeMcpConfigFile(serverNames: string[]): { path: string; clea
   return { path, cleanup: () => { try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ } } };
 }
 
+/**
+ * Attach MCP servers for a worker in `cwd`. Returns a restore function.
+ *
+ * - codex: workers get their MCP servers from inline `-c mcp_servers.*` overrides emitted by
+ *   codexMcpFlags at invocation. `--ignore-user-config` sheds global config, so this function
+ *   writes no per-task file for codex.
+ * - claude: no-op — its MCP is a temp `--mcp-config` file written by claudeMcpConfigFile, never the worktree.
+ * - cursor: project `.cursor/mcp.json` (mcpServers key — verified format).
+ * - gemini/agy: project `.agents/mcp_config.json` — format NOT yet verified against agy docs, so
+ *   this path throws rather than write a guessed schema. (Tracked follow-up.)
+ */
 export function materializeWorkerMcp(cwd: string, provider: string, serverNames: string[], opts: MaterializeOpts): () => void {
   if (serverNames.length === 0) return () => { /* nothing to attach */ };
 
   // Codex servers and their tool approval come from codexMcpFlags inline `-c` overrides (including
   // default_tools_approval_mode="approve"), so there is nothing to materialize here. Codex server
   // validation happens via codexMcpFlags (called by validateWorkerMcp), not in this function.
-  if (provider === 'codex') return () => { /* no-op */ };
+  // codex + claude write nothing into the worktree — codex via inline `-c` flags (codexMcpFlags),
+  // claude via a temp `--mcp-config` file (claudeMcpConfigFile). Both are no-ops here; claude is
+  // never actually routed through this fn (dispatch handles it separately), but returning a no-op
+  // keeps it consistent with validateWorkerMcp, which lists claude as supported (codacy #68).
+  if (provider === 'codex' || provider === 'claude') return () => { /* no-op */ };
 
   const servers = resolveMcpServers(serverNames);
   switch (provider) {

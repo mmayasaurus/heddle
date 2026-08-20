@@ -24,10 +24,15 @@ describe('validateWorkerMcp — direct unit contract', () => {
     expect(() => validateWorkerMcp('codex', ['does-not-exist'])).toThrow(/unknown codex MCP server "does-not-exist"/);
   });
 
-  it('explains that Serena is Codex-only when cursor materialization requests it', () => {
+  it('explains that Serena is Codex-only when cursor requests it', () => {
     expect(() => validateWorkerMcp('cursor', ['serena'])).toThrow(
-      'unknown worker MCP server "serena" for materialization. Materializable: memtrace. (serena is available only for codex workers, attached via inline -c flags.)',
+      'unknown worker MCP server "serena". Available: memtrace. (serena is codex-only — attached via inline -c flags, never materialized.)',
     );
+  });
+
+  it('does NOT append the Serena note for an unrelated unknown server (copilot/cubic #68)', () => {
+    // A non-serena unknown name must not be told it is "codex-only" — that claim is serena-specific.
+    expect(() => validateWorkerMcp('cursor', ['does-not-exist'])).toThrow(/unknown worker MCP server "does-not-exist"\. Available: memtrace\.$/);
   });
 
   it('refuses gemini/agy attachment outright (schema unverified — heddle never writes guessed config)', () => {
