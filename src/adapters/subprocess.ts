@@ -16,22 +16,18 @@ export function run(bin: string, args: string[], cwd: string, timeoutMs: number,
     let stderr = '';
     // 'error' and 'close' can BOTH fire (e.g. spawn failure then close) — settle exactly once.
     let settled = false;
-    let timedOut = false;
+    let killedByTimer = false;
     const settle = (v: { stdout: string; stderr: string; exitCode: number | null }) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve({ ...v, timedOut });
+      // Decide timedOut from the OUTCOME, not a pre-kill guess: it is a timeout only if the timer fired
+      // AND the process died from the signal (exitCode null). A process that exits naturally as the
+      // timer fires still reports its real exit code — even if the event loop was blocked past its exit
+      // so exitCode wasn't set yet when the timer ran — so it is NOT a timeout (copilot/cubic #69).
+      resolve({ ...v, timedOut: killedByTimer && v.exitCode === null });
     };
-    const timer = setTimeout(() => {
-      // Node sets exitCode/signalCode on the 'exit' event, which precedes 'close'. If the child has
-      // already exited when the timer fires, this is NOT a timeout — don't flag it or SIGKILL a
-      // finished pid (copilot/cubic #69). JS is single-threaded, so the child cannot exit between this
-      // check and the kill below.
-      if (child.exitCode !== null || child.signalCode !== null) return;
-      timedOut = true;
-      child.kill('SIGKILL');
-    }, timeoutMs);
+    const timer = setTimeout(() => { killedByTimer = true; child.kill('SIGKILL'); }, timeoutMs);
     child.stdout.on('data', (d) => { stdout += d; });
     child.stderr.on('data', (d) => { stderr += d; });
     child.on('close', (code) => settle({ stdout, stderr, exitCode: code }));
