@@ -82,12 +82,21 @@ describe('adversarial review dispatch', () => {
     } finally { restore(); }
   });
 
-  it('HED-205 retains class-default memtrace for a cursor reviewer', async () => {
-    const restore = reviewRouting(tempDir); const ledger = tempLedger(); const fake = fakeAdapter();
+  it('HED-205 retains class-default memtrace for a cursor reviewer — materialized, not just un-dropped (cubic #67)', async () => {
+    const restore = reviewRouting(tempDir); const ledger = tempLedger();
+    // Capture the reviewer's project MCP config DURING the dispatch (before the restore runs), so a
+    // regression that silently stopped attaching memtrace to cursor — without emitting the drop note —
+    // fails on the POSITIVE assertion, not only the negative not-'dropped' one.
+    let materializedMcp: string | null = null;
+    const capturing: WorkerAdapter = { name: 'fake', provider: 'cursor', dispatch: async (_p, o) => {
+      try { materializedMcp = readFileSync(join(o.cwd, '.cursor', 'mcp.json'), 'utf8'); } catch { materializedMcp = null; }
+      return { ok: true, output: 'done', exitCode: 0 };
+    } };
     try {
-      const outcome = await dispatch({ taskClass: 'adversarial-review', authorProvider: 'claude', prompt: 'review', cwd: tempDir(), identity: unbound }, ledger, () => fake.adapter);
+      const outcome = await dispatch({ taskClass: 'adversarial-review', authorProvider: 'claude', prompt: 'review', cwd: tempDir(), identity: unbound }, ledger, () => capturing);
+      expect(outcome.review?.reviewerProvider).toBe('cursor');
       expect(outcome.routeReason ?? '').not.toContain('dropped');
-      expect(fake.calls[0].opts.model).toBe('cursor-grok-4.6-high');
+      expect(materializedMcp).toContain('memtrace'); // POSITIVE: memtrace actually materialized for the cursor reviewer
     } finally { restore(); }
   });
 

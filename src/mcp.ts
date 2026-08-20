@@ -105,14 +105,19 @@ export function validateWorkerMcp(provider: string, serverNames: string[]): void
   if (serverNames.length === 0) return;
   if (provider === 'codex') { codexMcpFlags(serverNames); return; }
   if (provider === 'claude') { resolveMcpServers(serverNames); return; } // written to a temp --mcp-config file at run time
+  if (provider === 'cursor') { resolveMcpServers(serverNames); return; } // materialized into .cursor/mcp.json
   if (provider === 'gemini') {
     throw new Error(
-      'worker MCP attachment for agy/gemini is not implemented yet: the .agents/mcp_config.json ' +
-      'schema has not been verified against Antigravity docs, and heddle does not write guessed ' +
-      'config. Dispatch without --mcp for gemini, or use a codex/cursor worker for discovery tasks.',
+      'worker MCP attachment for the gemini provider (agy/Antigravity CLI) is not implemented yet: the ' +
+      '.agents/mcp_config.json schema has not been verified against Antigravity docs, and heddle does ' +
+      'not write guessed config. Dispatch without --mcp for gemini, or use a codex/cursor worker.',
     );
   }
-  resolveMcpServers(serverNames);
+  // Any OTHER provider has no worker-MCP attachment path — throw rather than fall through to a pass
+  // (and materializeWorkerMcp's default no-op), so a class-default mcp on it is DROPPED, not kept-but-
+  // never-attached (qodo/cubic #67). resolveRoute rejects unknown providers upstream; this keeps the
+  // gate correct in isolation and makes workerMcpSupported (which probes it) right for them too.
+  throw new Error(`worker MCP attachment is not supported for provider "${provider}" (supported: codex, claude, cursor)`);
 }
 
 /**
@@ -145,12 +150,14 @@ export function materializeWorkerMcp(cwd: string, provider: string, serverNames:
       return writeMergedMcpJson(join(cwd, '.cursor', 'mcp.json'), servers, opts);
     case 'gemini':
       throw new Error(
-        'worker MCP attachment for agy/gemini is not implemented yet: the .agents/mcp_config.json ' +
-        'schema has not been verified against Antigravity docs, and heddle does not write guessed ' +
-        'config. Dispatch without --mcp for gemini, or use a codex/cursor worker for discovery tasks.',
+        'worker MCP attachment for the gemini provider (agy/Antigravity CLI) is not implemented yet: the ' +
+        '.agents/mcp_config.json schema has not been verified against Antigravity docs, and heddle does ' +
+        'not write guessed config. Dispatch without --mcp for gemini, or use a codex/cursor worker.',
       );
     default:
-      return () => { /* unknown provider — nothing to attach */ };
+      // No attachment path — throw rather than a silent no-op that keeps mcp in the list but never
+      // attaches it (qodo/cubic #67). validateWorkerMcp rejects this first in the dispatch flow.
+      throw new Error(`worker MCP attachment is not supported for provider "${provider}" (supported: codex, claude, cursor)`);
   }
 }
 
