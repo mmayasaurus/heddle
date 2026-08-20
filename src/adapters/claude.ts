@@ -1,6 +1,5 @@
-import { spawn } from 'node:child_process';
-import { buildWorkerEnv } from '../env.js';
 import { lastResultJson } from './parse.js';
+import { run } from './subprocess.js';
 import type { DispatchOptions, WorkerAdapter, WorkerResult, TokenUsage } from '../types.js';
 
 /**
@@ -168,30 +167,4 @@ export class ClaudeAdapter implements WorkerAdapter {
     }
     return { ...parsed, durationMs: parsed.durationMs ?? Date.now() - started };
   }
-}
-
-function run(bin: string, args: string[], cwd: string, timeoutMs: number,
-             envOverrides?: Record<string, string>, envUnset?: string[]):
-  Promise<{ stdout: string; stderr: string; exitCode: number | null; timedOut: boolean }> {
-  return new Promise((resolve) => {
-    // stdin 'ignore' — same discipline as every subprocess adapter (see codex.ts).
-    const { env } = buildWorkerEnv({ overrides: envOverrides, unset: envUnset });
-    const child = spawn(bin, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
-    let stdout = '';
-    let stderr = '';
-    // 'error' and 'close' can BOTH fire (e.g. spawn failure then close) — settle exactly once.
-    let settled = false;
-    let timedOut = false;
-    const settle = (v: { stdout: string; stderr: string; exitCode: number | null }) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve({ ...v, timedOut });
-    };
-    const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, timeoutMs);
-    child.stdout.on('data', (d) => { stdout += d; });
-    child.stderr.on('data', (d) => { stderr += d; });
-    child.on('close', (code) => settle({ stdout, stderr, exitCode: code }));
-    child.on('error', (err) => settle({ stdout, stderr: `${stderr}\nspawn error: ${String(err)}`, exitCode: null }));
-  });
 }
