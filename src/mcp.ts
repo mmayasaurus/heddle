@@ -77,6 +77,26 @@ export function resolveMcpServers(names: string[]): Record<string, { command: st
  *   this path throws rather than write a guessed schema. (Tracked follow-up.)
  */
 /**
+ * Does this provider have an implemented worker-MCP attachment path at all? DERIVED from
+ * validateWorkerMcp (not a parallel hardcoded check) so the two can never drift (gitar #67) — it
+ * probes the attachment gate with the canonical, always-registered `memtrace` server and reports
+ * whether it is accepted. Today only the `gemini` provider key (the agy / Antigravity CLI behind it)
+ * lacks a path and throws. Used to filter a CLASS-DEFAULT mcp list (best-effort intent — "this class
+ * reads code, give it discovery") down to what the RESOLVED provider can take, so e.g. a gemini
+ * reviewer picked from an adversarial-review pool simply runs without memtrace instead of failing the
+ * dispatch (HED-205). A caller's EXPLICIT req.mcp is NOT filtered — it goes straight to
+ * validateWorkerMcp and still throws for an impossible ask, so it is loud, not a silent no-op.
+ */
+export function workerMcpSupported(provider: string): boolean {
+  try {
+    validateWorkerMcp(provider, ['memtrace']);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Validate an MCP attachment request WITHOUT writing anything — the dispatcher calls this before it
  * opens a ledger row (HED-19: an unknown server / unsupported provider must fail fast, leaving no
  * orphan row and no mutated worktree). Same rules as materializeWorkerMcp + codexMcpFlags.
@@ -85,14 +105,19 @@ export function validateWorkerMcp(provider: string, serverNames: string[]): void
   if (serverNames.length === 0) return;
   if (provider === 'codex') { codexMcpFlags(serverNames); return; }
   if (provider === 'claude') { resolveMcpServers(serverNames); return; } // written to a temp --mcp-config file at run time
+  if (provider === 'cursor') { resolveMcpServers(serverNames); return; } // materialized into .cursor/mcp.json
   if (provider === 'gemini') {
     throw new Error(
-      'worker MCP attachment for agy/gemini is not implemented yet: the .agents/mcp_config.json ' +
-      'schema has not been verified against Antigravity docs, and heddle does not write guessed ' +
-      'config. Dispatch without --mcp for gemini, or use a codex/cursor worker for discovery tasks.',
+      'worker MCP attachment for the gemini provider (agy/Antigravity CLI) is not implemented yet: the ' +
+      '.agents/mcp_config.json schema has not been verified against Antigravity docs, and heddle does ' +
+      'not write guessed config. Dispatch without --mcp for gemini, or use a codex/cursor worker.',
     );
   }
-  resolveMcpServers(serverNames);
+  // Any OTHER provider has no worker-MCP attachment path — throw rather than fall through to a pass
+  // (and materializeWorkerMcp's default no-op), so a class-default mcp on it is DROPPED, not kept-but-
+  // never-attached (qodo/cubic #67). resolveRoute rejects unknown providers upstream; this keeps the
+  // gate correct in isolation and makes workerMcpSupported (which probes it) right for them too.
+  throw new Error(`worker MCP attachment is not supported for provider "${provider}" (supported: codex, claude, cursor)`);
 }
 
 /**
@@ -125,12 +150,14 @@ export function materializeWorkerMcp(cwd: string, provider: string, serverNames:
       return writeMergedMcpJson(join(cwd, '.cursor', 'mcp.json'), servers, opts);
     case 'gemini':
       throw new Error(
-        'worker MCP attachment for agy/gemini is not implemented yet: the .agents/mcp_config.json ' +
-        'schema has not been verified against Antigravity docs, and heddle does not write guessed ' +
-        'config. Dispatch without --mcp for gemini, or use a codex/cursor worker for discovery tasks.',
+        'worker MCP attachment for the gemini provider (agy/Antigravity CLI) is not implemented yet: the ' +
+        '.agents/mcp_config.json schema has not been verified against Antigravity docs, and heddle does ' +
+        'not write guessed config. Dispatch without --mcp for gemini, or use a codex/cursor worker.',
       );
     default:
-      return () => { /* unknown provider — nothing to attach */ };
+      // No attachment path — throw rather than a silent no-op that keeps mcp in the list but never
+      // attaches it (qodo/cubic #67). validateWorkerMcp rejects this first in the dispatch flow.
+      throw new Error(`worker MCP attachment is not supported for provider "${provider}" (supported: codex, claude, cursor)`);
   }
 }
 

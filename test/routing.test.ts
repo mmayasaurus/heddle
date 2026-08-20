@@ -81,6 +81,10 @@ describe('resolveRoute / directRoute — policy fences', () => {
   const directSubscriptionModels = ['claude-opus-4.6', 'gpt-5.6', 'gemini-3-pro', 'o1-preview', 'o3-mini'];
   const cursorModels = ['cursor-grok-4.6-high', 'composer-2.5', 'kimi-k3-high'];
 
+  it('adversarial-review defaults to memtrace so a reviewer gets code discovery (HED-205)', () => {
+    expect(resolveRoute(table, 'adversarial-review').mcp).toEqual(['memtrace']);
+  });
+
   it('rejects an unknown class and lists every known class in the message', () => {
     let message = '';
     try { resolveRoute(table, 'no-such-class'); } catch (e) { message = (e as Error).message; }
