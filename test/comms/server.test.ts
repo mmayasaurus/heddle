@@ -1,12 +1,35 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, mkdirSync, rmSync, readFileSync, writeFileSync, statSync, existsSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { createCommsServer, initOperatorToken, operatorTokenMatches, resolveCommsIdentity, resolveFleetIdentity, type CommsServer } from '../../src/comms/server.js';
 import { CommsLog } from '../../src/comms/log.js';
+
+/**
+ * `resolveFleetIdentity` walks UP from the cwd it is given to the filesystem root, so a fresh
+ * `mkdtemp` under the OS temp dir does NOT isolate it from a stray `.fleet-agent` in an ancestor
+ * (…/T, /var/folders, /var, /). Such a file would silently flip every null-identity expectation in
+ * this file into a failure. Assert the precondition in SETUP instead, so a polluted machine reports a
+ * broken ENVIRONMENT — naming the offending path — rather than a mystifying assertion diff.
+ */
+function assertNoAncestralFleetAgent(start: string): void {
+  let dir = start; // mirrors the prod walk in resolveFleetIdentity, including its root termination
+  for (;;) {
+    const f = join(dir, '.fleet-agent');
+    if (existsSync(f)) {
+      throw new Error(
+        `polluted test environment: ${f} exists, and resolveFleetIdentity's upward walk from ${start} would bind it. `
+        + 'The null-identity cases in this file cannot be hermetic while it is there — remove it and re-run.',
+      );
+    }
+    const up = dirname(dir);
+    if (up === dir) return;
+    dir = up;
+  }
+}
 
 /**
  * The channel MCP server in-process (InMemoryTransport — the SDK's documented way to test a
@@ -44,6 +67,7 @@ describe('heddle-comms server (in-process)', () => {
 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), 'heddle-server-test-'));
+    assertNoAncestralFleetAgent(dir);
     dbPath = join(dir, 'comms.db');
     tokenPath = join(dir, 'operator.token');
     warnings.length = 0;
@@ -77,6 +101,7 @@ describe('heddle-comms server (in-process)', () => {
     expect(resolveFleetIdentity({ ...baseEnv(), HEDDLE_AGENT: 'operator' }, dir, warn)).toBeNull();
     expect(w.some((m) => m.includes('refusing to bind the operator identity'))).toBe(true);
     // No env, no file: the upward walk terminates at the filesystem root with null (never hangs).
+    // Hermetic only because beforeEach proved no `.fleet-agent` sits anywhere above `dir`.
     expect(resolveFleetIdentity({ ...baseEnv() }, dir, warn)).toBeNull();
 
     // A `.fleet-agent` file is found by walking UP from cwd, and matches resolveCommsIdentity.

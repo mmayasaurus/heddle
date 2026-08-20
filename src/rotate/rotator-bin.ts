@@ -174,10 +174,14 @@ async function main(): Promise<void> {
     if (!operatorTokenMatches(env)) { warn('operator token no longer matches (rotated?) — stopping.'); stopping = true; releaseLock(LOCK_PATH); try { log.close(); } catch { /* closing */ } process.exit(1); }
     // HED-187 (per-tick revalidation): the startup guard is a snapshot; a session carrying our fleet
     // identity can register mid-run. Re-check each tick, alongside the operator-token recheck. If this
-    // fires while a pause is IN FORCE, the pause stays in force (the quiesce timeout runs in THIS
-    // now-exiting process) — that is fail-closed: the supervisor is re-entrant, so a standalone rotator
-    // restart takes over the same pause and drives it to completion.
-    if (fleetIdentity && log.liveSessions().some((s) => s.address === fleetIdentity)) { warn(`stopping: fleet identity ${fleetIdentity} now has a LIVE comms session — the rotator must run STANDALONE. Any pause in force is left in force for a standalone rotator to resume.`); stopping = true; releaseLock(LOCK_PATH); try { log.close(); } catch { /* closing */ } process.exit(1); }
+    // fires while a pause is IN FORCE, the pause and its rotation intent persist durably in the comms log,
+    // but THIS process exits — so the quiesce timeout cannot fire (no surviving process watches the pause),
+    // and a same-env rotator restart REFUSES by design (the startup guard blocks the tainted identity while
+    // the triggering session is live). Recovery is an OPERATOR action — resume_pause, or a rotator launched
+    // WITHOUT this fleet identity (HEDDLE_AGENT unset) — both surfaced by the pause machinery. Fail-closed:
+    // the fleet parks, nothing is killed, and resume authority stays with the operator / tick(), never a
+    // refusal guard.
+    if (fleetIdentity && log.liveSessions().some((s) => s.address === fleetIdentity)) { warn(`stopping: fleet identity ${fleetIdentity} now has a LIVE comms session — the rotator must run STANDALONE. Any pause in force stays in force — resume it with resume_pause or a rotator started without HEDDLE_AGENT (a same-env restart refuses by design).`); stopping = true; releaseLock(LOCK_PATH); try { log.close(); } catch { /* closing */ } process.exit(1); }
     try { await runOnce(); } catch (err) { warn(`tick failed: ${errorMessage(err)}`); }
     // NOT unref()'d: the timer is the daemon's only event-loop reference; unref would exit after the first tick.
     if (!stopping) setTimeout(() => void loop(), intervalMs);
