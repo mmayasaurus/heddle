@@ -58,7 +58,7 @@ export function resolveMcpServers(names: string[]): Record<string, { command: st
     const s = WORKER_MCP_SERVERS[n];
     if (!s) {
       throw new Error(
-        `unknown worker MCP server "${n}". Known: ${Object.keys(WORKER_MCP_SERVERS).join(', ')}`,
+        `unknown worker MCP server "${n}" for materialization. Materializable: ${Object.keys(WORKER_MCP_SERVERS).join(', ')}. (serena is available only for codex workers, attached via inline -c flags.)`,
       );
     }
     out[n] = s;
@@ -69,9 +69,9 @@ export function resolveMcpServers(names: string[]): Record<string, { command: st
 /**
  * Attach MCP servers for a worker in `cwd`. Returns a restore function.
  *
- * - codex: memtrace is already enabled in the user's global `~/.codex/config.toml` (verified), so
- *   codex workers get it with no per-task file. If a requested server is NOT the globally-present
- *   memtrace, that's surfaced by resolveMcpServers rather than silently missing.
+ * - codex: workers get their MCP servers from inline `-c mcp_servers.*` overrides emitted by
+ *   codexMcpFlags at invocation. `--ignore-user-config` sheds global config, so this function
+ *   writes no per-task file for codex.
  * - cursor: project `.cursor/mcp.json` (mcpServers key — verified format).
  * - gemini/agy: project `.agents/mcp_config.json` — format NOT yet verified against agy docs, so
  *   this path throws rather than write a guessed schema. (Tracked follow-up.)
@@ -139,9 +139,9 @@ export function claudeMcpConfigFile(serverNames: string[]): { path: string; clea
 export function materializeWorkerMcp(cwd: string, provider: string, serverNames: string[], opts: MaterializeOpts): () => void {
   if (serverNames.length === 0) return () => { /* nothing to attach */ };
 
-  // Codex reads its servers (memtrace, serena) from the user's global config — nothing to write,
-  // and its known-set differs from the materializable set, so validate via codexApprovalFlags,
-  // not here.
+  // Codex servers and their tool approval come from codexMcpFlags inline `-c` overrides (including
+  // default_tools_approval_mode="approve"), so there is nothing to materialize here. Codex server
+  // validation happens via codexMcpFlags (called by validateWorkerMcp), not in this function.
   if (provider === 'codex') return () => { /* no-op */ };
 
   const servers = resolveMcpServers(serverNames);

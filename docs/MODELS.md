@@ -489,6 +489,8 @@ land.
   `second-opinion` fallback): worker MCP attachment for agy/gemini is not implemented, and the
   throw happens after `ledger.start()` outside the try/finally — the ledger row is orphaned
   in-flight and skill restores are skipped (HED-63). Dispatch gemini classes without `mcp`.
+  HED-205 best-effort drops a class-default MCP when routing resolves to gemini and records that in
+  `routeReason`; an explicit MCP request still fails loudly.
 - **`second-opinion` (grok-4.6-high) with memtrace attached is unreliable on long read-and-review
   prompts** — a design-review dispatch timed out at 600 s with no result JSON. Prefer no `mcp` and
   paste the relevant code/design into the prompt.
@@ -510,4 +512,3 @@ Follow-up data (Agent V, ledger #48–55, later the same day):
   directly AND fell back to codex/gpt-5.6-terra when Claude was capped. As of HED-148 the class routes
   **codex-primary (gpt-5.6-terra), claude/sonnet fallback** (flip to move default load off the shared
   Claude 5h pool) — see the class table above.
-

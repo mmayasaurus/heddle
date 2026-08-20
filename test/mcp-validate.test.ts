@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { validateWorkerMcp, workerMcpSupported } from '../src/mcp.js';
+import { codexMcpFlags, materializeWorkerMcp, validateWorkerMcp, workerMcpSupported } from '../src/mcp.js';
 import { dispatch } from '../src/dispatch.js';
 import { useTempResources, fakeAdapter, IDENTITIES } from './helpers.js';
 
@@ -24,6 +24,12 @@ describe('validateWorkerMcp — direct unit contract', () => {
     expect(() => validateWorkerMcp('codex', ['does-not-exist'])).toThrow(/unknown codex MCP server "does-not-exist"/);
   });
 
+  it('explains that Serena is Codex-only when cursor materialization requests it', () => {
+    expect(() => validateWorkerMcp('cursor', ['serena'])).toThrow(
+      'unknown worker MCP server "serena" for materialization. Materializable: memtrace. (serena is available only for codex workers, attached via inline -c flags.)',
+    );
+  });
+
   it('refuses gemini/agy attachment outright (schema unverified — heddle never writes guessed config)', () => {
     expect(() => validateWorkerMcp('gemini', ['memtrace'])).toThrow(/not implemented yet/);
   });
@@ -40,6 +46,54 @@ describe('validateWorkerMcp — direct unit contract', () => {
     expect(() => validateWorkerMcp('gemini', [])).not.toThrow(); // the zero-servers early return precedes the gemini throw
     expect(() => validateWorkerMcp('cursor', [])).not.toThrow();
     expect(() => validateWorkerMcp('codex', [])).not.toThrow();
+  });
+});
+
+describe('codexMcpFlags — inline Codex MCP configuration', () => {
+  it('emits memtrace command, args, and tool-approval overrides', () => {
+    const flags = codexMcpFlags(['memtrace']);
+    expect(flags).toContain('-c');
+    expect(flags).toContain(`mcp_servers.memtrace.command=${JSON.stringify('memtrace')}`);
+    expect(flags).toContain(`mcp_servers.memtrace.args=${JSON.stringify(['mcp'])}`);
+    expect(flags).toContain('mcp_servers.memtrace.default_tools_approval_mode="approve"');
+  });
+
+  it('emits the Codex-context Serena command override', () => {
+    expect(codexMcpFlags(['serena'])).toContain(
+      `mcp_servers.serena.command=${JSON.stringify('codex-serena')}`,
+    );
+  });
+
+  it('rejects unknown Codex MCP servers', () => {
+    expect(() => codexMcpFlags(['does-not-exist'])).toThrow(/unknown codex MCP server/);
+  });
+
+  it('returns no flags when no MCP servers are requested', () => {
+    expect(codexMcpFlags([])).toEqual([]);
+  });
+});
+
+describe('materializeWorkerMcp — cursor touched-file safety', () => {
+  const { tempDir } = useTempResources('heddle-mcp-touched-file-test-');
+
+  it('preserves an unrelated cursor server while restoring heddle’s memtrace reference', () => {
+    const cwd = tempDir();
+    const cursorDir = join(cwd, '.cursor');
+    const path = join(cursorDir, 'mcp.json');
+    mkdirSync(cursorDir);
+    writeFileSync(path, JSON.stringify({
+      mcpServers: { unrelated: { command: 'unrelated-command', args: ['unrelated-arg'] } },
+    }));
+
+    const restore = materializeWorkerMcp(cwd, 'cursor', ['memtrace'], { dispatchId: 29 });
+    const attached = JSON.parse(readFileSync(path, 'utf8')).mcpServers;
+    expect(attached.unrelated).toEqual({ command: 'unrelated-command', args: ['unrelated-arg'] });
+    expect(attached.memtrace).toEqual({ command: 'memtrace', args: ['mcp'] });
+
+    restore();
+    const restored = JSON.parse(readFileSync(path, 'utf8')).mcpServers;
+    expect(restored.unrelated).toEqual({ command: 'unrelated-command', args: ['unrelated-arg'] });
+    expect(restored.memtrace).toBeUndefined();
   });
 });
 
