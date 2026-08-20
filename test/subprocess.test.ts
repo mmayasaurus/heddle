@@ -39,9 +39,10 @@ describe('subprocess run() — the shared adapter runner', () => {
   it('does not corrupt a multi-byte UTF-8 payload split across stream chunks (codacy/copilot #69)', async () => {
     // ~150KB of 3-byte chars spans several ~64KB stream chunks, so char boundaries land mid-chunk.
     // Without setEncoding('utf8') a split 3-byte char corrupts on the Buffer→string `+= d` coercion.
-    const payload = 'あ'.repeat(50_000);
-    const r = await run(NODE, ['-e', `process.stdout.write(${JSON.stringify(payload)})`], process.cwd(), 10_000);
+    // The .repeat() runs INSIDE node so the 150KB never becomes a command-line arg — a 150KB arg
+    // exceeds Linux MAX_ARG_STRLEN (~128KB) and makes spawn throw E2BIG on CI (passes on macOS).
+    const r = await run(NODE, ['-e', 'process.stdout.write("あ".repeat(50000))'], process.cwd(), 10_000);
     expect(r.exitCode).toBe(0);
-    expect(r.stdout).toBe(payload);
+    expect(r.stdout).toBe('あ'.repeat(50_000));
   });
 });

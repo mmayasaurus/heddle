@@ -17,20 +17,23 @@ export function run(bin: string, args: string[], cwd: string, timeoutMs: number,
     // 'error' and 'close' can BOTH fire (e.g. spawn failure then close) — settle exactly once.
     let settled = false;
     let killedByTimer = false;
-    const settle = (v: { stdout: string; stderr: string; exitCode: number | null }) => {
+    const settle = (
+      v: { stdout: string; stderr: string; exitCode: number | null },
+      signal: NodeJS.Signals | null = null,
+    ) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      // Decide timedOut from the OUTCOME, not a pre-kill guess: it is a timeout only if the timer fired
-      // AND the process died from the signal (exitCode null). A process that exits naturally as the
-      // timer fires still reports its real exit code — even if the event loop was blocked past its exit
-      // so exitCode wasn't set yet when the timer ran — so it is NOT a timeout (copilot/cubic #69).
-      resolve({ ...v, timedOut: killedByTimer && v.exitCode === null });
+      // Decide timedOut from the OUTCOME signal, not a pre-kill guess: a timeout ONLY if the timer
+      // fired AND the process died from OUR SIGKILL. A natural exit reports a real code (signal null);
+      // an external SIGTERM racing the deadline reports SIGTERM — neither is our timeout (copilot/cubic
+      // #69). Keying on the death signal is exact regardless of event-loop timing.
+      resolve({ ...v, timedOut: killedByTimer && signal === 'SIGKILL' });
     };
     const timer = setTimeout(() => { killedByTimer = true; child.kill('SIGKILL'); }, timeoutMs);
     child.stdout.on('data', (d) => { stdout += d; });
     child.stderr.on('data', (d) => { stderr += d; });
-    child.on('close', (code) => settle({ stdout, stderr, exitCode: code }));
+    child.on('close', (code, signal) => settle({ stdout, stderr, exitCode: code }, signal));
     child.on('error', (err) => settle({ stdout, stderr: `${stderr}\nspawn error: ${String(err)}`, exitCode: null }));
   });
 }
