@@ -178,10 +178,11 @@ async function main(): Promise<void> {
     // but THIS process exits — so the quiesce timeout cannot fire (no surviving process watches the pause),
     // and a same-env rotator restart REFUSES by design (the startup guard blocks the tainted identity while
     // the triggering session is live). Recovery is an OPERATOR action — resume_pause, or a rotator launched
-    // WITHOUT this fleet identity (HEDDLE_AGENT unset) — both surfaced by the pause machinery. Fail-closed:
+    // with NO fleet identity at all (HEDDLE_AGENT / FLEET_AGENT / HEDDLE_COMMS_ADDRESS unset, and no .fleet-agent
+    // reachable up-tree from its cwd) — both surfaced by the pause machinery. Fail-closed:
     // the fleet parks, nothing is killed, and resume authority stays with the operator / tick(), never a
     // refusal guard.
-    if (fleetIdentity && log.liveSessions().some((s) => s.address === fleetIdentity)) { warn(`stopping: fleet identity ${fleetIdentity} now has a LIVE comms session — the rotator must run STANDALONE. Any pause in force stays in force — resume it with resume_pause or a rotator started without HEDDLE_AGENT (a same-env restart refuses by design).`); stopping = true; releaseLock(LOCK_PATH); try { log.close(); } catch { /* closing */ } process.exit(1); }
+    if (fleetIdentity && log.liveSessions().some((s) => s.address === fleetIdentity)) { warn(`stopping: fleet identity ${fleetIdentity} now has a LIVE comms session — the rotator must run STANDALONE. Any pause in force stays in force — resume it with resume_pause or a rotator started with NO fleet identity (HEDDLE_AGENT/FLEET_AGENT/HEDDLE_COMMS_ADDRESS unset, none via .fleet-agent) — a same-env restart refuses by design.`); stopping = true; releaseLock(LOCK_PATH); try { log.close(); } catch { /* closing */ } process.exit(1); }
     try { await runOnce(); } catch (err) { warn(`tick failed: ${errorMessage(err)}`); }
     // NOT unref()'d: the timer is the daemon's only event-loop reference; unref would exit after the first tick.
     if (!stopping) setTimeout(() => void loop(), intervalMs);
