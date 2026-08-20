@@ -24,7 +24,7 @@ export function packsFor(provider: string, requested: readonly string[]): string
   const family = modelFamilyPack(provider);
   return family && !base.includes(family) ? [...base, family] : base;
 }
-import { materializeWorkerMcp, validateWorkerMcp, codexMcpFlags, claudeMcpConfigFile } from './mcp.js';
+import { materializeWorkerMcp, validateWorkerMcp, workerMcpSupported, codexMcpFlags, claudeMcpConfigFile } from './mcp.js';
 import { classifyEffort, assessResult, type ResultAssessment } from './classify.js';
 import { pickReviewer, snapshotWorktree, sameSnapshot, diffInstruction, embeddedDiff, normalizeProvider, type ReviewerPick } from './review.js';
 import { parentCheckoutOf, checkoutFingerprint, escapedPaths, destroyedWork } from './worktree.js';
@@ -287,7 +287,19 @@ async function runTarget(
     ? [...new Set([...(target.skills ?? []), ...(req.skills ?? [])])]
     : (req.skills ?? target.skills ?? []);
   const skills = packsFor(target.provider, asked);
-  const mcp = req.mcp ?? target.mcp ?? [];
+  // A caller's EXPLICIT mcp (req.mcp) is a REQUIREMENT — validated below, and it THROWS if the target
+  // provider has no attachment path (loud beats a silent no-op). A CLASS-DEFAULT mcp (target.mcp) is
+  // INTENT — "this class reads code, give it discovery" — so attach it BEST-EFFORT: filter to what the
+  // resolved provider supports. A gemini reviewer picked from the adversarial-review pool thus runs
+  // without memtrace rather than failing the dispatch (HED-205); the drop is surfaced in routeReason.
+  let mcp = req.mcp ?? target.mcp ?? [];
+  if (req.mcp === undefined && mcp.length > 0 && !workerMcpSupported(target.provider)) {
+    const dropped = mcp.join(', ');
+    mcp = [];
+    ctx.routeReason = ctx.routeReason
+      ? `${ctx.routeReason}; class-default mcp [${dropped}] dropped: ${target.provider} has no worker-MCP path`
+      : `class-default mcp [${dropped}] dropped: ${target.provider} has no worker-MCP path`;
+  }
 
   // Capabilities are decided per TARGET provider (a fallback may enforce a different set).
   const caps = decideCapabilities(target.provider, req.capabilities, req.optIn === true, capabilityPolicy(ctx.table));

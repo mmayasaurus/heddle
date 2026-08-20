@@ -209,6 +209,7 @@ task_classes:
     provider: cursor        #   worktree read-only, find-only; the author fixes; the ledger scores each
     model: cursor-grok-4.6-high   # author→reviewer provider pair by accepted-finding rate.
     fallback: {provider: gemini, model: gemini-3.1-pro-high}
+    mcp: [memtrace]         # HED-205: a reviewer reads the code under review (test-quality lens) — grant discovery so it doesn't trip the memtrace-first hook and return a complaint instead of findings. BEST-EFFORT: a gemini pick/fallback has no worker-MCP path yet and runs without it (dispatch filters the class default per resolved provider; an EXPLICIT mcp override still errors loudly).
     reviewer_pool:          # first entry whose provider differs from `author_provider` is used
       - {provider: cursor, model: cursor-grok-4.6-high}
       - {provider: gemini, model: gemini-3.1-pro-high}
