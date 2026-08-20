@@ -1,6 +1,5 @@
-import { spawn } from 'node:child_process';
-import { buildWorkerEnv } from '../env.js';
 import type { DispatchOptions, WorkerAdapter, WorkerResult, TokenUsage } from '../types.js';
+import { run } from './subprocess.js';
 
 /**
  * Codex CLI adapter — `codex exec --json`.
@@ -114,24 +113,4 @@ export class CodexAdapter implements WorkerAdapter {
       raw: events,
     };
   }
-}
-
-function run(bin: string, args: string[], cwd: string, timeoutMs: number,
-             envOverrides?: Record<string, string>):
-  Promise<{ stdout: string; stderr: string; exitCode: number | null }> {
-  return new Promise((resolve) => {
-    // stdin 'ignore' is load-bearing — see contract note above.
-    const { env } = buildWorkerEnv({ overrides: envOverrides });
-    const child = spawn(bin, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
-    let stdout = '';
-    let stderr = '';
-    const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
-    child.stdout.on('data', (d) => { stdout += d; });
-    child.stderr.on('data', (d) => { stderr += d; });
-    child.on('close', (code) => { clearTimeout(timer); resolve({ stdout, stderr, exitCode: code }); });
-    child.on('error', (err) => {
-      clearTimeout(timer);
-      resolve({ stdout, stderr: `${stderr}\nspawn error: ${String(err)}`, exitCode: null });
-    });
-  });
 }

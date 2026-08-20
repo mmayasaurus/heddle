@@ -1,6 +1,5 @@
-import { spawn } from 'node:child_process';
-import { buildWorkerEnv } from '../env.js';
 import type { DispatchOptions, WorkerAdapter, WorkerResult, TokenUsage } from '../types.js';
+import { run } from './subprocess.js';
 
 /**
  * Antigravity CLI adapter — `agy -p --output-format stream-json`.
@@ -197,28 +196,4 @@ export class AgyAdapter implements WorkerAdapter {
       raw: events,
     };
   }
-}
-
-function run(bin: string, args: string[], cwd: string, timeoutMs: number,
-             envOverrides?: Record<string, string>):
-  Promise<{ stdout: string; stderr: string; exitCode: number | null; timedOut: boolean }> {
-  return new Promise((resolve) => {
-    // stdin 'ignore' — same discipline as every subprocess adapter (see codex.ts).
-    const { env } = buildWorkerEnv({ overrides: envOverrides });
-    const child = spawn(bin, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
-    let stdout = '';
-    let stderr = '';
-    let timedOut = false;
-    const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, timeoutMs);
-    child.stdout.on('data', (d) => { stdout += d; });
-    child.stderr.on('data', (d) => { stderr += d; });
-    child.on('close', (code) => {
-      clearTimeout(timer);
-      resolve({ stdout, stderr, exitCode: code, timedOut });
-    });
-    child.on('error', (err) => {
-      clearTimeout(timer);
-      resolve({ stdout, stderr: `${stderr}\nspawn error: ${String(err)}`, exitCode: null, timedOut });
-    });
-  });
 }
