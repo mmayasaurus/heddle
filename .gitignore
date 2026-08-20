@@ -7,6 +7,11 @@ dist/
 .memdb/
 .serena/
 
+# memtrace staleness detector runtime state (scripts/memtrace-staleness-check.sh)
+.memtrace-heddle-indexed-commit
+.memtrace-staleness.log
+.memtrace-staleness.launchd.log
+
 # Agent worktrees live INSIDE the repo (Maya 2026-08-15) — never tracked
 .worktrees/
 

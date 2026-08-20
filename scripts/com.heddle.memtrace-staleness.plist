@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  TEMPLATE — NOT installed by default. This launchd LaunchAgent runs the heddle memtrace
+  staleness DETECTOR every 30 minutes. It is read-only (fetch + compare + nag); it does NOT
+  index anything (see scripts/memtrace-staleness-check.sh and docs/MEMTRACE-FRESHNESS.md).
+
+  Installing it touches the machine's launchd + sits beside a pending-Maya memtrace data-dir
+  decision, so loading it is Maya's firsthand call:
+
+    cp scripts/com.heddle.memtrace-staleness.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.heddle.memtrace-staleness.plist
+
+  Disable:
+    launchctl unload ~/Library/LaunchAgents/com.heddle.memtrace-staleness.plist
+
+  Paths below assume the canonical checkout at /Users/mayatobi/Developer/heddle — adjust if it moves.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.heddle.memtrace-staleness</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>/Users/mayatobi/Developer/heddle/scripts/memtrace-staleness-check.sh</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>1800</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>/Users/mayatobi/Developer/heddle/.memtrace-staleness.launchd.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/mayatobi/Developer/heddle/.memtrace-staleness.launchd.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+</dict>
+</plist>
