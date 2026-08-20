@@ -28,6 +28,19 @@ export const DEFAULT_USAGE_DIR = join(homedir(), '.heddle', 'usage');
 export const LIMITS_JSON_MAX_AGE_S = 900;
 /** Raw Claude tap files older than this → unknown (tap writes on every statusline render). */
 export const CLAUDE_TAP_MAX_AGE_S = 600;
+/** Fresh billing/login failures are trusted for this long; stale failures fail open for recovery. */
+export const DISPATCH_SIGNAL_MAX_AGE_S = 6 * 60 * 60;
+
+export type DispatchSignalReason = 'ok' | 'billing' | 'logged-out' | 'rate-capped' | 'error';
+
+/** HED-178's per-account headless-ping result. Invalid or absent files are deliberately ignored. */
+export interface DispatchSignal {
+  account: string;
+  dispatchable: boolean;
+  reason: DispatchSignalReason;
+  /** Epoch seconds when the producer's ping returned. */
+  checkedAt: number;
+}
 
 export interface CapWindow {
   /** 0–100, null when the provider does not expose it or the snapshot is unusable. */
@@ -51,6 +64,8 @@ export interface AccountCaps {
   fableWeeklyEstimatePct?: number | null;
   /** Attributed samples behind the estimate (its confidence); null/absent when no estimate. */
   fableWeeklySamples?: number | null;
+  /** Optional HED-178 signal; absent is equivalent to today's no-op behavior. */
+  dispatch?: DispatchSignal;
 }
 
 export interface ProviderCaps {
@@ -118,6 +133,25 @@ function readJson(path: string): unknown | null {
   } catch {
     return null; // unreadable/corrupt = unknown, never a crash at dispatch time
   }
+}
+
+/** Read only schema-contract-v1 dispatch signals. Any bad/missing input is a no-op by design. */
+export function readDispatchSignals(usageDir: string): Map<string, DispatchSignal> {
+  const out = new Map<string, DispatchSignal>();
+  let files: string[] = [];
+  try { files = existsSync(usageDir) ? readdirSync(usageDir) : []; } catch { return out; }
+  for (const file of files) {
+    const match = /^claude-([A-Za-z0-9_.-]+)\.dispatch\.json$/.exec(file);
+    if (!match) continue;
+    const raw = readJson(join(usageDir, file)) as Record<string, unknown> | null;
+    if (!raw || raw.schemaVersion !== 1 || raw.account !== match[1] || typeof raw.dispatchable !== 'boolean') continue;
+    const reason = raw.reason;
+    if (reason !== 'ok' && reason !== 'billing' && reason !== 'logged-out' && reason !== 'rate-capped' && reason !== 'error') continue;
+    const checkedAt = num(raw.checkedAt);
+    if (checkedAt === null || raw.dispatchable !== (reason === 'ok')) continue;
+    out.set(raw.account, { account: raw.account, dispatchable: raw.dispatchable, reason, checkedAt });
+  }
+  return out;
 }
 
 /** Parse the dashboard's limits.json mirror. Returns null when absent, corrupt, or too old. */
@@ -252,6 +286,15 @@ export function readProviderCaps(opts: { usageDir?: string; nowS?: number } = {}
       }
       out.claude = { ...m, accounts: [...byId.values()] };
     }
+  }
+  // HED-178 is independent of cap freshness: decorate the final merged Claude rows after choosing
+  // mirror/tap data. A missing, corrupt, or unknown account signal leaves the row untouched.
+  if (out.claude) {
+    const signals = readDispatchSignals(usageDir);
+    out.claude = { ...out.claude, accounts: out.claude.accounts.map((a) => {
+      const dispatch = signals.get(a.id);
+      return dispatch ? { ...a, dispatch } : a;
+    }) };
   }
   for (const p of ['claude', 'codex', 'cursor', 'gemini']) if (!out[p]) out[p] = unknownCaps(p);
   return out;

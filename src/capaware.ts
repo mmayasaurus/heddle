@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
 import type { RouteTarget, RoutingTable } from './routing.js';
-import { bindingWindow, type CapsByProvider, type ProviderCaps } from './usage.js';
+import { bindingWindow, DISPATCH_SIGNAL_MAX_AGE_S, type CapsByProvider, type ProviderCaps } from './usage.js';
 
 /**
  * Cap-aware routing (HED-67) + Claude account advice (HED-68) — pure decisions over the caps that
@@ -409,6 +409,14 @@ export function pickClaudeAccount(
     const row = caps?.accounts.find((r) => r.id === id);
     return row && !row.stale ? row.sevenDay.usedPercentage : null;
   };
+  // Only known, recent authentication/billing failures are actionable. Every other signal, including
+  // a stale failure, fails open so an account that recovered while the keeper was down stays usable.
+  const isFreshExcludable = (id: string): boolean => {
+    const signal = caps?.accounts.find((r) => r.id === id)?.dispatch;
+    if (!signal || (signal.reason !== 'billing' && signal.reason !== 'logged-out')) return false;
+    const nowS = Math.floor(Date.now() / 1000);
+    return signal.checkedAt <= nowS && nowS - signal.checkedAt <= DISPATCH_SIGNAL_MAX_AGE_S;
+  };
   if (opts.pin) {
     const a = accounts.find((x) => x.id === opts.pin);
     if (!a) throw new Error(`account_pin "${opts.pin}" is not in ~/.heddle/accounts.json (known: ${accounts.map((x) => x.id).join(', ')})`);
@@ -418,12 +426,16 @@ export function pickClaudeAccount(
         `\`${a.configDir ? `CLAUDE_CONFIG_DIR=${a.configDir} ` : ''}claude /login\` there first, then update accounts.json.`,
       );
     }
+    if (isFreshExcludable(a.id)) {
+      const reason = caps?.accounts.find((r) => r.id === a.id)?.dispatch?.reason;
+      throw new Error(`account_pin "${opts.pin}" is registered but NOT dispatchable (${reason}) — wait for a successful keeper ping or fix the account before pinning it.`);
+    }
     const used = usedOf(a.id);
     return { account: a, usedPct: used, usedPct7d: used7dOf(a.id), reason: `account:${a.id} pinned${used !== null ? ` (5h ${used.toFixed(0)}%)` : ''}`, ...envFor(a) };
   }
   // A logged-out account is not addressable, whatever its caps say (a fresh keeper anchor for a dir
   // whose credential was replaced would otherwise make the picker choose an account that 401s).
-  const addressable = accounts.filter((a) => a.loggedIn !== false);
+  const addressable = accounts.filter((a) => a.loggedIn !== false && !isFreshExcludable(a.id));
   // For a FABLE-model target, Fable-weekly headroom outranks 5h headroom (HED-76): the weekly
   // Fable share is the binding constraint, and only accounts with a KNOWN estimate compete on it
   // (unknown → fall through to the normal 5h ordering — unknown never decides).
