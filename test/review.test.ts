@@ -96,7 +96,9 @@ describe('adversarial review helpers', () => {
 
     expect(sameSnapshot(clean, { git: true, hash: null, error: 'boom' })).toBe(false);
     expect(sameSnapshot({ git: true, hash: null }, snapshotWorktree(cwd))).toBeNull();
-  }, 45_000); // snapshot-heavy: ~6 git spawns per call — parallel-fork load needs headroom
+  }, 90_000); // snapshot-heavy: ~6 REAL git spawns/call × ~10 calls; ~9s standalone but a loaded
+  //            parallel-fork CI runner can exceed 45s (HED-211). It hangs on nothing — a generous
+  //            ceiling beats a tight bound that intermittently reds CI; not masking a hang.
 
   it('normalizes provider casing on BOTH sides and skips unusable pool entries with a reasoned error', () => {
     const route = { taskClass: 'adversarial-review', provider: 'Cursor', model: 'cursor-grok-4.6-high',
@@ -127,7 +129,9 @@ describe('adversarial review helpers', () => {
     // a chmod changes no bytes either — the mode is part of each file line
     chmodSync(join(cwd, 'tracked.txt'), 0o755);
     expect(sameSnapshot(base, snapshotWorktree(cwd))).toBe(false);
-  }, 45_000); // snapshot-heavy: ~6 git spawns per call — parallel-fork load needs headroom
+  }, 90_000); // snapshot-heavy: ~6 REAL git spawns/call × ~10 calls; ~9s standalone but a loaded
+  //            parallel-fork CI runner can exceed 45s (HED-211). It hangs on nothing — a generous
+  //            ceiling beats a tight bound that intermittently reds CI; not masking a hang.
 
   it('prepends an actionable diff instruction and leaves a blank line before the task', () => {
     const instruction = diffInstruction('main');
