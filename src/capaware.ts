@@ -280,8 +280,8 @@ export function adviseClaudeAccount(caps: ProviderCaps | undefined, accounts: Cl
   const usable = caps !== undefined && !caps.stale && caps.source !== 'none';
   const rows = (usable ? caps.accounts : []).map((a) => ({ id: a.id, usedPct: a.stale ? null : a.fiveHour.usedPercentage, stale: a.stale }));
   const known = accounts.map((a) => rows.find((r) => r.id === a.id) ?? { id: a.id, usedPct: null, stale: true });
-  const loggedOut = new Set(accounts.filter((a) => a.loggedIn === false).map((a) => a.id));
-  const fresh = known.filter((r): r is { id: string; usedPct: number; stale: boolean } => r.usedPct !== null && !loggedOut.has(r.id));
+  const excluded = new Set(accounts.filter((a) => a.loggedIn === false || isDispatchExcluded(caps, a.id)).map((a) => a.id));
+  const fresh = known.filter((r): r is { id: string; usedPct: number; stale: boolean } => r.usedPct !== null && !excluded.has(r.id));
   const bestRow = fresh.sort((x, y) => x.usedPct - y.usedPct)[0];
   const best = bestRow ? { id: bestRow.id, usedPct: bestRow.usedPct, configDir: accounts.find((a) => a.id === bestRow.id)?.configDir ?? null } : null;
   const cur = currentClaudeAccount(accounts, env);
@@ -354,6 +354,14 @@ function fableWeeklyOf(caps: ProviderCaps | undefined, accountId: string): numbe
  *  like the threshold should have fired (PR #24, copilot/qodo). */
 export const fmtPct = (n: number): string => (Number.isInteger(n) ? n.toFixed(0) : n.toFixed(1));
 
+/** Fresh billing/login failures are not addressable; all other or stale signals fail open. */
+export function isDispatchExcluded(caps: ProviderCaps | undefined, id: string, nowMs = Date.now()): boolean {
+  const signal = caps?.accounts.find((row) => row.id === id)?.dispatch;
+  if (!signal || (signal.reason !== 'billing' && signal.reason !== 'logged-out')) return false;
+  const nowS = Math.floor(nowMs / 1000);
+  return signal.checkedAt <= nowS && nowS - signal.checkedAt <= DISPATCH_SIGNAL_MAX_AGE_S;
+}
+
 /**
  * The Fable-weekly estimate the soft cap must judge.
  * - PINNED dispatch → that account's own estimate: the pin is where the work WILL run, so another
@@ -367,14 +375,14 @@ export function bestFableWeekly(
 ): { id: string; pct: number; pinned?: true } | null {
   if (pin) {
     const pinned = accounts.find((a) => a.id === pin);
-    if (pinned) {
+    if (pinned && !isDispatchExcluded(caps, pinned.id)) {
       const pct = fableWeeklyOf(caps, pinned.id);
       return pct === null ? null : { id: pinned.id, pct, pinned: true };
     }
   }
   let best: { id: string; pct: number } | null = null;
   for (const a of accounts) {
-    if (a.loggedIn === false) continue;
+    if (a.loggedIn === false || isDispatchExcluded(caps, a.id)) continue;
     const pct = fableWeeklyOf(caps, a.id);
     if (pct !== null && (best === null || pct < best.pct)) best = { id: a.id, pct };
   }
@@ -409,14 +417,6 @@ export function pickClaudeAccount(
     const row = caps?.accounts.find((r) => r.id === id);
     return row && !row.stale ? row.sevenDay.usedPercentage : null;
   };
-  // Only known, recent authentication/billing failures are actionable. Every other signal, including
-  // a stale failure, fails open so an account that recovered while the keeper was down stays usable.
-  const isFreshExcludable = (id: string): boolean => {
-    const signal = caps?.accounts.find((r) => r.id === id)?.dispatch;
-    if (!signal || (signal.reason !== 'billing' && signal.reason !== 'logged-out')) return false;
-    const nowS = Math.floor(Date.now() / 1000);
-    return signal.checkedAt <= nowS && nowS - signal.checkedAt <= DISPATCH_SIGNAL_MAX_AGE_S;
-  };
   if (opts.pin) {
     const a = accounts.find((x) => x.id === opts.pin);
     if (!a) throw new Error(`account_pin "${opts.pin}" is not in ~/.heddle/accounts.json (known: ${accounts.map((x) => x.id).join(', ')})`);
@@ -426,7 +426,7 @@ export function pickClaudeAccount(
         `\`${a.configDir ? `CLAUDE_CONFIG_DIR=${a.configDir} ` : ''}claude /login\` there first, then update accounts.json.`,
       );
     }
-    if (isFreshExcludable(a.id)) {
+    if (isDispatchExcluded(caps, a.id)) {
       const reason = caps?.accounts.find((r) => r.id === a.id)?.dispatch?.reason;
       throw new Error(`account_pin "${opts.pin}" is registered but NOT dispatchable (${reason}) — wait for a successful keeper ping or fix the account before pinning it.`);
     }
@@ -435,7 +435,7 @@ export function pickClaudeAccount(
   }
   // A logged-out account is not addressable, whatever its caps say (a fresh keeper anchor for a dir
   // whose credential was replaced would otherwise make the picker choose an account that 401s).
-  const addressable = accounts.filter((a) => a.loggedIn !== false && !isFreshExcludable(a.id));
+  const addressable = accounts.filter((a) => a.loggedIn !== false && !isDispatchExcluded(caps, a.id));
   // For a FABLE-model target, Fable-weekly headroom outranks 5h headroom (HED-76): the weekly
   // Fable share is the binding constraint, and only accounts with a KNOWN estimate compete on it
   // (unknown → fall through to the normal 5h ordering — unknown never decides).

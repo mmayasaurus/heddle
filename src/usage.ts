@@ -234,6 +234,7 @@ export function readClaudeTap(usageDir: string, nowS: number): ProviderCaps | nu
   try { files = existsSync(usageDir) ? readdirSync(usageDir) : []; } catch { files = []; }
   const ids = new Set<string>();
   for (const f of files) {
+    if (/\.(dispatch|oauth-usage)\.json$/.test(f)) continue;
     const m = /^claude-([A-Za-z0-9_.-]+?)(\.keeper)?\.json$/.exec(f);
     if (m) ids.add(m[1]);
   }
@@ -287,16 +288,24 @@ export function readProviderCaps(opts: { usageDir?: string; nowS?: number } = {}
       out.claude = { ...m, accounts: [...byId.values()] };
     }
   }
+  for (const p of ['claude', 'codex', 'cursor', 'gemini']) if (!out[p]) out[p] = unknownCaps(p);
   // HED-178 is independent of cap freshness: decorate the final merged Claude rows after choosing
-  // mirror/tap data. A missing, corrupt, or unknown account signal leaves the row untouched.
-  if (out.claude) {
+  // mirror/tap data. Signal-only accounts get a stale unknown row so a fresh failure can exclude a
+  // registry account even when no cap producer has ever emitted a row for it.
+  {
     const signals = readDispatchSignals(usageDir);
-    out.claude = { ...out.claude, accounts: out.claude.accounts.map((a) => {
+    const byId = new Map(out.claude.accounts.map((a) => [a.id, a]));
+    for (const [id, dispatch] of signals) {
+      if (!byId.has(id)) byId.set(id, {
+        id, fiveHour: UNKNOWN, sevenDay: UNKNOWN, windows: {}, noteCodes: ['claude.dispatchSignalOnly'],
+        limitReached: false, stale: true, dispatch,
+      });
+    }
+    out.claude = { ...out.claude, accounts: [...byId.values()].map((a) => {
       const dispatch = signals.get(a.id);
       return dispatch ? { ...a, dispatch } : a;
     }) };
   }
-  for (const p of ['claude', 'codex', 'cursor', 'gemini']) if (!out[p]) out[p] = unknownCaps(p);
   return out;
 }
 
