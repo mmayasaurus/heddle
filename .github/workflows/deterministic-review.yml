@@ -175,14 +175,15 @@ jobs:
           # image (the semgrep CLI is a Python package); jq is not (qodo, r3).
           N=$(python3 -c 'import json; print(len(json.load(open("semgrep.sarif"))["runs"][0]["results"]))')
           echo "semgrep: **$N** finding(s) (${BASELINE:+new vs base }${BASELINE:-full scan})" >> "$GITHUB_STEP_SUMMARY"
-          # ── Fail-closed scanned-volume guard (HED-70): a green scanner is not
-          #    proof a scan happened — gitleaks shipped GREEN with EMPTY scans in
-          #    rounds 3/4 of heddle#2 when its git broke. semgrep aborts loudly if
-          #    --baseline-commit's git fails, so this gap is smaller — but "0 targets
-          #    scanned" on a code change must never be green. paths.scanned lists the
-          #    files semgrep actually analysed; with --baseline-commit it is the
-          #    CHANGED in-language set (measured, uvx semgrep 1.173.0). Fail CLOSED if
-          #    paths.scanned is absent (schema drift) rather than reading it as green.
+          # ── Scanned-volume guard (HED-70): a green scanner is not proof it scanned.
+          #    gitleaks shipped GREEN with EMPTY scans in heddle#2 r3/r4 when its git
+          #    broke; semgrep already ABORTS (non-zero, so this step reds) when
+          #    --baseline-commit's git fails, so this guard covers the residue.
+          #    paths.scanned lists the files semgrep analysed (measured, uvx semgrep
+          #    1.173.0). semgrep emits NO paths.skipped, so on a PR a 0-scan cannot be
+          #    proven a real miss vs a legitimate skip (excludes / .semgrepignore /
+          #    deletions) — a PR 0-scan WARNS; only a full-main 0-scan or unreadable
+          #    output (schema drift) fails closed.
           SCANNED=$(python3 -c 'import json,sys; p=json.load(open("semgrep.json")).get("paths") or {}; s=p.get("scanned"); print(len(s)) if isinstance(s,list) else sys.exit(3)' 2>/dev/null) \
             || { echo "::error::semgrep scanned-volume unreadable (paths.scanned missing/unparseable in semgrep.json) — NOT a clean pass"; echo "semgrep: ❌ scanned-volume unreadable — NOT a clean pass" >> "$GITHUB_STEP_SUMMARY"; exit 1; }
           if [ -n "$BASELINE" ]; then
@@ -190,17 +191,20 @@ jobs:
             # Keep both sets in sync with the scan flags above (excludes: node_modules
             # / dist; languages from p/typescript + p/nodejs → ts tsx js jsx mjs cjs).
             # Too-narrow here only weakens the guard (safe); too-broad false-reds.
-            CHANGED=$(git diff --name-only "$BASELINE"..HEAD) \
+            CHANGED=$(git diff --name-only --diff-filter=ACMR "$BASELINE"..HEAD) \
               || { echo "::error::git diff failed for the semgrep scanned-volume guard — NOT a clean pass"; exit 1; }
             INLANG=$(printf '%s\n' "$CHANGED" \
-              | grep -vE '^(node_modules|dist)/' \
+              | grep -vE '(^|/)(node_modules|dist)/' \
               | grep -cE '\.(ts|tsx|js|jsx|mjs|cjs)$' || true)
             if [ "$INLANG" -gt 0 ] && [ "$SCANNED" -eq 0 ]; then
-              echo "::error::semgrep scanned 0 targets but this PR changed $INLANG in-language file(s) (ts/tsx/js/jsx/mjs/cjs) — the scan did not cover the change (a green scanner is not a scan). NOT a clean pass"
-              echo "semgrep: ❌ scanned 0 targets with $INLANG in-language file(s) changed — NOT a clean pass" >> "$GITHUB_STEP_SUMMARY"
-              exit 1
+              # WARN, not RED: semgrep emits no paths.skipped, so a PR 0-scan cannot be
+              # proven a real miss vs a legitimate skip (nested excludes / .semgrepignore
+              # / deletions). Only a full-main 0-scan or unreadable output fails closed.
+              echo "::warning::semgrep scanned 0 targets while this PR changed $INLANG in-language file(s) — expected when they are all excluded / .semgrepignore'd, but verify it is not a scan miss."
+              echo "semgrep volume: scanned 0 target(s) with $INLANG in-language file(s) changed — verify (excludes/ignores expected)" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "semgrep volume: scanned $SCANNED target(s); diff has $INLANG in-language file(s)" >> "$GITHUB_STEP_SUMMARY"
             fi
-            echo "semgrep volume: scanned $SCANNED target(s); diff has $INLANG in-language file(s)" >> "$GITHUB_STEP_SUMMARY"
           else
             # main push (full scan): the repo always has TS source, so a real scan
             # covers > 0 targets; 0 means the scan was empty (git broke, etc.).
