@@ -208,11 +208,10 @@ task_classes:
   adversarial-review:       # HED-3 (Maya: "super important") — a DIFFERENT model family reviews a diff/
     provider: cursor        #   worktree read-only, find-only; the author fixes; the ledger scores each
     model: cursor-grok-4.6-high   # author→reviewer provider pair by accepted-finding rate.
-    fallback: {provider: gemini, model: gemini-3.1-pro-high}
-    mcp: [memtrace]         # HED-205: a reviewer reads the code under review (test-quality lens) — grant discovery so it doesn't trip the memtrace-first hook and return a complaint instead of findings. BEST-EFFORT: a gemini pick/fallback has no worker-MCP path yet and runs without it (dispatch filters the class default per resolved provider; an EXPLICIT mcp override still errors loudly).
-    reviewer_pool:          # first entry whose provider differs from `author_provider` is used
+    fallback: {provider: codex, model: gpt-5.6-sol}   # HED-249: MUST be mcp-attachable (see mcp: below). Codex is memtrace-capable AND a different family from cursor + claude authors, so review diversity holds. NOT gemini: agy has no worker-MCP path, so a gemini fallback HARD-FAILED the whole dispatch on a transient cursor blip — cursor was a SPOF (ledger 254).
+    mcp: [memtrace]         # HED-205 default so a reviewer gets code discovery (else it trips the memtrace-first hook and returns a complaint instead of findings, ledger 206). HED-249 HARD CONSTRAINT: every provider this class can resolve to — primary, fallback, AND every reviewer_pool entry — MUST be worker-MCP-attachable. gemini/agy is NOT, so it is kept OUT of this class entirely (refusing loudly beats a silent discovery-less review). A CI invariant test (routing.test.ts) enforces this for all mcp-carrying classes.
+    reviewer_pool:          # first entry whose provider differs from `author_provider` is used. HED-249: no gemini — this class carries mcp and gemini can't attach it (pickReviewer's usable() gate does not check mcp, so a gemini pick would hard-fail the dispatch).
       - {provider: cursor, model: cursor-grok-4.6-high}
-      - {provider: gemini, model: gemini-3.1-pro-high}
       - {provider: codex, model: gpt-5.6-sol}
       - {provider: claude, model: opus}
     why: pre-PR adversarial review by another model family, read-only + find-only, with a test-quality lens (a toggle test is not a behavior test); the author fixes, the ledger scores reviewer pairs

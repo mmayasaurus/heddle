@@ -22,7 +22,7 @@ describe('adversarial review helpers', () => {
     expect(pickReviewer(route, undefined)).toBeNull();
     expect(pickReviewer(route, 'codex')).toBeNull();
     expect(pickReviewer(route, 'cursor')).toEqual({
-      provider: 'gemini', model: 'gemini-3.1-pro-high', reason: 'pool:2 (author is cursor)',
+      provider: 'codex', model: 'gpt-5.6-sol', reason: 'pool:2 (author is cursor)',
     });
   });
 

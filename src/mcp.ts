@@ -75,11 +75,11 @@ export function resolveMcpServers(names: string[]): Record<string, { command: st
  * validateWorkerMcp (not a parallel hardcoded check) so the two can never drift (gitar #67) — it
  * probes the attachment gate with the canonical, always-registered `memtrace` server and reports
  * whether it is accepted. Today only the `gemini` provider key (the agy / Antigravity CLI behind it)
- * lacks a path and throws. Used to filter a CLASS-DEFAULT mcp list (best-effort intent — "this class
- * reads code, give it discovery") down to what the RESOLVED provider can take, so e.g. a gemini
- * reviewer picked from an adversarial-review pool simply runs without memtrace instead of failing the
- * dispatch (HED-205). A caller's EXPLICIT req.mcp is NOT filtered — it goes straight to
- * validateWorkerMcp and still throws for an impossible ask, so it is loud, not a silent no-op.
+ * lacks a path and throws. Used by the routing CI invariant (routing.test.ts): every provider an
+ * mcp-carrying task class can resolve to — primary, fallback, AND every reviewer_pool entry — must be
+ * worker-MCP-attachable, so an mcp class can never route to a provider that would hard-fail the
+ * dispatch. HED-249 replaced HED-205's runtime graceful-degrade (silently dropping mcp for a gemini
+ * target) with this config-time guard: refusing loudly at the table beats a silent discovery-less run.
  */
 export function workerMcpSupported(provider: string): boolean {
   try {

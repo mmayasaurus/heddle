@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { loadRouting, listTaskClasses, resolveRoute, directRoute, neverViaCursorPrefixes, isNeverViaCursor, providerExecution } from '../src/routing.js';
+import { workerMcpSupported } from '../src/mcp.js';
 
 /**
  * Behavioral checks on the SHIPPED routing table (routing/routing.v0.yaml) — the file Maya tunes by
@@ -27,6 +28,24 @@ describe('routing.v0.yaml — shipped table invariants', () => {
 
   it('has at least one task class', () => {
     expect(classes.length).toBeGreaterThan(0);
+  });
+
+  it.each(classes)('%s: if it carries mcp, EVERY provider it can resolve to is worker-MCP-attachable (HED-249)', (c) => {
+    // The hard constraint that replaced HED-205's runtime graceful-degrade: an mcp-carrying class must
+    // never resolve to a provider that can't attach mcp (gemini/agy) — that hard-fails the dispatch
+    // (cursor-blip SPOF, ledger 254). Check the RESOLVED targets: fallback inherits the class mcp unless
+    // it sets its own (a fallback with `mcp: []` is legitimately exempt); a picked pool reviewer carries
+    // the class mcp. Catches the misconfiguration at CI time, louder and earlier than the runtime throw.
+    const r = resolveRoute(table, c);
+    const targets: Array<{ label: string; provider: string; mcp?: string[] }> = [
+      { label: 'primary', provider: r.provider, mcp: r.mcp },
+      ...(r.fallback ? [{ label: 'fallback', provider: r.fallback.provider, mcp: r.fallback.mcp }] : []),
+      ...(r.reviewerPool ?? []).map((e, i) => ({ label: `reviewer_pool[${i}]`, provider: e.provider, mcp: r.mcp })),
+    ];
+    for (const t of targets) {
+      if ((t.mcp ?? []).length === 0) continue; // no mcp to attach → any provider is fine
+      expect(workerMcpSupported(t.provider), `class "${c}" ${t.label} (${t.provider}) carries mcp [${t.mcp}] but is not worker-MCP-attachable`).toBe(true);
+    }
   });
 
   it.each(classes)('%s resolves to a provider and a model', (c) => {

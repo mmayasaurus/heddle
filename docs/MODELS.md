@@ -489,8 +489,11 @@ land.
   `second-opinion` fallback): worker MCP attachment for agy/gemini is not implemented, and the
   throw happens after `ledger.start()` outside the try/finally — the ledger row is orphaned
   in-flight and skill restores are skipped (HED-63). Dispatch gemini classes without `mcp`.
-  HED-205 best-effort drops a class-default MCP when routing resolves to gemini and records that in
-  `routeReason`; an explicit MCP request still fails loudly.
+  HED-249 (superseding HED-205's runtime graceful-degrade): an mcp-carrying class must NOT list
+  gemini/agy anywhere it can resolve — primary, fallback, OR reviewer_pool — since it can't attach
+  mcp and would hard-fail the dispatch (cursor-blip SPOF, ledger 254). A `routing.test.ts` CI
+  invariant enforces this for every mcp class. gemini stays a primary only for classes carrying NO
+  `mcp` (`documentation`, `gemini-analysis`, the `second-opinion` fallback).
 - **`second-opinion` (grok-4.6-high) with memtrace attached is unreliable on long read-and-review
   prompts** — a design-review dispatch timed out at 600 s with no result JSON. Prefer no `mcp` and
   paste the relevant code/design into the prompt.
