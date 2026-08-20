@@ -1,6 +1,9 @@
+import { writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { pickClaudeAccount, type ClaudeAccount } from '../src/capaware.js';
-import type { ProviderCaps } from '../src/usage.js';
+import { adviseClaudeAccount, bestFableWeekly, pickClaudeAccount, type ClaudeAccount } from '../src/capaware.js';
+import { readClaudeTap, readProviderCaps, type ProviderCaps } from '../src/usage.js';
+import { useTempResources } from './helpers.js';
 
 const registry: ClaudeAccount[] = [{ id: 'acct1', configDir: null }, { id: 'acct2', configDir: '/x/.claude-acct2' }, { id: 'acct3', configDir: '/x/.claude-acct3' }];
 const claudeCaps = (rows: Array<{ id: string; used: number | null; stale?: boolean }>): ProviderCaps => ({ provider: 'claude', source: 'limits.json', stale: false, capturedAt: 1, fiveHour: { usedPercentage: null, resetsAt: null }, sevenDay: { usedPercentage: null, resetsAt: null }, windows: {}, noteCodes: [], activeAccount: null, accounts: rows.map(({ id, used, stale = false }) => ({ id, fiveHour: { usedPercentage: used, resetsAt: null }, sevenDay: { usedPercentage: null, resetsAt: null }, windows: {}, noteCodes: [], limitReached: false, stale })) });
@@ -149,5 +152,139 @@ describe('pickClaudeAccount — logged-out accounts are not addressable', () => 
     const advice = adviseClaudeAccount(capsWith([{ id: 'acct1', used: 0 }, { id: 'acct2', used: 40 }, { id: 'acct3', used: 20 }]), registry);
     expect(advice.best?.id).toBe('acct3');
     expect(advice.line).toContain('acct3 has the most 5h headroom');
+  });
+});
+
+describe('regression PR#176 — picker skips non-dispatchable accounts', () => {
+  const { tempDir } = useTempResources('heddle-dispatch-signal-');
+  const nowS = Math.floor(Date.now() / 1000);
+  const accounts: ClaudeAccount[] = [
+    { id: 'acct1', configDir: null },
+    { id: 'acct2', configDir: '/x/.claude-acct2' },
+  ];
+  type Reason = 'ok' | 'billing' | 'logged-out' | 'rate-capped' | 'error';
+  const capsFromSignals = (signals: Array<{ account: string; reason: Reason; checkedAt?: number }> = []) => {
+    const dir = tempDir();
+    writeFileSync(join(dir, 'limits.json'), JSON.stringify({
+      writtenAt: nowS,
+      limits: [{ provider: 'claude', capturedAt: nowS, staleAfterSecs: 900, accounts: [
+        { id: 'acct1', fiveHour: { usedPercentage: 75 }, sevenDay: {} },
+        { id: 'acct2', fiveHour: { usedPercentage: 1 }, sevenDay: {} },
+      ] }],
+    }));
+    for (const signal of signals) {
+      writeFileSync(join(dir, `claude-${signal.account}.dispatch.json`), JSON.stringify({
+        schemaVersion: 1, account: signal.account, dispatchable: signal.reason === 'ok', reason: signal.reason,
+        checkedAt: signal.checkedAt ?? nowS,
+      }));
+    }
+    return readProviderCaps({ usageDir: dir, nowS }).claude;
+  };
+
+  it('excludes fresh logged-out and billing accounts even when they have the most headroom', () => {
+    for (const reason of ['logged-out', 'billing'] as const) {
+      const pick = pickClaudeAccount(capsFromSignals([{ account: 'acct2', reason }]), accounts)!;
+      expect(pick.account.id).toBe('acct1');
+    }
+  });
+
+  it('fails open for fresh ok, error, and rate-capped signals', () => {
+    for (const reason of ['ok', 'error', 'rate-capped'] as const) {
+      const pick = pickClaudeAccount(capsFromSignals([{ account: 'acct2', reason }]), accounts)!;
+      expect(pick.account.id).toBe('acct2');
+    }
+  });
+
+  it('fails open for a stale logged-out signal and for absent signal files', () => {
+    expect(pickClaudeAccount(capsFromSignals([{ account: 'acct2', reason: 'logged-out', checkedAt: nowS - 21_601 }]), accounts)!.account.id).toBe('acct2');
+    expect(pickClaudeAccount(capsFromSignals(), accounts)!.account.id).toBe('acct2');
+  });
+
+  it('refuses a pin to a fresh non-dispatchable account', () => {
+    expect(() => pickClaudeAccount(capsFromSignals([{ account: 'acct2', reason: 'billing' }]), accounts, { pin: 'acct2' }))
+      .toThrow(/account_pin "acct2".*NOT dispatchable.*billing/s);
+  });
+});
+
+describe('regression PR#176 — dispatch signals cover signal-only and all account selection paths', () => {
+  const { tempDir } = useTempResources('heddle-dispatch-signal-review-');
+  const nowS = Math.floor(Date.now() / 1000);
+  const accounts: ClaudeAccount[] = [
+    { id: 'acct1', configDir: null },
+    { id: 'acct2', configDir: '/x/.claude-acct2' },
+  ];
+  const signal = (dir: string, account: string, reason: 'ok' | 'billing' | 'logged-out' | 'rate-capped' | 'error', checkedAt = nowS, extra: Record<string, unknown> = {}) => {
+    writeFileSync(join(dir, `claude-${account}.dispatch.json`), JSON.stringify({
+      schemaVersion: 1, account, dispatchable: reason === 'ok', reason, checkedAt, ...extra,
+    }));
+  };
+  const freshMirror = (dir: string) => writeFileSync(join(dir, 'limits.json'), JSON.stringify({
+    writtenAt: nowS,
+    limits: [{ provider: 'claude', capturedAt: nowS, staleAfterSecs: 900, accounts: [
+      { id: 'acct1', fiveHour: { usedPercentage: 70 }, sevenDay: {}, fableWeeklyEstimatePct: 40, fableWeeklySamples: 7 },
+      { id: 'acct2', fiveHour: { usedPercentage: 1 }, sevenDay: {}, fableWeeklyEstimatePct: 10, fableWeeklySamples: 7 },
+    ] }],
+  }));
+
+  it('adds a signal-only billing account as a stale dispatch row and never picks it', () => {
+    const dir = tempDir();
+    signal(dir, 'acct2', 'billing');
+    const caps = readProviderCaps({ usageDir: dir, nowS }).claude;
+    expect(caps.accounts).toContainEqual(expect.objectContaining({ id: 'acct2', stale: true, noteCodes: ['claude.dispatchSignalOnly'], dispatch: expect.objectContaining({ reason: 'billing' }) }));
+    expect(pickClaudeAccount(caps, accounts)?.account.id).toBe('acct1');
+  });
+
+  it('does not treat a dispatch sidecar as a Claude tap account', () => {
+    const dir = tempDir();
+    signal(dir, 'acct2', 'billing');
+    expect(readClaudeTap(dir, nowS)).toBeNull();
+  });
+
+  it('excludes a fresh billing account from Fable weekly ranking and advice', () => {
+    const dir = tempDir(); freshMirror(dir); signal(dir, 'acct2', 'billing');
+    const caps = readProviderCaps({ usageDir: dir, nowS }).claude;
+    expect(bestFableWeekly(caps, accounts)).toEqual({ id: 'acct1', pct: 40 });
+    expect(adviseClaudeAccount(caps, accounts, {}).best?.id).toBe('acct1');
+  });
+
+  it('returns null for a Fable pin on a freshly excluded account instead of ranking another', () => {
+    const dir = tempDir(); freshMirror(dir); signal(dir, 'acct2', 'billing');
+    const caps = readProviderCaps({ usageDir: dir, nowS }).claude;
+    // Excluded pin → null (matches pickClaudeAccount's pin refusal), NOT a silent fallthrough to acct1.
+    expect(bestFableWeekly(caps, accounts, 'acct2')).toBeNull();
+  });
+
+  it('returns null when every registered account is freshly excluded', () => {
+    const dir = tempDir(); signal(dir, 'acct1', 'billing'); signal(dir, 'acct2', 'logged-out');
+    expect(pickClaudeAccount(readProviderCaps({ usageDir: dir, nowS }).claude, accounts)).toBeNull();
+  });
+
+  it('ignores a signal-only row for an unregistered account without crashing', () => {
+    const dir = tempDir(); signal(dir, 'unregistered', 'billing');
+    expect(pickClaudeAccount(readProviderCaps({ usageDir: dir, nowS }).claude, accounts)?.account.id).toBe('acct1');
+  });
+
+  it('fails open for a billing signal checked in the future', () => {
+    // Robustly-future offset: isDispatchExcluded reads live Date.now(), so a +1s offset flakes once the
+    // suite runs a second past nowS capture (HED-176 review).
+    const dir = tempDir(); freshMirror(dir); signal(dir, 'acct2', 'billing', nowS + 3600);
+    expect(pickClaudeAccount(readProviderCaps({ usageDir: dir, nowS }).claude, accounts)?.account.id).toBe('acct2');
+  });
+
+  it('fails open for each invalid dispatch signal contract', () => {
+    const invalid = [
+      { schemaVersion: 2 },
+      { account: 'acct1' },
+      { dispatchable: true },
+    ];
+    for (const extra of invalid) {
+      const dir = tempDir(); freshMirror(dir); signal(dir, 'acct2', 'billing', nowS, extra);
+      expect(pickClaudeAccount(readProviderCaps({ usageDir: dir, nowS }).claude, accounts)?.account.id).toBe('acct2');
+    }
+  });
+
+  it('allows pinning a healthy account while another account is freshly excluded', () => {
+    const dir = tempDir(); freshMirror(dir); signal(dir, 'acct2', 'billing');
+    expect(pickClaudeAccount(readProviderCaps({ usageDir: dir, nowS }).claude, accounts, { pin: 'acct1' })?.account.id).toBe('acct1');
   });
 });
