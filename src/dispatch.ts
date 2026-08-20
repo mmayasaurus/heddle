@@ -294,11 +294,9 @@ async function runTarget(
   // without memtrace rather than failing the dispatch (HED-205); the drop is surfaced in routeReason.
   let mcp = req.mcp ?? target.mcp ?? [];
   if (req.mcp === undefined && mcp.length > 0 && !workerMcpSupported(target.provider)) {
-    const dropped = mcp.join(', ');
+    const notice = `class-default mcp [${mcp.join(', ')}] dropped: ${target.provider} has no worker-MCP path`;
     mcp = [];
-    ctx.routeReason = ctx.routeReason
-      ? `${ctx.routeReason}; class-default mcp [${dropped}] dropped: ${target.provider} has no worker-MCP path`
-      : `class-default mcp [${dropped}] dropped: ${target.provider} has no worker-MCP path`;
+    ctx.routeReason = [ctx.routeReason, notice].filter(Boolean).join('; ');
   }
 
   // Capabilities are decided per TARGET provider (a fallback may enforce a different set).
