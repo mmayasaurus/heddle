@@ -77,16 +77,23 @@ export function resolveMcpServers(names: string[]): Record<string, { command: st
  *   this path throws rather than write a guessed schema. (Tracked follow-up.)
  */
 /**
- * Does this provider have an implemented worker-MCP attachment path at all? Mirrors validateWorkerMcp:
- * only agy/gemini has none (it THROWS for any non-empty list). Used to filter a CLASS-DEFAULT mcp list
- * (best-effort intent — "this class reads code, give it discovery") down to what the RESOLVED provider
- * can take, so e.g. a gemini reviewer picked from an adversarial-review pool simply runs without
- * memtrace instead of failing the dispatch. A caller's EXPLICIT req.mcp is NOT filtered — it stays a
- * requirement and still throws here, so an impossible ask is loud, not a silent no-op. A drift-guard
- * test asserts this stays in lock-step with validateWorkerMcp's throw. HED-205.
+ * Does this provider have an implemented worker-MCP attachment path at all? DERIVED from
+ * validateWorkerMcp (not a parallel hardcoded check) so the two can never drift (gitar #67) — it
+ * probes the attachment gate with the canonical, always-registered `memtrace` server and reports
+ * whether it is accepted. Today only the `gemini` provider key (the agy / Antigravity CLI behind it)
+ * lacks a path and throws. Used to filter a CLASS-DEFAULT mcp list (best-effort intent — "this class
+ * reads code, give it discovery") down to what the RESOLVED provider can take, so e.g. a gemini
+ * reviewer picked from an adversarial-review pool simply runs without memtrace instead of failing the
+ * dispatch (HED-205). A caller's EXPLICIT req.mcp is NOT filtered — it goes straight to
+ * validateWorkerMcp and still throws for an impossible ask, so it is loud, not a silent no-op.
  */
 export function workerMcpSupported(provider: string): boolean {
-  return provider !== 'gemini';
+  try {
+    validateWorkerMcp(provider, ['memtrace']);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**
