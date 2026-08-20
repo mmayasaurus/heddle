@@ -31,7 +31,12 @@ exists because an unconfigured DeepSource opened ~118 non-defect threads on one 
   still exited 0 with "0 commits scanned … no leaks found". Two rounds of a PR were green with an
   empty scan before a human read the log. Every container-job script therefore starts with
   `git config --global --add safe.directory "$GITHUB_WORKSPACE"`, and any scanner added later must
-  ship with a volume assertion from day one (semgrep/zizmor: HED-70).
+  ship with a volume assertion from day one. The semgrep step likewise asserts volume (HED-70): it
+  writes `--json-output=semgrep.json` and reds if `paths.scanned` is empty while the diff still has
+  files in semgrep's languages — or if `paths.scanned` is absent altogether (schema drift fails
+  closed) — so a `Targets scanned: 0` on a code change can never be green. Still pending under HED-70:
+  the same assertion for zizmor/actionlint, and extracting the semgrep step to a fixture-testable
+  script (as gitleaks did in HED-113).
 - **Suppressions are PR-controlled, so the scan never trusts the PR's copy.** gitleaks scans with
   the *base branch's* `.gitleaks.toml`/`.gitleaksignore` (or a default-rules stub), ignores inline
   `gitleaks:allow`, and moves the PR's working-tree copies aside (gitleaks merges
