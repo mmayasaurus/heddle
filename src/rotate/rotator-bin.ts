@@ -55,16 +55,15 @@ const log = new CommsLog(env.HEDDLE_COMMS_DB || DEFAULT_COMMS_PATH);
 const ledger = openLedgerIfPresent(env, warn);
 const broker = new Broker({ log, ledger, transport: new ChannelTransport(log), onWarning: warn });
 
+const fleetIdentity = (mode === 'run' || mode === 'once') ? resolveFleetIdentity(env, process.cwd(), warn) : null;
+
 // HED-187: the rotator must run STANDALONE, never inside a fleet session it may relaunch — an
 // in-session driver would sit in its own quiesce ack-set/roster. The operator binding masks the
 // fleet letter (identity === 'operator'), so resolve the RAW fleet identity and refuse on a live match.
-if (mode === 'run' || mode === 'once') {
-  const inSession = resolveFleetIdentity(env, process.cwd(), warn);
-  if (inSession && log.liveSessions().some((s) => s.address === inSession)) {
-    warn(`refusing to run: this process carries fleet identity ${inSession}, which has a LIVE comms session — the rotator must run STANDALONE, never inside a session it may relaunch. Start it from a plain shell (unset HEDDLE_AGENT/FLEET_AGENT, not a fleet agent's terminal).`);
-    log.close();
-    process.exit(1);
-  }
+if (fleetIdentity && log.liveSessions().some((s) => s.address === fleetIdentity)) {
+  warn(`refusing to run: this process carries fleet identity ${fleetIdentity}, which has a LIVE comms session — the rotator must run STANDALONE, never inside a session it may relaunch. Start it from a plain shell (unset HEDDLE_AGENT/FLEET_AGENT, not a fleet agent's terminal).`);
+  log.close();
+  process.exit(1);
 }
 
 const softPct = Number(env.HEDDLE_ROTATE_SOFT_PCT);
@@ -173,6 +172,12 @@ async function main(): Promise<void> {
     // A token rotation revokes the operator everywhere (like the comms server's per-call check) —
     // a daemon that keeps pausing/killing after its authority was revoked would be dangerous.
     if (!operatorTokenMatches(env)) { warn('operator token no longer matches (rotated?) — stopping.'); stopping = true; releaseLock(LOCK_PATH); try { log.close(); } catch { /* closing */ } process.exit(1); }
+    // HED-187 (per-tick revalidation): the startup guard is a snapshot; a session carrying our fleet
+    // identity can register mid-run. Re-check each tick, alongside the operator-token recheck. If this
+    // fires while a pause is IN FORCE, the pause stays in force (the quiesce timeout runs in THIS
+    // now-exiting process) — that is fail-closed: the supervisor is re-entrant, so a standalone rotator
+    // restart takes over the same pause and drives it to completion.
+    if (fleetIdentity && log.liveSessions().some((s) => s.address === fleetIdentity)) { warn(`stopping: fleet identity ${fleetIdentity} now has a LIVE comms session — the rotator must run STANDALONE. Any pause in force is left in force for a standalone rotator to resume.`); stopping = true; releaseLock(LOCK_PATH); try { log.close(); } catch { /* closing */ } process.exit(1); }
     try { await runOnce(); } catch (err) { warn(`tick failed: ${errorMessage(err)}`); }
     // NOT unref()'d: the timer is the daemon's only event-loop reference; unref would exit after the first tick.
     if (!stopping) setTimeout(() => void loop(), intervalMs);
