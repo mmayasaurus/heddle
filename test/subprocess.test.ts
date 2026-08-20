@@ -24,6 +24,11 @@ describe('subprocess run() — the shared adapter runner', () => {
     expect(r.exitCode).toBeNull();
   });
 
+  it('does not flag timedOut when the process exits within a short timeout (race guard, cubic #69)', async () => {
+    const r = await run(NODE, ['-e', 'process.stdout.write("quick")'], process.cwd(), 500);
+    expect(r).toEqual({ stdout: 'quick', stderr: '', exitCode: 0, timedOut: false });
+  });
+
   it('settles once with a spawn error for a nonexistent binary (exitCode null, stderr names it)', async () => {
     const r = await run('heddle-no-such-binary-xyz', [], process.cwd(), 10_000);
     expect(r.exitCode).toBeNull();
