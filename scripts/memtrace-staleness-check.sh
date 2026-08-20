@@ -66,15 +66,17 @@ fi
 origin="$(git -C "$CANON" rev-parse origin/main 2>/dev/null || printf '')"
 head="$(git -C "$CANON" rev-parse HEAD 2>/dev/null || printf '')"
 
-# Read the marker's FIRST line, accepting ONLY a bare hex commit id (7–40 chars). Taking one line and
-# rejecting any internal/edge whitespace means a multi-line or space-separated file cannot be collapsed
-# into a false-valid concatenation (gitar); $() already strips the trailing newline. Garbage / hostile
-# content is rejected to "none" (→ needs-reindex) so it is never interpolated into a git revision below.
+# Read the marker's FIRST line, hex-validate it (cheap pre-filter + injection guard; one line so a
+# multi-line file cannot collapse into a false-valid concatenation — gitar), THEN canonicalize it to a
+# FULL commit id via git so an ABBREVIATED marker (e.g. ea31787) still compares equal to the full
+# origin/main SHA (cubic P2). rev-parse --verify also confirms it names a real commit in the repo.
+# Any step failing → "none" (→ needs-reindex); raw is never interpolated into a git revision.
 raw="$(head -n1 "$MARKER" 2>/dev/null)"
-if printf '%s' "$raw" | grep -Eq '^[0-9a-fA-F]{7,40}$'; then
-  indexed="$raw"
+if printf '%s' "$raw" | grep -Eq '^[0-9a-fA-F]{7,40}$' &&
+   indexed="$(git -C "$CANON" rev-parse --verify --quiet "${raw}^{commit}" 2>/dev/null)" && [ -n "$indexed" ]; then
+  : # indexed is now the full 40-char commit SHA
 else
-  [ -n "$raw" ] && logline "WARN: marker $MARKER holds non-commit-id content — treating as unindexed"
+  [ -n "$raw" ] && logline "WARN: marker $MARKER does not resolve to a commit in the repo — treating as unindexed"
   indexed="none"
 fi
 
