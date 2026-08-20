@@ -44,7 +44,9 @@ MARKER="${HEDDLE_MEMTRACE_MARKER:-$CANON/.memtrace-heddle-indexed-commit}"
 LOG="${HEDDLE_MEMTRACE_LOG:-$CANON/.memtrace-staleness.log}"
 
 # If the log path is not writable, fall back to /dev/null so no redirection can fail the run.
-{ : >> "$LOG"; } 2>/dev/null || LOG=/dev/null
+# Wrap in a SUBSHELL: `:` is a POSIX special built-in and a redirection error on one exits a strict
+# POSIX shell (dash) outright — the subshell contains that failure so the parent takes the `||`.
+( : >> "$LOG" ) 2>/dev/null || LOG=/dev/null
 
 ts() { date -u '+%Y-%m-%dT%H:%M:%SZ'; }
 logline() { printf '[%s] %s\n' "$(ts)" "$1" >> "$LOG" 2>/dev/null || true; }
@@ -64,10 +66,11 @@ fi
 origin="$(git -C "$CANON" rev-parse origin/main 2>/dev/null || printf '')"
 head="$(git -C "$CANON" rev-parse HEAD 2>/dev/null || printf '')"
 
-# Read the marker, accepting ONLY a hex commit id (7–40 chars). A garbage / multi-line /
-# attacker-written marker is rejected to "none" (→ treated as needs-reindex) so it is never
-# interpolated into a git revision below.
-raw="$(cat "$MARKER" 2>/dev/null | tr -d '[:space:]')"
+# Read the marker's FIRST line, accepting ONLY a bare hex commit id (7–40 chars). Taking one line and
+# rejecting any internal/edge whitespace means a multi-line or space-separated file cannot be collapsed
+# into a false-valid concatenation (gitar); $() already strips the trailing newline. Garbage / hostile
+# content is rejected to "none" (→ needs-reindex) so it is never interpolated into a git revision below.
+raw="$(head -n1 "$MARKER" 2>/dev/null)"
 if printf '%s' "$raw" | grep -Eq '^[0-9a-fA-F]{7,40}$'; then
   indexed="$raw"
 else

@@ -63,7 +63,7 @@ updates remote-tracking refs via `git fetch` and appends to its own log):
 2. Compare `origin/main` to a **last-indexed marker** (`.memtrace-heddle-indexed-commit`, a gitignored
    local file recording the commit last indexed into the live server).
 3. If they differ → **nag loudly** (log line + stderr + a best-effort macOS notification) and exit `1`.
-   If equal → exit `0`. Setup error → exit `2`.
+   If equal → exit `0`. Setup error, or inability to verify (git missing, canonical absent, or a `git fetch` / origin-resolve failure — never reported as "current") → exit `2`.
 
 It never writes a `.memdb`, never changes the working tree, and never rewrites history — only
 remote-tracking refs (fetch) and its own log. Run it ad-hoc, at agent `/startup`, or on the launchd timer.
