@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { CommsLog, DEFAULT_COMMS_PATH } from '../comms/log.js';
 import { Broker } from '../comms/broker.js';
 import { ChannelTransport, errorMessage } from '../comms/bridge.js';
-import { resolveCommsIdentity, openLedgerIfPresent, OPERATOR_TOKEN_PATH, operatorTokenMatches } from '../comms/server.js';
+import { resolveCommsIdentity, resolveFleetIdentity, openLedgerIfPresent, OPERATOR_TOKEN_PATH, operatorTokenMatches } from '../comms/server.js';
 import { createRotatorDeps, DEFAULT_VERIFY_TIMEOUT_MS, DEFAULT_QUIESCE_TIMEOUT_MS, DEFAULT_ABORT_COOLDOWN_MS } from './live.js';
 import { tick } from './supervisor.js';
 import { DEFAULT_THRESHOLDS } from './decide.js';
@@ -54,6 +54,17 @@ if ((mode === 'run' || mode === 'once') && !(isOperator && operatorTokenMatches(
 const log = new CommsLog(env.HEDDLE_COMMS_DB || DEFAULT_COMMS_PATH);
 const ledger = openLedgerIfPresent(env, warn);
 const broker = new Broker({ log, ledger, transport: new ChannelTransport(log), onWarning: warn });
+
+const fleetIdentity = (mode === 'run' || mode === 'once') ? resolveFleetIdentity(env, process.cwd(), warn) : null;
+
+// HED-187: the rotator must run STANDALONE, never inside a fleet session it may relaunch — an
+// in-session driver would sit in its own quiesce ack-set/roster. The operator binding masks the
+// fleet letter (identity === 'operator'), so resolve the RAW fleet identity and refuse on a live match.
+if (fleetIdentity && log.liveSessions().some((s) => s.address === fleetIdentity)) {
+  warn(`refusing to run: this process carries fleet identity ${fleetIdentity}, which has a LIVE comms session — the rotator must run STANDALONE, never inside a session it may relaunch. Start it from a plain shell (unset HEDDLE_AGENT/FLEET_AGENT, not a fleet agent's terminal).`);
+  log.close();
+  process.exit(1);
+}
 
 const softPct = Number(env.HEDDLE_ROTATE_SOFT_PCT);
 const hardPct = Number(env.HEDDLE_ROTATE_HARD_PCT);
@@ -161,6 +172,17 @@ async function main(): Promise<void> {
     // A token rotation revokes the operator everywhere (like the comms server's per-call check) —
     // a daemon that keeps pausing/killing after its authority was revoked would be dangerous.
     if (!operatorTokenMatches(env)) { warn('operator token no longer matches (rotated?) — stopping.'); stopping = true; releaseLock(LOCK_PATH); try { log.close(); } catch { /* closing */ } process.exit(1); }
+    // HED-187 (per-tick revalidation): the startup guard is a snapshot; a session carrying our fleet
+    // identity can register mid-run. Re-check each tick, alongside the operator-token recheck. If this
+    // fires while a pause is IN FORCE, the pause and its rotation intent persist durably in the comms log,
+    // but THIS process exits — so the quiesce timeout cannot fire (no surviving process watches the pause),
+    // and a same-env rotator restart REFUSES by design (the startup guard blocks the tainted identity while
+    // the triggering session is live). Recovery is an OPERATOR action — resume_pause, or a rotator launched
+    // with NO fleet identity at all (HEDDLE_AGENT / FLEET_AGENT / HEDDLE_COMMS_ADDRESS unset, and no .fleet-agent
+    // reachable up-tree from its cwd) — both surfaced by the pause machinery. Fail-closed:
+    // the fleet parks, nothing is killed, and resume authority stays with the operator / tick(), never a
+    // refusal guard.
+    if (fleetIdentity && log.liveSessions().some((s) => s.address === fleetIdentity)) { warn(`stopping: fleet identity ${fleetIdentity} now has a LIVE comms session — the rotator must run STANDALONE. Any pause in force stays in force — resume it with resume_pause or a rotator started with NO fleet identity (HEDDLE_AGENT/FLEET_AGENT/HEDDLE_COMMS_ADDRESS unset, none via .fleet-agent) — a same-env restart refuses by design.`); stopping = true; releaseLock(LOCK_PATH); try { log.close(); } catch { /* closing */ } process.exit(1); }
     try { await runOnce(); } catch (err) { warn(`tick failed: ${errorMessage(err)}`); }
     // NOT unref()'d: the timer is the daemon's only event-loop reference; unref would exit after the first tick.
     if (!stopping) setTimeout(() => void loop(), intervalMs);
