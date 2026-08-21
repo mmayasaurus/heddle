@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { loadRouting, listTaskClasses, resolveRoute, directRoute, neverViaCursorPrefixes, isNeverViaCursor, providerExecution } from '../src/routing.js';
-import { mcpAttachable } from '../src/mcp.js';
+import { mcpAttachable, webCapable } from '../src/mcp.js';
 import { normalizeProvider } from '../src/review.js';
 
 /**
@@ -31,26 +31,30 @@ describe('routing.v0.yaml — shipped table invariants', () => {
     expect(classes.length).toBeGreaterThan(0);
   });
 
-  it.each(classes)('%s: if it carries mcp, EVERY provider it can resolve to is worker-MCP-attachable (HED-249)', (c) => {
+  it.each(classes)('%s: every provider a capability-carrying class resolves to satisfies that capability (HED-249, HED-239)', (c) => {
     // The hard constraint that replaced HED-205's runtime graceful-degrade: an mcp-carrying class must
     // never resolve to a provider that can't attach mcp (gemini/agy) — that hard-fails the dispatch
     // (cursor-blip SPOF, ledger 254). Check the RESOLVED targets: fallback inherits the class mcp unless
     // it sets its own (a fallback with `mcp: []` is legitimately exempt); a picked pool reviewer carries
     // the class mcp. Catches the misconfiguration at CI time, louder and earlier than the runtime throw.
     const r = resolveRoute(table, c);
-    const targets: Array<{ label: string; provider: string; mcp?: string[] }> = [
-      { label: 'primary', provider: r.provider, mcp: r.mcp },
-      ...(r.fallback ? [{ label: 'fallback', provider: r.fallback.provider, mcp: r.fallback.mcp }] : []),
-      ...(r.reviewerPool ?? []).map((e, i) => ({ label: `reviewer_pool[${i}]`, provider: e.provider, mcp: r.mcp })),
+    const targets: Array<{ label: string; provider: string; mcp?: string[]; capabilities?: string[] }> = [
+      { label: 'primary', provider: r.provider, mcp: r.mcp, capabilities: r.capabilities },
+      ...(r.fallback ? [{ label: 'fallback', provider: r.fallback.provider, mcp: r.fallback.mcp, capabilities: r.fallback.capabilities }] : []),
+      ...(r.reviewerPool ?? []).map((e, i) => ({ label: `reviewer_pool[${i}]`, provider: e.provider, mcp: r.mcp, capabilities: r.capabilities })),
     ];
     for (const t of targets) {
-      if ((t.mcp ?? []).length === 0) continue; // no mcp to attach → any provider is fine
       // Normalize (trim + lowercase) exactly as dispatch does before attach, so a cased YAML entry
       // like " Codex " isn't falsely flagged (copilot/cubic #73).
       const provider = normalizeProvider(t.provider) ?? t.provider;
-      // Validate the DECLARED server list, not a generic memtrace probe — `['serena']` on cursor is
-      // unattachable even though cursor attaches memtrace (cubic #73).
-      expect(mcpAttachable(provider, t.mcp ?? []), `class "${c}" ${t.label} (${t.provider}) cannot attach its mcp [${t.mcp}]`).toBe(true);
+      if ((t.mcp ?? []).length > 0) {
+        // Validate the DECLARED server list, not a generic memtrace probe — `['serena']` on cursor is
+        // unattachable even though cursor attaches memtrace (cubic #73).
+        expect(mcpAttachable(provider, t.mcp ?? []), `class "${c}" ${t.label} (${t.provider}) cannot attach its mcp [${t.mcp}]`).toBe(true);
+      }
+      if (r.requiresWeb) {
+        expect(webCapable(provider, t.capabilities ?? []), `class "${c}" ${t.label} (${t.provider}) cannot perform web research`).toBe(true);
+      }
     }
   });
 
@@ -98,6 +102,12 @@ describe('routing.v0.yaml — shipped table invariants', () => {
     const r = resolveRoute(table, 'second-opinion-hard');
     expect(r.requiresExplicitOptIn).toBe(true);
     expect(r.note).toMatch(/PR review/i);
+  });
+
+  it('web-research requires web capability and gives its Codex fallback browse', () => {
+    const route = resolveRoute(table, 'web-research');
+    expect(route.requiresWeb).toBe(true);
+    expect(route.fallback?.capabilities).toEqual(['browse']);
   });
 });
 
@@ -254,6 +264,19 @@ describe('resolveRoute — fallback inherits class policy', () => {
     expect(route.fallback?.skills).toEqual(['worker-role', 'quality-gate']);
   });
 
+  it('inherits class capabilities into a fallback unless the fallback defines its own', () => {
+    const table = syntheticTable(`
+providers: { codex: {} }
+task_classes:
+  synthetic:
+    provider: codex
+    model: m1
+    capabilities: [browse]
+    fallback: { provider: codex, model: m2 }
+`);
+    expect(resolveRoute(table, 'synthetic').fallback?.capabilities).toEqual(['browse']);
+  });
+
   it('uses a fallback node’s own skills instead of the class skills when the fallback defines them', () => {
     const table = syntheticTable(`
 providers: { codex: {} }
@@ -269,7 +292,7 @@ task_classes:
     expect(fallback?.mcp).toBeUndefined();
   });
 
-  it('defers rejecting bare skills and mcp values until resolveRoute validates each target', () => {
+  it('defers rejecting bare skills, mcp, and capabilities values until resolveRoute validates each target', () => {
     const skillsYaml = `
 providers: { codex: {} }
 task_classes: { synthetic: { provider: codex, model: m1, skills: quality-gate } }
@@ -278,11 +301,17 @@ task_classes: { synthetic: { provider: codex, model: m1, skills: quality-gate } 
 providers: { codex: {} }
 task_classes: { synthetic: { provider: codex, model: m1, mcp: memtrace } }
 `;
+    const capabilitiesYaml = `
+providers: { codex: {} }
+task_classes: { synthetic: { provider: codex, model: m1, capabilities: browse } }
+`;
     // loadRouting itself must accept these files — the assignments below fail the test if it throws.
     const skillsTable = syntheticTable(skillsYaml);
     const mcpTable = syntheticTable(mcpYaml);
+    const capabilitiesTable = syntheticTable(capabilitiesYaml);
     expect(() => resolveRoute(skillsTable, 'synthetic')).toThrow(/skills must be a list of strings/);
     expect(() => resolveRoute(mcpTable, 'synthetic')).toThrow(/mcp must be a list of strings/);
+    expect(() => resolveRoute(capabilitiesTable, 'synthetic')).toThrow(/capabilities must be a list of strings/);
   });
 
   it('rejects a fallback node that lacks a provider or a model instead of routing to "undefined"', () => {

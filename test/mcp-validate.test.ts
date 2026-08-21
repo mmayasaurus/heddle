@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { codexMcpFlags, materializeWorkerMcp, validateWorkerMcp, workerMcpSupported, mcpAttachable } from '../src/mcp.js';
+import { codexMcpFlags, materializeWorkerMcp, validateWorkerMcp, workerMcpSupported, mcpAttachable, webCapable } from '../src/mcp.js';
 import { dispatch } from '../src/dispatch.js';
 import { useTempResources, fakeAdapter, IDENTITIES } from './helpers.js';
 
@@ -20,6 +20,13 @@ import { useTempResources, fakeAdapter, IDENTITIES } from './helpers.js';
  *     here even though the adapter-throw test would still pass.
  */
 describe('validateWorkerMcp — direct unit contract', () => {
+  it('recognizes intrinsic and enforceable web research capability', () => {
+    expect(webCapable('gemini', [])).toBe(true);
+    expect(webCapable('codex', ['browse'])).toBe(true);
+    expect(webCapable('codex', [])).toBe(false);
+    expect(webCapable('cursor', ['browse'])).toBe(false);
+  });
+
   it('rejects an unknown codex MCP server by name', () => {
     expect(() => validateWorkerMcp('codex', ['does-not-exist'])).toThrow(/unknown codex MCP server "does-not-exist"/);
   });

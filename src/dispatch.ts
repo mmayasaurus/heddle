@@ -24,7 +24,7 @@ export function packsFor(provider: string, requested: readonly string[]): string
   const family = modelFamilyPack(provider);
   return family && !base.includes(family) ? [...base, family] : base;
 }
-import { materializeWorkerMcp, validateWorkerMcp, mcpAttachable, codexMcpFlags, claudeMcpConfigFile } from './mcp.js';
+import { materializeWorkerMcp, validateWorkerMcp, mcpAttachable, codexMcpFlags, claudeMcpConfigFile, webCapable } from './mcp.js';
 import { classifyEffort, assessResult, type ResultAssessment } from './classify.js';
 import { pickReviewer, snapshotWorktree, sameSnapshot, diffInstruction, embeddedDiff, normalizeProvider, type ReviewerPick } from './review.js';
 import { parentCheckoutOf, checkoutFingerprint, escapedPaths, destroyedWork } from './worktree.js';
@@ -294,8 +294,10 @@ async function runTarget(
   // that fails LOUD here rather than silently reviewing without discovery tools (ledger 206).
   const mcp = req.mcp ?? target.mcp ?? [];
 
-  // Capabilities are decided per TARGET provider (a fallback may enforce a different set).
-  const caps = decideCapabilities(target.provider, req.capabilities, req.optIn === true, capabilityPolicy(ctx.table));
+  // Class capabilities are defaults: callers can add to them, but never silently drop them. This is
+  // resolved per TARGET because a fallback may declare a different default capability set.
+  const requestedCapabilities = [...new Set([...(target.capabilities ?? []), ...(req.capabilities ?? [])])];
+  const caps = decideCapabilities(target.provider, requestedCapabilities, req.optIn === true, capabilityPolicy(ctx.table));
   if (caps.refusal) {
     return refusalOutcome(ctx, req, route.taskClass, target, skills, {
       code: caps.refusal.code, reason: caps.refusal.reason,
@@ -303,6 +305,13 @@ async function runTarget(
         ? 'Dispatch to a provider that can enforce it (class + explicit provider/model), or drop the capability (see docs/MODELS.md "Capabilities").'
         : 'Drop the capability, or fix the call (see docs/MODELS.md "Capabilities").',
     }, { extra: { usedFallback: fellBackFrom !== null, capabilityRefusalKind: caps.refusal.kind }, fellBackFrom });
+  }
+  if (route.requiresWeb && !webCapable(target.provider, caps.granted)) {
+    return refusalOutcome(ctx, req, route.taskClass, target, skills, {
+      code: 'capability-denied',
+      reason: `web-research class requires a web-capable provider; "${target.provider}" has no intrinsic grounding or enforceable "browse" grant.`,
+      instruction: 'Use the class route, or select a provider with an enforceable browse grant.',
+    }, { extra: { usedFallback: fellBackFrom !== null }, fellBackFrom });
   }
 
   // HED-19: fail fast, BEFORE a ledger row exists, on anything materialization would reject —
@@ -698,9 +707,11 @@ export async function dispatch(
   if (primary.refusal?.code === 'capability-denied' && primary.capabilityRefusalKind === 'unenforceable'
       && !req.noFallback && fallback
       && !(route.reviewerPool && normalizeProvider(fallback.provider) === normalizeProvider(req.authorProvider))) {
-    const fbCaps = decideCapabilities(fallback.provider, req.capabilities, req.optIn === true, capabilityPolicy(table));
+    const fallbackCapabilities = [...new Set([...(fallback.capabilities ?? []), ...(req.capabilities ?? [])])];
+    const fbCaps = decideCapabilities(fallback.provider, fallbackCapabilities, req.optIn === true, capabilityPolicy(table));
     if (!fbCaps.refusal && providerExecution(table, fallback.provider) !== 'in-session-subagent') {
-      ctx.routeReason = `${plan.decision.routeReason}; capability-fit fallback: ${target.provider} cannot enforce [${(req.capabilities ?? []).join(', ')}] → ${fallback.provider}/${fallback.model}`;
+      const targetCapabilities = [...new Set([...(target.capabilities ?? []), ...(req.capabilities ?? [])])];
+      ctx.routeReason = `${plan.decision.routeReason}; capability-fit fallback: ${target.provider} cannot enforce [${targetCapabilities.join(', ')}] → ${fallback.provider}/${fallback.model}`;
       return runTarget(fallback, req, ctx, route, `${route.provider}/${route.model} (capability-unenforceable)`);
     }
   }

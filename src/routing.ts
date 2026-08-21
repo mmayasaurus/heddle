@@ -16,6 +16,8 @@ export interface RouteTarget {
   skills?: string[];
   /** Code-discovery MCP servers to attach for this route (e.g. ["memtrace"]). */
   mcp?: string[];
+  /** Capabilities granted by default for this route (e.g. ["browse"]). */
+  capabilities?: string[];
   requiresExplicitOptIn?: boolean;
   note?: string;
 }
@@ -30,6 +32,8 @@ export interface Route extends RouteTarget {
    * hook's no-task-fit-packs nudge. Strictly the boolean `true` — anything else reads as false.
    */
   editsCode: boolean;
+  /** True when this class must only resolve to providers that can perform live web research. */
+  requiresWeb: boolean;
   /**
    * False when the class is the orchestrator's OWN work and is never delegated (YAML
    * `dispatchable: false`, today only `orchestration`): dispatching it is refused with an
@@ -92,6 +96,7 @@ function toTarget(node: any, where = 'task class'): RouteTarget | undefined {
     extraFlags: node.codex_flags ?? node.extra_flags,
     skills: listField(node, 'skills', where),
     mcp: listField(node, 'mcp', where),
+    capabilities: listField(node, 'capabilities', where),
     requiresExplicitOptIn: node.requires_explicit_opt_in === true,
     note: node.note,
   };
@@ -149,13 +154,19 @@ export function resolveRoute(table: RoutingTable, taskClass: string): Route {
     // Same policy checks as the primary, surfaced at resolve time — not after the primary failed.
     assertRoutableTarget(table, fb.provider, fb.model, `task class "${taskClass}": fallback`);
   }
-  const fallback = fb ? { ...fb, skills: fb.skills ?? primary.skills, mcp: fb.mcp ?? primary.mcp } : undefined;
+  const fallback = fb ? {
+    ...fb,
+    skills: fb.skills ?? primary.skills,
+    mcp: fb.mcp ?? primary.mcp,
+    capabilities: fb.capabilities ?? primary.capabilities,
+  } : undefined;
   return {
     taskClass,
     ...primary,
     fallback,
     why: typeof node.why === 'string' ? node.why : undefined,
     editsCode: node.edits_code === true,
+    requiresWeb: node.requires_web === true,
     dispatchable: node.dispatchable !== false,
     readOnly: node.read_only === true,
     autoAssess: node.auto_assess === true,
@@ -320,5 +331,5 @@ export function directRoute(
   if (provider === 'cursor' && isNeverViaCursor(table, model)) {
     throw new Error(`model "${model}" is a direct-subscription family — never route it through Cursor (policy.never_via_cursor)`);
   }
-  return { taskClass: `direct:${provider}/${model}`, provider, model, skills, mcp, editsCode: false, dispatchable: true, readOnly: false, autoAssess: false };
+  return { taskClass: `direct:${provider}/${model}`, provider, model, skills, mcp, editsCode: false, requiresWeb: false, dispatchable: true, readOnly: false, autoAssess: false };
 }

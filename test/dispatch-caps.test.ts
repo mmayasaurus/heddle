@@ -107,6 +107,36 @@ describe('dispatch — structural caps', () => {
     expect(terminal.refusal?.code).toBe('capability-denied'); expect(bogus.calls).toHaveLength(0);
   });
 
+  it('unions web-research class capabilities into its Codex fallback without a caller capability', async () => {
+    const calls: Array<{ provider: string; capabilities: string[] }> = [];
+    const outcome = await dispatch(
+      { taskClass: 'web-research', prompt: 'x', cwd: tempDir(), identity: unbound },
+      tempLedger(),
+      (provider) => ({ name: provider, provider: provider as WorkerAdapter['provider'], dispatch: async (_prompt, opts) => {
+        calls.push({ provider, capabilities: opts.capabilities ?? [] });
+        return provider === 'gemini'
+          ? { ok: false, output: '', exitCode: 1, error: 'grounding failed' }
+          : { ok: true, output: 'grounded fallback', exitCode: 0 };
+      } }),
+    );
+    expect(outcome).toMatchObject({ ok: true, provider: 'codex', usedFallback: true, capabilities: ['browse'] });
+    expect(calls).toEqual([
+      { provider: 'gemini', capabilities: [] },
+      { provider: 'codex', capabilities: ['browse'] },
+    ]);
+  });
+
+  it('refuses an explicit web-research override to a provider without enforceable browse', async () => {
+    const fake = fakeAdapter();
+    const outcome = await dispatch(
+      { taskClass: 'web-research', provider: 'cursor', model: 'composer-2.5', prompt: 'x', cwd: tempDir(), identity: unbound },
+      tempLedger(),
+      () => fake.adapter,
+    );
+    expect(outcome.refusal?.code).toBe('capability-denied');
+    expect(fake.calls).toHaveLength(0);
+  });
+
   it('enforces named concurrency caps independently and ignores stale rows', async () => {
     const ledgerDir = tempDir(); const dbPath = join(ledgerDir, 'ledger.db');
     const ledger = trackLedger(new Ledger(dbPath)); const cwd = tempDir(); const fake = fakeAdapter();
