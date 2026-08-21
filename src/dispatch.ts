@@ -995,8 +995,10 @@ function hasNoDispatchableClaudeAccount(plan: Pick<DispatchPlan,
 }
 
 function noDispatchableClaudeAccountReason(accountCount: number): string {
-  const suffix = accountCount === 1 ? '' : 's';
-  return `no dispatchable Claude account — all ${accountCount} registered account${suffix} are logged-out or non-dispatchable ` +
+  const registry = accountCount === 1
+    ? 'the 1 registered account is'
+    : `all ${accountCount} registered accounts are`;
+  return `no dispatchable Claude account — ${registry} logged-out or non-dispatchable ` +
     '(a billing/logged-out signal, or a replaced credential). Run `claude /login` on the affected account and update accounts.json, or wait for a keeper ping to clear the signal.';
 }
 
