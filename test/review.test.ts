@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { diffInstruction, pickReviewer, sameSnapshot, snapshotWorktree } from '../src/review.js';
 import { loadRouting, resolveRoute } from '../src/routing.js';
+import { mcpAttachable } from '../src/mcp.js';
 import { useTempResources } from './helpers.js';
 
 function git(cwd: string, ...args: string[]): string {
@@ -22,7 +23,7 @@ describe('adversarial review helpers', () => {
     expect(pickReviewer(route, undefined)).toBeNull();
     expect(pickReviewer(route, 'codex')).toBeNull();
     expect(pickReviewer(route, 'cursor')).toEqual({
-      provider: 'gemini', model: 'gemini-3.1-pro-high', reason: 'pool:2 (author is cursor)',
+      provider: 'codex', model: 'gpt-5.6-sol', reason: 'pool:2 (author is cursor)',
     });
   });
 
@@ -46,6 +47,21 @@ describe('adversarial review helpers', () => {
     // when the ONLY different-family entry is unusable, there is no reviewer → throw (never dispatch it).
     const single = { ...route, reviewerPool: [{ provider: 'cursor', model: 'grok' }] } as any;
     expect(() => pickReviewer(single, 'codex', usable)).toThrow(/different model family/);
+  });
+
+  it('skips an mcp-incapable pool reviewer for an mcp-carrying class, picking the next capable one (HED-249 #73)', () => {
+    // Mirrors dispatch's usable() gate: a picked reviewer inherits the class mcp, so a provider that
+    // can't attach it (gemini) must be SKIPPED — pickReviewer selecting it would only hard-fail at
+    // validateWorkerMcp. This covers a custom HEDDLE_ROUTING table (the shipped table's CI invariant
+    // keeps gemini out of mcp pools; a custom one might not).
+    const route = { taskClass: 'r', provider: 'cursor', model: 'grok', mcp: ['memtrace'],
+      reviewerPool: [{ provider: 'cursor', model: 'grok' }, { provider: 'gemini', model: 'pro' }, { provider: 'codex', model: 'sol' }] } as any;
+    const usable = (p: string) => ((route.mcp?.length ?? 0) > 0 && !mcpAttachable(p, route.mcp) ? 'cannot attach the class mcp' : null);
+    // author=cursor (== primary) → pool pick: cursor is the author, gemini can't attach mcp → skip both → codex.
+    expect(pickReviewer(route, 'cursor', usable)).toMatchObject({ provider: 'codex', model: 'sol' });
+    // if the only mcp-capable different family is removed, there is no reviewer → refuse loudly.
+    const noCapable = { ...route, reviewerPool: [{ provider: 'cursor', model: 'grok' }, { provider: 'gemini', model: 'pro' }] } as any;
+    expect(() => pickReviewer(noCapable, 'cursor', usable)).toThrow(/different model family|cannot attach/);
   });
 
   it('reports a non-git directory as unavailable for a mandate comparison', () => {

@@ -71,23 +71,31 @@ export function resolveMcpServers(names: string[]): Record<string, { command: st
 }
 
 /**
- * Does this provider have an implemented worker-MCP attachment path at all? DERIVED from
- * validateWorkerMcp (not a parallel hardcoded check) so the two can never drift (gitar #67) — it
- * probes the attachment gate with the canonical, always-registered `memtrace` server and reports
- * whether it is accepted. Today only the `gemini` provider key (the agy / Antigravity CLI behind it)
- * lacks a path and throws. Used to filter a CLASS-DEFAULT mcp list (best-effort intent — "this class
- * reads code, give it discovery") down to what the RESOLVED provider can take, so e.g. a gemini
- * reviewer picked from an adversarial-review pool simply runs without memtrace instead of failing the
- * dispatch (HED-205). A caller's EXPLICIT req.mcp is NOT filtered — it goes straight to
- * validateWorkerMcp and still throws for an impossible ask, so it is loud, not a silent no-op.
+ * Can this provider attach the SPECIFIC worker-MCP servers requested? DERIVED from validateWorkerMcp
+ * (not a parallel check) so the two can never drift (gitar #67) — it runs the real attachment gate on
+ * the actual list and reports whether it's accepted. Validating the requested servers (not a generic
+ * memtrace probe) matters: `['serena']` on cursor is unattachable even though cursor attaches memtrace
+ * (cubic #73). Used by the routing CI invariant (routing.test.ts) and the reviewer-pick skip
+ * (dispatch.ts): every provider a capability-carrying class can resolve to — primary, fallback, AND
+ * every reviewer_pool entry — must attach that class's mcp, so an mcp class can never route to a
+ * target that would hard-fail the dispatch. HED-249 replaced HED-205's runtime graceful-degrade
+ * (silently dropping mcp for a gemini target) with this config-time guard: refuse loudly, not degrade.
  */
-export function workerMcpSupported(provider: string): boolean {
+export function mcpAttachable(provider: string, servers: string[]): boolean {
+  if (servers.length === 0) return true; // nothing to attach → any provider is fine
   try {
-    validateWorkerMcp(provider, ['memtrace']);
+    validateWorkerMcp(provider, servers);
     return true;
   } catch {
     return false;
   }
+}
+
+/** Provider-level attachability probe (the canonical `memtrace` server) — the drift-guard anchor and
+ *  the "does this provider attach worker MCP at all" question. For a SPECIFIC declared list, use
+ *  mcpAttachable directly (`['serena']` on cursor is unattachable even though memtrace is — cubic #73). */
+export function workerMcpSupported(provider: string): boolean {
+  return mcpAttachable(provider, ['memtrace']);
 }
 
 /**

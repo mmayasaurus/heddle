@@ -67,22 +67,13 @@ describe('adversarial review dispatch', () => {
     const restore = reviewRouting(tempDir); const ledger = tempLedger(); const fake = fakeAdapter({ ok: false, output: 'failed', exitCode: 1 });
     try {
       const outcome = await dispatch({ taskClass: 'adversarial-review', authorProvider: 'cursor', prompt: 'review', cwd: tempDir(), identity: unbound }, ledger, () => fake.adapter);
-      expect(fake.calls).toHaveLength(1); expect(fake.calls[0].opts.model).toBe('gemini-3.1-pro-high');
+      expect(fake.calls).toHaveLength(1); expect(fake.calls[0].opts.model).toBe('gpt-5.6-sol');
       expect(outcome.routeReason).toContain('reviewer pool:2 (author is cursor)');
-      expect(outcome.review?.reviewerProvider).toBe('gemini'); expect(ledger.getReview(outcome.ledgerId)?.reviewer_provider).toBe('gemini');
+      expect(outcome.review?.reviewerProvider).toBe('codex'); expect(ledger.getReview(outcome.ledgerId)?.reviewer_provider).toBe('codex');
     } finally { restore(); }
   });
 
-  it('HED-205 drops class-default memtrace for a gemini reviewer', async () => {
-    const restore = reviewRouting(tempDir); const ledger = tempLedger(); const fake = fakeAdapter();
-    try {
-      const outcome = await dispatch({ taskClass: 'adversarial-review', authorProvider: 'cursor', prompt: 'review', cwd: tempDir(), identity: unbound }, ledger, () => fake.adapter);
-      expect(fake.calls).toHaveLength(1); expect(fake.calls[0].opts.model).toBe('gemini-3.1-pro-high');
-      expect(outcome.routeReason).toContain('class-default mcp [memtrace] dropped: gemini has no worker-MCP path');
-    } finally { restore(); }
-  });
-
-  it('HED-205 retains class-default memtrace for a cursor reviewer — materialized, not just un-dropped (cubic #67)', async () => {
+  it('HED-249 retains class-default memtrace for a cursor reviewer — materialized, not just un-dropped (cubic #67)', async () => {
     const restore = reviewRouting(tempDir); const ledger = tempLedger();
     // Capture the reviewer's project MCP config DURING the dispatch (before the restore runs), so a
     // regression that silently stopped attaching memtrace to cursor — without emitting the drop note —
@@ -103,12 +94,12 @@ describe('adversarial review dispatch', () => {
   it('never retries a failed review on the author family, and a cap-routed primary still runs rather than routing to the author family', async () => {
     const restore = reviewRouting(tempDir); const failed = fakeAdapter({ ok: false, output: 'failed', exitCode: 1 });
     try {
-      await dispatch({ taskClass: 'adversarial-review', authorProvider: 'gemini', prompt: 'review', cwd: tempDir(), identity: unbound }, tempLedger(), () => failed.adapter);
-      // the class fallback (gemini) is the author's family → dropped, so a failed cursor review is NOT retried on gemini
+      await dispatch({ taskClass: 'adversarial-review', authorProvider: 'codex', prompt: 'review', cwd: tempDir(), identity: unbound }, tempLedger(), () => failed.adapter);
+      // the class fallback (codex, HED-249) is the author's family → dropped, so a failed cursor review is NOT retried on codex
       expect(failed.calls).toHaveLength(1); expect(failed.calls[0].opts.model).toBe('cursor-grok-4.6-high');
       // cursor over its cap: the author-family fallback was already dropped, so cap-aware routing has nowhere to go and runs cursor anyway
       const capped = fakeAdapter(); const ledger = tempLedger();
-      const outcome = await dispatch({ taskClass: 'adversarial-review', authorProvider: 'gemini', prompt: 'review', cwd: tempDir(), identity: unbound, caps: cursorOverCaps() }, ledger, () => capped.adapter);
+      const outcome = await dispatch({ taskClass: 'adversarial-review', authorProvider: 'codex', prompt: 'review', cwd: tempDir(), identity: unbound, caps: cursorOverCaps() }, ledger, () => capped.adapter);
       expect(outcome.refusal).toBeUndefined(); expect(capped.calls).toHaveLength(1); expect(capped.calls[0].opts.model).toBe('cursor-grok-4.6-high');
       expect(outcome.routeReason).toContain('cap:over cursor included-total 95%'); expect(outcome.routeReason).toContain('(no fallback) → ran primary');
       expect(ledger.recent(1)[0]).toMatchObject({ provider: 'cursor', refusal: null });

@@ -24,7 +24,7 @@ export function packsFor(provider: string, requested: readonly string[]): string
   const family = modelFamilyPack(provider);
   return family && !base.includes(family) ? [...base, family] : base;
 }
-import { materializeWorkerMcp, validateWorkerMcp, workerMcpSupported, codexMcpFlags, claudeMcpConfigFile } from './mcp.js';
+import { materializeWorkerMcp, validateWorkerMcp, mcpAttachable, codexMcpFlags, claudeMcpConfigFile } from './mcp.js';
 import { classifyEffort, assessResult, type ResultAssessment } from './classify.js';
 import { pickReviewer, snapshotWorktree, sameSnapshot, diffInstruction, embeddedDiff, normalizeProvider, type ReviewerPick } from './review.js';
 import { parentCheckoutOf, checkoutFingerprint, escapedPaths, destroyedWork } from './worktree.js';
@@ -287,17 +287,12 @@ async function runTarget(
     ? [...new Set([...(target.skills ?? []), ...(req.skills ?? [])])]
     : (req.skills ?? target.skills ?? []);
   const skills = packsFor(target.provider, asked);
-  // A caller's EXPLICIT mcp (req.mcp) is a REQUIREMENT — validated below, and it THROWS if the target
-  // provider has no attachment path (loud beats a silent no-op). A CLASS-DEFAULT mcp (target.mcp) is
-  // INTENT — "this class reads code, give it discovery" — so attach it BEST-EFFORT: filter to what the
-  // resolved provider supports. A gemini reviewer picked from the adversarial-review pool thus runs
-  // without memtrace rather than failing the dispatch (HED-205); the drop is surfaced in routeReason.
-  let mcp = req.mcp ?? target.mcp ?? [];
-  if (req.mcp === undefined && mcp.length > 0 && !workerMcpSupported(target.provider)) {
-    const notice = `class-default mcp [${mcp.join(', ')}] dropped: ${target.provider} has no worker-MCP path`;
-    mcp = [];
-    ctx.routeReason = [ctx.routeReason, notice].filter(Boolean).join('; ');
-  }
+  // mcp is a REQUIREMENT, not best-effort: validateWorkerMcp (below) THROWS if the resolved provider
+  // has no attachment path. HED-249 reverses HED-205's graceful-degrade — an mcp-carrying class may
+  // only resolve to mcp-attachable providers (a routing.v0.yaml CI invariant enforces this for
+  // primary + fallback + every reviewer_pool entry), so a gemini-in-an-mcp-class is a config error
+  // that fails LOUD here rather than silently reviewing without discovery tools (ledger 206).
+  const mcp = req.mcp ?? target.mcp ?? [];
 
   // Capabilities are decided per TARGET provider (a fallback may enforce a different set).
   const caps = decideCapabilities(target.provider, req.capabilities, req.optIn === true, capabilityPolicy(ctx.table));
@@ -1021,6 +1016,13 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
             if (!cfg) return 'unknown provider';
             if (cfg.status === 'excluded') return 'provider excluded by policy';
             if (cfg.status === 'held') return 'provider on hold and not routable yet'; // uniform held check (qodo #63)
+            // HED-249: a picked reviewer inherits the EFFECTIVE mcp (an explicit req.mcp overrides the
+            // class default — cubic #73), so an mcp-carrying dispatch must SKIP a reviewer that can't
+            // attach THAT list (else pickReviewer selects it and validateWorkerMcp then hard-fails).
+            // Skip → next capable reviewer, or refuse if none — never run a reviewer without discovery.
+            // Validates the actual list, so `['serena']` on cursor is caught, not just gemini+memtrace.
+            const effMcp = req.mcp ?? route.mcp ?? [];
+            if (effMcp.length > 0 && !mcpAttachable(provider, effMcp)) return 'cannot attach the class mcp';
             if (Array.isArray(cfg.models) && cfg.models.length && !cfg.models.includes(model)) return 'model not in provider list';
             return null;
           })
