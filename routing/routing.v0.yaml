@@ -5,7 +5,7 @@
 version: 0
 
 policy:
-  subscriptions_only: true            # hard rule: no per-token API billing anywhere
+  subscriptions_only: true            # subscriptions + operator-prepaid finite credit pools (auto-recharge OFF, bounded spend — never open-ended per-token billing). Credit-pool exception ratified by Maya 2026-08-20: Cerebras ($19), OpenRouter (existing balance + :free lane); receipts HED-247/HED-238 + _vault free-ai-providers doc.
   never_via_cursor: [claude, gpt, gemini]  # direct subscriptions cover these families
   metered_pool_guard:
     cursor_other_models:
@@ -54,6 +54,34 @@ providers:
     models: [gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna]
     effort: [minimal, low, medium, high, xhigh]   # -c model_reasoning_effort=…
     lean_workers: true                            # codex workers run --ignore-user-config by default (adapter)
+  groq:
+    auth: true-free
+    execution: headless
+    base_url: https://api.groq.com/openai/v1
+    key_env: GROQ_API_KEY
+    models: [openai/gpt-oss-120b, gpt-oss-20b, qwen3.6-27b]
+    max_tokens_default: 32768
+    quality_tier: workhorse
+    last_verified: 2026-08-20
+  cerebras:
+    auth: operator-prepaid-credit
+    execution: headless
+    base_url: https://api.cerebras.ai/v1
+    key_env: CEREBRAS_API_KEY
+    models: [gpt-oss-120b, gemma-4-31b]
+    context_cap: 8192
+    max_tokens_default: 32768
+    quality_tier: workhorse
+    last_verified: 2026-08-20
+  openrouter:
+    auth: operator-prepaid-credit
+    execution: headless
+    base_url: https://openrouter.ai/api/v1
+    key_env: OPENROUTER_API_KEY
+    models: []
+    max_tokens_default: 32768
+    quality_tier: dynamic-quality-allowlist
+    last_verified: 2026-08-20
   cursor:
     auth: cursor-subscription         # Max plan
     # ⚠️ TWO POOLS, and they are NOT interchangeable:

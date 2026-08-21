@@ -59,6 +59,7 @@ describe('validateWorkerMcp — direct unit contract', () => {
     expect(mcpAttachable('cursor', ['serena'])).toBe(false); // serena is codex-only — cursor attaches memtrace but not serena
     expect(mcpAttachable('codex', ['serena'])).toBe(true);   // codex knows serena via inline -c
     expect(mcpAttachable('gemini', ['memtrace'])).toBe(false);
+    expect(mcpAttachable('groq', ['memtrace'])).toBe(false);
     expect(mcpAttachable('cursor', [])).toBe(true);          // nothing to attach → any provider
   });
 

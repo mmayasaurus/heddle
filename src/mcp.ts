@@ -126,6 +126,9 @@ export function validateWorkerMcp(provider: string, serverNames: string[]): void
       'not write guessed config. Dispatch without --mcp for gemini, or use a codex/cursor worker.',
     );
   }
+  if (provider === 'groq' || provider === 'cerebras' || provider === 'openrouter') {
+    throw new Error(`worker MCP attachment is not supported for HTTP OpenAI-compat provider "${provider}"`);
+  }
   // Any OTHER provider has no worker-MCP attachment path — throw rather than fall through to a pass
   // (and materializeWorkerMcp's default no-op), so a class-default mcp on it is DROPPED, not kept-but-
   // never-attached (qodo/cubic #67). resolveRoute rejects unknown providers upstream; this keeps the

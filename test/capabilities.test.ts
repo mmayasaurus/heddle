@@ -43,6 +43,13 @@ describe('decideCapabilities', () => {
     expect(decideCapabilities('unknown-provider', ['net'], false).refusal?.code).toBe('capability-denied');
   });
 
+  it.each(['groq', 'cerebras', 'openrouter'])('refuses every requested capability for %s as unenforceable', (provider) => {
+    for (const capability of ['net', 'browse', 'exec-privileged']) {
+      const decision = decideCapabilities(provider, [capability], true, { allowExecPrivileged: true });
+      expect(decision.refusal).toMatchObject({ code: 'capability-denied', kind: 'unenforceable' });
+    }
+  });
+
   it('checks unknown tokens before opt-in and opt-in before provider enforceability', () => {
     const on = { allowExecPrivileged: true };
     expect(decideCapabilities('cursor', ['exec-privileged'], false, on).refusal?.reason).toContain('opt_in: true');
