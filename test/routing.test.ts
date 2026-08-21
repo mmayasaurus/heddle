@@ -60,8 +60,11 @@ describe('routing.v0.yaml — shipped table invariants', () => {
       // (net/browse/exec-privileged) must be enforceable by every provider the class resolves to —
       // else the grant is a silent no-op the run would refuse as `unenforceable` (codex #76). The
       // operator two-key gate still governs exec-privileged at dispatch; enforceability is the floor.
+      // OWN-PROPERTY read (like decideCapabilities): a provider literally named "toString"/"constructor"
+      // must resolve to [] (unknown), never an inherited function that crashes .includes (qodo #76 / HED-21).
+      const enforceable: readonly string[] = Object.hasOwn(ENFORCEABLE, provider) ? ENFORCEABLE[provider] : [];
       for (const cap of t.capabilities ?? []) {
-        expect(((ENFORCEABLE[provider] ?? []) as readonly string[]).includes(cap),
+        expect(enforceable.includes(cap),
           `class "${c}" ${t.label} (${t.provider}) declares capability "${cap}" its provider cannot enforce`).toBe(true);
       }
     }
