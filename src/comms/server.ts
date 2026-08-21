@@ -197,7 +197,9 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
   let channelLoaded: boolean | null;
   try {
     channelLoaded = channelLoadedProbe();
-  } catch {
+  } catch (err) {
+    // Fail-open, but never SILENTLY: a probe failure is logged, not swallowed (HED-270 review).
+    warn(`channel-loaded probe failed: ${errorMessage(err)}`);
     channelLoaded = null;
   }
   const pushDelivery: PushDelivery = !pushEnabled ? 'off' : (channelLoaded === false ? 'suspect-channel-not-loaded' : 'ok');

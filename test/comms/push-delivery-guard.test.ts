@@ -69,7 +69,7 @@ describe('regression PR#270 — push delivery loud-fail guard', () => {
     const { client, log, warnings } = await connect('1', () => { throw new Error('probe unavailable'); });
 
     expect((await whoami(client)).pushDelivery).toBe('ok');
-    expect(warnings).toEqual([]);
+    expect(warnings).toEqual([expect.stringContaining('channel-loaded probe failed: probe unavailable')]);
     expect(log.transcript({ pair: ['R', 'R'] })).toEqual([]);
   });
 
