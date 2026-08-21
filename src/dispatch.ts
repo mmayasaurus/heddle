@@ -763,16 +763,26 @@ export async function dispatch(
       ctx.account = ctx.claudeAccount?.account.id ?? null;
       if (fallbackAccounts.length > 0 && ctx.claudeAccount === null) {
         const note = `claude fallback blocked: no dispatchable account — ${noDispatchableClaudeAccountReason(fallbackAccounts.length)}`;
-        primary.error = `${primary.error ?? 'primary failed'}; ${note}`;
-        ledger.annotateError(primary.ledgerId, note);
+        const base = primary.error?.trim() ? primary.error : '';
+        primary.error = base ? `${base}; ${note}` : note;
+        try {
+          ledger.annotateError(primary.ledgerId, note);
+        } catch {
+          // best-effort: a ledger write failure must not abort or misclassify the dispatch
+        }
         return primary;
       }
     } catch (err) {
       // A pinned-but-unaddressable account is a caller error, but the primary's outcome is already
       // ledgered — report the blocked fallback on it instead of throwing away the whole dispatch.
       const note = `claude fallback blocked: ${err instanceof Error ? err.message : String(err)}`;
-      primary.error = `${primary.error ?? 'primary failed'}; ${note}`;
-      ledger.annotateError(primary.ledgerId, note);
+      const base = primary.error?.trim() ? primary.error : '';
+      primary.error = base ? `${base}; ${note}` : note;
+      try {
+        ledger.annotateError(primary.ledgerId, note);
+      } catch {
+        // best-effort: a ledger write failure must not abort or misclassify the dispatch
+      }
       return primary;
     }
   } else {
