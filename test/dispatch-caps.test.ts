@@ -2,7 +2,8 @@ import { describe, it, expect } from 'vitest';
 import { existsSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { join } from 'node:path';
-import { dispatch } from '../src/dispatch.js';
+import { dispatch, planDispatch, summarizePlan } from '../src/dispatch.js';
+import { loadRouting } from '../src/routing.js';
 import { Ledger } from '../src/ledger.js';
 import type { WorkerAdapter } from '../src/types.js';
 import { useTempResources, fakeAdapter, IDENTITIES } from './helpers.js';
@@ -148,13 +149,46 @@ describe('dispatch — structural caps', () => {
     const prev = process.env.HEDDLE_ROUTING;
     try {
       process.env.HEDDLE_ROUTING = yamlPath;
-      const refused = await dispatch({ taskClass: 'danger', prompt: 'x', cwd, identity: unbound }, ledger, () => fakeAdapter({ ok: false }).adapter);
+      const refused = await dispatch({ taskClass: 'danger', prompt: 'x', cwd, identity: unbound }, ledger, () => fakeAdapter({ ok: false, output: '', exitCode: null }).adapter);
       expect(refused.refusal?.code).toBe('capability-denied'); // no req.optIn → refused despite the class default + gate on
       const granted = await dispatch({ taskClass: 'danger', prompt: 'x', cwd, optIn: true, identity: unbound }, ledger, () => fakeAdapter().adapter);
       expect(granted.capabilities).toEqual(['exec-privileged']); // req.optIn is the second key; then the class default flows through
     } finally {
       if (prev === undefined) delete process.env.HEDDLE_ROUTING; else process.env.HEDDLE_ROUTING = prev;
     }
+  });
+
+  it('an explicit provider/model INHERITS the class capability defaults — never silently dropped (cubic P1/codex #76)', async () => {
+    const cwd = tempDir(); const ledger = tempLedger();
+    const yamlPath = join(tempDir(), 'routing.yaml');
+    const { writeFileSync } = await import('node:fs');
+    // A class whose PRIMARY declares a grantable default capability. Dispatching it with an explicit
+    // provider/model must carry that default to the named target (like skills/mcp) — else the class
+    // policy is silently shed on the explicit path.
+    writeFileSync(yamlPath, 'policy: {}\nproviders: {codex: {models: [gpt-5.6-luna, gpt-5.6-sol], execution: headless}}\ntask_classes: {browsy: {provider: codex, model: gpt-5.6-luna, capabilities: [browse]}}\n');
+    const prev = process.env.HEDDLE_ROUTING;
+    try {
+      process.env.HEDDLE_ROUTING = yamlPath;
+      // Explicit provider/model under the class policy, no req.capabilities of its own.
+      const out = await dispatch({ taskClass: 'browsy', provider: 'codex', model: 'gpt-5.6-sol', prompt: 'x', cwd, identity: unbound }, ledger, () => fakeAdapter().adapter);
+      expect(out.capabilities).toEqual(['browse']); // inherited from the class default, not dropped
+    } finally {
+      if (prev === undefined) delete process.env.HEDDLE_ROUTING; else process.env.HEDDLE_ROUTING = prev;
+    }
+  });
+
+  it('dry run mirrors the requiresWeb refusal — planDispatch/summarizePlan never advertise a web route the run refuses (codex #76)', async () => {
+    const yamlPath = join(tempDir(), 'routing.yaml');
+    const { writeFileSync } = await import('node:fs');
+    // requiresWeb class whose primary can't web (codex, no browse grant, not gemini): the run refuses,
+    // so the preview must not present it as runnable.
+    writeFileSync(yamlPath, 'policy: {}\nproviders: {codex: {models: [gpt-5.6-luna], execution: headless}}\ntask_classes: {research: {provider: codex, model: gpt-5.6-luna, requires_web: true}}\n');
+    const table = loadRouting(yamlPath);
+    const plan = planDispatch({ taskClass: 'research', prompt: 'x', cwd: tempDir(), identity: unbound, caps: {} }, table);
+    const summary = summarizePlan(plan);
+    expect(plan.requiresWebRefusal, 'plan flags the web refusal').toBeTruthy();
+    expect(summary.would_run, 'preview does not advertise a runnable route').toBeNull();
+    expect((summary.refusal as { code?: string } | null)?.code).toBe('capability-denied');
   });
 
   it('enforces named concurrency caps independently and ignores stale rows', async () => {

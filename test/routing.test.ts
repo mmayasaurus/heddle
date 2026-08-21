@@ -5,6 +5,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { loadRouting, listTaskClasses, resolveRoute, directRoute, neverViaCursorPrefixes, isNeverViaCursor, providerExecution } from '../src/routing.js';
 import { mcpAttachable, webCapable } from '../src/mcp.js';
+import { ENFORCEABLE } from '../src/capabilities.js';
 import { normalizeProvider } from '../src/review.js';
 
 /**
@@ -54,6 +55,14 @@ describe('routing.v0.yaml — shipped table invariants', () => {
       }
       if (r.requiresWeb) {
         expect(webCapable(provider, t.capabilities ?? []), `class "${c}" ${t.label} (${t.provider}) cannot perform web research`).toBe(true);
+      }
+      // The GENERAL invariant (not just requiresWeb): every ordinary capability a class DECLARES
+      // (net/browse/exec-privileged) must be enforceable by every provider the class resolves to —
+      // else the grant is a silent no-op the run would refuse as `unenforceable` (codex #76). The
+      // operator two-key gate still governs exec-privileged at dispatch; enforceability is the floor.
+      for (const cap of t.capabilities ?? []) {
+        expect(((ENFORCEABLE[provider] ?? []) as readonly string[]).includes(cap),
+          `class "${c}" ${t.label} (${t.provider}) declares capability "${cap}" its provider cannot enforce`).toBe(true);
       }
     }
   });

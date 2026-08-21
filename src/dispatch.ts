@@ -280,6 +280,13 @@ function refusalOutcome(
   };
 }
 
+/** The requiresWeb guard's refusal reason — shared by runTarget (enforcement) and planDispatch (dry
+ *  run) so a `heddle route` / plan_dispatch preview can't advertise a web-research route the real
+ *  dispatch would immediately refuse (codex #76). One source of truth for the wording. */
+function webRefusalReason(taskClass: string, provider: string): string {
+  return `the "${taskClass}" class requires a web-capable provider; "${provider}" has no intrinsic grounding or enforceable "browse" grant.`;
+}
+
 async function runTarget(
   target: RouteTarget, req: DispatchRequest, ctx: DispatchContext, route: Route,
   fellBackFrom: string | null,
@@ -314,7 +321,7 @@ async function runTarget(
   if (route.requiresWeb && !webCapable(target.provider, caps.granted)) {
     return refusalOutcome(ctx, req, route.taskClass, target, skills, {
       code: 'capability-denied',
-      reason: `the "${route.taskClass}" class requires a web-capable provider; "${target.provider}" has no intrinsic grounding or enforceable "browse" grant.`,
+      reason: webRefusalReason(route.taskClass, target.provider),
       instruction: 'Use the class route, or select a provider with an enforceable browse grant.',
     }, { extra: { usedFallback: fellBackFrom !== null }, fellBackFrom, capabilities: requestedCapabilities });
   }
@@ -965,6 +972,9 @@ export interface DispatchPlan {
   /** HED-95: set when a bare direct route would be refused for lacking an override_reason —
    *  so `heddle route` / `plan_dispatch` never claim a route the real dispatch would refuse. */
   overrideReasonRequired?: string;
+  /** HED-239: set when a requiresWeb class's effective target can't web — the dry run mirrors the
+   *  runtime guard so plan_dispatch never advertises a web-research route the real dispatch refuses. */
+  requiresWebRefusal?: string;
 }
 
 /**
@@ -1020,7 +1030,13 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
       // gate, ledger task_class), the named route replaces the table's — no fallback, naming it
       // is the choice. Effort is deliberately NOT inherited (per-provider vocabulary).
       const explicit = directRoute(table, req.provider, req.model, req.skills ?? route.skills, req.mcp ?? route.mcp);
-      target = { ...explicit, effort: req.effort };
+      // Class capabilities are POLICY, like skills/mcp: the named route replaces provider/model but
+      // inherits the class's capability defaults (the caller may still ADD via req.capabilities — the
+      // union in runTarget — but naming a provider must not SILENTLY DROP them, per the contract at the
+      // requestedCapabilities union). Otherwise a `capabilities:[browse]` class dispatched explicitly
+      // would spuriously refuse or shed its web requirement (cubic P1 / codex #76). requiresWeb stays on
+      // the class `route` the guard already reads; only the grantable defaults live on the target.
+      target = { ...explicit, effort: req.effort, capabilities: route.capabilities };
       origin = 'explicit';
     } else {
       target = route;
@@ -1126,7 +1142,16 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
   // The dry run must mirror what dispatch() would do — including refusing a bare direct route.
   const gate = overrideReasonGate(req);
   const overrideReasonRequired = gate ? gate.refusal(table).reason : undefined;
-  return { route, target, fallback, origin, execution, decision, skillsForRefusal, account, accountAdvice, accountPick, notDispatchable, reviewerPick, sameProviderReview, overrideReasonRequired };
+  // …and refusing a requiresWeb class whose effective target can't web. runTarget enforces this at
+  // dispatch; the preview must show it too, or plan_dispatch advertises a route the run refuses (codex
+  // #76). Derived from the SAME pure decideCapabilities as runTarget (identical inputs → identical
+  // grant), so plan and run cannot disagree. A capability refusal is surfaced by runTarget itself.
+  const dryReqCaps = [...new Set([...(target.capabilities ?? []), ...(req.capabilities ?? [])])];
+  const dryCaps = decideCapabilities(target.provider, dryReqCaps, req.optIn === true, capabilityPolicy(table));
+  const requiresWebRefusal = route.requiresWeb && !dryCaps.refusal && !webCapable(target.provider, dryCaps.granted)
+    ? webRefusalReason(route.taskClass, target.provider)
+    : undefined;
+  return { route, target, fallback, origin, execution, decision, skillsForRefusal, account, accountAdvice, accountPick, notDispatchable, reviewerPick, sameProviderReview, overrideReasonRequired, requiresWebRefusal };
 }
 
 /** One shared dry-run summary for `heddle route` and the `plan_dispatch` MCP tool (identical fields). */
@@ -1134,7 +1159,7 @@ export function summarizePlan(plan: DispatchPlan): Record<string, unknown> {
   const notDispatchable = plan.notDispatchable;
   return {
     task_class: plan.route.taskClass,
-    would_run: notDispatchable || plan.decision.refusal || plan.sameProviderReview || plan.overrideReasonRequired ? null : `${plan.target.provider}/${plan.target.model}`,
+    would_run: notDispatchable || plan.decision.refusal || plan.sameProviderReview || plan.overrideReasonRequired || plan.requiresWebRefusal ? null : `${plan.target.provider}/${plan.target.model}`,
     execution: plan.execution ?? null,
     in_session: plan.execution === 'in-session-subagent',
     routed_away_for_cap: plan.decision.routedAwayForCap,
@@ -1146,7 +1171,11 @@ export function summarizePlan(plan: DispatchPlan): Record<string, unknown> {
       ? { code: 'override-reason-required', reason: plan.overrideReasonRequired }
       : plan.sameProviderReview
       ? { code: 'same-provider-review', reason: plan.sameProviderReview }
-      : plan.decision.refusal ?? null,
+      : plan.decision.refusal
+      ? plan.decision.refusal
+      : plan.requiresWebRefusal
+      ? { code: 'capability-denied', reason: plan.requiresWebRefusal }
+      : null,
     checks: plan.decision.checks,
     account: plan.account,
     account_pick: plan.accountPick ? { id: plan.accountPick.account.id, used_pct: plan.accountPick.usedPct, reason: plan.accountPick.reason, config_dir: plan.accountPick.account.configDir } : null,
