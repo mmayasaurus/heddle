@@ -65,7 +65,7 @@ describe('regression PR#270 — push delivery loud-fail guard', () => {
     await connect('1', () => false, log);
     await connect('1', () => false, log);
 
-    expect(log.transcript({ pair: ['R', 'R'] }).filter((row) => row.meta.diagnostic === 'push-suspect')).toHaveLength(1);
+    expect(log.transcript({ pair: ['R', 'R'] }).filter((row) => row.meta?.diagnostic === 'push-suspect')).toHaveLength(1);
   });
 
   it('leaves push delivery ok without a warning or self-note when the channel probe is true or unknown', async () => {
