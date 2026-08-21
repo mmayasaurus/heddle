@@ -207,8 +207,8 @@ Residuals, by design:
 Full procedure with the exact commands: [REVIEW-SWEEP.md](REVIEW-SWEEP.md). In short: a PR is clean only after **every channel** — issue comments, review bodies, inline threads,
 code-scanning alerts, and the checks tab — has been read against the **latest** commit and every
 item fixed or answered with rationale (dispute bots with evidence, never rubber-stamp). Some
-reviewers need a manual trigger (CodeRabbit on repos with <10 stars: comment `@coderabbitai
-review`). The commands for every channel are in [REVIEW-SWEEP.md](REVIEW-SWEEP.md); the maintainers'
+reviewers are on-demand (Cursor Bugbot: comment `bugbot run` — never trigger or wait for a
+removed bot; roster last purged 2026-08-21). The commands for every channel are in [REVIEW-SWEEP.md](REVIEW-SWEEP.md); the maintainers'
 fleet automates the same sweep with a script kept outside this repo. Two clean sweeps ≥15 minutes
 apart against the SAME commit are the bar (late-landing bots), and merges are merge commits — never squash,
 never force.
