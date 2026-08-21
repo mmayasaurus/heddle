@@ -12,15 +12,16 @@ describe('regression PR#270 — push delivery loud-fail guard', () => {
   const clients: Client[] = [];
   const dirs: string[] = [];
 
-  async function connect(push: string, channelLoadedProbe: () => boolean | null) {
-    const dir = mkdtempSync(join(tmpdir(), 'heddle-push-delivery-guard-'));
-    dirs.push(dir);
-    const log = new CommsLog(join(dir, 'comms.db'));
+  async function connect(push: string, channelLoadedProbe: () => boolean | null, log?: CommsLog) {
+    const ownedLog = log === undefined;
+    const dir = ownedLog ? mkdtempSync(join(tmpdir(), 'heddle-push-delivery-guard-')) : undefined;
+    if (dir) dirs.push(dir);
+    const commsLog = log ?? new CommsLog(join(dir!, 'comms.db'));
     const warnings: string[] = [];
     const server = createCommsServer({
-      env: { HEDDLE_AGENT: 'R', HEDDLE_COMMS_PUSH: push, HEDDLE_LEDGER_DB: join(dir, 'no-such-ledger.db') },
-      cwd: dir,
-      log,
+      env: { HEDDLE_AGENT: 'R', HEDDLE_COMMS_PUSH: push, HEDDLE_LEDGER_DB: join(dir ?? tmpdir(), 'no-such-ledger.db') },
+      cwd: dir ?? tmpdir(),
+      log: commsLog,
       warn: (message) => warnings.push(message),
       channelLoadedProbe,
     });
@@ -30,7 +31,7 @@ describe('regression PR#270 — push delivery loud-fail guard', () => {
     await client.connect(clientSide);
     servers.push(server);
     clients.push(client);
-    return { client, log, warnings };
+    return { client, log: commsLog, warnings };
   }
 
   async function whoami(client: Client): Promise<Record<string, unknown>> {
@@ -54,6 +55,17 @@ describe('regression PR#270 — push delivery loud-fail guard', () => {
     ]);
     expect(log.transcript({ pair: ['R', 'R'] })).toHaveLength(1);
     expect(log.liveSession('R')).toMatchObject({ address: 'R' });
+  });
+
+  it('does not duplicate the push-suspect self-note across starts on the same log', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'heddle-push-delivery-guard-'));
+    dirs.push(dir);
+    const log = new CommsLog(join(dir, 'comms.db'));
+
+    await connect('1', () => false, log);
+    await connect('1', () => false, log);
+
+    expect(log.transcript({ pair: ['R', 'R'] }).filter((row) => row.meta.diagnostic === 'push-suspect')).toHaveLength(1);
   });
 
   it('leaves push delivery ok without a warning or self-note when the channel probe is true or unknown', async () => {

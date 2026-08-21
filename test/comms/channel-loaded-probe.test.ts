@@ -8,6 +8,13 @@ describe('channelLoadedFromParentArgv', () => {
     expect(channelLoadedFromParentArgv(1, () => 'claude --dangerously-load-development-channels plugin:heddle-comms@x')).toBe(true);
   });
 
+  it('only recognizes Claude when it is the executable', () => {
+    expect(channelLoadedFromParentArgv(1, () => 'bash -lc "x claude y"')).toBeNull();
+    expect(channelLoadedFromParentArgv(1, () => 'claude --dangerously-load-development-channels server:heddle-comms')).toBe(true);
+    expect(channelLoadedFromParentArgv(1, () => '/usr/bin/claude --resume x')).toBe(false);
+    expect(channelLoadedFromParentArgv(1, () => 'claude.exe --resume x')).toBe(false);
+  });
+
   it('reports false only for a clear Claude invocation without the heddle-comms channel flag', () => {
     expect(channelLoadedFromParentArgv(1, () => 'claude --print hello')).toBe(false);
     expect(channelLoadedFromParentArgv(1, () => 'claude --dangerously-load-development-channels server:other-channel')).toBe(false);

@@ -43,6 +43,8 @@ import { TIERS, MESSAGE_KINDS, type Tier, type MessageKind } from './types.js';
  * `sessions` row that makes senders get "queued-for-channel") and the inbound pump run only when
  * the launcher says the flag is on. Otherwise the session is pull-only and senders get
  * "no-live-session" (+ the SendMessage hint) — honest, never "delivered" into a void.
+ * The guard now best-effort infers channel-load from the parent Claude argv and surfaces a fail-open
+ * "suspect" warning only when the flag is clearly absent; pushEnabled still gates presence and pumping.
  */
 
 export interface CommsServerOptions {
@@ -77,6 +79,7 @@ export interface CommsServer {
 }
 
 const IDENTIFIER = /^[a-z0-9_]+$/;
+const PUSH_SUSPECT_RELAUNCH_REMEDY = 'Relaunch with --dangerously-load-development-channels server:heddle-comms (and --dangerously-skip-permissions).';
 
 /** The instruction every resume carries; an operator note is appended to it, never swapped for it. */
 const RESUME_DIRECTIVE = 'FLEET RESUMED — the pause is lifted; carry on.';
@@ -440,16 +443,21 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
       if (pushDelivery === 'suspect-channel-not-loaded') {
         warn(`push suspect: ${me} was launched WITHOUT --dangerously-load-development-channels server:heddle-comms — `
           + 'Claude Code will DROP channel events silently (they still record as channel-written). '
-          + 'Relaunch with that flag (and --dangerously-skip-permissions).');
+          + PUSH_SUSPECT_RELAUNCH_REMEDY);
         try {
-          log.append({
-            from: me, to: me,
-            body: '⚠️ heddle-comms PUSH SUSPECT: this session was launched WITHOUT '
-              + '--dangerously-load-development-channels server:heddle-comms. Channel events may be dropped '
-              + 'silently by Claude Code (they still record as channel-written). You are effectively PULL-ONLY. '
-              + 'Relaunch with that flag (and --dangerously-skip-permissions) to restore push.',
-            meta: { diagnostic: 'push-suspect' },
-          });
+          const alreadyNoted = log.transcript({ pair: [me, me] })
+            .some((row) => row.from === me && row.to === me && row.meta?.diagnostic === 'push-suspect');
+          // A later re-break will not re-note; comms_whoami.pushDelivery remains the live warning surface.
+          if (!alreadyNoted) {
+            log.append({
+              from: me, to: me,
+              body: '⚠️ heddle-comms PUSH SUSPECT: this session was launched WITHOUT '
+                + '--dangerously-load-development-channels server:heddle-comms. Channel events may be dropped '
+                + 'silently by Claude Code (they still record as channel-written). You are effectively PULL-ONLY. '
+                + PUSH_SUSPECT_RELAUNCH_REMEDY,
+              meta: { diagnostic: 'push-suspect' },
+            });
+          }
         } catch (err) { warn(`push-suspect self-note failed: ${errorMessage(err)}`); }
       }
       inbound = new InboundPump(log, me, (event) => {

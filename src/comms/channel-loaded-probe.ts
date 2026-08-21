@@ -29,7 +29,7 @@ export function channelLoadedFromParentArgv(
 }
 
 function looksLikeClaude(argv: string): boolean {
-  return /(?:^|\s)(?:[^\s]*\/)?claude(?:\s|$)/.test(argv);
+  return /^(?:\S*\/)?claude(?:\.exe)?(?:\s|$)/.test(argv.trimStart());
 }
 
 function readParentArgv(ppid: number): string | null {
