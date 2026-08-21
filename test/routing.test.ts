@@ -144,7 +144,7 @@ describe('resolveRoute / directRoute — policy fences', () => {
   });
 
   it('refuses a direct route to a provider the table does not know', () => {
-    expect(() => directRoute(table, 'openrouter', 'x')).toThrow(/unknown provider "openrouter"/);
+    expect(() => directRoute(table, 'not-a-provider', 'x')).toThrow(/unknown provider "not-a-provider"/);
   });
 
   it.each(directSubscriptionModels)('rejects %s through Cursor in both class and direct routing', (model) => {
@@ -198,8 +198,8 @@ describe('resolveRoute / directRoute — policy fences', () => {
   });
 
   it('rejects a task class whose PRIMARY provider is unknown (copilot #63)', () => {
-    const rt = { ...table, taskClasses: { ...table.taskClasses, bad: { provider: 'openrouter', model: 'x' } } };
-    expect(() => resolveRoute(rt, 'bad')).toThrow(/names unknown provider "openrouter"/);
+    const rt = { ...table, taskClasses: { ...table.taskClasses, bad: { provider: 'not-a-provider', model: 'x' } } };
+    expect(() => resolveRoute(rt, 'bad')).toThrow(/names unknown provider "not-a-provider"/);
   });
 
   it('treats a task class whose provider is an inherited property (`toString`) as UNKNOWN, never the prototype method (cubic #63)', () => {

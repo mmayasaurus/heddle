@@ -33,6 +33,11 @@ export const ENFORCEABLE: Record<string, readonly Capability[]> = {
   codex: ['net', 'browse', 'exec-privileged'],
   cursor: [],
   gemini: [],
+  // HTTP OpenAI-compat providers have no sandbox/network/browse knob heddle can pass, so every
+  // requested capability is refused as unenforceable (menial read-only by construction).
+  groq: [],
+  cerebras: [],
+  openrouter: [],
   // Headless claude (HED-78): browse → WebFetch/WebSearch on the tool allowlist; exec-privileged →
   // --dangerously-skip-permissions; net has no knob (no sandbox — the Bash allowlist is the fence).
   claude: ['browse', 'exec-privileged'],
