@@ -289,6 +289,8 @@ describe('regression PR#250 — Claude dispatches require an addressable registe
       expect(outcome.error).toContain('claude fallback blocked: no dispatchable account');
       expect(ledger.recent(2)).toHaveLength(1);
       expect(ledger.recent(2)[0]).toMatchObject({ id: outcome.ledgerId, provider: 'codex', ok: 0, refusal: null });
+      expect(ledger.get(outcome.ledgerId)?.error).toContain('primary boom');
+      expect(ledger.get(outcome.ledgerId)?.error).toContain('claude fallback blocked: no dispatchable account');
     } finally {
       if (previousRouting === undefined) delete process.env.HEDDLE_ROUTING; else process.env.HEDDLE_ROUTING = previousRouting;
     }

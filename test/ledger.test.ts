@@ -51,6 +51,17 @@ describe('Ledger (temp db)', () => {
     expect(row.error).toBe('codex produced no stdout');
   });
 
+  it('annotateError() appends to blank and existing errors, and returns false for a missing row', () => {
+    const id = startRow(ledger);
+    ledger.finish(id, { ok: false, error: '' });
+
+    expect(ledger.annotateError(id, 'first note')).toBe(true);
+    expect(ledger.get(id)?.error).toBe('first note');
+    expect(ledger.annotateError(id, 'second note')).toBe(true);
+    expect(ledger.get(id)?.error).toBe('first note; second note');
+    expect(ledger.annotateError(id + 1, 'missing')).toBe(false);
+  });
+
   it('finish() keeps a resume handle recorded at start when the outcome has none', () => {
     const id = startRow(ledger, { sessionId: 'resumed-from' });
     ledger.finish(id, { ok: true });
