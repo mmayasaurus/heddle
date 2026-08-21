@@ -3,6 +3,7 @@ import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { withFileLock } from './matlock.js';
 import type { MaterializeOpts } from './skillpacks.js';
+import { ENFORCEABLE } from './capabilities.js';
 
 /**
  * Worker MCP attachment — grants a cross-provider worker the code-discovery tools its task needs.
@@ -89,6 +90,16 @@ export function mcpAttachable(provider: string, servers: string[]): boolean {
   } catch {
     return false;
   }
+}
+
+/** A web-research route is satisfied intrinsically by Gemini grounding, or by a provider that can
+ * enforce an explicit browse grant. Providers that cannot enforce browse never count as web-capable.
+ * Own-property lookup on ENFORCEABLE (same guard as decideCapabilities): a provider name that shadows
+ * an inherited Object.prototype member (e.g. "toString") must read as NOT enforceable, never as that
+ * member (cubic #63 was this exact landmine on this exact table). */
+export function webCapable(provider: string, grantedCapabilities: string[]): boolean {
+  const enforceable = Object.hasOwn(ENFORCEABLE, provider) ? ENFORCEABLE[provider] : []; // own-property: a `toString` etc. isn't the prototype method (cubic #63); Object.hasOwn matches routing.ts (codacy #76)
+  return provider === 'gemini' || (grantedCapabilities.includes('browse') && enforceable.includes('browse'));
 }
 
 /** Provider-level attachability probe (the canonical `memtrace` server) — the drift-guard anchor and

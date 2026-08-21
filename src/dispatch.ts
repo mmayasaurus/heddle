@@ -24,7 +24,7 @@ export function packsFor(provider: string, requested: readonly string[]): string
   const family = modelFamilyPack(provider);
   return family && !base.includes(family) ? [...base, family] : base;
 }
-import { materializeWorkerMcp, validateWorkerMcp, mcpAttachable, codexMcpFlags, claudeMcpConfigFile } from './mcp.js';
+import { materializeWorkerMcp, validateWorkerMcp, mcpAttachable, codexMcpFlags, claudeMcpConfigFile, webCapable } from './mcp.js';
 import { classifyEffort, assessResult, type ResultAssessment } from './classify.js';
 import { pickReviewer, snapshotWorktree, sameSnapshot, diffInstruction, embeddedDiff, normalizeProvider, type ReviewerPick } from './review.js';
 import { parentCheckoutOf, checkoutFingerprint, escapedPaths, destroyedWork } from './worktree.js';
@@ -251,16 +251,21 @@ interface RefusalOpts {
   /** A ledger row that already exists for this attempt (e.g. the max-children transactional row). */
   ledgerId?: number;
   fellBackFrom?: string | null;
+  /** The EFFECTIVE capabilities that drove the refusal (class defaults ∪ req.capabilities). A
+   *  capability/web refusal triggered by a CLASS-DEFAULT capability must not be ledgered as caller-only
+   *  (Copilot #76); pass the unioned list so the audit trail shows what was actually asked. */
+  capabilities?: string[];
 }
 
 function refusalOutcome(
   ctx: DispatchContext, req: DispatchRequest, taskClass: string, target: RouteTarget,
   skills: string[], refusal: DispatchRefusal, opts: RefusalOpts = {},
 ): DispatchOutcome {
-  const { extra = {}, ledgerId, fellBackFrom = null } = opts;
-  // A refusal row records what was ASKED (e.g. the denied capabilities), so the audit trail shows it.
+  const { extra = {}, ledgerId, fellBackFrom = null, capabilities } = opts;
+  // A refusal row records what was ASKED (e.g. the denied capabilities), so the audit trail shows it —
+  // the EFFECTIVE list (class defaults ∪ req) when the caller passed one, else req.capabilities.
   const id = ledgerId ?? ctx.ledger.refuse(
-    baseRecord(ctx, req, taskClass, target, skills, fellBackFrom, req.capabilities ?? []),
+    baseRecord(ctx, req, taskClass, target, skills, fellBackFrom, capabilities ?? req.capabilities ?? []),
     refusal.code, refusal.reason,
   );
   return {
@@ -273,6 +278,13 @@ function refusalOutcome(
     routeReason: ctx.routeReason, account: ctx.account ?? null,
     refusal, ...extra,
   };
+}
+
+/** The requiresWeb guard's refusal reason — shared by runTarget (enforcement) and planDispatch (dry
+ *  run) so a `heddle route` / plan_dispatch preview can't advertise a web-research route the real
+ *  dispatch would immediately refuse (codex #76). One source of truth for the wording. */
+function webRefusalReason(taskClass: string, provider: string): string {
+  return `the "${taskClass}" class requires a web-capable provider; "${provider}" has no intrinsic grounding or enforceable "browse" grant.`;
 }
 
 async function runTarget(
@@ -294,15 +306,24 @@ async function runTarget(
   // that fails LOUD here rather than silently reviewing without discovery tools (ledger 206).
   const mcp = req.mcp ?? target.mcp ?? [];
 
-  // Capabilities are decided per TARGET provider (a fallback may enforce a different set).
-  const caps = decideCapabilities(target.provider, req.capabilities, req.optIn === true, capabilityPolicy(ctx.table));
+  // Class capabilities are defaults: callers can add to them, but never silently drop them. This is
+  // resolved per TARGET because a fallback may declare a different default capability set.
+  const requestedCapabilities = [...new Set([...(target.capabilities ?? []), ...(req.capabilities ?? [])])];
+  const caps = decideCapabilities(target.provider, requestedCapabilities, req.optIn === true, capabilityPolicy(ctx.table));
   if (caps.refusal) {
     return refusalOutcome(ctx, req, route.taskClass, target, skills, {
       code: caps.refusal.code, reason: caps.refusal.reason,
       instruction: caps.refusal.kind === 'unenforceable'
         ? 'Dispatch to a provider that can enforce it (class + explicit provider/model), or drop the capability (see docs/MODELS.md "Capabilities").'
         : 'Drop the capability, or fix the call (see docs/MODELS.md "Capabilities").',
-    }, { extra: { usedFallback: fellBackFrom !== null, capabilityRefusalKind: caps.refusal.kind }, fellBackFrom });
+    }, { extra: { usedFallback: fellBackFrom !== null, capabilityRefusalKind: caps.refusal.kind }, fellBackFrom, capabilities: requestedCapabilities });
+  }
+  if (route.requiresWeb && !webCapable(target.provider, caps.granted)) {
+    return refusalOutcome(ctx, req, route.taskClass, target, skills, {
+      code: 'capability-denied',
+      reason: webRefusalReason(route.taskClass, target.provider),
+      instruction: 'Use the class route, or select a provider with an enforceable browse grant.',
+    }, { extra: { usedFallback: fellBackFrom !== null }, fellBackFrom, capabilities: requestedCapabilities });
   }
 
   // HED-19: fail fast, BEFORE a ledger row exists, on anything materialization would reject —
@@ -716,9 +737,11 @@ export async function dispatch(
   if (primary.refusal?.code === 'capability-denied' && primary.capabilityRefusalKind === 'unenforceable'
       && !req.noFallback && fallback
       && !(route.reviewerPool && normalizeProvider(fallback.provider) === normalizeProvider(req.authorProvider))) {
-    const fbCaps = decideCapabilities(fallback.provider, req.capabilities, req.optIn === true, capabilityPolicy(table));
+    const fallbackCapabilities = [...new Set([...(fallback.capabilities ?? []), ...(req.capabilities ?? [])])];
+    const fbCaps = decideCapabilities(fallback.provider, fallbackCapabilities, req.optIn === true, capabilityPolicy(table));
     if (!fbCaps.refusal && providerExecution(table, fallback.provider) !== 'in-session-subagent') {
-      ctx.routeReason = `${plan.decision.routeReason}; capability-fit fallback: ${target.provider} cannot enforce [${(req.capabilities ?? []).join(', ')}] → ${fallback.provider}/${fallback.model}`;
+      const targetCapabilities = [...new Set([...(target.capabilities ?? []), ...(req.capabilities ?? [])])];
+      ctx.routeReason = `${plan.decision.routeReason}; capability-fit fallback: ${target.provider} cannot enforce [${targetCapabilities.join(', ')}] → ${fallback.provider}/${fallback.model}`;
       return runTarget(fallback, req, ctx, route, `${route.provider}/${route.model} (capability-unenforceable)`);
     }
   }
@@ -977,6 +1000,13 @@ export interface DispatchPlan {
   /** HED-95: set when a bare direct route would be refused for lacking an override_reason —
    *  so `heddle route` / `plan_dispatch` never claim a route the real dispatch would refuse. */
   overrideReasonRequired?: string;
+  /** HED-239: set when a TERMINAL capability refusal (unknown-token/operator-gate/opt-in) would reject
+   *  the target — mirrors runTarget's capability gate in the dry run (the `unenforceable` kind is left
+   *  for HED-275 since it may capability-fit-fallback rather than refuse). */
+  capabilityRefusal?: string;
+  /** HED-239: set when a requiresWeb class's effective target can't web — the dry run mirrors the
+   *  runtime guard so plan_dispatch never advertises a web-research route the real dispatch refuses. */
+  requiresWebRefusal?: string;
 }
 
 function hasNoDispatchableClaudeAccount(plan: Pick<DispatchPlan,
@@ -1056,7 +1086,13 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
       // gate, ledger task_class), the named route replaces the table's — no fallback, naming it
       // is the choice. Effort is deliberately NOT inherited (per-provider vocabulary).
       const explicit = directRoute(table, req.provider, req.model, req.skills ?? route.skills, req.mcp ?? route.mcp);
-      target = { ...explicit, effort: req.effort };
+      // Class capabilities are POLICY, like skills/mcp: the named route replaces provider/model but
+      // inherits the class's capability defaults (the caller may still ADD via req.capabilities — the
+      // union in runTarget — but naming a provider must not SILENTLY DROP them, per the contract at the
+      // requestedCapabilities union). Otherwise a `capabilities:[browse]` class dispatched explicitly
+      // would spuriously refuse or shed its web requirement (cubic P1 / codex #76). requiresWeb stays on
+      // the class `route` the guard already reads; only the grantable defaults live on the target.
+      target = { ...explicit, effort: req.effort, capabilities: route.capabilities };
       origin = 'explicit';
     } else {
       target = route;
@@ -1172,7 +1208,24 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
   // The dry run must mirror what dispatch() would do — including refusing a bare direct route.
   const gate = overrideReasonGate(req);
   const overrideReasonRequired = gate ? gate.refusal(table).reason : undefined;
-  return { route, target, fallback, origin, execution, decision, skillsForRefusal, account, accountAdvice, accountPick, claudeAccountCount, notDispatchable, reviewerPick, sameProviderReview, pinnedExcludedAccount, overrideReasonRequired };
+  // …and refusing what runTarget's capability gates would refuse, so the preview never advertises a
+  // route the run rejects (codex/cubic #76). Same pure decideCapabilities as runTarget (identical
+  // inputs → identical grant), so plan and run can't disagree. Order mirrors runTarget: the capability
+  // gate preempts the requiresWeb guard. TERMINAL capability refusals (unknown-token/operator-gate/
+  // opt-in) always refuse → surfaced. `unenforceable` is NOT terminal — dispatch()'s capability-fit
+  // fallback (~L712) may run it on a provider that CAN enforce — so it is deliberately NOT surfaced
+  // here (that would advertise a refusal the run avoids); full fallback-modeled parity is HED-275.
+  // Neither applies to an in-session Claude route: dispatch() returns the in-session instruction
+  // (~L676) BEFORE runTarget's gates run, so surfacing one would diverge from the run (cubic #76). The
+  // earlier gates (notDispatchable/override/same-provider/metered/no-account) are preempted by summarizePlan's chain.
+  const reachesRunTarget = execution !== 'in-session-subagent';
+  const dryReqCaps = [...new Set([...(target.capabilities ?? []), ...(req.capabilities ?? [])])];
+  const dryCaps = decideCapabilities(target.provider, dryReqCaps, req.optIn === true, capabilityPolicy(table));
+  const capabilityRefusal = reachesRunTarget && dryCaps.refusal && dryCaps.refusal.kind !== 'unenforceable' ? dryCaps.refusal.reason : undefined;
+  const requiresWebRefusal = reachesRunTarget && !dryCaps.refusal && route.requiresWeb && !webCapable(target.provider, dryCaps.granted)
+    ? webRefusalReason(route.taskClass, target.provider)
+    : undefined;
+  return { route, target, fallback, origin, execution, decision, skillsForRefusal, account, accountAdvice, accountPick, claudeAccountCount, notDispatchable, reviewerPick, sameProviderReview, pinnedExcludedAccount, overrideReasonRequired, capabilityRefusal, requiresWebRefusal };
 }
 
 /** One shared dry-run summary for `heddle route` and the `plan_dispatch` MCP tool (identical fields). */
@@ -1181,7 +1234,7 @@ export function summarizePlan(plan: DispatchPlan): Record<string, unknown> {
   const noDispatchableAccount = hasNoDispatchableClaudeAccount(plan);
   return {
     task_class: plan.route.taskClass,
-    would_run: notDispatchable || plan.decision.refusal || plan.sameProviderReview || plan.pinnedExcludedAccount || noDispatchableAccount || plan.overrideReasonRequired ? null : `${plan.target.provider}/${plan.target.model}`,
+    would_run: notDispatchable || plan.decision.refusal || plan.sameProviderReview || plan.pinnedExcludedAccount || noDispatchableAccount || plan.overrideReasonRequired || plan.capabilityRefusal || plan.requiresWebRefusal ? null : `${plan.target.provider}/${plan.target.model}`,
     execution: plan.execution ?? null,
     in_session: plan.execution === 'in-session-subagent',
     routed_away_for_cap: plan.decision.routedAwayForCap,
@@ -1193,11 +1246,17 @@ export function summarizePlan(plan: DispatchPlan): Record<string, unknown> {
       ? { code: 'override-reason-required', reason: plan.overrideReasonRequired }
       : plan.sameProviderReview
       ? { code: 'same-provider-review', reason: plan.sameProviderReview }
+      : plan.decision.refusal
+      ? plan.decision.refusal
       : plan.pinnedExcludedAccount
       ? { code: 'no-dispatchable-account', reason: plan.pinnedExcludedAccount.reason }
       : noDispatchableAccount
       ? { code: 'no-dispatchable-account', reason: noDispatchableClaudeAccountReason(plan.claudeAccountCount) }
-      : plan.decision.refusal ?? null,
+      : plan.capabilityRefusal
+      ? { code: 'capability-denied', reason: plan.capabilityRefusal }
+      : plan.requiresWebRefusal
+      ? { code: 'capability-denied', reason: plan.requiresWebRefusal }
+      : null,
     checks: plan.decision.checks,
     account: plan.account,
     account_pick: plan.accountPick ? { id: plan.accountPick.account.id, used_pct: plan.accountPick.usedPct, reason: plan.accountPick.reason, config_dir: plan.accountPick.account.configDir } : null,

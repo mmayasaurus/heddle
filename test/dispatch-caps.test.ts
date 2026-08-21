@@ -2,7 +2,8 @@ import { describe, it, expect } from 'vitest';
 import { existsSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { join } from 'node:path';
-import { dispatch } from '../src/dispatch.js';
+import { dispatch, planDispatch, summarizePlan } from '../src/dispatch.js';
+import { loadRouting } from '../src/routing.js';
 import { Ledger } from '../src/ledger.js';
 import type { WorkerAdapter } from '../src/types.js';
 import { useTempResources, fakeAdapter, IDENTITIES } from './helpers.js';
@@ -105,6 +106,117 @@ describe('dispatch — structural caps', () => {
     const bogus = fakeAdapter();
     const terminal = await dispatch({ taskClass: 'scaffold', prompt: 'x', cwd, capabilities: ['fly'], identity: unbound }, ledger, () => bogus.adapter);
     expect(terminal.refusal?.code).toBe('capability-denied'); expect(bogus.calls).toHaveLength(0);
+  });
+
+  it('unions web-research class capabilities into its Codex fallback without a caller capability', async () => {
+    const calls: Array<{ provider: string; capabilities: string[] }> = [];
+    const outcome = await dispatch(
+      { taskClass: 'web-research', prompt: 'x', cwd: tempDir(), identity: unbound },
+      tempLedger(),
+      (provider) => ({ name: provider, provider: provider as WorkerAdapter['provider'], dispatch: async (_prompt, opts) => {
+        calls.push({ provider, capabilities: opts.capabilities ?? [] });
+        return provider === 'gemini'
+          ? { ok: false, output: '', exitCode: 1, error: 'grounding failed' }
+          : { ok: true, output: 'grounded fallback', exitCode: 0 };
+      } }),
+    );
+    expect(outcome).toMatchObject({ ok: true, provider: 'codex', usedFallback: true, capabilities: ['browse'] });
+    expect(calls).toEqual([
+      { provider: 'gemini', capabilities: [] },
+      { provider: 'codex', capabilities: ['browse'] },
+    ]);
+  });
+
+  it('refuses an explicit web-research override to a provider without enforceable browse', async () => {
+    const fake = fakeAdapter();
+    const outcome = await dispatch(
+      { taskClass: 'web-research', provider: 'cursor', model: 'composer-2.5', prompt: 'x', cwd: tempDir(), identity: unbound },
+      tempLedger(),
+      () => fake.adapter,
+    );
+    expect(outcome.refusal?.code).toBe('capability-denied');
+    expect(fake.calls).toHaveLength(0);
+  });
+
+  it('a CLASS-declared exec-privileged capability still needs req.optIn — a class cannot self-grant it (gitar #76)', async () => {
+    const cwd = tempDir(); const ledger = tempLedger();
+    const yamlPath = join(tempDir(), 'routing.yaml');
+    const { writeFileSync } = await import('node:fs');
+    // Operator gate ON, and a class that DECLARES exec-privileged as a class-default capability. The
+    // union feeds decideCapabilities's `requested` list, but `optIn` still comes solely from req — so
+    // the two-key gate holds and the class cannot self-grant it.
+    writeFileSync(yamlPath, 'policy: {capabilities: {allow_exec_privileged: true}}\nproviders: {codex: {models: [gpt-5.6-luna], execution: headless}}\ntask_classes: {danger: {provider: codex, model: gpt-5.6-luna, capabilities: [exec-privileged]}}\n');
+    const prev = process.env.HEDDLE_ROUTING;
+    try {
+      process.env.HEDDLE_ROUTING = yamlPath;
+      const refused = await dispatch({ taskClass: 'danger', prompt: 'x', cwd, identity: unbound }, ledger, () => fakeAdapter({ ok: false, output: '', exitCode: null }).adapter);
+      expect(refused.refusal?.code).toBe('capability-denied'); // no req.optIn → refused despite the class default + gate on
+      const granted = await dispatch({ taskClass: 'danger', prompt: 'x', cwd, optIn: true, identity: unbound }, ledger, () => fakeAdapter().adapter);
+      expect(granted.capabilities).toEqual(['exec-privileged']); // req.optIn is the second key; then the class default flows through
+    } finally {
+      if (prev === undefined) delete process.env.HEDDLE_ROUTING; else process.env.HEDDLE_ROUTING = prev;
+    }
+  });
+
+  it('an explicit provider/model INHERITS the class capability defaults — never silently dropped (cubic P1/codex #76)', async () => {
+    const cwd = tempDir(); const ledger = tempLedger();
+    const yamlPath = join(tempDir(), 'routing.yaml');
+    const { writeFileSync } = await import('node:fs');
+    // A class whose PRIMARY declares a grantable default capability. Dispatching it with an explicit
+    // provider/model must carry that default to the named target (like skills/mcp) — else the class
+    // policy is silently shed on the explicit path.
+    writeFileSync(yamlPath, 'policy: {}\nproviders: {codex: {models: [gpt-5.6-luna, gpt-5.6-sol], execution: headless}}\ntask_classes: {browsy: {provider: codex, model: gpt-5.6-luna, capabilities: [browse]}}\n');
+    const prev = process.env.HEDDLE_ROUTING;
+    try {
+      process.env.HEDDLE_ROUTING = yamlPath;
+      // Explicit provider/model under the class policy, no req.capabilities of its own.
+      const out = await dispatch({ taskClass: 'browsy', provider: 'codex', model: 'gpt-5.6-sol', prompt: 'x', cwd, identity: unbound }, ledger, () => fakeAdapter().adapter);
+      expect(out.capabilities).toEqual(['browse']); // inherited from the class default, not dropped
+    } finally {
+      if (prev === undefined) delete process.env.HEDDLE_ROUTING; else process.env.HEDDLE_ROUTING = prev;
+    }
+  });
+
+  it('dry run mirrors the requiresWeb refusal — planDispatch/summarizePlan never advertise a web route the run refuses (codex #76)', async () => {
+    const yamlPath = join(tempDir(), 'routing.yaml');
+    const { writeFileSync } = await import('node:fs');
+    // requiresWeb class whose primary can't web (codex, no browse grant, not gemini): the run refuses,
+    // so the preview must not present it as runnable.
+    writeFileSync(yamlPath, 'policy: {}\nproviders: {codex: {models: [gpt-5.6-luna], execution: headless}}\ntask_classes: {research: {provider: codex, model: gpt-5.6-luna, requires_web: true}}\n');
+    const table = loadRouting(yamlPath);
+    const plan = planDispatch({ taskClass: 'research', prompt: 'x', cwd: tempDir(), identity: unbound, caps: {} }, table);
+    const summary = summarizePlan(plan);
+    expect(plan.requiresWebRefusal, 'plan flags the web refusal').toBeTruthy();
+    expect(summary.would_run, 'preview does not advertise a runnable route').toBeNull();
+    expect((summary.refusal as { code?: string } | null)?.code).toBe('capability-denied');
+  });
+
+  it('dry run surfaces a TERMINAL capability refusal (unknown token) — never advertises a route the run refuses (cubic #76)', async () => {
+    const yamlPath = join(tempDir(), 'routing.yaml');
+    const { writeFileSync } = await import('node:fs');
+    writeFileSync(yamlPath, 'policy: {}\nproviders: {codex: {models: [gpt-5.6-luna], execution: headless}}\ntask_classes: {plain: {provider: codex, model: gpt-5.6-luna}}\n');
+    const table = loadRouting(yamlPath);
+    // A bogus capability is a terminal unknown-token refusal (no capability-fit fallback), so the dry
+    // run must show it — unlike `unenforceable`, which may fall back and run (HED-275).
+    const plan = planDispatch({ taskClass: 'plain', capabilities: ['bogus'], prompt: 'x', cwd: tempDir(), identity: unbound, caps: {} }, table);
+    const summary = summarizePlan(plan);
+    expect(plan.capabilityRefusal, 'plan flags the terminal capability refusal').toBeTruthy();
+    expect(summary.would_run).toBeNull();
+    expect((summary.refusal as { code?: string } | null)?.code).toBe('capability-denied');
+  });
+
+  it('dry run does NOT surface a capability refusal for an in-session Claude route — dispatch returns the in-session instruction first (cubic #76)', async () => {
+    const yamlPath = join(tempDir(), 'routing.yaml');
+    const { writeFileSync } = await import('node:fs');
+    // A Claude route run in-session returns the in-session instruction before runTarget's capability
+    // gate, so a bad capability must NOT preview as a refusal (that would diverge from the run).
+    writeFileSync(yamlPath, 'policy: {}\nproviders: {claude: {models: [sonnet], execution: headless}}\ntask_classes: {think: {provider: claude, model: sonnet}}\n');
+    const table = loadRouting(yamlPath);
+    const plan = planDispatch({ taskClass: 'think', capabilities: ['bogus'], inSession: true, prompt: 'x', cwd: tempDir(), identity: unbound, caps: {} }, table);
+    const summary = summarizePlan(plan);
+    expect(plan.capabilityRefusal, 'no capability refusal for in-session route').toBeFalsy();
+    expect(summary.in_session).toBe(true);
+    expect((summary.refusal as { code?: string } | null)?.code).not.toBe('capability-denied');
   });
 
   it('enforces named concurrency caps independently and ignores stale rows', async () => {
