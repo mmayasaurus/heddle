@@ -9,6 +9,7 @@ export function channelLoadedFromParentArgv(
   ppid: number,
   readArgv: (ppid: number) => string | null = readParentArgv,
 ): boolean | null {
+  if (!Number.isInteger(ppid) || ppid <= 0) return null;
   let argv: string | null;
   try {
     argv = readArgv(ppid);
@@ -21,8 +22,8 @@ export function channelLoadedFromParentArgv(
   let match: RegExpExecArray | null;
   while ((match = flag.exec(argv)) !== null) {
     const value = match[1] ?? match[2];
-    if (!value || value.startsWith('--')) return null;
-    if (value.includes('heddle-comms')) return true;
+    if (!value || value.startsWith('--')) continue;
+    if (/(^|:)heddle-comms($|@)/.test(value)) return true;
   }
   return false;
 }
@@ -36,7 +37,8 @@ function readParentArgv(ppid: number): string | null {
     return readFileSync(`/proc/${ppid}/cmdline`, 'utf8').replace(/\0/g, ' ');
   } catch {
     try {
-      return execFileSync('ps', ['-ww', '-o', 'command=', '-p', String(ppid)], { encoding: 'utf8' });
+      // Inputs are a fixed arg vector + a validated integer pid (no injection surface).
+      return execFileSync('/bin/ps', ['-ww', '-o', 'command=', '-p', String(ppid)], { encoding: 'utf8' });
     } catch {
       return null;
     }

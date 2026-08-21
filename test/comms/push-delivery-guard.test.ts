@@ -65,6 +65,14 @@ describe('regression PR#270 — push delivery loud-fail guard', () => {
     }
   });
 
+  it('fails open when an injected channel probe throws', async () => {
+    const { client, log, warnings } = await connect('1', () => { throw new Error('probe unavailable'); });
+
+    expect((await whoami(client)).pushDelivery).toBe('ok');
+    expect(warnings).toEqual([]);
+    expect(log.transcript({ pair: ['R', 'R'] })).toEqual([]);
+  });
+
   it('reports push delivery off when push is disabled', async () => {
     const { client } = await connect('0', () => false);
     expect((await whoami(client)).pushDelivery).toBe('off');

@@ -189,11 +189,18 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
   const { identity: me, isOperator } = resolveCommsIdentity(env, cwd, warn, tokenPath);
   const isWorker = env.HEDDLE_WORKER === '1';
   const pushEnabled = env.HEDDLE_COMMS_PUSH === '1';
-  const channelLoadedProbe = opts.channelLoadedProbe ?? (() => channelLoadedFromParentArgv(process.ppid));
+  const channelLoadedProbe = opts.channelLoadedProbe ?? (() => {
+    const cp = Number(env.CLAUDE_PID);
+    return channelLoadedFromParentArgv(Number.isInteger(cp) && cp > 0 ? cp : process.ppid);
+  });
   type PushDelivery = 'off' | 'ok' | 'suspect-channel-not-loaded';
-  const pushDelivery: PushDelivery = !pushEnabled
-    ? 'off'
-    : (channelLoadedProbe() === false ? 'suspect-channel-not-loaded' : 'ok');
+  let channelLoaded: boolean | null;
+  try {
+    channelLoaded = channelLoadedProbe();
+  } catch {
+    channelLoaded = null;
+  }
+  const pushDelivery: PushDelivery = !pushEnabled ? 'off' : (channelLoaded === false ? 'suspect-channel-not-loaded' : 'ok');
   const sessionName = env.HEDDLE_SESSION_NAME || me;
   const instanceId = env.CLAUDE_CODE_SESSION_ID || randomUUID(); // owns this process's presence row
 
