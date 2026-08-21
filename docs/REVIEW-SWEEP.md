@@ -41,13 +41,12 @@ gh api graphql -f query='query($o:String!,$r:String!,$n:Int!){ repository(owner:
 
 ## Trigger the reviewers that need it
 
-Most review applications trigger automatically on push. A couple need an explicit manual trigger, and one class must be neither triggered nor waited for:
+Most review applications trigger automatically on push, but **which ones are live changes over time — read the active set off the PR itself (the checks tab plus the comment/review authors of a recent PR), never off a remembered list in this document.** A hardcoded roster rots: bots get added, removed, or (as happened on 2026-08-21) removed-then-accidentally-kept, and a stale list sends you chasing ghosts. Two operational rules are all you need:
 
-- **Cursor Bugbot**: on-demand only — post a `bugbot run` comment on the PR to request a review, after opening it and after a substantive push.
-- **Copilot code review**: request-based; re-request manually from the Reviewers panel in the GitHub UI.
-- **Removed bots — never trigger, never wait for one.** The roster is purged from time to time (most recently 2026-08-21). A trigger comment addressed to a removed bot does nothing but clutter the PR, and a sweep that blocks on a removed bot's review waits forever. Removed as of 2026-08-21: CodeRabbit, Sourcery, Gitar, what-the-diff, DeepSource, Greptile, LlamaPReview, AccessLint, cr-gpt, codereviewbot.ai, Sweep.
+- **On-demand reviewers need a trigger.** Cursor Bugbot: post a `bugbot run` comment (after opening the PR, and after a substantive push). Copilot code review: re-request from the Reviewers panel in the GitHub UI.
+- **Never trigger or wait for a bot that isn't there.** A trigger comment addressed to a bot that has been removed is a no-op that only clutters the PR; a sweep that blocks on a reviewer which never posts on this repo waits forever. If an expected reviewer has not left a check or a comment on the PR, it is not active here — move on.
 
-**The live reviewer set is empirical — read it off the PR, not off this document.** Rosters change; treat any list of names here as a dated snapshot and confirm against the **checks tab and the comment/review authors of any recent PR**. Snapshot as of 2026-08-21 (auto-run on push unless noted): Qodo · cubic · Codacy · Amazon Q · Copilot · SonarCloud · CodeAnt · Corgea · Codex (chatgpt-codex) · Cursor Bugbot (on-demand, above). CI **checks** — Semgrep, gitleaks, actionlint/zizmor, GitHub code scanning, Dependabot — are separate from the review bots and surface in channel (e).
+CI **checks** (Semgrep, gitleaks, actionlint/zizmor, GitHub code scanning, Dependabot, CodeFactor, …) are distinct from the review bots and surface in channel (e); read them off the checks tab the same way.
 
 ## What is NOT a finding (noise)
 

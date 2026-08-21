@@ -13,11 +13,9 @@ installs) are tracked in Linear **HED-13**.
 | `deterministic-review.yml` | PRs (incl. drafts for gitleaks, base retargets, and title/body edits), push `main` | **`semgrep-scan` → `semgrep`** (`p/typescript` + `p/nodejs`, diff-aware vs the PR base, full on `main`, SARIF → code scanning) · **`gitleaks-scan` → `gitleaks`** (official CLI over exactly `base.sha..head.sha`). The plain-runner public jobs aggregate real scan results into SHA-bound `*-verdict` markers; title/body edits echo those markers instead of rescanning or skipping. gitleaks' shell lives in `.github/scripts/gitleaks-range-scan.sh` (HED-113) so the fixture matrix can exercise it directly. | semgrep report-only · gitleaks red on a hit (not required); edit-safe via real verdict echoes (HED-131) |
 | `actions-hygiene.yml` | PRs / `main` pushes touching `.github/**` | **actionlint** · **zizmor** (SARIF → code scanning) | actionlint red on findings · zizmor report (same-repo) / red (forks) |
 | `.github/dependabot.yml` | weekly | grouped bumps of the hash-pinned actions, 7-day cooldown | — |
-| `.deepsource.toml` | (DeepSource app, once installed — HED-13) | JS/TS + secrets analyzers, repo-accurate config | merged *before* the app so it doesn't invent work |
 
 Findings surface as **code-scanning alerts** ("Code scanning results / <tool>" checks + the Security
-tab), job summaries, and the job log — plus whatever the AI reviewer apps post. The `.deepsource.toml`
-exists because an unconfigured DeepSource opened ~118 non-defect threads on one Spinventory PR.
+tab), job summaries, and the job log — plus whatever the AI reviewer apps post.
 
 ## Rules baked into the workflows (don't undo them casually)
 
