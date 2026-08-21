@@ -133,7 +133,7 @@ export interface DispatchRequest {
  * `refusal` column.
  */
 export interface DispatchRefusal {
-  code: 'claude-in-session' | 'not-dispatchable' | 'depth-1' | 'max-children' | 'capability-denied' | 'metered-pool-exhausted' | 'same-provider-review' | 'override-reason-required' | 'fleet-paused';
+  code: 'claude-in-session' | 'no-dispatchable-account' | 'not-dispatchable' | 'depth-1' | 'max-children' | 'capability-denied' | 'metered-pool-exhausted' | 'same-provider-review' | 'override-reason-required' | 'fleet-paused';
   reason: string;
   /** What to do instead, when there is a clear alternative. */
   instruction?: string;
@@ -662,6 +662,24 @@ export async function dispatch(
     );
   }
 
+  // A non-empty registry is an explicit account-routing contract. If none of its accounts is
+  // addressable, never let a headless Claude worker fall through to the orchestrator's inherited
+  // login; an empty registry intentionally retains that legacy inherited-login behavior.
+  if (plan.pinnedExcludedAccount) {
+    return refusalOutcome(ctx, req, route.taskClass, target, skillsForRefusal, {
+      code: 'no-dispatchable-account',
+      reason: plan.pinnedExcludedAccount.reason,
+      instruction: 'Wait for a successful keeper ping or restore the pinned Claude account before dispatching it.',
+    });
+  }
+  if (hasNoDispatchableClaudeAccount(plan)) {
+    return refusalOutcome(ctx, req, route.taskClass, target, skillsForRefusal, {
+      code: 'no-dispatchable-account',
+      reason: noDispatchableClaudeAccountReason(plan.claudeAccountCount),
+      instruction: 'An operator must restore a Claude account before this can dispatch.',
+    });
+  }
+
   // Auto-effort (opt-in): classify the sub-task's difficulty and pin the effort, unless the caller
   // already set one. Runs only after every plan-level refusal gate has passed — a refused dispatch
   // never spends a classifier (a max-children refusal can still waste one: that count is
@@ -739,9 +757,14 @@ export async function dispatch(
     try {
       // forFable on the RUNTIME fallback too: a claude/fable fallback must be picked by Fable
       // headroom, not 5h (PR #24, codeant).
-      ctx.claudeAccount = pickClaudeAccount(fbSnap.claude, req.accounts ?? readClaudeAccounts(),
+      const fallbackAccounts = req.accounts ?? readClaudeAccounts();
+      ctx.claudeAccount = pickClaudeAccount(fbSnap.claude, fallbackAccounts,
         { pin: req.accountPin, routeAwayAtPct: capAwarePolicy(table).routeAwayAtPct, forFable: fallback.model === 'fable' }) ?? null;
       ctx.account = ctx.claudeAccount?.account.id ?? null;
+      if (fallbackAccounts.length > 0 && ctx.claudeAccount === null) {
+        primary.error = `${primary.error ?? 'primary failed'}; claude fallback blocked: no dispatchable account — ${noDispatchableClaudeAccountReason(fallbackAccounts.length)}`;
+        return primary;
+      }
     } catch (err) {
       // A pinned-but-unaddressable account is a caller error, but the primary's outcome is already
       // ledgered — report the blocked fallback on it instead of throwing away the whole dispatch.
@@ -938,17 +961,46 @@ export interface DispatchPlan {
   /** Account the run bills to / is advised (see DispatchOutcome.account). */
   account: string | null;
   accountAdvice?: AccountAdvice;
-  /** HED-78: the Claude account a headless worker will run on (null = in-session / not Claude / no registry). */
+  /** HED-78: the Claude account a headless worker will run on. `undefined` = in-session/non-Claude;
+   *  `null` = a registry was consulted but none is addressable (or it has no entries). */
   accountPick?: AccountPick | null;
+  /** Number of registered Claude accounts consulted for the effective Claude target. */
+  claudeAccountCount: number;
   /** True for a `dispatchable: false` class — dispatch() refuses before any route runs. */
   notDispatchable: boolean;
   /** HED-3: set when the class primary matched the author's provider and a pool entry was taken instead. */
   reviewerPick?: ReviewerPick | null;
   /** HED-3: the caller named the author's own provider as the explicit route — refused. */
   sameProviderReview?: string;
+  /** A pinned account was freshly excluded from dispatch; dispatch() returns a structured refusal. */
+  pinnedExcludedAccount?: { pin: string; reason: string };
   /** HED-95: set when a bare direct route would be refused for lacking an override_reason —
    *  so `heddle route` / `plan_dispatch` never claim a route the real dispatch would refuse. */
   overrideReasonRequired?: string;
+}
+
+function hasNoDispatchableClaudeAccount(plan: Pick<DispatchPlan,
+  'target' | 'execution' | 'notDispatchable' | 'claudeAccountCount' | 'accountPick'>,
+): boolean {
+  return plan.target.provider === 'claude'
+    && plan.execution !== 'in-session-subagent'
+    && !plan.notDispatchable
+    && plan.claudeAccountCount > 0
+    && plan.accountPick === null;
+}
+
+function noDispatchableClaudeAccountReason(accountCount: number): string {
+  const registry = accountCount === 1
+    ? 'the 1 registered account is'
+    : `all ${accountCount} registered accounts are`;
+  return `no dispatchable Claude account — ${registry} logged-out or non-dispatchable ` +
+    '(a billing/logged-out signal, or a replaced credential). Run `claude /login` on the affected account and update accounts.json, or wait for a keeper ping to clear the signal.';
+}
+
+function excludedClaudePin(err: unknown): { pin: string; reason: string } | null {
+  const message = err instanceof Error ? err.message : String(err);
+  const match = /^account_pin "([^"]+)" is registered but NOT dispatchable \(([^)]+)\)/.exec(message);
+  return match ? { pin: match[1], reason: message } : null;
 }
 
 /**
@@ -1095,12 +1147,22 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
   let account: string | null = null;
   let accountAdvice: AccountAdvice | undefined;
   let accountPick: AccountPick | null | undefined;
+  let claudeAccountCount = 0;
+  let pinnedExcludedAccount: { pin: string; reason: string } | undefined;
   if (target.provider === 'codex' && req.env?.CODEX_HOME) account = basename(req.env.CODEX_HOME);
   if (target.provider === 'claude') {
     const accounts = claudeAccounts();
+    claudeAccountCount = accounts.length;
     accountAdvice = adviseClaudeAccount(caps.claude, accounts);
     if (!req.inSession && !notDispatchable) {
-      accountPick = pickClaudeAccount(caps.claude, accounts, { pin: req.accountPin, routeAwayAtPct: capAwarePolicy(table).routeAwayAtPct, forFable: target.model === 'fable' });
+      try {
+        accountPick = pickClaudeAccount(caps.claude, accounts, { pin: req.accountPin, routeAwayAtPct: capAwarePolicy(table).routeAwayAtPct, forFable: target.model === 'fable' });
+      } catch (err) {
+        const excludedPin = excludedClaudePin(err);
+        if (!excludedPin) throw err;
+        pinnedExcludedAccount = excludedPin;
+        accountPick = null;
+      }
       account = accountPick?.account.id ?? null;
       if (accountPick) decision.routeReason = `${decision.routeReason}; ${accountPick.reason}`;
     } else {
@@ -1110,15 +1172,16 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
   // The dry run must mirror what dispatch() would do — including refusing a bare direct route.
   const gate = overrideReasonGate(req);
   const overrideReasonRequired = gate ? gate.refusal(table).reason : undefined;
-  return { route, target, fallback, origin, execution, decision, skillsForRefusal, account, accountAdvice, accountPick, notDispatchable, reviewerPick, sameProviderReview, overrideReasonRequired };
+  return { route, target, fallback, origin, execution, decision, skillsForRefusal, account, accountAdvice, accountPick, claudeAccountCount, notDispatchable, reviewerPick, sameProviderReview, pinnedExcludedAccount, overrideReasonRequired };
 }
 
 /** One shared dry-run summary for `heddle route` and the `plan_dispatch` MCP tool (identical fields). */
 export function summarizePlan(plan: DispatchPlan): Record<string, unknown> {
   const notDispatchable = plan.notDispatchable;
+  const noDispatchableAccount = hasNoDispatchableClaudeAccount(plan);
   return {
     task_class: plan.route.taskClass,
-    would_run: notDispatchable || plan.decision.refusal || plan.sameProviderReview || plan.overrideReasonRequired ? null : `${plan.target.provider}/${plan.target.model}`,
+    would_run: notDispatchable || plan.decision.refusal || plan.sameProviderReview || plan.pinnedExcludedAccount || noDispatchableAccount || plan.overrideReasonRequired ? null : `${plan.target.provider}/${plan.target.model}`,
     execution: plan.execution ?? null,
     in_session: plan.execution === 'in-session-subagent',
     routed_away_for_cap: plan.decision.routedAwayForCap,
@@ -1130,6 +1193,10 @@ export function summarizePlan(plan: DispatchPlan): Record<string, unknown> {
       ? { code: 'override-reason-required', reason: plan.overrideReasonRequired }
       : plan.sameProviderReview
       ? { code: 'same-provider-review', reason: plan.sameProviderReview }
+      : plan.pinnedExcludedAccount
+      ? { code: 'no-dispatchable-account', reason: plan.pinnedExcludedAccount.reason }
+      : noDispatchableAccount
+      ? { code: 'no-dispatchable-account', reason: noDispatchableClaudeAccountReason(plan.claudeAccountCount) }
       : plan.decision.refusal ?? null,
     checks: plan.decision.checks,
     account: plan.account,
