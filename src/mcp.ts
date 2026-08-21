@@ -98,7 +98,7 @@ export function mcpAttachable(provider: string, servers: string[]): boolean {
  * an inherited Object.prototype member (e.g. "toString") must read as NOT enforceable, never as that
  * member (cubic #63 was this exact landmine on this exact table). */
 export function webCapable(provider: string, grantedCapabilities: string[]): boolean {
-  const enforceable = Object.prototype.hasOwnProperty.call(ENFORCEABLE, provider) ? ENFORCEABLE[provider] : [];
+  const enforceable = Object.hasOwn(ENFORCEABLE, provider) ? ENFORCEABLE[provider] : []; // own-property: a `toString` etc. isn't the prototype method (cubic #63); Object.hasOwn matches routing.ts (codacy #76)
   return provider === 'gemini' || (grantedCapabilities.includes('browse') && enforceable.includes('browse'));
 }
 

@@ -137,6 +137,26 @@ describe('dispatch — structural caps', () => {
     expect(fake.calls).toHaveLength(0);
   });
 
+  it('a CLASS-declared exec-privileged capability still needs req.optIn — a class cannot self-grant it (gitar #76)', async () => {
+    const cwd = tempDir(); const ledger = tempLedger();
+    const yamlPath = join(tempDir(), 'routing.yaml');
+    const { writeFileSync } = await import('node:fs');
+    // Operator gate ON, and a class that DECLARES exec-privileged as a class-default capability. The
+    // union feeds decideCapabilities's `requested` list, but `optIn` still comes solely from req — so
+    // the two-key gate holds and the class cannot self-grant it.
+    writeFileSync(yamlPath, 'policy: {capabilities: {allow_exec_privileged: true}}\nproviders: {codex: {models: [gpt-5.6-luna], execution: headless}}\ntask_classes: {danger: {provider: codex, model: gpt-5.6-luna, capabilities: [exec-privileged]}}\n');
+    const prev = process.env.HEDDLE_ROUTING;
+    try {
+      process.env.HEDDLE_ROUTING = yamlPath;
+      const refused = await dispatch({ taskClass: 'danger', prompt: 'x', cwd, identity: unbound }, ledger, () => fakeAdapter({ ok: false }).adapter);
+      expect(refused.refusal?.code).toBe('capability-denied'); // no req.optIn → refused despite the class default + gate on
+      const granted = await dispatch({ taskClass: 'danger', prompt: 'x', cwd, optIn: true, identity: unbound }, ledger, () => fakeAdapter().adapter);
+      expect(granted.capabilities).toEqual(['exec-privileged']); // req.optIn is the second key; then the class default flows through
+    } finally {
+      if (prev === undefined) delete process.env.HEDDLE_ROUTING; else process.env.HEDDLE_ROUTING = prev;
+    }
+  });
+
   it('enforces named concurrency caps independently and ignores stale rows', async () => {
     const ledgerDir = tempDir(); const dbPath = join(ledgerDir, 'ledger.db');
     const ledger = trackLedger(new Ledger(dbPath)); const cwd = tempDir(); const fake = fakeAdapter();

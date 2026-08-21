@@ -251,16 +251,21 @@ interface RefusalOpts {
   /** A ledger row that already exists for this attempt (e.g. the max-children transactional row). */
   ledgerId?: number;
   fellBackFrom?: string | null;
+  /** The EFFECTIVE capabilities that drove the refusal (class defaults ∪ req.capabilities). A
+   *  capability/web refusal triggered by a CLASS-DEFAULT capability must not be ledgered as caller-only
+   *  (Copilot #76); pass the unioned list so the audit trail shows what was actually asked. */
+  capabilities?: string[];
 }
 
 function refusalOutcome(
   ctx: DispatchContext, req: DispatchRequest, taskClass: string, target: RouteTarget,
   skills: string[], refusal: DispatchRefusal, opts: RefusalOpts = {},
 ): DispatchOutcome {
-  const { extra = {}, ledgerId, fellBackFrom = null } = opts;
-  // A refusal row records what was ASKED (e.g. the denied capabilities), so the audit trail shows it.
+  const { extra = {}, ledgerId, fellBackFrom = null, capabilities } = opts;
+  // A refusal row records what was ASKED (e.g. the denied capabilities), so the audit trail shows it —
+  // the EFFECTIVE list (class defaults ∪ req) when the caller passed one, else req.capabilities.
   const id = ledgerId ?? ctx.ledger.refuse(
-    baseRecord(ctx, req, taskClass, target, skills, fellBackFrom, req.capabilities ?? []),
+    baseRecord(ctx, req, taskClass, target, skills, fellBackFrom, capabilities ?? req.capabilities ?? []),
     refusal.code, refusal.reason,
   );
   return {
@@ -304,14 +309,14 @@ async function runTarget(
       instruction: caps.refusal.kind === 'unenforceable'
         ? 'Dispatch to a provider that can enforce it (class + explicit provider/model), or drop the capability (see docs/MODELS.md "Capabilities").'
         : 'Drop the capability, or fix the call (see docs/MODELS.md "Capabilities").',
-    }, { extra: { usedFallback: fellBackFrom !== null, capabilityRefusalKind: caps.refusal.kind }, fellBackFrom });
+    }, { extra: { usedFallback: fellBackFrom !== null, capabilityRefusalKind: caps.refusal.kind }, fellBackFrom, capabilities: requestedCapabilities });
   }
   if (route.requiresWeb && !webCapable(target.provider, caps.granted)) {
     return refusalOutcome(ctx, req, route.taskClass, target, skills, {
       code: 'capability-denied',
-      reason: `web-research class requires a web-capable provider; "${target.provider}" has no intrinsic grounding or enforceable "browse" grant.`,
+      reason: `the "${route.taskClass}" class requires a web-capable provider; "${target.provider}" has no intrinsic grounding or enforceable "browse" grant.`,
       instruction: 'Use the class route, or select a provider with an enforceable browse grant.',
-    }, { extra: { usedFallback: fellBackFrom !== null }, fellBackFrom });
+    }, { extra: { usedFallback: fellBackFrom !== null }, fellBackFrom, capabilities: requestedCapabilities });
   }
 
   // HED-19: fail fast, BEFORE a ledger row exists, on anything materialization would reject —
