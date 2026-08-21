@@ -972,6 +972,10 @@ export interface DispatchPlan {
   /** HED-95: set when a bare direct route would be refused for lacking an override_reason —
    *  so `heddle route` / `plan_dispatch` never claim a route the real dispatch would refuse. */
   overrideReasonRequired?: string;
+  /** HED-239: set when a TERMINAL capability refusal (unknown-token/operator-gate/opt-in) would reject
+   *  the target — mirrors runTarget's capability gate in the dry run (the `unenforceable` kind is left
+   *  for HED-275 since it may capability-fit-fallback rather than refuse). */
+  capabilityRefusal?: string;
   /** HED-239: set when a requiresWeb class's effective target can't web — the dry run mirrors the
    *  runtime guard so plan_dispatch never advertises a web-research route the real dispatch refuses. */
   requiresWebRefusal?: string;
@@ -1142,16 +1146,20 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
   // The dry run must mirror what dispatch() would do — including refusing a bare direct route.
   const gate = overrideReasonGate(req);
   const overrideReasonRequired = gate ? gate.refusal(table).reason : undefined;
-  // …and refusing a requiresWeb class whose effective target can't web. runTarget enforces this at
-  // dispatch; the preview must show it too, or plan_dispatch advertises a route the run refuses (codex
-  // #76). Derived from the SAME pure decideCapabilities as runTarget (identical inputs → identical
-  // grant), so plan and run cannot disagree. A capability refusal is surfaced by runTarget itself.
+  // …and refusing what runTarget's capability gates would refuse, so the preview never advertises a
+  // route the run rejects (codex/cubic #76). Same pure decideCapabilities as runTarget (identical
+  // inputs → identical grant), so plan and run can't disagree. Order mirrors runTarget: the capability
+  // gate preempts the requiresWeb guard. TERMINAL capability refusals (unknown-token/operator-gate/
+  // opt-in) always refuse → surfaced. `unenforceable` is NOT terminal — dispatch()'s capability-fit
+  // fallback (~L712) may run it on a provider that CAN enforce — so it is deliberately NOT surfaced
+  // here (that would advertise a refusal the run avoids); full fallback-modeled parity is HED-275.
   const dryReqCaps = [...new Set([...(target.capabilities ?? []), ...(req.capabilities ?? [])])];
   const dryCaps = decideCapabilities(target.provider, dryReqCaps, req.optIn === true, capabilityPolicy(table));
-  const requiresWebRefusal = route.requiresWeb && !dryCaps.refusal && !webCapable(target.provider, dryCaps.granted)
+  const capabilityRefusal = dryCaps.refusal && dryCaps.refusal.kind !== 'unenforceable' ? dryCaps.refusal.reason : undefined;
+  const requiresWebRefusal = !dryCaps.refusal && route.requiresWeb && !webCapable(target.provider, dryCaps.granted)
     ? webRefusalReason(route.taskClass, target.provider)
     : undefined;
-  return { route, target, fallback, origin, execution, decision, skillsForRefusal, account, accountAdvice, accountPick, notDispatchable, reviewerPick, sameProviderReview, overrideReasonRequired, requiresWebRefusal };
+  return { route, target, fallback, origin, execution, decision, skillsForRefusal, account, accountAdvice, accountPick, notDispatchable, reviewerPick, sameProviderReview, overrideReasonRequired, capabilityRefusal, requiresWebRefusal };
 }
 
 /** One shared dry-run summary for `heddle route` and the `plan_dispatch` MCP tool (identical fields). */
@@ -1159,7 +1167,7 @@ export function summarizePlan(plan: DispatchPlan): Record<string, unknown> {
   const notDispatchable = plan.notDispatchable;
   return {
     task_class: plan.route.taskClass,
-    would_run: notDispatchable || plan.decision.refusal || plan.sameProviderReview || plan.overrideReasonRequired || plan.requiresWebRefusal ? null : `${plan.target.provider}/${plan.target.model}`,
+    would_run: notDispatchable || plan.decision.refusal || plan.sameProviderReview || plan.overrideReasonRequired || plan.capabilityRefusal || plan.requiresWebRefusal ? null : `${plan.target.provider}/${plan.target.model}`,
     execution: plan.execution ?? null,
     in_session: plan.execution === 'in-session-subagent',
     routed_away_for_cap: plan.decision.routedAwayForCap,
@@ -1173,6 +1181,8 @@ export function summarizePlan(plan: DispatchPlan): Record<string, unknown> {
       ? { code: 'same-provider-review', reason: plan.sameProviderReview }
       : plan.decision.refusal
       ? plan.decision.refusal
+      : plan.capabilityRefusal
+      ? { code: 'capability-denied', reason: plan.capabilityRefusal }
       : plan.requiresWebRefusal
       ? { code: 'capability-denied', reason: plan.requiresWebRefusal }
       : null,

@@ -191,6 +191,20 @@ describe('dispatch — structural caps', () => {
     expect((summary.refusal as { code?: string } | null)?.code).toBe('capability-denied');
   });
 
+  it('dry run surfaces a TERMINAL capability refusal (unknown token) — never advertises a route the run refuses (cubic #76)', async () => {
+    const yamlPath = join(tempDir(), 'routing.yaml');
+    const { writeFileSync } = await import('node:fs');
+    writeFileSync(yamlPath, 'policy: {}\nproviders: {codex: {models: [gpt-5.6-luna], execution: headless}}\ntask_classes: {plain: {provider: codex, model: gpt-5.6-luna}}\n');
+    const table = loadRouting(yamlPath);
+    // A bogus capability is a terminal unknown-token refusal (no capability-fit fallback), so the dry
+    // run must show it — unlike `unenforceable`, which may fall back and run (HED-275).
+    const plan = planDispatch({ taskClass: 'plain', capabilities: ['bogus'], prompt: 'x', cwd: tempDir(), identity: unbound, caps: {} }, table);
+    const summary = summarizePlan(plan);
+    expect(plan.capabilityRefusal, 'plan flags the terminal capability refusal').toBeTruthy();
+    expect(summary.would_run).toBeNull();
+    expect((summary.refusal as { code?: string } | null)?.code).toBe('capability-denied');
+  });
+
   it('enforces named concurrency caps independently and ignores stale rows', async () => {
     const ledgerDir = tempDir(); const dbPath = join(ledgerDir, 'ledger.db');
     const ledger = trackLedger(new Ledger(dbPath)); const cwd = tempDir(); const fake = fakeAdapter();
