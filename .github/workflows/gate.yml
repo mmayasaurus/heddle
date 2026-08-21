@@ -215,7 +215,13 @@ jobs:
               # NEVER coerce it to an empty `{}` (that jq-errors under `set -eu`
               # and reds the required gate on a single transient API blip, and it
               # also fakes "no leaf in flight", advancing the fail-closed proof).
-              if ! CR=$(gh api "repos/$REPO/commits/$SHA/check-runs" --paginate --slurp 2>/dev/null); then
+              # `?filter=all` (HED-202, mirrors HED-193 on deterministic-review.yml): the
+              # check-runs API defaults to filter=latest = the latest run PER NAME, dropping
+              # older runs from earlier suites. The verdict resolution below keys on the newest
+              # EXECUTED leaf across suites vs the marker's started_at (HED-142), so a dropped
+              # run could mis-rank that ordering; filter=all returns every run so the
+              # newest-by-started_at pick is complete. Query is preserved across pages by --paginate.
+              if ! CR=$(gh api "repos/$REPO/commits/$SHA/check-runs?filter=all" --paginate --slurp 2>/dev/null); then
                 echo "  could not read check runs for ${SHA}; build liveness is unknown — retrying"
                 # A failed read breaks the "verifiably gone" streak: you cannot prove
                 # the build is gone across an outage, so the sustained-dry proof must
