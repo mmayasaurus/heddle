@@ -202,6 +202,105 @@ Residuals, by design:
   `max(started_at)` fall or `sort_by|last` pick an older marker. The same belt for gate.yml's echo is
   tracked in **HED-202**.
 
+## Gate wedge recovery — a hung hosted runner (runbook, HED-206)
+
+The required `gate` runs on GitHub-**hosted** runners (`ubuntu-24.04`). Hosted runners *can* hang
+mid-job — not only self-hosted ones — leaving the `build` leaf stuck `in_progress` and the required
+`gate` context pending. This is the operational counterpart to the verdict-echo section above: what to
+run when a wedge is live. First hit was on the dashboard (2026-08-19, HED-206), whose `gate` shares
+this repo's marker/echo architecture; the cancel-poisons-the-marker trap below bit heddle#66 live.
+
+*Recurrence-watch scope (HED-206 has no written spec):* a documented detection procedure plus a
+live-tested query — **no daemon/watcher**, because the belt self-clears and there has been a single
+incident. The "if it recurs" clause at the end names the upgrade path.
+
+> Throughout the `gh` commands below, replace every `<…>` placeholder with the real value (`<id>` = a
+> run id, `<n>` = a PR number, `<branch>` = a branch name) — the angle brackets are literal here, not
+> shell redirection, so a verbatim paste will fail.
+
+**First: most wedges self-*terminate* — don't touch them early.** The `build` leaf carries
+`timeout-minutes: 15` and the `gate` job carries `timeout-minutes: 30` (by the invariant that it
+exceeds the leaf plus the echo's polling/API budget). So a hung run **ends within the belt** rather
+than hanging for GitHub's 6-hour default — but self-terminate is not self-heal: a `build` killed by
+its own timeout publishes a **red** verdict, so the required `gate` still needs a re-trigger (below) to
+go green. **Act only once the required `gate` has been pending past the point any single job could
+still be running (~30 min — `build` is 15, the gate job 30).**
+
+**Recurrence watch — how to spot one.** The tell is a required `gate` pending well past the ceiling
+with the `build` run stuck `in_progress`. A `runner-scale.sh status` reading of "many online / 0 busy"
+is a **red herring** for a *hosted*-runner hang. Surface candidates to inspect (query live-verified
+2026-08-21; empty = nothing to inspect). Treat it as a **first-pass filter, not a verdict** — it ages
+each run's total wall-clock (`createdAt` includes any queue wait), so a long-but-healthy run can show
+up; confirm every hit with the `…/jobs` call below before acting:
+
+```shell
+gh run list --repo mmayasaurus/heddle --workflow gate.yml --status in_progress --limit 100 \
+  --json databaseId,createdAt,headBranch,event,url \
+  --jq '.[] | select(((now-(.createdAt|fromdate))/60) > 30)
+             | {id:.databaseId, age_min:(((now-(.createdAt|fromdate))/60)|floor),
+                branch:.headBranch, event:.event, url:.url}'   # >30 min: past any job's own timeout (build 15, gate 30)
+```
+
+`--limit 100` is load-bearing: `gh run list` fetches **newest-first, default 20**, and the jq age
+filter runs *after* the fetch — a small limit can page right past an old wedged run and print nothing
+(a false "healthy"). Then confirm the specific run:
+
+```shell
+gh api repos/mmayasaurus/heddle/actions/runs/<id>/jobs \
+  --jq '.jobs[] | {name, status, started_at, runner_name, labels}'
+```
+
+A job `in_progress` with `started_at` well past its timeout is genuinely stuck (`runner_name` /
+`labels` confirm hosted vs self-hosted); a job still running *inside* its timeout is not a wedge —
+leave it.
+
+**Kill a genuinely-hung run — force-cancel, never plain cancel:**
+
+```shell
+gh api -X POST repos/mmayasaurus/heddle/actions/runs/<id>/force-cancel
+```
+
+`force-cancel` is GitHub's documented last-resort endpoint (it bypasses `always()`); plain `gh run
+cancel` does **not** clear a truly-hung run.
+
+**⚠️ DANGER — a plain cancel poisons the verdict marker.** `gh run cancel` is **run-scoped** — it
+cancels the run's `build` check-run. The `gate` job's `needs: [build]` (`if: always()`) then
+aggregates that `cancelled` need as non-success → publishes `gate-verdict = FAILURE` → the edit echo
+faithfully **repeats** that false failure, so the PR looks code-broken when it is only infra (this bit
+heddle#66). With a single `gate` need here, cancelling `build` always poisons the marker — use
+`force-cancel`, which bypasses the aggregator entirely.
+
+**Then unblock the PR — force-cancel alone does NOT.** Because `force-cancel` bypasses `always()`, the
+`gate` job never runs, so no fresh `gate-verdict` is written and the required `gate` for that head SHA
+stays cancelled/absent → still blocking. Re-trigger a **commit-path** run to publish a fresh verdict
+(HEAD is unchanged — verdicts are SHA-bound, so any double-sweep merge-pin stays valid):
+
+```shell
+gh pr close <n> --repo mmayasaurus/heddle && \
+  gh pr reopen <n> --repo mmayasaurus/heddle
+```
+
+`reopened` is a commit-path event (in `gate.yml` `types:`), so it re-runs the real `build` and
+republishes the marker with the **true** verdict for that SHA — green if the code is actually green;
+infra recovery on a genuinely-red SHA correctly stays red. If `reopen` fails (auth/network) the PR is
+left **closed** — check `gh pr view <n> --json state` and reopen manually. Confirm `headRefOid` is
+unchanged afterward.
+
+Break-glass alternative (no PR churn): `gh workflow run gate.yml --ref <branch>` (`workflow_dispatch`,
+also commit-path). **Force-cancel the hung run first** — a dispatch run uses the ref-keyed concurrency
+group (`gate-<ref>-run`), not the hung run's PR-number group, so it does not displace the hung run,
+which could later `always()`-publish `FAILURE` over your fresh marker. Do **not** reach for `gh run
+rerun` reflexively: it replays a run's *original* event, so it only helps on a **commit-path** run
+(`push` / `opened` / `synchronize` / `reopened` / `workflow_dispatch`) — rerunning an *edit* run just
+re-echoes the existing (bad) marker. Close/reopen is unambiguously commit-path, so prefer it.
+
+**After recovery** you still owe the full review sweep — two clean sweeps ≥15 min apart at the
+now-green HEAD (see below).
+
+**If this recurs** (beyond the single 2026-08-19 incident), extract the detection query above into a
+committed, fixture-testable script and file a follow-up ticket — a standing watcher is not justified
+by one self-clearing incident.
+
 ## The review sweep (before anything is called clean)
 
 Full procedure with the exact commands: [REVIEW-SWEEP.md](REVIEW-SWEEP.md). In short: a PR is clean only after **every channel** — issue comments, review bodies, inline threads,
