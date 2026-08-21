@@ -6,6 +6,7 @@ import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { CommsLog, DEFAULT_COMMS_PATH } from './log.js';
+import { channelLoadedFromParentArgv } from './channel-loaded-probe.js';
 import { Ledger, DEFAULT_LEDGER_PATH } from '../ledger.js';
 import { Broker } from './broker.js';
 import type { LineageSource } from './envelope.js';
@@ -51,6 +52,8 @@ export interface CommsServerOptions {
   log?: CommsLog;
   ledger?: LineageSource | null;
   warn?: (message: string) => void;
+  /** Injectable for tests; by default probes the parent Claude argv for the channel-load flag. */
+  channelLoadedProbe?: () => boolean | null;
   /** Epoch-ms clock passed to the Broker (rate limits, holds, floor leases); injectable for tests. */
   now?: () => number;
   /**
@@ -186,6 +189,11 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
   const { identity: me, isOperator } = resolveCommsIdentity(env, cwd, warn, tokenPath);
   const isWorker = env.HEDDLE_WORKER === '1';
   const pushEnabled = env.HEDDLE_COMMS_PUSH === '1';
+  const channelLoadedProbe = opts.channelLoadedProbe ?? (() => channelLoadedFromParentArgv(process.ppid));
+  type PushDelivery = 'off' | 'ok' | 'suspect-channel-not-loaded';
+  const pushDelivery: PushDelivery = !pushEnabled
+    ? 'off'
+    : (channelLoadedProbe() === false ? 'suspect-channel-not-loaded' : 'ok');
   const sessionName = env.HEDDLE_SESSION_NAME || me;
   const instanceId = env.CLAUDE_CODE_SESSION_ID || randomUUID(); // owns this process's presence row
 
@@ -348,7 +356,7 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
           return text(pauseReadiness(log, inFlightSource, staleMs === undefined ? {} : { staleMs }));
         }
         case 'comms_whoami': return text({
-          identity: operatorStillValid() ? me : null, revoked: !operatorStillValid(), sessionName, worker: isWorker, operator: isOperator && operatorStillValid(), pushEnabled, session: me ? log.session(me) : null,
+          identity: operatorStillValid() ? me : null, revoked: !operatorStillValid(), sessionName, worker: isWorker, operator: isOperator && operatorStillValid(), pushEnabled, pushDelivery, session: me ? log.session(me) : null,
           rooms: me ? log.roomsFor(me).map((r) => r.name) : [], liveSessions: log.liveSessions(), sendMessageLimits: SENDMESSAGE_LIMITS,
         });
         default: return errorText(`unknown tool: ${name}`);
@@ -420,6 +428,21 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
         address: me, sessionId: instanceId, sessionName,
         pid: env.CLAUDE_PID ? Number(env.CLAUDE_PID) : process.ppid, socket: env.CLAUDE_CODE_MESSAGING_SOCKET ?? null, // the hosting Claude session, not this child
       });
+      if (pushDelivery === 'suspect-channel-not-loaded') {
+        warn(`push suspect: ${me} was launched WITHOUT --dangerously-load-development-channels server:heddle-comms — `
+          + 'Claude Code will DROP channel events silently (they still record as channel-written). '
+          + 'Relaunch with that flag (and --dangerously-skip-permissions).');
+        try {
+          log.append({
+            from: me, to: me,
+            body: '⚠️ heddle-comms PUSH SUSPECT: this session was launched WITHOUT '
+              + '--dangerously-load-development-channels server:heddle-comms. Channel events may be dropped '
+              + 'silently by Claude Code (they still record as channel-written). You are effectively PULL-ONLY. '
+              + 'Relaunch with that flag (and --dangerously-skip-permissions) to restore push.',
+            meta: { diagnostic: 'push-suspect' },
+          });
+        } catch (err) { warn(`push-suspect self-note failed: ${errorMessage(err)}`); }
+      }
       inbound = new InboundPump(log, me, (event) => {
         for (const k of Object.keys(event.meta)) if (!IDENTIFIER.test(k)) delete event.meta[k]; // Claude Code drops these silently — never send them
         return mcp.notification({ method: 'notifications/claude/channel', params: { content: event.content, meta: event.meta } });
