@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { dispatch } from '../src/dispatch.js';
+import { dispatch, planDispatch, summarizePlan } from '../src/dispatch.js';
 import { buildWorkerEnv } from '../src/env.js';
 import type { ClaudeAccount } from '../src/capaware.js';
 import { readProviderCaps, type ProviderCaps } from '../src/usage.js';
@@ -247,5 +247,62 @@ describe('regression PR#250 — Claude dispatches require an addressable registe
     const codex = fakeAdapter();
     const nonClaude = await dispatch({ taskClass: 'bulk-mechanical', prompt: 'x', cwd: tempDir(), identity: unbound }, tempLedger(), () => codex.adapter);
     expect(nonClaude.ok).toBe(true); expect(codex.calls).toHaveLength(1);
+  });
+
+  it('keeps the dry-run summary aligned with no-dispatchable-account refusal', () => {
+    const plan = planDispatch({
+      taskClass: 'research-summarize', prompt: 'x', cwd: tempDir(), identity: unbound,
+      accounts: registry.map((account) => ({ ...account, loggedIn: false })), caps: { claude: claudeCaps([]) },
+    });
+
+    expect(summarizePlan(plan)).toMatchObject({
+      would_run: null,
+      refusal: { code: 'no-dispatchable-account' },
+    });
+  });
+
+  it('preserves the failed primary ledger outcome when a Claude failure fallback has no addressable account', async () => {
+    const { writeFileSync } = await import('node:fs'); const { join: joinPath } = await import('node:path');
+    const yaml = joinPath(tempDir(), 'claude-fallback.yaml');
+    writeFileSync(yaml, [
+      'version: 0', 'providers:',
+      '  claude: { auth: anthropic-subscription, execution: headless, models: [haiku] }',
+      '  codex: { auth: chatgpt-subscription, models: [gpt-5.6-terra] }',
+      'task_classes:', '  fallback-test:',
+      '    provider: codex', '    model: gpt-5.6-terra',
+      '    fallback: { provider: claude, model: haiku }', '',
+    ].join('\n'));
+    const previousRouting = process.env.HEDDLE_ROUTING;
+    process.env.HEDDLE_ROUTING = yaml;
+    try {
+      const fake = fakeAdapter(undefined, { readAgents: false }); const ledger = tempLedger();
+      const adapter = { ...fake.adapter, dispatch: async (prompt: string, opts: Parameters<typeof fake.adapter.dispatch>[1]) => {
+        await fake.adapter.dispatch(prompt, opts);
+        return { ok: false, output: '', exitCode: 1, error: 'primary boom' };
+      } };
+      const outcome = await dispatch({
+        taskClass: 'fallback-test', prompt: 'x', cwd: tempDir(), identity: unbound,
+        accounts: registry.map((account) => ({ ...account, loggedIn: false })), caps: { claude: claudeCaps([]) },
+      }, ledger, () => adapter);
+
+      expect(outcome).toMatchObject({ ok: false, provider: 'codex', model: 'gpt-5.6-terra' });
+      expect(outcome.error).toContain('claude fallback blocked: no dispatchable account');
+      expect(ledger.recent(2)).toHaveLength(1);
+      expect(ledger.recent(2)[0]).toMatchObject({ id: outcome.ledgerId, provider: 'codex', ok: 0, refusal: null });
+    } finally {
+      if (previousRouting === undefined) delete process.env.HEDDLE_ROUTING; else process.env.HEDDLE_ROUTING = previousRouting;
+    }
+  });
+
+  it('returns a structured refusal for a pinned fresh-billing account without a run row', async () => {
+    const fake = fakeAdapter(undefined, { readAgents: false }); const ledger = tempLedger();
+    const outcome = await dispatch({
+      taskClass: 'research-summarize', prompt: 'x', cwd: tempDir(), identity: unbound, accountPin: 'acct1', accounts: registry,
+      caps: { claude: capsWithSignals([{ account: 'acct1', reason: 'billing' }]) },
+    }, ledger, () => fake.adapter);
+
+    expect(outcome).toMatchObject({ ok: false, refusal: { code: 'no-dispatchable-account' } });
+    expect(outcome.refusal?.reason).toContain('account_pin "acct1"');
+    expect(fake.calls).toHaveLength(0); expect(ledger.recent(1)[0]).toMatchObject({ refusal: 'no-dispatchable-account' });
   });
 });
