@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { dispatch, planDispatch, summarizePlan } from '../src/dispatch.js';
 import { buildWorkerEnv } from '../src/env.js';
 import type { ClaudeAccount } from '../src/capaware.js';
@@ -9,6 +9,19 @@ import { fakeAdapter, IDENTITIES, useTempResources } from './helpers.js';
 
 const accounts: ClaudeAccount[] = [{ id: 'acct1', configDir: null }, { id: 'acct2', configDir: '/x/.claude-acct2' }, { id: 'acct3', configDir: '/x/.claude-acct3' }];
 const claudeCaps = (rows: Array<{ id: string; used: number | null; stale?: boolean }>): ProviderCaps => ({ provider: 'claude', source: 'limits.json', stale: false, capturedAt: 1, fiveHour: { usedPercentage: null, resetsAt: null }, sevenDay: { usedPercentage: null, resetsAt: null }, windows: {}, noteCodes: [], activeAccount: null, accounts: rows.map(({ id, used, stale = false }) => ({ id, fiveHour: { usedPercentage: used, resetsAt: null }, sevenDay: { usedPercentage: null, resetsAt: null }, windows: {}, noteCodes: [], limitReached: false, stale })) });
+
+function writeClaudeFallbackRouting(tempDir: () => string): string {
+  const yaml = join(tempDir(), 'claude-fallback.yaml');
+  writeFileSync(yaml, [
+    'version: 0', 'providers:',
+    '  claude: { auth: anthropic-subscription, execution: headless, models: [haiku] }',
+    '  codex: { auth: chatgpt-subscription, models: [gpt-5.6-terra] }',
+    'task_classes:', '  fallback-test:',
+    '    provider: codex', '    model: gpt-5.6-terra',
+    '    fallback: { provider: claude, model: haiku }', '',
+  ].join('\n'));
+  return yaml;
+}
 
 describe('dispatch — headless Claude workers', () => {
   const { tempDir, tempLedger } = useTempResources('heddle-dispatch-claude-test-');
@@ -289,6 +302,81 @@ describe('regression PR#250 — Claude dispatches require an addressable registe
       expect(outcome.error).toContain('claude fallback blocked: no dispatchable account');
       expect(ledger.recent(2)).toHaveLength(1);
       expect(ledger.recent(2)[0]).toMatchObject({ id: outcome.ledgerId, provider: 'codex', ok: 0, refusal: null });
+      expect(ledger.get(outcome.ledgerId)?.error).toContain('primary boom');
+      expect(ledger.get(outcome.ledgerId)?.error).toContain('claude fallback blocked: no dispatchable account');
+    } finally {
+      if (previousRouting === undefined) delete process.env.HEDDLE_ROUTING; else process.env.HEDDLE_ROUTING = previousRouting;
+    }
+  });
+
+  it('keeps the no-account fallback reason when best-effort ledger annotation throws', async () => {
+    const previousRouting = process.env.HEDDLE_ROUTING;
+    process.env.HEDDLE_ROUTING = writeClaudeFallbackRouting(tempDir);
+    try {
+      const fake = fakeAdapter(undefined, { readAgents: false }); const ledger = tempLedger();
+      vi.spyOn(ledger, 'annotateError').mockImplementation(() => { throw new Error('SQLite handle is closed'); });
+      const adapter = { ...fake.adapter, dispatch: async (prompt: string, opts: Parameters<typeof fake.adapter.dispatch>[1]) => {
+        await fake.adapter.dispatch(prompt, opts);
+        return { ok: false, output: '', exitCode: 1, error: 'primary boom' };
+      } };
+
+      const outcome = await dispatch({
+        taskClass: 'fallback-test', prompt: 'x', cwd: tempDir(), identity: unbound,
+        accounts: accounts.map((account) => ({ ...account, loggedIn: false })), caps: { claude: claudeCaps([]) },
+      }, ledger, () => adapter);
+
+      expect(outcome.error).toMatch(/^primary boom; claude fallback blocked: no dispatchable account — no dispatchable Claude account/);
+      expect(outcome.error).not.toContain('SQLite handle is closed');
+    } finally {
+      if (previousRouting === undefined) delete process.env.HEDDLE_ROUTING; else process.env.HEDDLE_ROUTING = previousRouting;
+    }
+  });
+
+  it('keeps the pinned-account fallback reason when best-effort ledger annotation throws', async () => {
+    const previousRouting = process.env.HEDDLE_ROUTING;
+    process.env.HEDDLE_ROUTING = writeClaudeFallbackRouting(tempDir);
+    try {
+      const fake = fakeAdapter(undefined, { readAgents: false }); const ledger = tempLedger();
+      vi.spyOn(ledger, 'annotateError').mockImplementation(() => { throw new Error('SQLite handle is closed'); });
+      const adapter = { ...fake.adapter, dispatch: async (prompt: string, opts: Parameters<typeof fake.adapter.dispatch>[1]) => {
+        await fake.adapter.dispatch(prompt, opts);
+        return { ok: false, output: '', exitCode: 1, error: 'primary boom' };
+      } };
+
+      const outcome = await dispatch({
+        taskClass: 'fallback-test', prompt: 'x', cwd: tempDir(), identity: unbound, accountPin: 'missing',
+        accounts, caps: { claude: claudeCaps([{ id: 'acct1', used: 1 }]) },
+      }, ledger, () => adapter);
+
+      expect(outcome.error).toContain('primary boom; claude fallback blocked: account_pin "missing" is not in ~/.heddle/accounts.json');
+      expect(outcome.error).not.toContain('SQLite handle is closed');
+    } finally {
+      if (previousRouting === undefined) delete process.env.HEDDLE_ROUTING; else process.env.HEDDLE_ROUTING = previousRouting;
+    }
+  });
+
+  it.each([
+    ['empty', ''],
+    ['null', null],
+  ])('matches the persisted fallback note when the primary error is %s', async (_kind, primaryError) => {
+    const previousRouting = process.env.HEDDLE_ROUTING;
+    process.env.HEDDLE_ROUTING = writeClaudeFallbackRouting(tempDir);
+    try {
+      const fake = fakeAdapter(undefined, { readAgents: false }); const ledger = tempLedger();
+      const adapter = { ...fake.adapter, dispatch: async (prompt: string, opts: Parameters<typeof fake.adapter.dispatch>[1]) => {
+        await fake.adapter.dispatch(prompt, opts);
+        return { ok: false, output: '', exitCode: 1, error: primaryError as string };
+      } };
+
+      const outcome = await dispatch({
+        taskClass: 'fallback-test', prompt: 'x', cwd: tempDir(), identity: unbound,
+        accounts: accounts.map((account) => ({ ...account, loggedIn: false })), caps: { claude: claudeCaps([]) },
+      }, ledger, () => adapter);
+      const persisted = ledger.get(outcome.ledgerId)?.error;
+
+      expect(outcome.error).toMatch(/^claude fallback blocked: no dispatchable account — no dispatchable Claude account/);
+      expect(outcome.error).toBe(persisted);
+      expect(outcome.error).not.toMatch(/^;\s/);
     } finally {
       if (previousRouting === undefined) delete process.env.HEDDLE_ROUTING; else process.env.HEDDLE_ROUTING = previousRouting;
     }

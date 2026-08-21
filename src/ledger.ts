@@ -454,6 +454,16 @@ export class Ledger {
     );
   }
 
+  /** Append a durable note to a dispatch error without replacing the outcome already recorded. */
+  annotateError(id: number, note: string): boolean {
+    assertReportable(id, {});
+    const info = this.db.prepare(`
+      UPDATE dispatches SET error = CASE WHEN error IS NULL OR error = '' THEN ? ELSE error || '; ' || ? END
+      WHERE id = ?
+    `).run(note, note, id);
+    return Number(info.changes) > 0;
+  }
+
   private persistOutput(id: number, output: string | undefined): string | null {
     // Worker output is large by design; trim() can scan it all and materialize a second copy just to find non-whitespace.
     if (!output || !/\S/.test(output)) return null;
