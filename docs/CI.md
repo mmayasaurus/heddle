@@ -283,10 +283,10 @@ gh pr close <n> --repo mmayasaurus/heddle && \
 `reopened` is a commit-path event (in `gate.yml` `types:`), so it re-runs the real `build` and
 republishes the marker with the **true** verdict for that SHA — green if the code is actually green;
 infra recovery on a genuinely-red SHA correctly stays red. If `reopen` fails (auth/network) the PR is
-left **closed** — check `gh pr view <n> --json state` and reopen manually. Confirm `headRefOid` is
+left **closed** — check `gh pr view <n> --repo mmayasaurus/heddle --json state` and reopen manually. Confirm `headRefOid` is
 unchanged afterward.
 
-Break-glass alternative (no PR churn): `gh workflow run gate.yml --ref <branch>` (`workflow_dispatch`,
+Break-glass alternative (no PR churn): `gh workflow run gate.yml --repo mmayasaurus/heddle --ref <branch>` (`workflow_dispatch`,
 also commit-path). **Force-cancel the hung run first** — a dispatch run uses the ref-keyed concurrency
 group (`gate-<ref>-run`), not the hung run's PR-number group, so it does not displace the hung run,
 which could later `always()`-publish `FAILURE` over your fresh marker. Do **not** reach for `gh run
