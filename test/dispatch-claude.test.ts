@@ -1,10 +1,10 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { dispatch } from '../src/dispatch.js';
+import { dispatch, planDispatch, summarizePlan } from '../src/dispatch.js';
 import { buildWorkerEnv } from '../src/env.js';
 import type { ClaudeAccount } from '../src/capaware.js';
-import type { ProviderCaps } from '../src/usage.js';
+import { readProviderCaps, type ProviderCaps } from '../src/usage.js';
 import { fakeAdapter, IDENTITIES, useTempResources } from './helpers.js';
 
 const accounts: ClaudeAccount[] = [{ id: 'acct1', configDir: null }, { id: 'acct2', configDir: '/x/.claude-acct2' }, { id: 'acct3', configDir: '/x/.claude-acct3' }];
@@ -165,5 +165,144 @@ describe('dispatch — headless Claude workers', () => {
       if (previousClaude === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = previousClaude;
       if (previousKey === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = previousKey;
     }
+  });
+});
+
+describe('regression PR#250 — Claude dispatches require an addressable registered account', () => {
+  const { tempDir, tempLedger } = useTempResources('heddle-dispatch-no-account-test-');
+  const { unbound } = IDENTITIES;
+  const registry: ClaudeAccount[] = [
+    { id: 'acct1', configDir: null },
+    { id: 'acct2', configDir: '/x/.claude-acct2' },
+  ];
+
+  const capsWithSignals = (signals: Array<{ account: string; reason: 'billing' | 'logged-out' }>) => {
+    const usageDir = tempDir();
+    const nowS = Math.floor(Date.now() / 1000);
+    writeFileSync(join(usageDir, 'limits.json'), JSON.stringify({
+      writtenAt: nowS,
+      limits: [{ provider: 'claude', capturedAt: nowS, staleAfterSecs: 900, accounts: registry.map((account, index) => ({
+        id: account.id, fiveHour: { usedPercentage: index + 1 }, sevenDay: {},
+      })) }],
+    }));
+    for (const signal of signals) {
+      writeFileSync(join(usageDir, `claude-${signal.account}.dispatch.json`), JSON.stringify({
+        schemaVersion: 1, account: signal.account, dispatchable: false, reason: signal.reason, checkedAt: nowS,
+      }));
+    }
+    return readProviderCaps({ usageDir, nowS }).claude;
+  };
+
+  it('refuses without a worker run when every registered account has a fresh billing or logged-out signal', async () => {
+    const fake = fakeAdapter(undefined, { readAgents: false }); const ledger = tempLedger();
+    const outcome = await dispatch({
+      taskClass: 'research-summarize', prompt: 'x', cwd: tempDir(), identity: unbound, accounts: registry,
+      caps: { claude: capsWithSignals([{ account: 'acct1', reason: 'billing' }, { account: 'acct2', reason: 'logged-out' }]) },
+    }, ledger, () => fake.adapter);
+
+    expect(outcome).toMatchObject({ ok: false, refusal: { code: 'no-dispatchable-account' } });
+    expect(outcome.refusal?.reason).toContain('all 2 registered accounts are logged-out or non-dispatchable');
+    expect(fake.calls).toHaveLength(0); expect(ledger.inFlight()).toEqual([]);
+    expect(ledger.recent(1)[0]).toMatchObject({ refusal: 'no-dispatchable-account', account: null });
+  });
+
+  it('refuses without a worker run when every registered account is logged out', async () => {
+    const fake = fakeAdapter(undefined, { readAgents: false }); const ledger = tempLedger();
+    const outcome = await dispatch({
+      taskClass: 'research-summarize', prompt: 'x', cwd: tempDir(), identity: unbound,
+      accounts: registry.map((account) => ({ ...account, loggedIn: false })), caps: { claude: claudeCaps([]) },
+    }, ledger, () => fake.adapter);
+
+    expect(outcome.refusal?.code).toBe('no-dispatchable-account');
+    expect(fake.calls).toHaveLength(0); expect(ledger.inFlight()).toEqual([]);
+  });
+
+  it('runs when a registered Claude account remains addressable', async () => {
+    const fake = fakeAdapter(undefined, { readAgents: false });
+    const outcome = await dispatch({
+      taskClass: 'research-summarize', prompt: 'x', cwd: tempDir(), identity: unbound, accounts: registry,
+      caps: { claude: capsWithSignals([{ account: 'acct1', reason: 'billing' }]) },
+    }, tempLedger(), () => fake.adapter);
+
+    expect(outcome.ok).toBe(true); expect(fake.calls).toHaveLength(1); expect(outcome.account).toBe('acct2');
+  });
+
+  it('keeps the inherited login path when no Claude account registry exists', async () => {
+    const fake = fakeAdapter(undefined, { readAgents: false });
+    const outcome = await dispatch({
+      taskClass: 'research-summarize', prompt: 'x', cwd: tempDir(), identity: unbound, accounts: [], caps: { claude: claudeCaps([]) },
+    }, tempLedger(), () => fake.adapter);
+
+    expect(outcome.ok).toBe(true); expect(outcome.refusal).toBeUndefined(); expect(fake.calls).toHaveLength(1);
+  });
+
+  it('leaves in-session Claude and non-Claude dispatches unchanged', async () => {
+    const claude = fakeAdapter(undefined, { readAgents: false });
+    const inSession = await dispatch({
+      taskClass: 'research-summarize', prompt: 'x', cwd: tempDir(), identity: unbound, inSession: true,
+      accounts: registry.map((account) => ({ ...account, loggedIn: false })), caps: { claude: claudeCaps([]) },
+    }, tempLedger(), () => claude.adapter);
+    expect(inSession.refusal?.code).toBe('claude-in-session'); expect(claude.calls).toHaveLength(0);
+
+    const codex = fakeAdapter();
+    const nonClaude = await dispatch({ taskClass: 'bulk-mechanical', prompt: 'x', cwd: tempDir(), identity: unbound }, tempLedger(), () => codex.adapter);
+    expect(nonClaude.ok).toBe(true); expect(codex.calls).toHaveLength(1);
+  });
+
+  it('keeps the dry-run summary aligned with no-dispatchable-account refusal', () => {
+    const plan = planDispatch({
+      taskClass: 'research-summarize', prompt: 'x', cwd: tempDir(), identity: unbound,
+      accounts: registry.map((account) => ({ ...account, loggedIn: false })), caps: { claude: claudeCaps([]) },
+    });
+
+    expect(summarizePlan(plan)).toMatchObject({
+      would_run: null,
+      refusal: { code: 'no-dispatchable-account' },
+    });
+  });
+
+  it('preserves the failed primary ledger outcome when a Claude failure fallback has no addressable account', async () => {
+    const { writeFileSync } = await import('node:fs'); const { join: joinPath } = await import('node:path');
+    const yaml = joinPath(tempDir(), 'claude-fallback.yaml');
+    writeFileSync(yaml, [
+      'version: 0', 'providers:',
+      '  claude: { auth: anthropic-subscription, execution: headless, models: [haiku] }',
+      '  codex: { auth: chatgpt-subscription, models: [gpt-5.6-terra] }',
+      'task_classes:', '  fallback-test:',
+      '    provider: codex', '    model: gpt-5.6-terra',
+      '    fallback: { provider: claude, model: haiku }', '',
+    ].join('\n'));
+    const previousRouting = process.env.HEDDLE_ROUTING;
+    process.env.HEDDLE_ROUTING = yaml;
+    try {
+      const fake = fakeAdapter(undefined, { readAgents: false }); const ledger = tempLedger();
+      const adapter = { ...fake.adapter, dispatch: async (prompt: string, opts: Parameters<typeof fake.adapter.dispatch>[1]) => {
+        await fake.adapter.dispatch(prompt, opts);
+        return { ok: false, output: '', exitCode: 1, error: 'primary boom' };
+      } };
+      const outcome = await dispatch({
+        taskClass: 'fallback-test', prompt: 'x', cwd: tempDir(), identity: unbound,
+        accounts: registry.map((account) => ({ ...account, loggedIn: false })), caps: { claude: claudeCaps([]) },
+      }, ledger, () => adapter);
+
+      expect(outcome).toMatchObject({ ok: false, provider: 'codex', model: 'gpt-5.6-terra' });
+      expect(outcome.error).toContain('claude fallback blocked: no dispatchable account');
+      expect(ledger.recent(2)).toHaveLength(1);
+      expect(ledger.recent(2)[0]).toMatchObject({ id: outcome.ledgerId, provider: 'codex', ok: 0, refusal: null });
+    } finally {
+      if (previousRouting === undefined) delete process.env.HEDDLE_ROUTING; else process.env.HEDDLE_ROUTING = previousRouting;
+    }
+  });
+
+  it('returns a structured refusal for a pinned fresh-billing account without a run row', async () => {
+    const fake = fakeAdapter(undefined, { readAgents: false }); const ledger = tempLedger();
+    const outcome = await dispatch({
+      taskClass: 'research-summarize', prompt: 'x', cwd: tempDir(), identity: unbound, accountPin: 'acct1', accounts: registry,
+      caps: { claude: capsWithSignals([{ account: 'acct1', reason: 'billing' }]) },
+    }, ledger, () => fake.adapter);
+
+    expect(outcome).toMatchObject({ ok: false, refusal: { code: 'no-dispatchable-account' } });
+    expect(outcome.refusal?.reason).toContain('account_pin "acct1"');
+    expect(fake.calls).toHaveLength(0); expect(ledger.recent(1)[0]).toMatchObject({ refusal: 'no-dispatchable-account' });
   });
 });
