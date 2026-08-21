@@ -205,6 +205,20 @@ describe('dispatch — structural caps', () => {
     expect((summary.refusal as { code?: string } | null)?.code).toBe('capability-denied');
   });
 
+  it('dry run does NOT surface a capability refusal for an in-session Claude route — dispatch returns the in-session instruction first (cubic #76)', async () => {
+    const yamlPath = join(tempDir(), 'routing.yaml');
+    const { writeFileSync } = await import('node:fs');
+    // A Claude route run in-session returns the in-session instruction before runTarget's capability
+    // gate, so a bad capability must NOT preview as a refusal (that would diverge from the run).
+    writeFileSync(yamlPath, 'policy: {}\nproviders: {claude: {models: [sonnet], execution: headless}}\ntask_classes: {think: {provider: claude, model: sonnet}}\n');
+    const table = loadRouting(yamlPath);
+    const plan = planDispatch({ taskClass: 'think', capabilities: ['bogus'], inSession: true, prompt: 'x', cwd: tempDir(), identity: unbound, caps: {} }, table);
+    const summary = summarizePlan(plan);
+    expect(plan.capabilityRefusal, 'no capability refusal for in-session route').toBeFalsy();
+    expect(summary.in_session).toBe(true);
+    expect((summary.refusal as { code?: string } | null)?.code).not.toBe('capability-denied');
+  });
+
   it('enforces named concurrency caps independently and ignores stale rows', async () => {
     const ledgerDir = tempDir(); const dbPath = join(ledgerDir, 'ledger.db');
     const ledger = trackLedger(new Ledger(dbPath)); const cwd = tempDir(); const fake = fakeAdapter();

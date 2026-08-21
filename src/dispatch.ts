@@ -1153,10 +1153,14 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
   // opt-in) always refuse → surfaced. `unenforceable` is NOT terminal — dispatch()'s capability-fit
   // fallback (~L712) may run it on a provider that CAN enforce — so it is deliberately NOT surfaced
   // here (that would advertise a refusal the run avoids); full fallback-modeled parity is HED-275.
+  // Neither applies to an in-session Claude route: dispatch() returns the in-session instruction
+  // (~L676) BEFORE runTarget's gates run, so surfacing one would diverge from the run (cubic #76). The
+  // earlier gates (notDispatchable/override/same-provider/metered) are preempted by summarizePlan's chain.
+  const reachesRunTarget = execution !== 'in-session-subagent';
   const dryReqCaps = [...new Set([...(target.capabilities ?? []), ...(req.capabilities ?? [])])];
   const dryCaps = decideCapabilities(target.provider, dryReqCaps, req.optIn === true, capabilityPolicy(table));
-  const capabilityRefusal = dryCaps.refusal && dryCaps.refusal.kind !== 'unenforceable' ? dryCaps.refusal.reason : undefined;
-  const requiresWebRefusal = !dryCaps.refusal && route.requiresWeb && !webCapable(target.provider, dryCaps.granted)
+  const capabilityRefusal = reachesRunTarget && dryCaps.refusal && dryCaps.refusal.kind !== 'unenforceable' ? dryCaps.refusal.reason : undefined;
+  const requiresWebRefusal = reachesRunTarget && !dryCaps.refusal && route.requiresWeb && !webCapable(target.provider, dryCaps.granted)
     ? webRefusalReason(route.taskClass, target.provider)
     : undefined;
   return { route, target, fallback, origin, execution, decision, skillsForRefusal, account, accountAdvice, accountPick, notDispatchable, reviewerPick, sameProviderReview, overrideReasonRequired, capabilityRefusal, requiresWebRefusal };
