@@ -8,6 +8,11 @@
             "type": "command",
             "command": "if [ -f \"/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/agent-identity.py\" ]; then python3 \"/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/agent-identity.py\"; else echo \"heddle: discipline hook agent-identity.py MISSING at the Spinventory canonical \u2014 running WITHOUT it (HED-107; vendoring deferred to HED-96)\" >&2; exit 1; fi",
             "timeout": 15
+          },
+          {
+            "type": "command",
+            "command": "if [ -f \"/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/agent-preflight.py\" ]; then python3 \"/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/agent-preflight.py\"; else echo \"heddle: discipline hook agent-preflight.py MISSING at the Spinventory canonical -- running WITHOUT it (HED-241)\" >&2; exit 1; fi",
+            "timeout": 5
           }
         ]
       }
