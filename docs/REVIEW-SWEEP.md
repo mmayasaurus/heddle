@@ -41,34 +41,19 @@ gh api graphql -f query='query($o:String!,$r:String!,$n:Int!){ repository(owner:
 
 ## Trigger the reviewers that need it
 
-Most review applications trigger automatically on push. However, specific tools require explicit manual triggers depending on repository state or workflow configuration:
+Most review applications trigger automatically on push, but **which ones are live changes over time — read the active set off the PR itself (the checks tab plus the comment/review authors of a recent PR), never off a remembered list in this document.** A hardcoded roster rots: bots get added, removed, or (as happened on 2026-08-21) removed-then-accidentally-kept, and a stale list sends you chasing ghosts. Two operational rules are all you need:
 
-- **CodeRabbit**: On repositories with fewer than 10 stars, CodeRabbit only reviews when triggered by commenting `@coderabbitai review` (or `@coderabbitai full review` for an initial full pass). Post this comment after opening the PR and after each substantive push.
-- **Copilot code review**: Request-based review; re-request manually from the Reviewers panel in the GitHub UI.
-- **Automatic reviewers** (roster as of 2026-08-15 — it changes; the checks tab and comment authors of any recent PR are the live list):
-  - Qodo
-  - Codacy
-  - cubic
-  - Gitar
-  - Sourcery
-  - Amazon Q
-  - LlamaPReview
-  - Corgea
-  - CodeFactor
-  - qlty
-  - Hound
-  - Macroscope
-  - Semgrep AppSec check
-  - GitHub code scanning
-  - Dependabot
+- **On-demand reviewers need a trigger.** Cursor Bugbot: post a `bugbot run` comment (after opening the PR, and after a substantive push). Copilot code review: re-request from the Reviewers panel in the GitHub UI.
+- **Never trigger or wait for a bot that isn't there.** A trigger comment addressed to a bot that has been removed is a no-op that only clutters the PR; a sweep that blocks on a reviewer which never posts on this repo waits forever. If an expected reviewer has not left a check or a comment on the PR, it is not active here — move on.
+
+CI **checks** (Semgrep, gitleaks, actionlint/zizmor, GitHub code scanning, Dependabot, CodeFactor, …) are distinct from the review bots and surface in channel (e); read them off the checks tab the same way.
 
 ## What is NOT a finding (noise)
 
 Certain operational automated outputs should be recognized as non-findings, documented during review, and bypassed:
 
-- "rate limit exceeded" review bodies (e.g. codereviewbot.ai free tier limit of 2–3 reviews per 4 h per repo).
-- cr-gpt failure messages stating "OPENAI_API_KEY not set".
-- Gitar reports of "CI failed" when the underlying failure is the by-design `lint` job.
+- Stale rate-limit or configuration-error notices from a bot that has since been removed (e.g. lingering "rate limit exceeded" or "OPENAI_API_KEY not set" bodies) — those operational notices are non-findings. A **substantive** review a bot left before it was removed still counts: removal stops new reviews, it does not retract old ones, so keep dispositioning existing bodies against the latest commit.
+- A "CI failed" report from a bot when the underlying failure is a non-required job rather than a real defect.
 - A **pending** `gate`, `semgrep`, or `gitleaks` title/body-edit echo while its matching commit-path leaf is still running. Confirm the job summary says it is waiting for the SHA-bound verdict, then wait for its final conclusion. A final skipped, cancelled, or red public check is a finding, not noise.
 
 Read these notices to confirm their status, then move on without treating them as findings.
@@ -95,7 +80,7 @@ After reading and addressing a non-empty review body (channel b), post ONE comme
 <!-- dispositioned: <login> <submitted_at ISO timestamp> -->
 ```
 
-Use the login as GitHub prints it (e.g. `codacy-production[bot]`) and the timestamp exactly as returned by the API. The receipt is keyed on author and submission timestamp, so a new review by the same author still flags. Known limit: a bot that EDITS an already-submitted review keeps its `submitted_at`, so the receipt still matches — Gitar maintains a living review this way; re-read living reviews each round rather than trusting the receipt. To list the pairs you need to receipt:
+Use the login as GitHub prints it (e.g. `codacy-production[bot]`) and the timestamp exactly as returned by the API. The receipt is keyed on author and submission timestamp, so a new review by the same author still flags. Known limit: a bot that EDITS an already-submitted review keeps its `submitted_at`, so the receipt still matches — some bots maintain a living review this way; re-read living reviews each round rather than trusting the receipt. To list the pairs you need to receipt:
 
 ```shell
 gh api --paginate "repos/$OWNER/$REPO/pulls/$N/reviews" --jq '.[] | select(.body != "") | "<!-- dispositioned: \(.user.login) \(.submitted_at) -->"'
@@ -112,7 +97,7 @@ Reviewed and dispositioned automated feedback:
 
 Batch fixes for a round into one push (each push spawns reviewer runs — some incremental, some full, some none). After pushing:
 
-1. Re-trigger the manual reviewers (e.g. comment `@coderabbitai review`).
+1. Re-trigger the on-demand reviewers (e.g. comment `bugbot run`).
 2. Wait for the round to land.
 3. Sweep again.
 
