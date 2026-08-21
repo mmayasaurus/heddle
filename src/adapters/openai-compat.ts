@@ -8,6 +8,7 @@ export interface OpenAICompatProvider {
   keyEnv: string;
   /** Static providers map their accepted aliases to API model ids; OpenRouter is intentionally empty. */
   models: Record<string, string>;
+  tokenParam: 'max_completion_tokens';
   contextCap?: number;
   maxTokensDefault: number;
   qualityTier: string;
@@ -18,16 +19,16 @@ export interface OpenAICompatProvider {
 export const PROVIDER_REGISTRY: Record<'groq' | 'cerebras' | 'openrouter', OpenAICompatProvider> = {
   groq: {
     baseUrl: 'https://api.groq.com/openai/v1', keyEnv: 'GROQ_API_KEY',
-    models: { 'openai/gpt-oss-120b': 'openai/gpt-oss-120b', 'gpt-oss-20b': 'gpt-oss-20b', 'qwen3.6-27b': 'qwen3.6-27b' },
+    models: { workhorse: 'openai/gpt-oss-120b', 'openai/gpt-oss-120b': 'openai/gpt-oss-120b', 'gpt-oss-20b': 'gpt-oss-20b', 'qwen3.6-27b': 'qwen3.6-27b' }, tokenParam: 'max_completion_tokens',
     maxTokensDefault: 32768, qualityTier: 'workhorse', lastVerified: '2026-08-20',
   },
   cerebras: {
     baseUrl: 'https://api.cerebras.ai/v1', keyEnv: 'CEREBRAS_API_KEY',
-    models: { 'gpt-oss-120b': 'gpt-oss-120b', 'gemma-4-31b': 'gemma-4-31b' }, contextCap: 8192,
-    maxTokensDefault: 32768, qualityTier: 'workhorse', lastVerified: '2026-08-20',
+    models: { 'gpt-oss-120b': 'gpt-oss-120b', 'gemma-4-31b': 'gemma-4-31b' }, tokenParam: 'max_completion_tokens', contextCap: 8192,
+    maxTokensDefault: 4096, qualityTier: 'workhorse', lastVerified: '2026-08-20',
   },
   openrouter: {
-    baseUrl: 'https://openrouter.ai/api/v1', keyEnv: 'OPENROUTER_API_KEY', models: {},
+    baseUrl: 'https://openrouter.ai/api/v1', keyEnv: 'OPENROUTER_API_KEY', models: {}, tokenParam: 'max_completion_tokens',
     maxTokensDefault: 32768, qualityTier: 'dynamic-quality-allowlist', lastVerified: '2026-08-20',
   },
 };
@@ -50,30 +51,43 @@ export class OpenAICompatAdapter implements WorkerAdapter {
   }
 
   /** Pure request construction; apiKey is supplied by dispatch after loading the secrets file. */
-  buildRequest(prompt: string, opts: DispatchOptions, apiKey: string, maxTokens = this.config.maxTokensDefault): {
+  buildRequest(prompt: string, opts: DispatchOptions, apiKey: string, requested = this.config.maxTokensDefault): {
     url: string; headers: Record<string, string>; body: string;
   } {
+    const budget = this.config.contextCap ? Math.min(requested, this.config.contextCap) : requested;
+    const model = this.config.models[opts.model] ?? opts.model;
+    const messages = opts.systemPromptAppend
+      ? [{ role: 'system', content: opts.systemPromptAppend }, { role: 'user', content: prompt }]
+      : [{ role: 'user', content: prompt }];
     return {
       url: `${this.config.baseUrl}/chat/completions`,
       headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: opts.model, messages: [{ role: 'user', content: prompt }], max_tokens: maxTokens }),
+      body: JSON.stringify({ model, messages, [this.config.tokenParam]: budget }),
     };
   }
 
   async dispatch(prompt: string, opts: DispatchOptions): Promise<WorkerResult> {
+    const started = Date.now();
+    const deadline = Date.now() + (opts.timeoutMs ?? 600_000);
+    const completed = (result: WorkerResult): WorkerResult => ({ ...result, durationMs: Date.now() - started });
     const apiKey = this.loadKey();
-    if (!apiKey) return this.keyMissingResult();
+    if (!apiKey) return completed(this.keyMissingResult());
 
-    const first = await this.request(prompt, opts, apiKey, this.config.maxTokensDefault);
-    if ('result' in first) return first.result;
-    if (!this.needsReasoningRetry(first.response)) return this.toResult(first.response, first.httpOk);
+    const first = await this.request(prompt, opts, apiKey, this.config.maxTokensDefault, deadline);
+    if ('result' in first) return completed(first.result);
+    const firstResult = this.toResult(first.response, first.httpOk);
+    if (!this.needsReasoningRetry(first.response) || Date.now() >= deadline) return completed(firstResult);
 
-    const retry = await this.request(prompt, opts, apiKey, this.config.maxTokensDefault * 2);
-    if ('result' in retry) return retry.result;
+    const firstBudget = this.budgetFor(this.config.maxTokensDefault);
+    const retryBudget = Math.min(this.config.maxTokensDefault * 2, this.config.contextCap ?? Infinity);
+    if (retryBudget === firstBudget) return completed(firstResult);
+    const retry = await this.request(prompt, opts, apiKey, retryBudget, deadline);
+    if ('result' in retry) return completed({ ...retry.result, usage: sumUsage(firstResult.usage, retry.result.usage) });
     const result = this.toResult(retry.response, retry.httpOk);
-    return result.output.length === 0
+    const final = result.output.length === 0
       ? { ...result, ok: false, error: 'empty content after reasoning-retry' }
       : result;
+    return completed({ ...final, usage: sumUsage(firstResult.usage, final.usage) });
   }
 
   private loadKey(): string | undefined {
@@ -81,7 +95,11 @@ export class OpenAICompatAdapter implements WorkerAdapter {
       const contents = fs.readFileSync(join(homedir(), '.heddle', 'secrets.env'), 'utf8');
       for (const line of contents.split(/\r?\n/)) {
         const match = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$/);
-        if (match?.[1] === this.config.keyEnv && match[2]) return match[2].replace(/^['"]|['"]$/g, '');
+        if (match?.[1] === this.config.keyEnv && match[2]) {
+          let value = match[2].trim();
+          value = value.replace(/^(['"])([\s\S]*)\1$/, '$2');
+          return value || undefined;
+        }
       }
     } catch {
       // The caller gets the deliberate, non-secret failure below.
@@ -93,11 +111,11 @@ export class OpenAICompatAdapter implements WorkerAdapter {
     return { ok: false, output: '', exitCode: null, error: `${this.provider}: ${this.config.keyEnv} not found in ~/.heddle/secrets.env` };
   }
 
-  private async request(prompt: string, opts: DispatchOptions, apiKey: string, maxTokens: number): Promise<
+  private async request(prompt: string, opts: DispatchOptions, apiKey: string, maxTokens: number, deadline: number): Promise<
     { response: ChatResponse; httpOk: boolean } | { result: WorkerResult }
   > {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), opts.timeoutMs ?? 600_000);
+    const timeout = setTimeout(() => controller.abort(), Math.max(0, deadline - Date.now()));
     try {
       const request = this.buildRequest(prompt, opts, apiKey, maxTokens);
       const response = await fetch(request.url, { method: 'POST', headers: request.headers, body: request.body, signal: controller.signal });
@@ -131,7 +149,20 @@ export class OpenAICompatAdapter implements WorkerAdapter {
   private needsReasoningRetry(response: ChatResponse): boolean {
     const choice = response.choices?.[0];
     const content = typeof choice?.message?.content === 'string' ? choice.message.content : '';
-    const usage = response.usage;
-    return content.length === 0 && (choice?.finish_reason === 'length' || (usage?.completion_tokens ?? 0) > 0 || (usage?.completion_tokens_details?.reasoning_tokens ?? 0) > 0);
+    return content.length === 0 && choice?.finish_reason === 'length';
   }
+
+  private budgetFor(requested: number): number {
+    return this.config.contextCap ? Math.min(requested, this.config.contextCap) : requested;
+  }
+}
+
+function sumUsage(first?: TokenUsage, second?: TokenUsage): TokenUsage | undefined {
+  const sum = (a?: number, b?: number): number | undefined => a === undefined && b === undefined ? undefined : (a ?? 0) + (b ?? 0);
+  const usage = {
+    inputTokens: sum(first?.inputTokens, second?.inputTokens),
+    outputTokens: sum(first?.outputTokens, second?.outputTokens),
+    reasoningOutputTokens: sum(first?.reasoningOutputTokens, second?.reasoningOutputTokens),
+  };
+  return usage.inputTokens === undefined && usage.outputTokens === undefined && usage.reasoningOutputTokens === undefined ? undefined : usage;
 }
