@@ -6,6 +6,7 @@ import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { CommsLog, DEFAULT_COMMS_PATH } from './log.js';
+import { channelLoadedFromParentArgv } from './channel-loaded-probe.js';
 import { Ledger, DEFAULT_LEDGER_PATH } from '../ledger.js';
 import { Broker } from './broker.js';
 import type { LineageSource } from './envelope.js';
@@ -42,6 +43,8 @@ import { TIERS, MESSAGE_KINDS, type Tier, type MessageKind } from './types.js';
  * `sessions` row that makes senders get "queued-for-channel") and the inbound pump run only when
  * the launcher says the flag is on. Otherwise the session is pull-only and senders get
  * "no-live-session" (+ the SendMessage hint) — honest, never "delivered" into a void.
+ * The guard now best-effort infers channel-load from the parent Claude argv and surfaces a fail-open
+ * "suspect" warning only when the flag is clearly absent; pushEnabled still gates presence and pumping.
  */
 
 export interface CommsServerOptions {
@@ -51,6 +54,8 @@ export interface CommsServerOptions {
   log?: CommsLog;
   ledger?: LineageSource | null;
   warn?: (message: string) => void;
+  /** Injectable for tests; by default probes the parent Claude argv for the channel-load flag. */
+  channelLoadedProbe?: () => boolean | null;
   /** Epoch-ms clock passed to the Broker (rate limits, holds, floor leases); injectable for tests. */
   now?: () => number;
   /**
@@ -74,6 +79,7 @@ export interface CommsServer {
 }
 
 const IDENTIFIER = /^[a-z0-9_]+$/;
+const PUSH_SUSPECT_RELAUNCH_REMEDY = 'Relaunch with --dangerously-load-development-channels server:heddle-comms (and --dangerously-skip-permissions).';
 
 /** The instruction every resume carries; an operator note is appended to it, never swapped for it. */
 const RESUME_DIRECTIVE = 'FLEET RESUMED — the pause is lifted; carry on.';
@@ -186,6 +192,20 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
   const { identity: me, isOperator } = resolveCommsIdentity(env, cwd, warn, tokenPath);
   const isWorker = env.HEDDLE_WORKER === '1';
   const pushEnabled = env.HEDDLE_COMMS_PUSH === '1';
+  const channelLoadedProbe = opts.channelLoadedProbe ?? (() => {
+    const cp = Number(env.CLAUDE_PID);
+    return channelLoadedFromParentArgv(Number.isInteger(cp) && cp > 0 ? cp : process.ppid);
+  });
+  type PushDelivery = 'off' | 'ok' | 'suspect-channel-not-loaded';
+  let channelLoaded: boolean | null;
+  try {
+    channelLoaded = channelLoadedProbe();
+  } catch (err) {
+    // Fail-open, but never SILENTLY: a probe failure is logged, not swallowed (HED-270 review).
+    warn(`channel-loaded probe failed: ${errorMessage(err)}`);
+    channelLoaded = null;
+  }
+  const pushDelivery: PushDelivery = !pushEnabled ? 'off' : (channelLoaded === false ? 'suspect-channel-not-loaded' : 'ok');
   const sessionName = env.HEDDLE_SESSION_NAME || me;
   const instanceId = env.CLAUDE_CODE_SESSION_ID || randomUUID(); // owns this process's presence row
 
@@ -348,7 +368,7 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
           return text(pauseReadiness(log, inFlightSource, staleMs === undefined ? {} : { staleMs }));
         }
         case 'comms_whoami': return text({
-          identity: operatorStillValid() ? me : null, revoked: !operatorStillValid(), sessionName, worker: isWorker, operator: isOperator && operatorStillValid(), pushEnabled, session: me ? log.session(me) : null,
+          identity: operatorStillValid() ? me : null, revoked: !operatorStillValid(), sessionName, worker: isWorker, operator: isOperator && operatorStillValid(), pushEnabled, pushDelivery, session: me ? log.session(me) : null,
           rooms: me ? log.roomsFor(me).map((r) => r.name) : [], liveSessions: log.liveSessions(), sendMessageLimits: SENDMESSAGE_LIMITS,
         });
         default: return errorText(`unknown tool: ${name}`);
@@ -420,6 +440,26 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
         address: me, sessionId: instanceId, sessionName,
         pid: env.CLAUDE_PID ? Number(env.CLAUDE_PID) : process.ppid, socket: env.CLAUDE_CODE_MESSAGING_SOCKET ?? null, // the hosting Claude session, not this child
       });
+      if (pushDelivery === 'suspect-channel-not-loaded') {
+        warn(`push suspect: ${me} was launched WITHOUT --dangerously-load-development-channels server:heddle-comms — `
+          + 'Claude Code will DROP channel events silently (they still record as channel-written). '
+          + PUSH_SUSPECT_RELAUNCH_REMEDY);
+        try {
+          const alreadyNoted = log.transcript({ pair: [me, me] })
+            .some((row) => row.from === me && row.to === me && row.meta?.diagnostic === 'push-suspect');
+          // A later re-break will not re-note; comms_whoami.pushDelivery remains the live warning surface.
+          if (!alreadyNoted) {
+            log.append({
+              from: me, to: me,
+              body: '⚠️ heddle-comms PUSH SUSPECT: this session was launched WITHOUT '
+                + '--dangerously-load-development-channels server:heddle-comms. Channel events may be dropped '
+                + 'silently by Claude Code (they still record as channel-written). You are effectively PULL-ONLY. '
+                + PUSH_SUSPECT_RELAUNCH_REMEDY,
+              meta: { diagnostic: 'push-suspect' },
+            });
+          }
+        } catch (err) { warn(`push-suspect self-note failed: ${errorMessage(err)}`); }
+      }
       inbound = new InboundPump(log, me, (event) => {
         for (const k of Object.keys(event.meta)) if (!IDENTIFIER.test(k)) delete event.meta[k]; // Claude Code drops these silently — never send them
         return mcp.notification({ method: 'notifications/claude/channel', params: { content: event.content, meta: event.meta } });
