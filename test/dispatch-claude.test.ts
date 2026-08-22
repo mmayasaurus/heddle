@@ -400,3 +400,55 @@ describe('regression PR#250 — Claude dispatches require an addressable registe
     expect(fake.calls).toHaveLength(0); expect(ledger.recent(1)[0]).toMatchObject({ refusal: 'no-dispatchable-account' });
   });
 });
+
+// HED-106: a walked LADDER candidate (a lane_defaults target reached past the declared fallback) is a
+// fallback route and must inherit the class's mcp + skills — else a degraded-fleet worker runs without
+// memtrace and trips the memtrace-first hook (ledger 206, the exact HED-205 failure the walk prevents).
+describe('HED-106 — walked ladder candidate inherits class mcp + skills', () => {
+  const { tempDir, tempLedger } = useTempResources('heddle-walk-enrich-test-');
+  const { unbound } = IDENTITIES;
+  const deadRegistry: ClaudeAccount[] = [{ id: 'acct1', configDir: null, loggedIn: false }];
+
+  // claude primary + claude fallback (both dead) force the walk PAST the declared fallback onto the
+  // codex T1 lane_defaults candidate; the class carries mcp:[memtrace] + a code-discovery pack.
+  function writeWalkRouting(dir: string): string {
+    const yaml = join(dir, 'walk-routing.yaml');
+    writeFileSync(yaml, [
+      'version: 0', 'providers:',
+      '  claude: { auth: anthropic-subscription, execution: headless, models: [opus] }',
+      '  codex: { auth: chatgpt-subscription, models: [gpt-5.6-terra] }',
+      'lane_defaults:',
+      '  codex: { provider: codex, model: gpt-5.6-terra }',
+      'task_classes:', '  walk-mcp:',
+      '    provider: claude', '    model: opus',
+      '    mcp: [memtrace]', '    skills: [worker-role, code-discovery]', '    edits_code: true',
+      '    fallback: { provider: claude, model: opus }', '',
+    ].join('\n'));
+    return yaml;
+  }
+
+  it('enriches the walked codex candidate with the class mcp + skills (plan + run)', async () => {
+    const prev = process.env.HEDDLE_ROUTING;
+    process.env.HEDDLE_ROUTING = writeWalkRouting(tempDir());
+    try {
+      // plan level: the effective target carries the class policy that runTarget reads from it.
+      const plan = planDispatch({
+        taskClass: 'walk-mcp', prompt: 'x', cwd: tempDir(), identity: unbound,
+        accounts: deadRegistry, caps: { claude: claudeCaps([]) },
+      });
+      expect(plan.target).toMatchObject({ provider: 'codex', model: 'gpt-5.6-terra', mcp: ['memtrace'], skills: ['worker-role', 'code-discovery'] });
+      expect(plan.decision.routeReason).toContain('codex/gpt-5.6-terra (t1)');
+
+      // run level: the codex worker actually receives the memtrace attachment (codex -c mcp flags).
+      const fake = fakeAdapter(); const ledger = tempLedger();
+      const outcome = await dispatch({
+        taskClass: 'walk-mcp', prompt: 'x', cwd: tempDir(), identity: unbound,
+        accounts: deadRegistry, caps: { claude: claudeCaps([]) },
+      }, ledger, () => fake.adapter);
+      expect(outcome).toMatchObject({ ok: true, provider: 'codex', model: 'gpt-5.6-terra' });
+      expect(fake.calls[0].opts.extraFlags?.some((f) => f.includes('memtrace'))).toBe(true);
+    } finally {
+      if (prev === undefined) delete process.env.HEDDLE_ROUTING; else process.env.HEDDLE_ROUTING = prev;
+    }
+  });
+});

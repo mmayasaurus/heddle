@@ -77,7 +77,12 @@ export interface LadderContext {
   requiresWeb: boolean;
   /** The effective MCP list a worker of this class would get (caller override ?? class default). */
   mcp: string[];
-  /** Capabilities granted by default for this class (for the requiresWeb `webCapable` check). */
+  /** The class's default skill packs — an expansion candidate is a fallback route and inherits them
+   *  (mirrors resolveRoute's declared-fallback enrichment; a bare lane_defaults target carries none,
+   *  which would silently drop the class's task-fit + mandate packs). */
+  skills: string[];
+  /** Capabilities granted by default for this class (for the requiresWeb `webCapable` check AND for
+   *  enriching a bare expansion candidate so runTarget grants them). */
   grantedCapabilities: string[];
   /** Providers the walk must never land on beyond the declared target/fallback — a review class's
    *  author family. The declared target + fallback providers are excluded automatically. */
@@ -192,8 +197,14 @@ function walkLadder(
   };
   const ladder = buildLadder(tierOfProvider(deadTarget.provider, lanes, ctx.laneDefaults), minTier, maxTier, lanes, ctx.laneDefaults, eligible);
   const candidates: { target: RouteTarget; label: string }[] = [];
+  // The declared fallback is already enriched by resolveRoute (its own or the class's skills/mcp/caps)
+  // — leave it. A bare lane_defaults candidate is ALSO a fallback route, so it inherits the class's
+  // skills/mcp/capabilities here; without this a walked worker loses its task-fit + mandate packs and
+  // its verified MCP attachment, running discovery-less and tripping the memtrace-first hook (ledger 206).
   if (declaredFallback) candidates.push({ target: declaredFallback, label: 'declared-fallback' });
-  for (const c of ladder) candidates.push({ target: c.target, label: `t${c.tier[1]}` });
+  for (const c of ladder) {
+    candidates.push({ target: { ...c.target, skills: ctx.skills, mcp: ctx.mcp, capabilities: ctx.grantedCapabilities }, label: `t${c.tier[1]}` });
+  }
 
   const evaluated = candidates.map((c) => ({ ...c, dead: laneDeadReason(c.target, caps, accounts, accountPin, policy.routeAwayAtPct) }));
   const tried: string[] = [];

@@ -1180,6 +1180,7 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
           editsCode: route.editsCode,
           requiresWeb: route.requiresWeb,
           mcp: req.mcp ?? route.mcp ?? [],
+          skills: route.skills ?? [],
           grantedCapabilities: target.capabilities ?? [],
           excludeProviders: route.reviewerPool && author ? [author] : [],
         },

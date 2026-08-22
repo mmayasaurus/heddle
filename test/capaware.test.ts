@@ -134,7 +134,7 @@ describe('tier-ladder expansion walk (HED-264 fallback-not-refusal)', () => {
   };
   const ctx = (o: Partial<LadderContext> = {}): LadderContext => ({
     lanes: () => lanesFixture, laneDefaults: laneDefaultsFixture, declaredProvider: 'claude',
-    editsCode: false, requiresWeb: false, mcp: [], grantedCapabilities: [], excludeProviders: [], ...o,
+    editsCode: false, requiresWeb: false, mcp: [], skills: [], grantedCapabilities: [], excludeProviders: [], ...o,
   });
   const deadClaude = () => [{ id: 'a', configDir: null, loggedIn: false }];
   const t = loadRouting(join(process.cwd(), 'routing/routing.v0.yaml'));
