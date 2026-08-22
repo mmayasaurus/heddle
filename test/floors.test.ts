@@ -38,20 +38,28 @@ describe('claude floors (HED-261)', () => {
   });
 });
 
-describe('pickClaudeAccount floor integration (HED-261)', () => {
-  it('excludes a floored account and picks the healthy one', () => {
-    // a at 98% (headroom 2 < 3 → floored), b at 40% (healthy) → picks b despite a's lower id order.
-    const pick = pickClaudeAccount(claudeCaps([{ id: 'a', used: 98 }, { id: 'b', used: 40 }]), accts, { floors });
-    expect(pick?.account.id).toBe('b');
+describe('pickClaudeAccount floor integration (HED-261, opt-in only)', () => {
+  // Each test contrasts WITH vs WITHOUT floors so the floor is load-bearing — the assertion would fail
+  // if isFloored were a no-op. (A floored account has HIGH used%, so it is never the "most headroom"
+  // pick anyway; the floor only changes the outcome when it removes an otherwise-selected account.)
+  it('floors the only addressable account (near-exhausted) → null, where no-floors picks it', () => {
+    const caps = claudeCaps([{ id: 'a', used: 98 }]);
+    const one: ClaudeAccount[] = [{ id: 'a', configDir: null }];
+    expect(pickClaudeAccount(caps, one, {})?.account.id).toBe('a'); // no floors → picked (byte-stable)
+    expect(pickClaudeAccount(caps, one, { floors })).toBeNull();     // floors → excluded → null
   });
 
-  it('returns null when EVERY account is floored — the walk then expands off claude (HED-264)', () => {
-    const pick = pickClaudeAccount(claudeCaps([{ id: 'a', used: 99 }, { id: 'b', used: 98 }]), accts, { floors });
-    expect(pick).toBeNull();
+  it('returns null when every account is floored (the CLI relaunch pick refuses; router enrichment is HED-340)', () => {
+    const caps = claudeCaps([{ id: 'a', used: 99 }, { id: 'b', used: 98 }]);
+    expect(pickClaudeAccount(caps, accts, {})?.account.id).toBe('b'); // no floors → picks the least-floored
+    expect(pickClaudeAccount(caps, accts, { floors })).toBeNull();    // floors → null
   });
 
-  it('without floors (byte-stable) a near-exhausted account is still picked', () => {
-    const pick = pickClaudeAccount(claudeCaps([{ id: 'a', used: 98 }, { id: 'b', used: 99 }]), accts, {});
-    expect(pick?.account.id).toBe('a'); // 98 < 99 → most 5h headroom, floor not applied
+  it('excludes a floored account and picks a healthy sibling', () => {
+    expect(pickClaudeAccount(claudeCaps([{ id: 'a', used: 98 }, { id: 'b', used: 40 }]), accts, { floors })?.account.id).toBe('b');
+  });
+
+  it('unknown/stale used is NOT floored — the picker still selects (unknown never decides)', () => {
+    expect(pickClaudeAccount(claudeCaps([{ id: 'a', used: null }, { id: 'b', used: null }]), accts, { floors })).not.toBeNull();
   });
 });

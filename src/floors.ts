@@ -2,13 +2,15 @@ import type { LanesConfig } from './lanes.js';
 
 /**
  * HED-261 / HED-333 — the SINGLE definition of "is this claude account healthy enough to route/resume
- * onto", shared by BOTH decideRoute's account picker (src/capaware.ts pickClaudeAccount) AND the
- * relaunch wrapper (via the `heddle account pick` CLI). One implementation so the two can never drift
- * on what "healthy" means — the drift that let the rollover resume agents onto 98%/100% accounts.
+ * onto". The mechanism lives here + on pickClaudeAccount's OPT-IN `opts.floors`. In THIS increment only
+ * the `heddle account pick` CLI passes it — the relaunch fix, closing the drift that resumed agents onto
+ * 98%/100% accounts. decideRoute's DISPATCH callers (claudeRouteDead, planDispatch, the runtime
+ * fallback, src/rotate) do NOT pass floors yet, so the ROUTER is not floor-aware in this increment —
+ * wiring floors into every one of those callers (so a near-exhausted account is dead for dispatch too,
+ * and the S1 walk expands off it) is HED-340, done as one "every caller" pass with characterization,
+ * alongside the residency cap. This file is that one shared definition either way.
  *
- * Floors come from lanes.yaml (`floors.claude`, ratified). This module is pure over (used%, floors);
- * the residency cap (concurrent-agent count per account, from a pid-census + the ledger) is a separate
- * source folded in by a later increment — this file owns the ACCOUNT-LEVEL headroom floor.
+ * Floors come from lanes.yaml (`floors.claude`, ratified). This module is pure over (used%, floors).
  */
 export interface ClaudeFloors {
   /** Never SELECT an account whose 5h HEADROOM is below this (headroom = 100 − used%). */

@@ -57,8 +57,9 @@ describe('heddle account pick CLI', () => {
     });
 
     expect(result.code).toBe(1);
+    expect(result.stdout).toBe(''); // a refusal must NEVER print a (floored) account as the pick
     expect(result.stderr).toMatch(/2 floored/);
-    expect(result.stderr).toMatch(/floor.*3%/);
+    expect(result.stderr).toMatch(/headroom ≤ 3%/);
   }, 30_000);
 
   it('emits the documented JSON shape', async () => {

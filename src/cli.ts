@@ -230,10 +230,21 @@ try {
         };
       });
       if (!pick) {
-        const floored = accountRows.filter((account) => account.floored).length;
-        const loggedOut = accountRows.filter((account) => account.loggedOut).length;
-        const dispatchExcluded = accountRows.filter((account) => account.dispatchExcluded).length;
-        console.error(`heddle: refusing Claude account pick: ${floored} floored (headroom below ${floors.neverBelowPct}% floor), ${loggedOut} logged-out, ${dispatchExcluded} dispatch-excluded`);
+        if (accounts.length === 0) {
+          console.error('heddle: refusing Claude account pick: no accounts registered in ~/.heddle/accounts.json');
+          process.exit(1);
+        }
+        // Classify each unavailable account by ONE reason (priority logged-out → dispatch-excluded →
+        // floored) so the counts sum to the registry size rather than double-count an account that is
+        // several at once (e.g. a logged-out account also over the floor).
+        let loggedOut = 0, dispatchExcluded = 0, floored = 0;
+        for (const account of accountRows) {
+          if (account.loggedOut) loggedOut++;
+          else if (account.dispatchExcluded) dispatchExcluded++;
+          else if (account.floored) floored++;
+        }
+        console.error(`heddle: refusing Claude account pick: none of ${accounts.length} registered account(s) is healthy — ` +
+          `${floored} floored (5h headroom ≤ ${floors.neverBelowPct}%), ${loggedOut} logged-out, ${dispatchExcluded} dispatch-excluded`);
         process.exit(1);
       }
       const data = {
