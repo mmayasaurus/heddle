@@ -11,6 +11,10 @@ import { listPacks, withMandatoryPacks } from './skillpacks.js';
 import { classifyEffort, assessResult } from './classify.js';
 import { resolveIdentity } from './identity.js';
 import { loadProjectRegistry, DEFAULT_PROJECTS_PATH } from './projects.js';
+import { isDispatchExcluded, pickClaudeAccount, readClaudeAccounts } from './capaware.js';
+import { claudeFloorsFrom, headroomPct, isFloored } from './floors.js';
+import { loadLanes } from './lanes.js';
+import { readProviderCaps } from './usage.js';
 
 /**
  * heddle CLI — the surface orchestrators (and later the dashboard) drive.
@@ -64,6 +68,7 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
                                  or owner process provably gone (outcome='orphaned'); dry-run lists only
   heddle ledger report-in-session <id> (--ok | --failed) [--error "<why>"] [--input-tokens N] [--cached-input-tokens N] [--output-tokens N] [--reasoning-tokens N] [--duration-ms N] [--json]  administrative path: may report any orchestrator's handoff
   heddle usage [--since <iso>] [--json]    per-provider totals
+  heddle account pick [--for <letter>] [--json] [--explain]   healthiest addressable Claude account for a fleet relaunch
   heddle reviews [--limit N] [--json]      adversarial-review scoreboard (author→reviewer pairs) + recent reviews
   heddle review-outcome <dispatch-id> --total N --accepted M [--notes "…"]   record how many findings you accepted
 `;
@@ -191,6 +196,72 @@ try {
         (summary.account_pick ? `\n  ${summary.account_pick.reason}` : '') +
         (summary.account_advice ? `\n  ${summary.account_advice}` : '') +
         `\n  checks:\n    - ${summary.checks.join('\n    - ')}`);
+      break;
+    }
+
+    case 'account': {
+      if (process.argv[3] !== 'pick') {
+        console.error('usage: heddle account pick [--for <letter>] [--json] [--explain]');
+        process.exit(2);
+      }
+      const accounts = readClaudeAccounts();
+      const caps = readProviderCaps();
+      const floors = claudeFloorsFrom(loadLanes());
+      // Residency-balancing by --for is a later increment; this identifies the agent being launched only.
+      const forAgent = arg('--for');
+      const pick = pickClaudeAccount(caps.claude, accounts, { floors });
+      const usedOf = (id: string): number | null => {
+        const row = caps.claude.accounts.find((account) => account.id === id);
+        return row && !row.stale ? row.fiveHour.usedPercentage : null;
+      };
+      const accountRows = accounts.map((account) => {
+        const usedPct = usedOf(account.id);
+        const floored = isFloored(usedPct, floors);
+        const loggedOut = account.loggedIn === false;
+        const dispatchExcluded = isDispatchExcluded(caps.claude, account.id);
+        return {
+          account: account.id,
+          usedPct,
+          headroomPct: headroomPct(usedPct),
+          floored,
+          loggedOut,
+          dispatchExcluded,
+          excluded: floored || loggedOut || dispatchExcluded,
+        };
+      });
+      if (!pick) {
+        const floored = accountRows.filter((account) => account.floored).length;
+        const loggedOut = accountRows.filter((account) => account.loggedOut).length;
+        const dispatchExcluded = accountRows.filter((account) => account.dispatchExcluded).length;
+        console.error(`heddle: refusing Claude account pick: ${floored} floored (headroom below ${floors.neverBelowPct}% floor), ${loggedOut} logged-out, ${dispatchExcluded} dispatch-excluded`);
+        process.exit(1);
+      }
+      const data = {
+        account: pick.account.id,
+        configDir: pick.account.configDir,
+        usedPct: pick.usedPct,
+        reason: pick.reason,
+        unsetConfigDir: pick.envUnset.includes('CLAUDE_CONFIG_DIR'),
+        ...(forAgent ? { for: forAgent } : {}),
+        ...(has('--explain') ? { accounts: accountRows } : {}),
+      };
+      out(json, data, () => {
+        const config = pick.account.configDir
+          ? `CLAUDE_CONFIG_DIR=${pick.account.configDir}`
+          : 'default login — leave CLAUDE_CONFIG_DIR unset';
+        const selected = `${pick.account.id}  ${config}  ${pick.reason}` + (forAgent ? `  for: ${forAgent}` : '');
+        if (!has('--explain')) return selected;
+        const details = accountRows.map((account) => {
+          const state = [
+            account.floored ? 'floored' : null,
+            account.loggedOut ? 'logged-out' : null,
+            account.dispatchExcluded ? 'dispatch-excluded' : null,
+          ].filter(Boolean).join(', ') || 'eligible';
+          return `${account.account}: 5h ${account.usedPct === null ? 'unknown' : `${account.usedPct.toFixed(0)}%`}, ` +
+            `headroom ${account.headroomPct === null ? 'unknown' : `${account.headroomPct.toFixed(0)}%`}, ${state}`;
+        }).join('\n');
+        return `${selected}\n${details}`;
+      });
       break;
     }
 
