@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
-import type { RouteTarget, RoutingTable, Tier } from './routing.js';
+import { DEFAULT_MIN_TIER, type RouteTarget, type RoutingTable, type Tier } from './routing.js';
 import type { LanesConfig } from './lanes.js';
 import { buildLadder, tierOfProvider } from './ladder.js';
 import { mcpAttachable, webCapable } from './mcp.js';
@@ -185,8 +185,8 @@ function walkLadder(
   checks: string[], deadNote: string,
 ): RouteDecision {
   const lanes = ctx.lanes();
-  const minTier: Tier = ctx.minTier ?? 'T1';
-  const maxTier: Tier = ctx.maxTier ?? tierOfProvider(ctx.declaredProvider, lanes, ctx.laneDefaults) ?? 'T1';
+  const minTier: Tier = ctx.minTier ?? DEFAULT_MIN_TIER;
+  const maxTier: Tier = ctx.maxTier ?? tierOfProvider(ctx.declaredProvider, lanes, ctx.laneDefaults) ?? DEFAULT_MIN_TIER;
   const excluded = new Set<string>([deadTarget.provider, ...(declaredFallback ? [declaredFallback.provider] : []), ...ctx.excludeProviders]);
   const eligible = (t: RouteTarget, tier: Tier): boolean => {
     if (excluded.has(t.provider)) return false;
@@ -232,6 +232,25 @@ function walkLadder(
   };
 }
 
+/**
+ * The HED-264 account-liveness walk as a guard, shared by the cap-aware-DISABLED branch and the normal
+ * Point A. A dead claude route is a STRUCTURAL cannot-run (like the hard billing guards), so it expands
+ * even when soft route-away is switched off — a `enabled: false` config that still refused on dead
+ * accounts would BE the HED-264 26%-failure bug (grok review). Returns null when the walk does not apply
+ * (no ladder, an explicit/pinned route, or a live claude account), so the caller keeps its own decision.
+ */
+function maybeWalkDeadClaude(
+  target: RouteTarget, fallback: RouteTarget | undefined, caps: CapsByProvider, policy: CapAwarePolicy,
+  opts: { explicit: boolean; claudeAccounts?: () => ClaudeAccount[]; accountPin?: string; ladder?: LadderContext },
+  checks: string[],
+): RouteDecision | null {
+  if (!opts.ladder || opts.explicit) return null; // explicit routes never walk; a pin is refused inside claudeRouteDead
+  const accounts = opts.claudeAccounts?.() ?? [];
+  if (!claudeRouteDead(target.provider, caps, accounts, opts.accountPin, policy.routeAwayAtPct)) return null;
+  checks.push(`${target.provider}/${target.model}: no addressable claude account — walking the ladder (HED-264)`);
+  return walkLadder(target, fallback, caps, policy, opts.ladder, accounts, opts.accountPin, checks, `${target.provider}/${target.model} dead(no-account)`);
+}
+
 export function decideRoute(
   table: RoutingTable, target: RouteTarget, fallback: RouteTarget | undefined, caps: CapsByProvider,
   opts: { explicit: boolean; claudeAccounts?: () => ClaudeAccount[]; accountPin?: string; ladder?: LadderContext },
@@ -251,7 +270,12 @@ export function decideRoute(
   }
 
   if (!policy.enabled) {
-    return { target, fallback, routedAwayForCap: false, routeReason: 'cap-aware routing disabled (policy)', checks: [...checks, 'policy.cap_aware_routing.enabled = false (soft route-away off; hard billing guards stay)'] };
+    // Account-liveness is STRUCTURAL, not a soft cap — a dead claude route still expands here (else
+    // enabled:false would refuse on dead accounts, which IS the HED-264 26% bug). Explicit/pinned/live
+    // routes fall through to the disabled decision unchanged.
+    const walked = maybeWalkDeadClaude(target, fallback, caps, policy, opts, checks);
+    if (walked) return walked;
+    return { target, fallback, routedAwayForCap: false, routeReason: 'cap-aware routing disabled (policy)', checks: [...checks, 'policy.cap_aware_routing.enabled = false (soft route-away off; hard billing guards + dead-account walk stay)'] };
   }
 
   // Fable soft cap (HED-76): a FABLE-model class route moves to its class fallback when even the
@@ -300,12 +324,10 @@ export function decideRoute(
 
   // HED-264 (fallback-not-refusal): a claude PRIMARY with no addressable account is genuinely dead —
   // today it falls through to a cap:ok/unknown return and planDispatch then refuses (the 26% failure).
-  // With the ladder context (supplied by planDispatch) walk to the next LIVE lane instead of refusing.
-  // Pins and explicit routes never reach here; a zero-account registry is not dead (it inherits the login).
-  if (opts.ladder && claudeRouteDead(target.provider, caps, opts.claudeAccounts?.() ?? [], opts.accountPin, policy.routeAwayAtPct)) {
-    checks.push(`${target.provider}/${target.model}: no addressable claude account — walking the ladder (HED-264)`);
-    return walkLadder(target, fallback, caps, policy, opts.ladder, opts.claudeAccounts?.() ?? [], opts.accountPin, checks, `${target.provider}/${target.model} dead(no-account)`);
-  }
+  // Walk to the next LIVE lane instead (same structural guard as the disabled branch above; explicit/
+  // pinned routes never walk; a zero-account registry is not dead — it inherits the login).
+  const walkedPrimary = maybeWalkDeadClaude(target, fallback, caps, policy, opts, checks);
+  if (walkedPrimary) return walkedPrimary;
 
   const primary = tcaps ? bindingFor(target, tcaps) : null;
   if (!primary) {
@@ -327,6 +349,18 @@ export function decideRoute(
     checks.push(`fallback ${fallback.provider}/${fallback.model} blocked: ${fbRefusal} — running the primary`);
     return { target, fallback: undefined, routedAwayForCap: false, routeReason: `cap:over ${target.provider} ${primary.label}, fallback refused (${fbRefusal}) → ran primary`, checks };
   }
+  // HED-264: the route-away target is a dead claude route (no addressable account). Run the alive,
+  // over-soft-cap primary — a live lane beats a refusal — and DROP the dead fallback, exactly like the
+  // fbRefusal path above (the declared fallback is unusable). BEFORE the both-over check, so a dead
+  // fallback that is ALSO over its window gets the dead(no-account) narration, not a misleading
+  // cap:both-over. Cross-lane RUNTIME-failure retry (a failed primary failing over to a live sibling
+  // instead of the dead declared fallback) is deferred to HED-332 — it must cover the symmetric
+  // under-threshold path too, else the same class splits behavior across a 2% window. The primary here
+  // is non-claude (a dead claude PRIMARY was already walked above).
+  if (opts.ladder && claudeRouteDead(fallback.provider, caps, opts.claudeAccounts?.() ?? [], opts.accountPin, policy.routeAwayAtPct)) {
+    checks.push(`route-away target ${fallback.provider}/${fallback.model} has no addressable claude account — running the primary (soft cap); dead fallback dropped`);
+    return { target, fallback: undefined, routedAwayForCap: false, routeReason: `cap:over ${target.provider} ${primary.label}, fallback ${fallback.provider} dead(no-account) → ran primary`, checks };
+  }
   if (fb && fb.used >= policy.routeAwayAtPct) {
     checks.push(`fallback ${fallback.provider} ${fb.label} also over — running the primary (fallback kept for failure retry: the cap is soft)`);
     return { target, fallback, routedAwayForCap: false, routeReason: `cap:both-over ${target.provider} ${primary.label}, ${fallback.provider} ${fb.label} → ran primary`, checks };
@@ -338,13 +372,6 @@ export function decideRoute(
   // hard guards re-checked). The live case that set this: claude fresh at 94% while the codex
   // mirror was stale — staying on claude would have burned the last 6% of a known-nearly-exhausted
   // pool to honor missing data. route_reason/checks say "caps unknown" so the ledger shows it.
-  // HED-264: the route-away target itself may be a dead claude route (no addressable account). Running
-  // the alive, over-soft-cap primary beats refusing on it — the primary is non-claude here (a dead
-  // claude PRIMARY was already walked above), so it is safe. Same soft-cap spirit as the both-over path.
-  if (opts.ladder && claudeRouteDead(fallback.provider, caps, opts.claudeAccounts?.() ?? [], opts.accountPin, policy.routeAwayAtPct)) {
-    checks.push(`route-away target ${fallback.provider}/${fallback.model} has no addressable claude account — running the primary (soft cap)`);
-    return { target, fallback, routedAwayForCap: false, routeReason: `cap:over ${target.provider} ${primary.label}, fallback ${fallback.provider} dead(no-account) → ran primary`, checks };
-  }
   checks.push(`ROUTE AWAY → ${fallback.provider}/${fallback.model}` + (fb ? ` (${fallback.provider} ${fb.label})` : ` (${fallback.provider} caps unknown, ${src(fallback.provider)})`));
   return {
     target: fallback, fallback: undefined, routedAwayForCap: true,

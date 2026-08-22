@@ -85,4 +85,14 @@ describe('tier ladder — buildLadder ordering', () => {
     const out = buildLadder('T1', 'T0', 'T2', lanes, laneDefaults, (t) => t.provider !== 'cursor');
     expect(pv(out).includes('cursor/composer-2.5')).toBe(false);
   });
+
+  it('a start ABOVE maxTier enters the range from its ceiling, never emitting a tier above it', () => {
+    // start T2, bounds [T0,T1]: no within-tier (out of range), descend from the T1 ceiling then T0.
+    const out = buildLadder('T2', 'T0', 'T1', lanes, laneDefaults, all);
+    expect(pv(out)).toEqual(['codex/gpt-5.6-terra', 'cursor/composer-2.5', 'cerebras/gpt-oss-120b', 'groq/openai/gpt-oss-120b']);
+  });
+
+  it('an inverted range (minTier above maxTier) yields no candidates', () => {
+    expect(buildLadder('T2', 'T2', 'T0', lanes, laneDefaults, all)).toEqual([]);
+  });
 });

@@ -475,4 +475,16 @@ describe('HED-106 — walked ladder candidate inherits class mcp + skills', () =
       if (prev === undefined) delete process.env.HEDDLE_ROUTING; else process.env.HEDDLE_ROUTING = prev;
     }
   });
+
+  // HED-106 review (grok, finding 5): the walk is a HEADLESS + REGISTRY-gated mechanism — it must NOT
+  // fire for an in-session dispatch (runs on the orchestrator's own account; the bug I fixed mid-flight)
+  // nor for an empty registry (inherit the caller's login — claudeRouteDead treats length 0 as not-dead).
+  it('does NOT walk an in-session or empty-registry claude dispatch', async () => {
+    const inherited = fakeAdapter(undefined, { readAgents: false });
+    const run = await dispatch({ taskClass: 'research-summarize', prompt: 'x', cwd: tempDir(), identity: unbound, accounts: [], caps: { claude: claudeCaps([]) } }, tempLedger(), () => inherited.adapter);
+    expect(run).toMatchObject({ ok: true, provider: 'claude', model: 'haiku' }); // inherited login, NOT a walked codex
+    const session = fakeAdapter(undefined, { readAgents: false });
+    const inSession = await dispatch({ taskClass: 'research-summarize', prompt: 'x', cwd: tempDir(), identity: unbound, inSession: true, accounts: [{ id: 'a', configDir: null, loggedIn: false }], caps: { claude: claudeCaps([]) } }, tempLedger(), () => session.adapter);
+    expect(inSession.refusal?.code).toBe('claude-in-session'); expect(session.calls).toHaveLength(0);
+  });
 });

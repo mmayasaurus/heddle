@@ -72,12 +72,16 @@ export function buildLadder(
   const s = idx(start);
 
   const phases: Tier[] = [];
-  // (1) within-tier siblings — only if the start tier is itself inside the class's bounds.
+  // (1) within-tier siblings — only if the start tier is itself inside the class's [min,max] bounds.
   if (s >= lo && s <= hi) phases.push(start);
-  // (2) descend toward minTier, one tier at a time (start-1, start-2, … ≥ minTier).
-  for (let i = s - 1; i >= lo; i--) phases.push(AUTO_JOIN_TIERS[i]);
-  // (3) ascend above the declared route toward maxTier (start+1, … ≤ maxTier).
-  for (let i = s + 1; i <= hi; i++) phases.push(AUTO_JOIN_TIERS[i]);
+  // (2) DESCEND toward minTier, one tier at a time, CLAMPED to the bounds: a start ABOVE maxTier enters
+  //     the range from its ceiling (never emits a tier above maxTier), and an inverted range (lo > hi,
+  //     e.g. a defaulted min above an explicit max) yields nothing. For an in-range start this is
+  //     byte-identical to `s - 1` (since s ≤ hi ⟹ s-1 < hi).
+  for (let i = Math.min(s - 1, hi); i >= lo; i--) phases.push(AUTO_JOIN_TIERS[i]);
+  // (3) ASCEND above the declared route toward maxTier, CLAMPED: a start BELOW minTier enters from lo
+  //     (never emits a tier below minTier). For an in-range start this is byte-identical to `s + 1`.
+  for (let i = Math.max(s + 1, lo); i <= hi; i++) phases.push(AUTO_JOIN_TIERS[i]);
 
   const out: { target: RouteTarget; tier: Tier }[] = [];
   const seen = new Set<string>();

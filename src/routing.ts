@@ -63,6 +63,9 @@ export interface Route extends RouteTarget {
 export type Tier = 'T0' | 'T1' | 'T2';
 export const AUTO_JOIN_TIERS: readonly Tier[] = ['T0', 'T1', 'T2'];
 export const isTier = (v: unknown): v is Tier => v === 'T0' || v === 'T1' || v === 'T2';
+/** The default `min_tier` when a class declares none — the workhorse floor. Shared by resolveRoute's
+ *  bound validation AND the walk's own default so the two can never drift (HED-106 grok review). */
+export const DEFAULT_MIN_TIER: Tier = 'T1';
 
 export interface RoutingTable {
   version: number;
@@ -208,12 +211,15 @@ export function resolveRoute(table: RoutingTable, taskClass: string): Route {
     mcp: fb.mcp ?? primary.mcp,
     capabilities: fb.capabilities ?? primary.capabilities,
   } : undefined;
-  // Tier bounds validate as a PAIR: min above max is an empty expansion range that would silently turn
-  // a dead-route walk into a refusal — a config error, so it fails LOUD like every other bad policy field.
+  // Tier bounds validate as a PAIR against the EFFECTIVE min (the default fills in when min_tier is
+  // absent), so `max_tier: T0` with a defaulted min is caught too — an empty expansion range that would
+  // silently turn a dead-route walk into a refusal is a config error, so it fails LOUD. (A start tier
+  // above an explicit max cannot be validated here without lanes; buildLadder clamps it safely.)
   const minTier = readTier(node.min_tier, `task_classes.${taskClass}.min_tier`);
   const maxTier = readTier(node.max_tier, `task_classes.${taskClass}.max_tier`);
-  if (minTier && maxTier && AUTO_JOIN_TIERS.indexOf(minTier) > AUTO_JOIN_TIERS.indexOf(maxTier)) {
-    throw new Error(`task class "${taskClass}": min_tier ${minTier} is above max_tier ${maxTier} — the expansion range is empty`);
+  const effMinTier = minTier ?? DEFAULT_MIN_TIER;
+  if (maxTier && AUTO_JOIN_TIERS.indexOf(effMinTier) > AUTO_JOIN_TIERS.indexOf(maxTier)) {
+    throw new Error(`task class "${taskClass}": min_tier ${effMinTier}${minTier ? '' : ' (default)'} is above max_tier ${maxTier} — the expansion range is empty`);
   }
   return {
     taskClass,

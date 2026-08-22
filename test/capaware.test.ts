@@ -178,11 +178,29 @@ describe('tier-ladder expansion walk (HED-264 fallback-not-refusal)', () => {
     expect(d.routeReason).toBe('cap:expand-exhausted claude/fable dead(no-account); claude/opus dead(no-account) — no live lane');
   });
 
-  it('runs the over-soft-cap primary when its route-away target is a dead claude route (Point B)', () => {
+  it('runs the over-soft-cap primary and DROPS the dead claude route-away fallback (Point B)', () => {
     const d = decideRoute(t, { provider: 'codex', model: 'gpt-5.6-terra' }, { provider: 'claude', model: 'sonnet' },
       { codex: fresh('codex', 95), claude: fresh('claude', 50) }, { explicit: false, claudeAccounts: deadClaude, ladder: ctx({ declaredProvider: 'codex' }) });
     expect(d).toMatchObject({ target: { provider: 'codex', model: 'gpt-5.6-terra' }, routedAwayForCap: false });
+    expect(d.fallback).toBeUndefined(); // dead claude fallback dropped — never handed to the runtime retry (HED-332)
     expect(d.routeReason).toBe('cap:over codex 5h 95%, fallback claude dead(no-account) → ran primary');
+    // F4: a dead claude fallback whose OWN window is also over threshold must read dead(no-account), not both-over.
+    const bothOver = decideRoute(t, { provider: 'codex', model: 'gpt-5.6-terra' }, { provider: 'claude', model: 'sonnet' },
+      { codex: fresh('codex', 95), claude: fresh('claude', 95) }, { explicit: false, claudeAccounts: deadClaude, ladder: ctx({ declaredProvider: 'codex' }) });
+    expect(bothOver.routeReason).toBe('cap:over codex 5h 95%, fallback claude dead(no-account) → ran primary');
+    expect(bothOver.fallback).toBeUndefined();
+  });
+
+  it('walks a dead-account claude route even when cap-aware routing is DISABLED (account-death is structural)', () => {
+    const disabled = { ...t, policy: { cap_aware_routing: { enabled: false } } } as typeof t;
+    const dead = decideRoute(disabled, { provider: 'claude', model: 'haiku' }, { provider: 'codex', model: 'gpt-5.6-luna' },
+      { claude: fresh('claude', 50) }, { explicit: false, claudeAccounts: deadClaude, ladder: ctx() });
+    expect(dead.target).toMatchObject({ provider: 'codex', model: 'gpt-5.6-luna' });
+    expect(dead.routeReason).toContain('cap:expand');
+    // a LIVE claude route with routing disabled still just runs (the byte-stable disabled path is preserved).
+    const live = decideRoute(disabled, { provider: 'claude', model: 'haiku' }, { provider: 'codex', model: 'gpt-5.6-luna' },
+      { claude: fresh('claude', 50) }, { explicit: false, claudeAccounts: () => [{ id: 'a', configDir: null }], ladder: ctx() });
+    expect(live.routeReason).toBe('cap-aware routing disabled (policy)');
   });
 
   it('never walks a pinned dispatch — the pin is a placement contract', () => {
