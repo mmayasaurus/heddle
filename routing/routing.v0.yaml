@@ -127,6 +127,24 @@ providers:
   ollama-cloud:
     status: excluded                  # PR reviewer fleet only
 
+# Tier-ladder expansion (HED-106 S1). When a class's declared target AND its declared fallback are
+# both GENUINELY DEAD — S1's predicate is a claude route with no addressable account (the HED-264
+# 26%-failure bug); S2/S3 enrich the predicate with floors + cooling — the router walks lanes.yaml's
+# tiers for the next LIVE lane instead of refusing (fallback-not-refusal). Each auto-joinable lane
+# resolves HERE to ONE safe, cheap-representative concrete route — never the metered/never-auto model
+# (cursor → composer, NOT kimi; claude-workers → sonnet, NOT fable). A lane ABSENT from this map never
+# auto-joins the walk: openrouter-free has no routable :free id yet (providers.openrouter.models: []),
+# and the T1Q quality reserve + T3 fable/escalation are opt-in only (never auto-joined, per lanes.yaml).
+# All model ids live-verified 2026-08-22 (cursor-agent models / agy models / provider last_verified).
+# Declared class routes and declared fallbacks are UNCHANGED and keep their own specific model; these
+# defaults only supply the CROSS-LANE expansion candidates that come after them.
+lane_defaults:
+  cerebras:       {provider: cerebras, model: gpt-oss-120b}       # T0-menial (read-only by construction)
+  groq:           {provider: groq, model: openai/gpt-oss-120b}    # T0-menial (read-only by construction)
+  codex:          {provider: codex, model: gpt-5.6-terra}         # T1-workhorse
+  cursor:         {provider: cursor, model: cursor-grok-4.6-high} # T1-workhorse — the BENCH-PROVEN incumbent; NEVER kimi. composer-2.5 (PENDING BENCH per lanes.yaml) swaps in as a 1-line edit once its §C side-by-side lands (R nod 2026-08-22: a c2+ candidate executes REAL work, so it must be bench-proven)
+  claude-workers: {provider: claude, model: sonnet}               # T2-judgment — account-picked by the live meter; never fable
+
 # Task classes are intentionally coarse for the pilot. Refine from ledger data, not guesses.
 #
 # Per-class guidance fields (HED-1, 2026-08-15 — surfaced by `list_task_classes` / `heddle classes`
@@ -191,6 +209,7 @@ task_classes:
   escalate-judgment:        # genuinely hard bounded problems — Fable as an OOP worker (Maya 2026-08-16)
     provider: claude
     model: fable
+    min_tier: T2            # HED-106: never descend below judgment; opt-in class, already gated
     fallback: {provider: claude, model: opus}
     why: the Anthropic-side mirror of Sol's hard-problem role — dispatch Fable OUT-OF-PROCESS for a genuinely hard, bounded problem (account-picked by Fable-weekly headroom); at/over the 45% fable-weekly soft cap the class routes to Opus instead (cap:fable-soft-cap). Ledgered like every dispatch so Fable-class counts are visible. Not for labor — codex/cursor classes stay the default.
     skills: [worker-role]
@@ -216,6 +235,7 @@ task_classes:
   research-summarize:       # doc reading, log triage, summarization
     provider: claude
     model: haiku
+    min_tier: T0            # HED-106: menial reading — the ladder may descend to the read-only T0 lanes
     fallback: {provider: codex, model: gpt-5.6-luna}
     why: doc reading, log triage, summarization — Haiku is the cheap Claude; never spend Sonnet/Opus reading logs
     skills: [worker-role]
@@ -223,6 +243,7 @@ task_classes:
   documentation:            # READMEs, comments, changelogs, docstrings — minimal reasoning need
     provider: gemini         # gemini-flash: cheap, fast, fine for prose-over-known-facts
     model: gemini-3.6-flash-low
+    min_tier: T0            # HED-106: prose over known facts — T0-eligible (gemini is unlaned → tier T1 for the walk's start/ceiling)
     fallback: {provider: codex, model: gpt-5.6-luna}
     why: READMEs, comments, changelogs, docstrings — Flash is cheap and fast for prose over known facts; not for designing architecture
     skills: [worker-role]

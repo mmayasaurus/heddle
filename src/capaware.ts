@@ -1,7 +1,10 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
-import type { RouteTarget, RoutingTable } from './routing.js';
+import { DEFAULT_MIN_TIER, type RouteTarget, type RoutingTable, type Tier } from './routing.js';
+import type { LanesConfig } from './lanes.js';
+import { buildLadder, tierOfProvider } from './ladder.js';
+import { mcpAttachable, webCapable } from './mcp.js';
 import { bindingWindow, DISPATCH_SIGNAL_MAX_AGE_S, type CapsByProvider, type ProviderCaps } from './usage.js';
 
 /**
@@ -54,6 +57,36 @@ export interface RouteDecision {
   refusal?: { code: 'metered-pool-exhausted'; reason: string };
   /** Human-readable trace (one line per check) for `heddle route` / `plan_dispatch`. */
   checks: string[];
+}
+
+/**
+ * HED-106 tier-ladder context — the class-level policy the expansion walk needs, threaded through
+ * `decideRoute`'s opts. Present only from `planDispatch` (real routing); ABSENT from the direct
+ * `decideRoute` unit tests, and when absent the walk is disabled and decideRoute behaves exactly as
+ * before (the byte-stable soft-cap/refusal decisions). `lanes` is a THUNK: it is invoked only if a
+ * declared route is actually dead, so healthy/codex/cursor plans pay no lanes.yaml read (PR #24 discipline).
+ */
+export interface LadderContext {
+  lanes: () => LanesConfig;
+  laneDefaults: Record<string, RouteTarget>;
+  /** The class's declared PRIMARY provider — sets the maxTier default (the class author's ceiling). */
+  declaredProvider: string;
+  minTier?: Tier;
+  maxTier?: Tier;
+  editsCode: boolean;
+  requiresWeb: boolean;
+  /** The effective MCP list a worker of this class would get (caller override ?? class default). */
+  mcp: string[];
+  /** The class's default skill packs — an expansion candidate is a fallback route and inherits them
+   *  (mirrors resolveRoute's declared-fallback enrichment; a bare lane_defaults target carries none,
+   *  which would silently drop the class's task-fit + mandate packs). */
+  skills: string[];
+  /** Capabilities granted by default for this class (for the requiresWeb `webCapable` check AND for
+   *  enriching a bare expansion candidate so runTarget grants them). */
+  grantedCapabilities: string[];
+  /** Providers the walk must never land on beyond the declared target/fallback — a review class's
+   *  author family. The declared target + fallback providers are excluded automatically. */
+  excludeProviders: string[];
 }
 
 /** Cursor's own models draw from `included-total`; anything else in its catalog is a named third-party model. */
@@ -112,9 +145,124 @@ function bindingFor(target: RouteTarget, caps: ProviderCaps): { label: string; u
   return bw && bw.window.usedPercentage !== null ? { label: `${bw.name} ${bw.window.usedPercentage.toFixed(0)}%`, used: bw.window.usedPercentage } : null;
 }
 
+/**
+ * Is a CLAUDE route genuinely dead — no addressable account — mirroring hasNoDispatchableClaudeAccount
+ * (dispatch.ts): dead ONLY when accounts are registered (count > 0) and pickClaudeAccount returns null.
+ * A zero-account registry inherits the caller's login and is NOT dead; a PIN is a placement contract,
+ * so a pinned dispatch never walks (its own refusal path stands). Over-threshold is NOT death — the
+ * picker returns the best account regardless of headroom, so this fires only on genuine exhaustion.
+ */
+function claudeRouteDead(
+  provider: string, caps: CapsByProvider, accounts: ClaudeAccount[], accountPin: string | undefined, routeAwayAtPct: number,
+): boolean {
+  if (provider !== 'claude' || accountPin || accounts.length === 0) return false;
+  return pickClaudeAccount(caps.claude, accounts, { routeAwayAtPct }) === null;
+}
+
+/** A candidate is DEAD (skipped in the walk) when a metered pool refuses it, or its claude account pool
+ *  is empty. Returns a short reason for the ledger narration; null = alive. Soft-over is NOT dead (S1);
+ *  the codex/cursor cooling predicate is S3. */
+function laneDeadReason(
+  target: RouteTarget, caps: CapsByProvider, accounts: ClaudeAccount[], accountPin: string | undefined, routeAwayAtPct: number,
+): string | null {
+  if (target.provider === 'cursor' && caps.cursor && cursorRefusal(target.model, caps.cursor)) return 'metered';
+  if (claudeRouteDead(target.provider, caps, accounts, accountPin, routeAwayAtPct)) return 'no-account';
+  return null;
+}
+
+/**
+ * HED-106 expansion walk (HED-264 fallback-not-refusal). Called only when a class's declared route is
+ * genuinely dead. Tries, in order: the class's declared FALLBACK (its author's own escape hatch, with
+ * its specific model — if it clears the capability gate), then the cross-lane tier LADDER (within-tier
+ * siblings → descend to minTier → ascend to maxTier). Routes to the FIRST live+capable candidate with
+ * NO runtime-failure fallback (that is HED-332). If nothing is live it returns the ORIGINAL dead target unchanged — the sole S1 caller has a
+ * claude target, so planDispatch's `no-dispatchable-account` refusal fires — with the whole walk
+ * narrated (route_reason + checks) for R's nightly audit.
+ */
+function walkLadder(
+  deadTarget: RouteTarget, declaredFallback: RouteTarget | undefined, caps: CapsByProvider,
+  policy: CapAwarePolicy, ctx: LadderContext, accounts: ClaudeAccount[], accountPin: string | undefined,
+  checks: string[], deadNote: string,
+): RouteDecision {
+  const lanes = ctx.lanes();
+  const minTier: Tier = ctx.minTier ?? DEFAULT_MIN_TIER;
+  const maxTier: Tier = ctx.maxTier ?? tierOfProvider(ctx.declaredProvider, lanes, ctx.laneDefaults) ?? DEFAULT_MIN_TIER;
+  const excluded = new Set<string>([deadTarget.provider, ...(declaredFallback ? [declaredFallback.provider] : []), ...ctx.excludeProviders]);
+  // Capability gate (MCP attachability + web) — must pass for EVERY candidate, the declared fallback
+  // included: a caller mcp override or a requiresWeb class can make even the class's own declared
+  // fallback unattachable, and selecting it would throw in runTarget instead of continuing (qodo HIGH).
+  const capable = (t: RouteTarget): boolean =>
+    (ctx.mcp.length === 0 || mcpAttachable(t.provider, ctx.mcp)) &&
+    (!ctx.requiresWeb || webCapable(t.provider, ctx.grantedCapabilities));
+  const eligible = (t: RouteTarget, tier: Tier): boolean =>
+    !excluded.has(t.provider) && !(ctx.editsCode && tier === 'T0') && capable(t); // T0 lanes are read-only by construction
+  const ladder = buildLadder(tierOfProvider(deadTarget.provider, lanes, ctx.laneDefaults), minTier, maxTier, lanes, ctx.laneDefaults, eligible);
+  const candidates: { target: RouteTarget; label: string }[] = [];
+  // The declared fallback (resolveRoute-enriched) leads the walk — but only if it clears the capability
+  // gate above; an unattachable declared fallback is skipped (with a check) rather than selected-then-
+  // thrown. A bare lane_defaults candidate inherits the class skills/mcp/capabilities so a walked worker
+  // keeps its task-fit + mandate packs and its verified MCP attachment (else discovery-less → ledger 206).
+  if (declaredFallback && capable(declaredFallback)) {
+    candidates.push({ target: declaredFallback, label: 'declared-fallback' });
+  } else if (declaredFallback) {
+    checks.push(`declared fallback ${declaredFallback.provider}/${declaredFallback.model} skipped — cannot attach the effective mcp/web capability`);
+  }
+  for (const c of ladder) {
+    candidates.push({ target: { ...c.target, skills: ctx.skills, mcp: ctx.mcp, capabilities: ctx.grantedCapabilities }, label: `t${c.tier[1]}` });
+  }
+
+  const evaluated = candidates.map((c) => ({ ...c, dead: laneDeadReason(c.target, caps, accounts, accountPin, policy.routeAwayAtPct) }));
+  const tried: string[] = [];
+  for (let i = 0; i < evaluated.length; i++) {
+    const c = evaluated[i];
+    if (c.dead) {
+      tried.push(`${c.target.provider}/${c.target.model} dead(${c.dead})`);
+      checks.push(`walk: ${c.target.provider}/${c.target.model} skipped (${c.dead})`);
+      continue;
+    }
+    checks.push(`WALK → ${c.target.provider}/${c.target.model} (${c.label})`);
+    return {
+      // fallback: undefined — the walk provides NO runtime-failure fallback in S1. Threading the next
+      // live candidate through the existing `fallback` field would mis-attribute `fell_back_from` (that
+      // path records the class route, not the walked target) and would not re-run the ladder if the
+      // snapshot died by runtime (codeant/codex). Ladder-aware runtime retry — covering this AND the
+      // symmetric under-threshold path — is HED-332. Symmetric with Point B, which also drops its fallback.
+      target: c.target, fallback: undefined, routedAwayForCap: true,
+      routeReason: `cap:expand ${deadNote}${tried.length ? `; ${tried.join('; ')}` : ''} → ${c.target.provider}/${c.target.model} (${c.label})`,
+      checks,
+    };
+  }
+  const names = candidates.map((c) => `${c.target.provider}/${c.target.model}`).join(', ') || 'none';
+  checks.push(`walk exhausted — no live lane among [${names}]`);
+  return {
+    target: deadTarget, fallback: undefined, routedAwayForCap: false,
+    routeReason: `cap:expand-exhausted ${deadNote}${tried.length ? `; ${tried.join('; ')}` : ''} — no live lane`,
+    checks,
+  };
+}
+
+/**
+ * The HED-264 account-liveness walk as a guard, shared by the cap-aware-DISABLED branch and the normal
+ * Point A. A dead claude route is a STRUCTURAL cannot-run (like the hard billing guards), so it expands
+ * even when soft route-away is switched off — a `enabled: false` config that still refused on dead
+ * accounts would BE the HED-264 26%-failure bug (grok review). Returns null when the walk does not apply
+ * (no ladder, an explicit/pinned route, or a live claude account), so the caller keeps its own decision.
+ */
+function maybeWalkDeadClaude(
+  target: RouteTarget, fallback: RouteTarget | undefined, caps: CapsByProvider, policy: CapAwarePolicy,
+  opts: { explicit: boolean; claudeAccounts?: () => ClaudeAccount[]; accountPin?: string; ladder?: LadderContext },
+  checks: string[],
+): RouteDecision | null {
+  if (!opts.ladder || opts.explicit) return null; // explicit routes never walk; a pin is refused inside claudeRouteDead
+  const accounts = opts.claudeAccounts?.() ?? [];
+  if (!claudeRouteDead(target.provider, caps, accounts, opts.accountPin, policy.routeAwayAtPct)) return null;
+  checks.push(`${target.provider}/${target.model}: no addressable claude account — walking the ladder (HED-264)`);
+  return walkLadder(target, fallback, caps, policy, opts.ladder, accounts, opts.accountPin, checks, `${target.provider}/${target.model} dead(no-account)`);
+}
+
 export function decideRoute(
   table: RoutingTable, target: RouteTarget, fallback: RouteTarget | undefined, caps: CapsByProvider,
-  opts: { explicit: boolean; claudeAccounts?: () => ClaudeAccount[]; accountPin?: string },
+  opts: { explicit: boolean; claudeAccounts?: () => ClaudeAccount[]; accountPin?: string; ladder?: LadderContext },
 ): RouteDecision {
   const policy = capAwarePolicy(table);
   const checks: string[] = [];
@@ -131,7 +279,12 @@ export function decideRoute(
   }
 
   if (!policy.enabled) {
-    return { target, fallback, routedAwayForCap: false, routeReason: 'cap-aware routing disabled (policy)', checks: [...checks, 'policy.cap_aware_routing.enabled = false (soft route-away off; hard billing guards stay)'] };
+    // Account-liveness is STRUCTURAL, not a soft cap — a dead claude route still expands here (else
+    // enabled:false would refuse on dead accounts, which IS the HED-264 26% bug). Explicit/pinned/live
+    // routes fall through to the disabled decision unchanged.
+    const walked = maybeWalkDeadClaude(target, fallback, caps, policy, opts, checks);
+    if (walked) return walked;
+    return { target, fallback, routedAwayForCap: false, routeReason: 'cap-aware routing disabled (policy)', checks: [...checks, 'policy.cap_aware_routing.enabled = false (soft route-away off; hard billing guards + dead-account walk stay)'] };
   }
 
   // Fable soft cap (HED-76): a FABLE-model class route moves to its class fallback when even the
@@ -178,6 +331,13 @@ export function decideRoute(
     return { target, fallback, routedAwayForCap: false, routeReason: `explicit-route${b ? ` (${target.provider} ${b.label})` : ''}`, checks };
   }
 
+  // HED-264 (fallback-not-refusal): a claude PRIMARY with no addressable account is genuinely dead —
+  // today it falls through to a cap:ok/unknown return and planDispatch then refuses (the 26% failure).
+  // Walk to the next LIVE lane instead (same structural guard as the disabled branch above; explicit/
+  // pinned routes never walk; a zero-account registry is not dead — it inherits the login).
+  const walkedPrimary = maybeWalkDeadClaude(target, fallback, caps, policy, opts, checks);
+  if (walkedPrimary) return walkedPrimary;
+
   const primary = tcaps ? bindingFor(target, tcaps) : null;
   if (!primary) {
     checks.push(`${target.provider}: caps unknown (${src(target.provider)}) — no route-away`);
@@ -197,6 +357,18 @@ export function decideRoute(
   if (fbRefusal) {
     checks.push(`fallback ${fallback.provider}/${fallback.model} blocked: ${fbRefusal} — running the primary`);
     return { target, fallback: undefined, routedAwayForCap: false, routeReason: `cap:over ${target.provider} ${primary.label}, fallback refused (${fbRefusal}) → ran primary`, checks };
+  }
+  // HED-264: the route-away target is a dead claude route (no addressable account). Run the alive,
+  // over-soft-cap primary — a live lane beats a refusal — and DROP the dead fallback, exactly like the
+  // fbRefusal path above (the declared fallback is unusable). BEFORE the both-over check, so a dead
+  // fallback that is ALSO over its window gets the dead(no-account) narration, not a misleading
+  // cap:both-over. Cross-lane RUNTIME-failure retry (a failed primary failing over to a live sibling
+  // instead of the dead declared fallback) is deferred to HED-332 — it must cover the symmetric
+  // under-threshold path too, else the same class splits behavior across a 2% window. The primary here
+  // is non-claude (a dead claude PRIMARY was already walked above).
+  if (opts.ladder && claudeRouteDead(fallback.provider, caps, opts.claudeAccounts?.() ?? [], opts.accountPin, policy.routeAwayAtPct)) {
+    checks.push(`route-away target ${fallback.provider}/${fallback.model} has no addressable claude account — running the primary (soft cap); dead fallback dropped`);
+    return { target, fallback: undefined, routedAwayForCap: false, routeReason: `cap:over ${target.provider} ${primary.label}, fallback ${fallback.provider} dead(no-account) → ran primary`, checks };
   }
   if (fb && fb.used >= policy.routeAwayAtPct) {
     checks.push(`fallback ${fallback.provider} ${fb.label} also over — running the primary (fallback kept for failure retry: the cap is soft)`);
