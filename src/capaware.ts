@@ -4,6 +4,7 @@ import { basename, join } from 'node:path';
 import { DEFAULT_MIN_TIER, type RouteTarget, type RoutingTable, type Tier } from './routing.js';
 import type { LanesConfig } from './lanes.js';
 import { buildLadder, tierOfProvider } from './ladder.js';
+import { isFloored, type ClaudeFloors } from './floors.js';
 import { mcpAttachable, webCapable } from './mcp.js';
 import { bindingWindow, DISPATCH_SIGNAL_MAX_AGE_S, type CapsByProvider, type ProviderCaps } from './usage.js';
 
@@ -581,6 +582,10 @@ export function pickClaudeAccount(
     /** The 7d counterpart of `routeAwayAtPct`: a candidate at/over it is weekly-dead and sorts last
      *  under `prefer7d`. Unset = no weekly threshold (pure ranking). */
     routeAwayAt7dPct?: number;
+    /** HED-261: the claude floors. When set, an account whose 5h headroom is below `neverBelowPct` is
+     *  NOT addressable — never selected/resumed onto (the rollover-scare guard). Absent = no floor
+     *  (existing callers unchanged). Shared with the `heddle account pick` CLI via src/floors.ts. */
+    floors?: ClaudeFloors;
   } = {},
 ): AccountPick | null {
   if (accounts.length === 0) return null;
@@ -613,8 +618,11 @@ export function pickClaudeAccount(
     return { account: a, usedPct: used, usedPct7d: used7dOf(a.id), reason: `account:${a.id} pinned${used !== null ? ` (5h ${used.toFixed(0)}%)` : ''}`, ...envFor(a) };
   }
   // A logged-out account is not addressable, whatever its caps say (a fresh keeper anchor for a dir
-  // whose credential was replaced would otherwise make the picker choose an account that 401s).
-  const addressable = accounts.filter((a) => a.loggedIn !== false && !isDispatchExcluded(caps, a.id));
+  // whose credential was replaced would otherwise make the picker choose an account that 401s). And
+  // (HED-261, when floors are supplied) a FLOORED account — 5h headroom below never_below_pct — is not
+  // addressable either: never select/resume onto a near-exhausted account (the rollover-scare guard).
+  const addressable = accounts.filter((a) =>
+    a.loggedIn !== false && !isDispatchExcluded(caps, a.id) && !(opts.floors && isFloored(usedOf(a.id), opts.floors)));
   // For a FABLE-model target, Fable-weekly headroom outranks 5h headroom (HED-76): the weekly
   // Fable share is the binding constraint, and only accounts with a KNOWN estimate compete on it
   // (unknown → fall through to the normal 5h ordering — unknown never decides).
