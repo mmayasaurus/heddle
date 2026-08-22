@@ -1,0 +1,33 @@
+# lanes.yaml v1 — Maya-ratified 2026-08-21 ("lanes.yaml has my full blessing!")
+# Provenance: HED-106 comment [7] (canonical), amendments in comments [3]-[6]. Config-as-code:
+# tiers/floors/caps/guards are DATA, edited by PR-reviewed config change — never in code.
+# Loaded + schema-validated by src/lanes.ts; consumed by decideRoute's tier ladder (HED-106 S1).
+tiers:
+  T0-menial:            # read-only by construction; docs/research/classification
+    - cerebras          # $19 finite, auto-recharge OFF — primary (fast, quality)
+    - groq              # true-free durable — overflow
+    - openrouter-free   # :free lane, 1,000/day, durable
+  T1-workhorse:         # implementation/scaffold/mechanical/review pool
+    - codex             # 2 accounts, failover-driven lanes
+    - cursor            # lanes: A-included / A-api / B-included / B-api (dual-meter)
+    # composer-2.5: included-lane candidate PENDING BENCH (side-by-side vs grok-4.6)
+  T1Q-quality-reserve:  # class-OPT-IN only — never menial
+    - cursor-api-kimi-k3   # renewable monthly "Other Models" pool — FIRST
+    - openrouter-credits   # finite $101 war chest — SECOND (Kimi flagship; benchable)
+  T2-judgment:
+    - claude-workers    # account-rotated by live meters
+  T3-orchestrator:
+    - fable             # NEVER on the general ladder
+  T3-escalation:        # the gated exception (Maya-approved)
+    via: escalate-judgment
+    opt_in: true
+    requires_failed_attempts: 2   # named ledger ids, not vibes
+    fable_escalations_weekly: 3   # Maya-adjustable
+floors:
+  claude: {never_below_pct: 3, residency_cap_below_pct: 10, residency_max: 2}
+  cooling_minutes: 30        # unmetered lane rest after a rate-limit refusal
+  menial_verify_days: 7      # no routing without live-verification <=7 days
+caps:
+  openrouter_credits_weekly_usd: 10   # Maya-adjustable
+guards:
+  never_via_cursor: [claude, gpt, gemini]  # own-subscription families; + fable-via-cursor is NO-ZDR (privacy)

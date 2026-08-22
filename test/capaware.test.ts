@@ -1,8 +1,9 @@
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { adviseClaudeAccount, capAwarePolicy, currentClaudeAccount, decideRoute, isCursorNativeModel, readClaudeAccounts } from '../src/capaware.js';
-import { loadRouting, resolveRoute } from '../src/routing.js';
+import { adviseClaudeAccount, capAwarePolicy, currentClaudeAccount, decideRoute, isCursorNativeModel, readClaudeAccounts, type LadderContext } from '../src/capaware.js';
+import { loadRouting, resolveRoute, type RouteTarget } from '../src/routing.js';
+import type { LanesConfig } from '../src/lanes.js';
 import type { CapsByProvider, ProviderCaps } from '../src/usage.js';
 import { useTempResources } from './helpers.js';
 
@@ -104,5 +105,142 @@ describe('cap-aware routing', () => {
     const path = join(tempDir(), 'accounts.json'); writeFileSync(path, JSON.stringify({ claude: [{ id: 'a', configDir: '/p' }, { id: 'b' }, { nope: true }] }));
     expect(readClaudeAccounts(path)).toEqual([{ id: 'a', configDir: '/p', email: undefined, note: undefined }, { id: 'b', configDir: null, email: undefined, note: undefined }]);
     expect(readClaudeAccounts(join(tempDir(), 'missing.json'))).toEqual([]); writeFileSync(path, '{nope'); expect(readClaudeAccounts(path)).toEqual([]); writeFileSync(path, JSON.stringify({ claude: 'x' })); expect(readClaudeAccounts(path)).toEqual([]);
+  });
+});
+
+// HED-106 / HED-264 — the tier-ladder expansion walk INSIDE decideRoute. Gated on opts.ladder, so the
+// suite above (no ladder) proves the byte-stable paths are untouched; these exercise the walk with a
+// hermetic lanes/lane_defaults fixture (independent of the live routing values).
+describe('tier-ladder expansion walk (HED-264 fallback-not-refusal)', () => {
+  const lanesFixture: LanesConfig = {
+    tiers: {
+      'T0-menial': ['cerebras', 'groq', 'openrouter-free'],
+      'T1-workhorse': ['codex', 'cursor'],
+      'T1Q-quality-reserve': ['cursor-api-kimi-k3', 'openrouter-credits'],
+      'T2-judgment': ['claude-workers'],
+      'T3-orchestrator': ['fable'],
+      'T3-escalation': { via: 'escalate-judgment', opt_in: true, requires_failed_attempts: 2, fable_escalations_weekly: 3 },
+    },
+    floors: { claude: { never_below_pct: 3, residency_cap_below_pct: 10, residency_max: 2 }, cooling_minutes: 30, menial_verify_days: 7 },
+    caps: { openrouter_credits_weekly_usd: 10 },
+    guards: { never_via_cursor: ['claude', 'gpt', 'gemini'] },
+  };
+  const laneDefaultsFixture: Record<string, RouteTarget> = {
+    cerebras: { provider: 'cerebras', model: 'gpt-oss-120b' },
+    groq: { provider: 'groq', model: 'openai/gpt-oss-120b' },
+    codex: { provider: 'codex', model: 'gpt-5.6-terra' },
+    cursor: { provider: 'cursor', model: 'composer-2.5' },
+    'claude-workers': { provider: 'claude', model: 'sonnet' },
+  };
+  const ctx = (o: Partial<LadderContext> = {}): LadderContext => ({
+    lanes: () => lanesFixture, laneDefaults: laneDefaultsFixture, declaredProvider: 'claude',
+    editsCode: false, requiresWeb: false, mcp: [], skills: [], grantedCapabilities: [], excludeProviders: [], ...o,
+  });
+  const deadClaude = () => [{ id: 'a', configDir: null, loggedIn: false }];
+  const t = loadRouting(join(process.cwd(), 'routing/routing.v0.yaml'));
+
+  it('routes a dead-account claude PRIMARY to its declared fallback (the 26% bug fixed)', () => {
+    const d = decideRoute(t, { provider: 'claude', model: 'haiku' }, { provider: 'codex', model: 'gpt-5.6-luna' },
+      { claude: fresh('claude', 50) }, { explicit: false, claudeAccounts: deadClaude, ladder: ctx() });
+    expect(d).toMatchObject({ target: { provider: 'codex', model: 'gpt-5.6-luna' }, routedAwayForCap: true });
+    expect(d.routeReason).toBe('cap:expand claude/haiku dead(no-account) → codex/gpt-5.6-luna (declared-fallback)');
+  });
+
+  it('expands past a dead declared fallback across the tier ladder, narrating every dead lane', () => {
+    const caps = { claude: fresh('claude', 50), ...cursorCaps({ total: 10, api: 100 }) }; // cursor api pool exhausted → kimi metered-dead
+    const d = decideRoute(t, { provider: 'claude', model: 'haiku' }, { provider: 'cursor', model: 'kimi-k3-high' },
+      caps, { explicit: false, claudeAccounts: deadClaude, ladder: ctx() });
+    // declared fallback cursor/kimi dead(metered) → descend to T1; cursor excluded (fallback provider) → codex.
+    expect(d.target).toMatchObject({ provider: 'codex', model: 'gpt-5.6-terra' });
+    expect(d.routeReason).toBe('cap:expand claude/haiku dead(no-account); cursor/kimi-k3-high dead(metered) → codex/gpt-5.6-terra (t1)');
+  });
+
+  it('sets the next live candidate as the runtime fallback', () => {
+    const d = decideRoute(t, { provider: 'claude', model: 'opus' }, undefined,
+      { claude: fresh('claude', 50) }, { explicit: false, claudeAccounts: deadClaude, ladder: ctx({ minTier: 'T0' }) });
+    // no declared fallback; ladder from T2 (claude excluded) → codex, cursor, cerebras, groq.
+    expect(d.target).toMatchObject({ provider: 'codex', model: 'gpt-5.6-terra' });
+    expect(d.fallback).toMatchObject({ provider: 'cursor', model: 'composer-2.5' });
+  });
+
+  it('drops the read-only T0 lanes for an edits_code class', () => {
+    const d = decideRoute(t, { provider: 'claude', model: 'opus' }, undefined,
+      { claude: fresh('claude', 50) }, { explicit: false, claudeAccounts: deadClaude, ladder: ctx({ editsCode: true, minTier: 'T0' }) });
+    expect(d.target).toMatchObject({ provider: 'codex' }); // T1, never cerebras/groq (T0)
+    expect(d.fallback).toMatchObject({ provider: 'cursor' });
+  });
+
+  it('REFUSES with every lane named when a claude-only class exhausts the walk', () => {
+    const d = decideRoute(t, { provider: 'claude', model: 'fable' }, { provider: 'claude', model: 'opus' },
+      { claude: fresh('claude', 50) }, { explicit: false, claudeAccounts: deadClaude, ladder: ctx({ minTier: 'T2', maxTier: 'T2' }) });
+    // returns the ORIGINAL dead target so planDispatch's no-dispatchable-account refusal fires.
+    expect(d).toMatchObject({ target: { provider: 'claude', model: 'fable' }, routedAwayForCap: false });
+    expect(d.routeReason).toBe('cap:expand-exhausted claude/fable dead(no-account); claude/opus dead(no-account) — no live lane');
+  });
+
+  it('runs the over-soft-cap primary and DROPS the dead claude route-away fallback (Point B)', () => {
+    const d = decideRoute(t, { provider: 'codex', model: 'gpt-5.6-terra' }, { provider: 'claude', model: 'sonnet' },
+      { codex: fresh('codex', 95), claude: fresh('claude', 50) }, { explicit: false, claudeAccounts: deadClaude, ladder: ctx({ declaredProvider: 'codex' }) });
+    expect(d).toMatchObject({ target: { provider: 'codex', model: 'gpt-5.6-terra' }, routedAwayForCap: false });
+    expect(d.fallback).toBeUndefined(); // dead claude fallback dropped — never handed to the runtime retry (HED-332)
+    expect(d.routeReason).toBe('cap:over codex 5h 95%, fallback claude dead(no-account) → ran primary');
+    // F4: a dead claude fallback whose OWN window is also over threshold must read dead(no-account), not both-over.
+    const bothOver = decideRoute(t, { provider: 'codex', model: 'gpt-5.6-terra' }, { provider: 'claude', model: 'sonnet' },
+      { codex: fresh('codex', 95), claude: fresh('claude', 95) }, { explicit: false, claudeAccounts: deadClaude, ladder: ctx({ declaredProvider: 'codex' }) });
+    expect(bothOver.routeReason).toBe('cap:over codex 5h 95%, fallback claude dead(no-account) → ran primary');
+    expect(bothOver.fallback).toBeUndefined();
+  });
+
+  it('walks a dead-account claude route even when cap-aware routing is DISABLED (account-death is structural)', () => {
+    const disabled = { ...t, policy: { cap_aware_routing: { enabled: false } } } as typeof t;
+    const dead = decideRoute(disabled, { provider: 'claude', model: 'haiku' }, { provider: 'codex', model: 'gpt-5.6-luna' },
+      { claude: fresh('claude', 50) }, { explicit: false, claudeAccounts: deadClaude, ladder: ctx() });
+    expect(dead.target).toMatchObject({ provider: 'codex', model: 'gpt-5.6-luna' });
+    expect(dead.routeReason).toContain('cap:expand');
+    // a LIVE claude route with routing disabled still just runs (the byte-stable disabled path is preserved).
+    const live = decideRoute(disabled, { provider: 'claude', model: 'haiku' }, { provider: 'codex', model: 'gpt-5.6-luna' },
+      { claude: fresh('claude', 50) }, { explicit: false, claudeAccounts: () => [{ id: 'a', configDir: null }], ladder: ctx() });
+    expect(live.routeReason).toBe('cap-aware routing disabled (policy)');
+  });
+
+  it('never walks a pinned dispatch — the pin is a placement contract', () => {
+    const d = decideRoute(t, { provider: 'claude', model: 'haiku' }, { provider: 'codex', model: 'gpt-5.6-luna' },
+      { claude: fresh('claude', 50) }, { explicit: false, accountPin: 'a', claudeAccounts: deadClaude, ladder: ctx() });
+    expect(d).toMatchObject({ target: { provider: 'claude', model: 'haiku' }, routedAwayForCap: false });
+    expect(d.routeReason).toBe('cap:ok claude 5h 50%');
+  });
+
+  it('never walks when no ladder context is supplied (the byte-stable path)', () => {
+    const d = decideRoute(t, { provider: 'claude', model: 'haiku' }, { provider: 'codex', model: 'gpt-5.6-luna' },
+      { claude: fresh('claude', 50) }, { explicit: false, claudeAccounts: deadClaude });
+    expect(d).toMatchObject({ target: { provider: 'claude', model: 'haiku' }, routedAwayForCap: false });
+    expect(d.routeReason).toBe('cap:ok claude 5h 50%');
+  });
+
+  it('excludes the author family from expansion (reviewer diversity holds in the walk)', () => {
+    const d = decideRoute(t, { provider: 'claude', model: 'opus' }, undefined,
+      { claude: fresh('claude', 50) }, { explicit: false, claudeAccounts: deadClaude, ladder: ctx({ excludeProviders: ['codex'] }) });
+    // codex banned (author family) → the walk skips it and takes the next T1 lane, cursor.
+    expect(d.target).toMatchObject({ provider: 'cursor', model: 'composer-2.5' });
+  });
+
+  it('drops expansion candidates that cannot attach the class MCP, refusing rather than routing discovery-less (HED-249)', () => {
+    // mcp:[memtrace] with only the T0 lanes reachable (codex/cursor excluded); cerebras/groq cannot attach
+    // memtrace, so every candidate is filtered and the walk exhausts instead of running without discovery.
+    const d = decideRoute(t, { provider: 'claude', model: 'opus' }, undefined,
+      { claude: fresh('claude', 50) }, { explicit: false, claudeAccounts: deadClaude, ladder: ctx({ mcp: ['memtrace'], minTier: 'T0', excludeProviders: ['codex', 'cursor'] }) });
+    expect(d).toMatchObject({ target: { provider: 'claude', model: 'opus' }, routedAwayForCap: false });
+    expect(d.routeReason).toContain('cap:expand-exhausted');
+  });
+
+  it('a requiresWeb class expands only to web-capable lanes, honouring a granted browse capability', () => {
+    // no browse grant → codex is not web-capable → nothing eligible → exhaust.
+    const noWeb = decideRoute(t, { provider: 'claude', model: 'opus' }, undefined,
+      { claude: fresh('claude', 50) }, { explicit: false, claudeAccounts: deadClaude, ladder: ctx({ requiresWeb: true }) });
+    expect(noWeb.routeReason).toContain('cap:expand-exhausted');
+    // browse granted (the caller's capability, unioned by planDispatch) → codex IS web-capable → take it.
+    const withWeb = decideRoute(t, { provider: 'claude', model: 'opus' }, undefined,
+      { claude: fresh('claude', 50) }, { explicit: false, claudeAccounts: deadClaude, ladder: ctx({ requiresWeb: true, grantedCapabilities: ['browse'] }) });
+    expect(withWeb.target).toMatchObject({ provider: 'codex', model: 'gpt-5.6-terra' });
   });
 });

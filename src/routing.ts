@@ -46,13 +46,39 @@ export interface Route extends RouteTarget {
   autoAssess: boolean;
   /** HED-3: ordered alternatives when the caller's `author_provider` matches the route (a reviewer must differ). */
   reviewerPool?: { provider: string; model: string }[];
+  /** HED-106 tier bounds for the expansion walk (auto-join tiers only). `minTier` = the cheapest tier
+   *  the class tolerates when its own routes are dead (default T1); `maxTier` = the class author's
+   *  pre-declared ceiling (default: the declared route's own tier — no silent ascent, "no new
+   *  permission implied"). Undefined = the default applies; the ladder never auto-joins T1Q/T3. */
+  minTier?: Tier;
+  maxTier?: Tier;
 }
+
+/**
+ * The auto-joinable tiers of lanes.yaml, cheapest → priciest (HED-106). T1Q (quality reserve) and
+ * both T3 lanes (fable orchestrator, escalation) are DELIBERATELY absent — they never auto-join the
+ * expansion walk (opt-in only, per lanes.yaml). A class's `min_tier`/`max_tier` bounds are expressed
+ * in these terms; the ladder maps each to its lanes.yaml key (`T0` → `T0-menial`, …).
+ */
+export type Tier = 'T0' | 'T1' | 'T2';
+export const AUTO_JOIN_TIERS: readonly Tier[] = ['T0', 'T1', 'T2'];
+export const isTier = (v: unknown): v is Tier => v === 'T0' || v === 'T1' || v === 'T2';
+/** The default `min_tier` when a class declares none — the workhorse floor. Shared by resolveRoute's
+ *  bound validation AND the walk's own default so the two can never drift (HED-106 grok review). */
+export const DEFAULT_MIN_TIER: Tier = 'T1';
 
 export interface RoutingTable {
   version: number;
   policy: Record<string, unknown>;
   providers: Record<string, Record<string, unknown>>;
   taskClasses: Record<string, unknown>;
+  /**
+   * HED-106 tier-ladder expansion: lane-name (lanes.yaml) → the ONE safe concrete route it resolves
+   * to when the walk auto-joins it. Lanes absent here never auto-join (openrouter-free, the T1Q
+   * reserve, T3). Structurally validated at load; live-model membership is a CI invariant. Optional so
+   * a hand-built RoutingTable (tests) may omit it — loadRouting always normalizes it to at least `{}`.
+   */
+  laneDefaults?: Record<string, RouteTarget>;
 }
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -74,7 +100,32 @@ export function loadRouting(path = defaultRoutingPath()): RoutingTable {
     policy: raw.policy ?? {},
     providers: raw.providers ?? {},
     taskClasses: raw.task_classes,
+    laneDefaults: parseLaneDefaults(raw.lane_defaults),
   };
+}
+
+/**
+ * `lane_defaults:` (HED-106) → lane-name → concrete RouteTarget. Absent/empty is fine (no lane
+ * auto-joins the walk then). Malformed entries THROW — a policy file that silently mis-parses a
+ * lane→model map would route expansion to nowhere, exactly the failure this loader exists to prevent.
+ */
+function parseLaneDefaults(node: unknown): Record<string, RouteTarget> {
+  if (node === undefined || node === null) return {};
+  if (typeof node !== 'object' || Array.isArray(node)) {
+    throw new Error(`routing table: lane_defaults must be a map of lane-name → {provider, model}`);
+  }
+  const out: Record<string, RouteTarget> = {};
+  for (const [lane, raw] of Object.entries(node as Record<string, unknown>)) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      throw new Error(`routing table: lane_defaults.${lane} must be an object with provider + model`);
+    }
+    const entry = raw as Record<string, unknown>;
+    if (typeof entry.provider !== 'string' || !entry.provider || typeof entry.model !== 'string' || !entry.model) {
+      throw new Error(`routing table: lane_defaults.${lane} needs non-empty string provider and model`);
+    }
+    out[lane] = { provider: entry.provider, model: entry.model };
+  }
+  return out;
 }
 
 /** A YAML list field must be a list: `skills: quality-gate` (a bare string) would otherwise spread
@@ -160,6 +211,16 @@ export function resolveRoute(table: RoutingTable, taskClass: string): Route {
     mcp: fb.mcp ?? primary.mcp,
     capabilities: fb.capabilities ?? primary.capabilities,
   } : undefined;
+  // Tier bounds validate as a PAIR against the EFFECTIVE min (the default fills in when min_tier is
+  // absent), so `max_tier: T0` with a defaulted min is caught too — an empty expansion range that would
+  // silently turn a dead-route walk into a refusal is a config error, so it fails LOUD. (A start tier
+  // above an explicit max cannot be validated here without lanes; buildLadder clamps it safely.)
+  const minTier = readTier(node.min_tier, `task_classes.${taskClass}.min_tier`);
+  const maxTier = readTier(node.max_tier, `task_classes.${taskClass}.max_tier`);
+  const effMinTier = minTier ?? DEFAULT_MIN_TIER;
+  if (maxTier && AUTO_JOIN_TIERS.indexOf(effMinTier) > AUTO_JOIN_TIERS.indexOf(maxTier)) {
+    throw new Error(`task class "${taskClass}": min_tier ${effMinTier}${minTier ? '' : ' (default)'} is above max_tier ${maxTier} — the expansion range is empty`);
+  }
   return {
     taskClass,
     ...primary,
@@ -174,7 +235,17 @@ export function resolveRoute(table: RoutingTable, taskClass: string): Route {
       ? (node.reviewer_pool as any[]).filter((e) => e && typeof e.provider === 'string' && typeof e.model === 'string')
           .map((e) => ({ provider: e.provider as string, model: e.model as string }))
       : undefined,
+    minTier,
+    maxTier,
   };
+}
+
+/** A `min_tier`/`max_tier` field is one of the auto-join tiers or absent — a typo (`T4`, `T1-workhorse`)
+ *  must fail LOUD, not silently disable the bound (loud beats silent for a policy file). */
+function readTier(value: unknown, where: string): Tier | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!isTier(value)) throw new Error(`routing table: ${where} must be one of T0, T1, T2 (got ${JSON.stringify(value)})`);
+  return value;
 }
 
 /** Structural caps (HED-2) — from `policy.structural_caps` in the routing YAML, with defaults. */

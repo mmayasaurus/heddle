@@ -206,28 +206,35 @@ describe('regression PR#250 — Claude dispatches require an addressable registe
     return readProviderCaps({ usageDir, nowS }).claude;
   };
 
-  it('refuses without a worker run when every registered account has a fresh billing or logged-out signal', async () => {
+  // HED-106 S1 / HED-264 (fallback-not-refusal) FLIP: PR#250 made a dead-account claude PRIMARY REFUSE.
+  // The tier-ladder walk now routes it to the class's declared NON-claude fallback instead — PR#250's
+  // safety property still holds (we never run claude on a dead account; we run CODEX), but the old
+  // 26%-failure refusal becomes a live route. The refusal is PRESERVED where there is no live lane:
+  // a claude runtime-FALLBACK with no account, a pinned dead account, and a claude-only class (below).
+  it('walks a billing/logged-out claude PRIMARY to its declared codex fallback instead of refusing (HED-264)', async () => {
     const fake = fakeAdapter(undefined, { readAgents: false }); const ledger = tempLedger();
     const outcome = await dispatch({
       taskClass: 'research-summarize', prompt: 'x', cwd: tempDir(), identity: unbound, accounts: registry,
       caps: { claude: capsWithSignals([{ account: 'acct1', reason: 'billing' }, { account: 'acct2', reason: 'logged-out' }]) },
     }, ledger, () => fake.adapter);
 
-    expect(outcome).toMatchObject({ ok: false, refusal: { code: 'no-dispatchable-account' } });
-    expect(outcome.refusal?.reason).toContain('all 2 registered accounts are logged-out or non-dispatchable');
-    expect(fake.calls).toHaveLength(0); expect(ledger.inFlight()).toEqual([]);
-    expect(ledger.recent(1)[0]).toMatchObject({ refusal: 'no-dispatchable-account', account: null });
+    expect(outcome.ok).toBe(true); expect(outcome.refusal).toBeUndefined();
+    expect(fake.calls).toHaveLength(1); expect(fake.calls[0].opts.model).toBe('gpt-5.6-luna');
+    expect(outcome.routeReason).toContain('cap:expand'); expect(outcome.routeReason).toContain('claude/haiku dead(no-account)');
+    expect(outcome.routeReason).toContain('codex/gpt-5.6-luna');
+    expect(ledger.recent(1)[0]).toMatchObject({ provider: 'codex', model: 'gpt-5.6-luna', ok: 1 });
   });
 
-  it('refuses without a worker run when every registered account is logged out', async () => {
+  it('walks a fully logged-out claude PRIMARY to its declared codex fallback (HED-264)', async () => {
     const fake = fakeAdapter(undefined, { readAgents: false }); const ledger = tempLedger();
     const outcome = await dispatch({
       taskClass: 'research-summarize', prompt: 'x', cwd: tempDir(), identity: unbound,
       accounts: registry.map((account) => ({ ...account, loggedIn: false })), caps: { claude: claudeCaps([]) },
     }, ledger, () => fake.adapter);
 
-    expect(outcome.refusal?.code).toBe('no-dispatchable-account');
-    expect(fake.calls).toHaveLength(0); expect(ledger.inFlight()).toEqual([]);
+    expect(outcome.ok).toBe(true); expect(outcome.refusal).toBeUndefined();
+    expect(fake.calls).toHaveLength(1); expect(fake.calls[0].opts.model).toBe('gpt-5.6-luna');
+    expect(ledger.recent(1)[0]).toMatchObject({ provider: 'codex', model: 'gpt-5.6-luna', ok: 1 });
   });
 
   it('runs when a registered Claude account remains addressable', async () => {
@@ -262,16 +269,15 @@ describe('regression PR#250 — Claude dispatches require an addressable registe
     expect(nonClaude.ok).toBe(true); expect(codex.calls).toHaveLength(1);
   });
 
-  it('keeps the dry-run summary aligned with no-dispatchable-account refusal', () => {
+  it('dry-run summary shows the HED-264 walk to the codex fallback (dispatch/plan parity, HED-250)', () => {
     const plan = planDispatch({
       taskClass: 'research-summarize', prompt: 'x', cwd: tempDir(), identity: unbound,
       accounts: registry.map((account) => ({ ...account, loggedIn: false })), caps: { claude: claudeCaps([]) },
     });
 
-    expect(summarizePlan(plan)).toMatchObject({
-      would_run: null,
-      refusal: { code: 'no-dispatchable-account' },
-    });
+    const summary = summarizePlan(plan);
+    expect(summary).toMatchObject({ would_run: 'codex/gpt-5.6-luna', routed_away_for_cap: true, refusal: null });
+    expect(String(summary.route_reason)).toContain('cap:expand');
   });
 
   it('preserves the failed primary ledger outcome when a Claude failure fallback has no addressable account', async () => {
@@ -392,5 +398,93 @@ describe('regression PR#250 — Claude dispatches require an addressable registe
     expect(outcome).toMatchObject({ ok: false, refusal: { code: 'no-dispatchable-account' } });
     expect(outcome.refusal?.reason).toContain('account_pin "acct1"');
     expect(fake.calls).toHaveLength(0); expect(ledger.recent(1)[0]).toMatchObject({ refusal: 'no-dispatchable-account' });
+  });
+});
+
+// HED-106: a walked LADDER candidate (a lane_defaults target reached past the declared fallback) is a
+// fallback route and must inherit the class's mcp + skills — else a degraded-fleet worker runs without
+// memtrace and trips the memtrace-first hook (ledger 206, the exact HED-205 failure the walk prevents).
+describe('HED-106 — walked ladder candidate inherits class mcp + skills', () => {
+  const { tempDir, tempLedger } = useTempResources('heddle-walk-enrich-test-');
+  const { unbound } = IDENTITIES;
+  const deadRegistry: ClaudeAccount[] = [{ id: 'acct1', configDir: null, loggedIn: false }];
+
+  // claude primary + claude fallback (both dead) force the walk PAST the declared fallback onto the
+  // codex T1 lane_defaults candidate; the class carries mcp:[memtrace] + a code-discovery pack.
+  function writeWalkRouting(dir: string): string {
+    const yaml = join(dir, 'walk-routing.yaml');
+    writeFileSync(yaml, [
+      'version: 0', 'providers:',
+      '  claude: { auth: anthropic-subscription, execution: headless, models: [opus] }',
+      '  codex: { auth: chatgpt-subscription, models: [gpt-5.6-terra] }',
+      'lane_defaults:',
+      '  codex: { provider: codex, model: gpt-5.6-terra }',
+      'task_classes:', '  walk-mcp:',
+      '    provider: claude', '    model: opus',
+      '    mcp: [memtrace]', '    skills: [worker-role, code-discovery]', '    edits_code: true',
+      '    fallback: { provider: claude, model: opus }', '',
+    ].join('\n'));
+    return yaml;
+  }
+
+  it('enriches the walked codex candidate with the class mcp + skills (plan + run)', async () => {
+    const prev = process.env.HEDDLE_ROUTING;
+    process.env.HEDDLE_ROUTING = writeWalkRouting(tempDir());
+    try {
+      // plan level: the effective target carries the class policy that runTarget reads from it.
+      const plan = planDispatch({
+        taskClass: 'walk-mcp', prompt: 'x', cwd: tempDir(), identity: unbound,
+        accounts: deadRegistry, caps: { claude: claudeCaps([]) },
+      });
+      expect(plan.target).toMatchObject({ provider: 'codex', model: 'gpt-5.6-terra', mcp: ['memtrace'], skills: ['worker-role', 'code-discovery'] });
+      expect(plan.decision.routeReason).toContain('codex/gpt-5.6-terra (t1)');
+
+      // run level: the codex worker actually receives the memtrace attachment (codex -c mcp flags).
+      const fake = fakeAdapter(); const ledger = tempLedger();
+      const outcome = await dispatch({
+        taskClass: 'walk-mcp', prompt: 'x', cwd: tempDir(), identity: unbound,
+        accounts: deadRegistry, caps: { claude: claudeCaps([]) },
+      }, ledger, () => fake.adapter);
+      expect(outcome).toMatchObject({ ok: true, provider: 'codex', model: 'gpt-5.6-terra' });
+      expect(fake.calls[0].opts.extraFlags?.some((f) => f.includes('memtrace'))).toBe(true);
+    } finally {
+      if (prev === undefined) delete process.env.HEDDLE_ROUTING; else process.env.HEDDLE_ROUTING = prev;
+    }
+  });
+
+  // HED-106 review (codex): a requiresWeb class's walk must judge web-capability on the EFFECTIVE
+  // granted caps (class defaults ∪ req.capabilities), so a caller's browse grant lets it expand to codex.
+  it('expands a dead requiresWeb claude class to codex only when browse is granted by the caller', () => {
+    const prev = process.env.HEDDLE_ROUTING;
+    const yaml = join(tempDir(), 'web-routing.yaml');
+    writeFileSync(yaml, [
+      'version: 0', 'providers:',
+      '  claude: { auth: anthropic-subscription, execution: headless, models: [opus] }',
+      '  codex: { auth: chatgpt-subscription, models: [gpt-5.6-terra] }',
+      'lane_defaults:', '  codex: { provider: codex, model: gpt-5.6-terra }',
+      'task_classes:', '  web-claude:',
+      '    provider: claude', '    model: opus', '    requires_web: true', '',
+    ].join('\n'));
+    process.env.HEDDLE_ROUTING = yaml;
+    try {
+      const refused = planDispatch({ taskClass: 'web-claude', prompt: 'x', cwd: tempDir(), identity: unbound, accounts: deadRegistry, caps: { claude: claudeCaps([]) } });
+      expect(summarizePlan(refused).would_run).toBeNull(); // codex not web-capable without a browse grant → exhaust
+      const routed = planDispatch({ taskClass: 'web-claude', prompt: 'x', cwd: tempDir(), identity: unbound, capabilities: ['browse'], accounts: deadRegistry, caps: { claude: claudeCaps([]) } });
+      expect(summarizePlan(routed).would_run).toBe('codex/gpt-5.6-terra');
+    } finally {
+      if (prev === undefined) delete process.env.HEDDLE_ROUTING; else process.env.HEDDLE_ROUTING = prev;
+    }
+  });
+
+  // HED-106 review (grok, finding 5): the walk is a HEADLESS + REGISTRY-gated mechanism — it must NOT
+  // fire for an in-session dispatch (runs on the orchestrator's own account; the bug I fixed mid-flight)
+  // nor for an empty registry (inherit the caller's login — claudeRouteDead treats length 0 as not-dead).
+  it('does NOT walk an in-session or empty-registry claude dispatch', async () => {
+    const inherited = fakeAdapter(undefined, { readAgents: false });
+    const run = await dispatch({ taskClass: 'research-summarize', prompt: 'x', cwd: tempDir(), identity: unbound, accounts: [], caps: { claude: claudeCaps([]) } }, tempLedger(), () => inherited.adapter);
+    expect(run).toMatchObject({ ok: true, provider: 'claude', model: 'haiku' }); // inherited login, NOT a walked codex
+    const session = fakeAdapter(undefined, { readAgents: false });
+    const inSession = await dispatch({ taskClass: 'research-summarize', prompt: 'x', cwd: tempDir(), identity: unbound, inSession: true, accounts: [{ id: 'a', configDir: null, loggedIn: false }], caps: { claude: claudeCaps([]) } }, tempLedger(), () => session.adapter);
+    expect(inSession.refusal?.code).toBe('claude-in-session'); expect(session.calls).toHaveLength(0);
   });
 });
