@@ -13,7 +13,7 @@ describe('HED-106 lane_defaults + tier bounds — routing.v0.yaml', () => {
     expect(realTable.laneDefaults).toMatchObject({
       cerebras: { provider: 'cerebras', model: 'gpt-oss-120b' },
       codex: { provider: 'codex', model: 'gpt-5.6-terra' },
-      cursor: { provider: 'cursor', model: 'composer-2.5' },
+      cursor: { provider: 'cursor', model: 'cursor-grok-4.6-high' },
       'claude-workers': { provider: 'claude', model: 'sonnet' },
     });
     // openrouter-free is deliberately absent — no routable :free id yet.
@@ -28,8 +28,9 @@ describe('HED-106 lane_defaults + tier bounds — routing.v0.yaml', () => {
     }
   });
 
-  it('never resolves a lane default to a metered/never-auto model (cursor→composer not kimi, claude→sonnet not fable)', () => {
-    expect(realTable.laneDefaults?.cursor?.model).toBe('composer-2.5');
+  it('never resolves a lane default to a metered/never-auto model (cursor→bench-proven grok not kimi, claude→sonnet not fable)', () => {
+    expect(realTable.laneDefaults?.cursor?.model).toBe('cursor-grok-4.6-high'); // the bench-proven incumbent (R nod 2026-08-22); composer-2.5 pending bench
+    expect(realTable.laneDefaults?.cursor?.model).not.toBe('kimi-k3-high');
     expect(realTable.laneDefaults?.['claude-workers']?.model).toBe('sonnet');
     expect(realTable.laneDefaults?.['claude-workers']?.model).not.toBe('fable');
   });

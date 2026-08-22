@@ -129,7 +129,7 @@ describe('tier-ladder expansion walk (HED-264 fallback-not-refusal)', () => {
     cerebras: { provider: 'cerebras', model: 'gpt-oss-120b' },
     groq: { provider: 'groq', model: 'openai/gpt-oss-120b' },
     codex: { provider: 'codex', model: 'gpt-5.6-terra' },
-    cursor: { provider: 'cursor', model: 'composer-2.5' },
+    cursor: { provider: 'cursor', model: 'cursor-grok-4.6-high' },
     'claude-workers': { provider: 'claude', model: 'sonnet' },
   };
   const ctx = (o: Partial<LadderContext> = {}): LadderContext => ({
@@ -160,7 +160,7 @@ describe('tier-ladder expansion walk (HED-264 fallback-not-refusal)', () => {
       { claude: fresh('claude', 50) }, { explicit: false, claudeAccounts: deadClaude, ladder: ctx({ minTier: 'T0' }) });
     // no declared fallback; ladder from T2 (claude excluded) → codex, cursor, cerebras, groq.
     expect(d.target).toMatchObject({ provider: 'codex', model: 'gpt-5.6-terra' });
-    expect(d.fallback).toMatchObject({ provider: 'cursor', model: 'composer-2.5' });
+    expect(d.fallback).toMatchObject({ provider: 'cursor', model: 'cursor-grok-4.6-high' });
   });
 
   it('drops the read-only T0 lanes for an edits_code class', () => {
@@ -221,7 +221,7 @@ describe('tier-ladder expansion walk (HED-264 fallback-not-refusal)', () => {
     const d = decideRoute(t, { provider: 'claude', model: 'opus' }, undefined,
       { claude: fresh('claude', 50) }, { explicit: false, claudeAccounts: deadClaude, ladder: ctx({ excludeProviders: ['codex'] }) });
     // codex banned (author family) → the walk skips it and takes the next T1 lane, cursor.
-    expect(d.target).toMatchObject({ provider: 'cursor', model: 'composer-2.5' });
+    expect(d.target).toMatchObject({ provider: 'cursor', model: 'cursor-grok-4.6-high' });
   });
 
   it('drops expansion candidates that cannot attach the class MCP, refusing rather than routing discovery-less (HED-249)', () => {

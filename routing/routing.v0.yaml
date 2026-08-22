@@ -142,7 +142,7 @@ lane_defaults:
   cerebras:       {provider: cerebras, model: gpt-oss-120b}       # T0-menial (read-only by construction)
   groq:           {provider: groq, model: openai/gpt-oss-120b}    # T0-menial (read-only by construction)
   codex:          {provider: codex, model: gpt-5.6-terra}         # T1-workhorse
-  cursor:         {provider: cursor, model: composer-2.5}         # T1-workhorse — native pool, cache-warm; never kimi
+  cursor:         {provider: cursor, model: cursor-grok-4.6-high} # T1-workhorse — the BENCH-PROVEN incumbent; NEVER kimi. composer-2.5 (PENDING BENCH per lanes.yaml) swaps in as a 1-line edit once its §C side-by-side lands (R nod 2026-08-22: a c2+ candidate executes REAL work, so it must be bench-proven)
   claude-workers: {provider: claude, model: sonnet}               # T2-judgment — account-picked by the live meter; never fable
 
 # Task classes are intentionally coarse for the pilot. Refine from ledger data, not guesses.
