@@ -601,6 +601,7 @@ export function pickClaudeAccount(
     const row = caps?.accounts.find((r) => r.id === id);
     return row && !row.stale ? row.sevenDay.usedPercentage : null;
   };
+  const floorApplies = Boolean(opts.floors && caps && !caps.stale && caps.source !== 'none');
   if (opts.pin) {
     const a = accounts.find((x) => x.id === opts.pin);
     if (!a) throw new Error(`account_pin "${opts.pin}" is not in ~/.heddle/accounts.json (known: ${accounts.map((x) => x.id).join(', ')})`);
@@ -615,6 +616,9 @@ export function pickClaudeAccount(
       throw new Error(`account_pin "${opts.pin}" is registered but NOT dispatchable (${reason}) — wait for a successful keeper ping or fix the account before pinning it.`);
     }
     const used = usedOf(a.id);
+    if (floorApplies && opts.floors && isFloored(used, opts.floors)) {
+      throw new Error(`account_pin "${opts.pin}" is at/below the headroom floor (5h ${used!.toFixed(0)}%, floor ${opts.floors.neverBelowPct}%) — pick a healthier account`);
+    }
     return { account: a, usedPct: used, usedPct7d: used7dOf(a.id), reason: `account:${a.id} pinned${used !== null ? ` (5h ${used.toFixed(0)}%)` : ''}`, ...envFor(a) };
   }
   // A logged-out account is not addressable, whatever its caps say (a fresh keeper anchor for a dir
@@ -622,7 +626,7 @@ export function pickClaudeAccount(
   // (HED-261, when floors are supplied) a FLOORED account — 5h headroom below never_below_pct — is not
   // addressable either: never select/resume onto a near-exhausted account (the rollover-scare guard).
   const addressable = accounts.filter((a) =>
-    a.loggedIn !== false && !isDispatchExcluded(caps, a.id) && !(opts.floors && isFloored(usedOf(a.id), opts.floors)));
+    a.loggedIn !== false && !isDispatchExcluded(caps, a.id) && !(floorApplies && opts.floors && isFloored(usedOf(a.id), opts.floors)));
   // For a FABLE-model target, Fable-weekly headroom outranks 5h headroom (HED-76): the weekly
   // Fable share is the binding constraint, and only accounts with a KNOWN estimate compete on it
   // (unknown → fall through to the normal 5h ordering — unknown never decides).

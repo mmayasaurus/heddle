@@ -209,14 +209,18 @@ try {
       const floors = claudeFloorsFrom(loadLanes());
       // Residency-balancing by --for is a later increment; this identifies the agent being launched only.
       const forAgent = arg('--for');
+      if (has('--for') && (!forAgent || forAgent.startsWith('--'))) {
+        console.error('usage: heddle account pick [--for <letter>] [--json] [--explain]');
+        process.exit(2);
+      }
       const pick = pickClaudeAccount(caps.claude, accounts, { floors });
       const usedOf = (id: string): number | null => {
-        const row = caps.claude.accounts.find((account) => account.id === id);
-        return row && !row.stale ? row.fiveHour.usedPercentage : null;
+        const row = caps.claude?.accounts.find((account) => account.id === id);
+        return row && !caps.claude?.stale && caps.claude.source !== 'none' && !row.stale ? row.fiveHour.usedPercentage : null;
       };
       const accountRows = accounts.map((account) => {
         const usedPct = usedOf(account.id);
-        const floored = isFloored(usedPct, floors);
+        const floored = caps.claude !== undefined && !caps.claude.stale && caps.claude.source !== 'none' && isFloored(usedPct, floors);
         const loggedOut = account.loggedIn === false;
         const dispatchExcluded = isDispatchExcluded(caps.claude, account.id);
         return {

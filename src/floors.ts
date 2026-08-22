@@ -22,11 +22,17 @@ export interface ClaudeFloors {
 
 /** Read the claude floors from lanes.yaml — the one ratified source both consumers load. */
 export function claudeFloorsFrom(lanes: LanesConfig): ClaudeFloors {
-  return {
-    neverBelowPct: lanes.floors.claude.never_below_pct,
-    residencyCapBelowPct: lanes.floors.claude.residency_cap_below_pct,
-    residencyMax: lanes.floors.claude.residency_max,
-  };
+  const { never_below_pct, residency_cap_below_pct, residency_max } = lanes.floors.claude;
+  if (never_below_pct < 0 || never_below_pct > 100) {
+    throw new Error('lanes config: floors.claude.never_below_pct must be between 0 and 100');
+  }
+  if (residency_cap_below_pct < 0 || residency_cap_below_pct > 100) {
+    throw new Error('lanes config: floors.claude.residency_cap_below_pct must be between 0 and 100');
+  }
+  if (residency_max < 0) {
+    throw new Error('lanes config: floors.claude.residency_max must be greater than or equal to 0');
+  }
+  return { neverBelowPct: never_below_pct, residencyCapBelowPct: residency_cap_below_pct, residencyMax: residency_max };
 }
 
 /** Headroom remaining on an account: 100 − used%. null used (unknown/stale) → null (unknown never decides). */

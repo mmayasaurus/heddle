@@ -78,4 +78,28 @@ describe('heddle account pick CLI', () => {
       reason: expect.any(String), unsetConfigDir: true, for: 'U',
     });
   }, 30_000);
+
+  it('does not crash when limits.json has no Claude provider data', async () => {
+    const dir = tempDir();
+    const accountsPath = join(dir, 'accounts.json');
+    writeFileSync(accountsPath, JSON.stringify({ claude: [{ id: 'default', configDir: null }] }));
+
+    const result = await runCli(['account', 'pick'], {
+      env: { HEDDLE_ACCOUNTS: accountsPath, HEDDLE_USAGE_DIR: dir },
+    });
+
+    expect([0, 1]).toContain(result.code);
+    expect(result.stderr).not.toMatch(/TypeError|\.find\(/);
+  }, 30_000);
+
+  it('rejects a missing --for value instead of consuming --json', async () => {
+    const { accountsPath, usageDir } = fixture([{ id: 'default', configDir: null }], { default: 40 });
+
+    const result = await runCli(['account', 'pick', '--for', '--json'], {
+      env: { HEDDLE_ACCOUNTS: accountsPath, HEDDLE_USAGE_DIR: usageDir },
+    });
+
+    expect(result.code).toBe(2);
+    expect(result.stderr).toMatch(/usage: heddle account pick/);
+  }, 30_000);
 });
