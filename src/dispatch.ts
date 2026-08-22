@@ -1181,7 +1181,10 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
           requiresWeb: route.requiresWeb,
           mcp: req.mcp ?? route.mcp ?? [],
           skills: route.skills ?? [],
-          grantedCapabilities: target.capabilities ?? [],
+          // The EFFECTIVE granted set (class defaults ∪ caller's) — the same union runTarget grants — so
+          // the walk's webCapable filter judges a candidate on the caps it would actually run with, not
+          // just the class defaults (a caller's `browse` must let a web class expand to codex; HED-106 review).
+          grantedCapabilities: [...new Set([...(target.capabilities ?? []), ...(req.capabilities ?? [])])],
           excludeProviders: route.reviewerPool && author ? [author] : [],
         },
       });

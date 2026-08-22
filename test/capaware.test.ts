@@ -198,4 +198,31 @@ describe('tier-ladder expansion walk (HED-264 fallback-not-refusal)', () => {
     expect(d).toMatchObject({ target: { provider: 'claude', model: 'haiku' }, routedAwayForCap: false });
     expect(d.routeReason).toBe('cap:ok claude 5h 50%');
   });
+
+  it('excludes the author family from expansion (reviewer diversity holds in the walk)', () => {
+    const d = decideRoute(t, { provider: 'claude', model: 'opus' }, undefined,
+      { claude: fresh('claude', 50) }, { explicit: false, claudeAccounts: deadClaude, ladder: ctx({ excludeProviders: ['codex'] }) });
+    // codex banned (author family) → the walk skips it and takes the next T1 lane, cursor.
+    expect(d.target).toMatchObject({ provider: 'cursor', model: 'composer-2.5' });
+  });
+
+  it('drops expansion candidates that cannot attach the class MCP, refusing rather than routing discovery-less (HED-249)', () => {
+    // mcp:[memtrace] with only the T0 lanes reachable (codex/cursor excluded); cerebras/groq cannot attach
+    // memtrace, so every candidate is filtered and the walk exhausts instead of running without discovery.
+    const d = decideRoute(t, { provider: 'claude', model: 'opus' }, undefined,
+      { claude: fresh('claude', 50) }, { explicit: false, claudeAccounts: deadClaude, ladder: ctx({ mcp: ['memtrace'], minTier: 'T0', excludeProviders: ['codex', 'cursor'] }) });
+    expect(d).toMatchObject({ target: { provider: 'claude', model: 'opus' }, routedAwayForCap: false });
+    expect(d.routeReason).toContain('cap:expand-exhausted');
+  });
+
+  it('a requiresWeb class expands only to web-capable lanes, honouring a granted browse capability', () => {
+    // no browse grant → codex is not web-capable → nothing eligible → exhaust.
+    const noWeb = decideRoute(t, { provider: 'claude', model: 'opus' }, undefined,
+      { claude: fresh('claude', 50) }, { explicit: false, claudeAccounts: deadClaude, ladder: ctx({ requiresWeb: true }) });
+    expect(noWeb.routeReason).toContain('cap:expand-exhausted');
+    // browse granted (the caller's capability, unioned by planDispatch) → codex IS web-capable → take it.
+    const withWeb = decideRoute(t, { provider: 'claude', model: 'opus' }, undefined,
+      { claude: fresh('claude', 50) }, { explicit: false, claudeAccounts: deadClaude, ladder: ctx({ requiresWeb: true, grantedCapabilities: ['browse'] }) });
+    expect(withWeb.target).toMatchObject({ provider: 'codex', model: 'gpt-5.6-terra' });
+  });
 });

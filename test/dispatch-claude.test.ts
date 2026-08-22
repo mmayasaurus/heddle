@@ -451,4 +451,28 @@ describe('HED-106 — walked ladder candidate inherits class mcp + skills', () =
       if (prev === undefined) delete process.env.HEDDLE_ROUTING; else process.env.HEDDLE_ROUTING = prev;
     }
   });
+
+  // HED-106 review (codex): a requiresWeb class's walk must judge web-capability on the EFFECTIVE
+  // granted caps (class defaults ∪ req.capabilities), so a caller's browse grant lets it expand to codex.
+  it('expands a dead requiresWeb claude class to codex only when browse is granted by the caller', () => {
+    const prev = process.env.HEDDLE_ROUTING;
+    const yaml = join(tempDir(), 'web-routing.yaml');
+    writeFileSync(yaml, [
+      'version: 0', 'providers:',
+      '  claude: { auth: anthropic-subscription, execution: headless, models: [opus] }',
+      '  codex: { auth: chatgpt-subscription, models: [gpt-5.6-terra] }',
+      'lane_defaults:', '  codex: { provider: codex, model: gpt-5.6-terra }',
+      'task_classes:', '  web-claude:',
+      '    provider: claude', '    model: opus', '    requires_web: true', '',
+    ].join('\n'));
+    process.env.HEDDLE_ROUTING = yaml;
+    try {
+      const refused = planDispatch({ taskClass: 'web-claude', prompt: 'x', cwd: tempDir(), identity: unbound, accounts: deadRegistry, caps: { claude: claudeCaps([]) } });
+      expect(summarizePlan(refused).would_run).toBeNull(); // codex not web-capable without a browse grant → exhaust
+      const routed = planDispatch({ taskClass: 'web-claude', prompt: 'x', cwd: tempDir(), identity: unbound, capabilities: ['browse'], accounts: deadRegistry, caps: { claude: claudeCaps([]) } });
+      expect(summarizePlan(routed).would_run).toBe('codex/gpt-5.6-terra');
+    } finally {
+      if (prev === undefined) delete process.env.HEDDLE_ROUTING; else process.env.HEDDLE_ROUTING = prev;
+    }
+  });
 });

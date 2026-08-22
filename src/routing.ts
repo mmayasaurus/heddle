@@ -208,6 +208,13 @@ export function resolveRoute(table: RoutingTable, taskClass: string): Route {
     mcp: fb.mcp ?? primary.mcp,
     capabilities: fb.capabilities ?? primary.capabilities,
   } : undefined;
+  // Tier bounds validate as a PAIR: min above max is an empty expansion range that would silently turn
+  // a dead-route walk into a refusal — a config error, so it fails LOUD like every other bad policy field.
+  const minTier = readTier(node.min_tier, `task_classes.${taskClass}.min_tier`);
+  const maxTier = readTier(node.max_tier, `task_classes.${taskClass}.max_tier`);
+  if (minTier && maxTier && AUTO_JOIN_TIERS.indexOf(minTier) > AUTO_JOIN_TIERS.indexOf(maxTier)) {
+    throw new Error(`task class "${taskClass}": min_tier ${minTier} is above max_tier ${maxTier} — the expansion range is empty`);
+  }
   return {
     taskClass,
     ...primary,
@@ -222,8 +229,8 @@ export function resolveRoute(table: RoutingTable, taskClass: string): Route {
       ? (node.reviewer_pool as any[]).filter((e) => e && typeof e.provider === 'string' && typeof e.model === 'string')
           .map((e) => ({ provider: e.provider as string, model: e.model as string }))
       : undefined,
-    minTier: readTier(node.min_tier, `task_classes.${taskClass}.min_tier`),
-    maxTier: readTier(node.max_tier, `task_classes.${taskClass}.max_tier`),
+    minTier,
+    maxTier,
   };
 }
 

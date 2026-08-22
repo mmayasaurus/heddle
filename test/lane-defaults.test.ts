@@ -56,6 +56,12 @@ describe('HED-106 lane_defaults + tier bounds — routing.v0.yaml', () => {
     expect(() => resolveRoute(bad, 'x')).toThrow(/min_tier must be one of T0, T1, T2/);
   });
 
+  it('throws when min_tier is above max_tier (an empty expansion range)', () => {
+    const p = join(tempDir(), 'inverted-tier.yaml');
+    writeFileSync(p, 'version: 0\nproviders: {codex: {}}\ntask_classes: {x: {provider: codex, model: m, min_tier: T2, max_tier: T1}}\n');
+    expect(() => resolveRoute(loadRouting(p), 'x')).toThrow(/min_tier T2 is above max_tier T1/);
+  });
+
   it('accepts a table with no lane_defaults (nothing auto-joins the walk)', () => {
     const p = join(tempDir(), 'no-lanes.yaml');
     writeFileSync(p, 'version: 0\nproviders: {codex: {}}\ntask_classes: {x: {provider: codex, model: m}}\n');
