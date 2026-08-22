@@ -220,5 +220,9 @@ fi
     // Generous timeout: each case spawns gh+jq per poll and the D2/no-marker cases
     // do a long fail-closed accumulation; under full-suite concurrency on a loaded
     // machine subprocess-spawn latency can exceed vitest's 30s default (HED-182).
-  }, 120000);
+    // Bumped 120s→300s (HED-266): a 60-file loaded fleet run measured 133s and timed
+    // the 120s budget out under vitest's no-worker-cap parallelism; 300s clears the
+    // observed worst case with margin. This is vitest.config.ts's own doctrine —
+    // explicit per-test budgets for the slow subprocess tests, not a worker cap.
+  }, 300000);
 });
