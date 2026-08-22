@@ -29,7 +29,11 @@ function seedReview(ledger: Ledger, authorProvider: string, reviewerProvider: st
 function textResult(result: Awaited<ReturnType<McpHarness['callTool']>>): Record<string, unknown> {
   const content = result.content[0];
   if (!content || content.type !== 'text') throw new Error('expected text MCP result');
-  return JSON.parse(content.text) as Record<string, unknown>;
+  try {
+    return JSON.parse(content.text) as Record<string, unknown>;
+  } catch {
+    throw new Error(`MCP result was not valid JSON: ${content.text.slice(0, 200)}`);
+  }
 }
 
 describe('review surfaces end to end', () => {
@@ -100,16 +104,26 @@ describe('review surfaces end to end', () => {
     });
   }, 30_000);
 
-  it('returns a timeout result when the Claude command exceeds its dispatch timeout', async () => {
+  it('returns a timeout result promptly when the Claude command exceeds its dispatch timeout', async () => {
     const script = join(tempDir(), 'slow-claude');
-    writeFileSync(script, '#!/bin/sh\nsleep 5\n', 'utf8');
+    // `exec` replaces the shell with sleep (no fork), so the dispatch SIGKILL reaches the sleeper
+    // directly, its stdio closes, and dispatch resolves promptly. Without exec, sh forks sleep,
+    // SIGKILL hits only the shell, and the orphaned sleep keeps the pipes open for the full 5s —
+    // dispatch would still report a timeout but not return promptly, so this test would silently
+    // take 5s and never pin caller-visible prompt-return (HED-92 review, chatgpt-codex).
+    writeFileSync(script, '#!/bin/sh\nexec sleep 5\n', 'utf8');
     chmodSync(script, 0o755);
 
+    const started = Date.now();
     const result = await new ClaudeAdapter({ bin: script }).dispatch('review this', {
       model: 'haiku', cwd: process.cwd(), timeoutMs: 100,
     });
+    const elapsed = Date.now() - started;
 
     expect(result).toMatchObject({ ok: false, exitCode: null, error: expect.stringContaining('claude timed out after 100ms (SIGKILL)') });
+    // Caller-visible contract: dispatch RETURNS promptly on timeout, not after the child's full 5s.
+    // Pins that dispatch does not block on the killed child (HED-92 review).
+    expect(elapsed).toBeLessThan(4_000);
   }, 10_000);
 
   it('includes fake Claude stderr in the failed dispatch result', async () => {
