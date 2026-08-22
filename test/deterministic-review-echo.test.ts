@@ -251,6 +251,13 @@ fi
       );
       expect(isolation.status).not.toBe(0);
       expect(isolation.stdout).toContain("real verdict for 0123456789abcdef was 'failure'");
-    }, 120000);
+      // Generous budget: the scenarios drive the real echo shell's poll loop —
+      // the outage/D2 path runs the full ~57-poll belt, the DRY cases break at ~10 —
+      // spawning gh+jq per poll, and this test runs once per scanner (semgrep +
+      // gitleaks). Bumped 120s→300s (HED-266): a 60-file loaded fleet run measured
+      // 133s and timed the 120s budget out under vitest's no-worker-cap parallelism;
+      // 300s clears the observed worst case with margin (vitest.config.ts doctrine —
+      // explicit per-test budgets for slow subprocess tests).
+    }, 300000);
   }
 });
