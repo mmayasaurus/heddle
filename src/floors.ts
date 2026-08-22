@@ -34,13 +34,14 @@ export function headroomPct(usedPct: number | null): number | null {
 
 /**
  * Is this account FLOORED — too close to exhaustion to route or resume onto? True when its fresh 5h
- * headroom is strictly BELOW `neverBelowPct` (matching the field's "never_below" name: headroom = 3
- * with a floor of 3 is AT the floor, not below it, so used = 97% is allowed; used = 98% → headroom 2 <
- * 3 → floored). Unknown/stale used is NOT floored — unknown never decides, the same discipline every
- * other cap follows. This is the property that would have stopped the rollover from resuming onto a
- * 98%/100% account.
+ * headroom is at or below `neverBelowPct` (INCLUSIVE): headroom ≤ never_below_pct → floored, so at
+ * pct=3, used ≥ 97% is floored. The field NAME "never_below" reads exclusive, but the RATIFIED
+ * lanes.yaml semantic (canonical on HED-106) is "never rotate INTO ≤3%" — inclusive — and the ratified
+ * text wins; this comment is the tie-break record (R nod 2026-08-22). Unknown/stale used is NOT floored
+ * — unknown never decides, the same discipline every other cap follows. This is the property that would
+ * have stopped the rollover from resuming onto a 98%/100% account.
  */
 export function isFloored(usedPct: number | null, floors: ClaudeFloors): boolean {
   const headroom = headroomPct(usedPct);
-  return headroom !== null && headroom < floors.neverBelowPct;
+  return headroom !== null && headroom <= floors.neverBelowPct;
 }

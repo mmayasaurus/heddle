@@ -27,12 +27,12 @@ describe('claude floors (HED-261)', () => {
     expect(headroomPct(null)).toBeNull();
   });
 
-  it('floors an account strictly BELOW the headroom floor — the rollover-scare guard', () => {
-    expect(isFloored(98, floors)).toBe(true);   // headroom 2 < 3 → floored (the 98% resume the rollover hit)
+  it('floors an account at or below the headroom floor (INCLUSIVE) — the rollover-scare guard', () => {
+    expect(isFloored(98, floors)).toBe(true);   // headroom 2 → floored (the 98% resume the rollover hit)
     expect(isFloored(100, floors)).toBe(true);  // headroom 0 → floored (the 100% resume)
-    // boundary: headroom == the floor is AT the floor, NOT below it — allowed (matches "never_below").
-    expect(isFloored(97, floors)).toBe(false);  // headroom 3 = 3 → allowed
-    expect(isFloored(96, floors)).toBe(false);  // headroom 4 → allowed
+    // boundary: ratified lanes.yaml is "never rotate INTO ≤3%" → INCLUSIVE, so headroom == the floor is floored (R nod 2026-08-22).
+    expect(isFloored(97, floors)).toBe(true);   // headroom 3 ≤ 3 → floored
+    expect(isFloored(96, floors)).toBe(false);  // headroom 4 > 3 → allowed
     expect(isFloored(50, floors)).toBe(false);
     expect(isFloored(null, floors)).toBe(false); // unknown never decides
   });
