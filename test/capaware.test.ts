@@ -155,19 +155,29 @@ describe('tier-ladder expansion walk (HED-264 fallback-not-refusal)', () => {
     expect(d.routeReason).toBe('cap:expand claude/haiku dead(no-account); cursor/kimi-k3-high dead(metered) → codex/gpt-5.6-terra (t1)');
   });
 
-  it('sets the next live candidate as the runtime fallback', () => {
+  it('provides NO runtime fallback for a walked route (deferred to HED-332, symmetric with Point B)', () => {
     const d = decideRoute(t, { provider: 'claude', model: 'opus' }, undefined,
       { claude: fresh('claude', 50) }, { explicit: false, claudeAccounts: deadClaude, ladder: ctx({ minTier: 'T0' }) });
-    // no declared fallback; ladder from T2 (claude excluded) → codex, cursor, cerebras, groq.
+    // no declared fallback; ladder from T2 (claude excluded) → codex is the first live candidate.
     expect(d.target).toMatchObject({ provider: 'codex', model: 'gpt-5.6-terra' });
-    expect(d.fallback).toMatchObject({ provider: 'cursor', model: 'cursor-grok-4.6-high' });
+    expect(d.fallback).toBeUndefined(); // threading a live sibling here would mis-attribute the runtime retry (codeant/codex)
+  });
+
+  it('skips a declared fallback that cannot attach the effective mcp, continuing to the ladder (qodo HIGH)', () => {
+    // dead claude primary; declared fallback = gemini (cannot attach memtrace) under an effective mcp:[memtrace].
+    // The declared fallback must clear the SAME capability gate as ladder candidates — else runTarget would
+    // throw on it — so the walk skips it and takes the next attachable lane (codex).
+    const d = decideRoute(t, { provider: 'claude', model: 'opus' }, { provider: 'gemini', model: 'gemini-3.1-pro-high' },
+      { claude: fresh('claude', 50) }, { explicit: false, claudeAccounts: deadClaude, ladder: ctx({ mcp: ['memtrace'] }) });
+    expect(d.target).toMatchObject({ provider: 'codex', model: 'gpt-5.6-terra' });
+    expect(d.checks.some((c) => c.includes('declared fallback gemini') && c.includes('skipped'))).toBe(true);
   });
 
   it('drops the read-only T0 lanes for an edits_code class', () => {
     const d = decideRoute(t, { provider: 'claude', model: 'opus' }, undefined,
       { claude: fresh('claude', 50) }, { explicit: false, claudeAccounts: deadClaude, ladder: ctx({ editsCode: true, minTier: 'T0' }) });
     expect(d.target).toMatchObject({ provider: 'codex' }); // T1, never cerebras/groq (T0)
-    expect(d.fallback).toMatchObject({ provider: 'cursor' });
+    expect(d.fallback).toBeUndefined();
   });
 
   it('REFUSES with every lane named when a claude-only class exhausts the walk', () => {

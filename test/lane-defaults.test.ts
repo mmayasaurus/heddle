@@ -69,6 +69,16 @@ describe('HED-106 lane_defaults + tier bounds — routing.v0.yaml', () => {
     expect(() => resolveRoute(loadRouting(p), 'x')).toThrow(/min_tier T1 \(default\) is above max_tier T0/);
   });
 
+  it('fences lane_defaults through routing policy — excluded provider + never_via_cursor throw at load (qodo/codex)', () => {
+    const excluded = join(tempDir(), 'bad-lane-excluded.yaml');
+    writeFileSync(excluded, 'version: 0\nproviders: {codex: {}, ollama-cloud: {status: excluded}}\nlane_defaults: {bad: {provider: ollama-cloud, model: m}}\ntask_classes: {x: {provider: codex, model: m}}\n');
+    expect(() => loadRouting(excluded)).toThrow(/lane_defaults\.bad routes to excluded provider/);
+
+    const viaCursor = join(tempDir(), 'bad-lane-cursor.yaml');
+    writeFileSync(viaCursor, 'version: 0\npolicy: {never_via_cursor: [claude]}\nproviders: {codex: {}, cursor: {}}\nlane_defaults: {c: {provider: cursor, model: claude-opus-5}}\ntask_classes: {x: {provider: codex, model: m}}\n');
+    expect(() => loadRouting(viaCursor)).toThrow(/never route it through Cursor/);
+  });
+
   it('accepts a table with no lane_defaults (nothing auto-joins the walk)', () => {
     const p = join(tempDir(), 'no-lanes.yaml');
     writeFileSync(p, 'version: 0\nproviders: {codex: {}}\ntask_classes: {x: {provider: codex, model: m}}\n');

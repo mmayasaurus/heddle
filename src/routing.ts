@@ -95,13 +95,21 @@ export function loadRouting(path = defaultRoutingPath()): RoutingTable {
   if (!existsSync(path)) throw new Error(`routing table not found: ${path}`);
   const raw = parseYaml(readFileSync(path, 'utf8')) as any;
   if (!raw?.task_classes) throw new Error(`routing table has no task_classes: ${path}`);
-  return {
+  const table: RoutingTable = {
     version: raw.version ?? 0,
     policy: raw.policy ?? {},
     providers: raw.providers ?? {},
     taskClasses: raw.task_classes,
     laneDefaults: parseLaneDefaults(raw.lane_defaults),
   };
+  // HED-106 (qodo/codex review): a lane_default is a ROUTE the ladder can auto-select, so it passes the
+  // SAME policy fences as a class primary/fallback — known + non-excluded + non-held provider, and no
+  // `never_via_cursor` family through Cursor. Without this a config edit could make the walk auto-select
+  // a forbidden lane that only fails at dispatch. Fenced at load so a bad map never reaches the walker.
+  for (const [lane, target] of Object.entries(table.laneDefaults ?? {})) {
+    assertRoutableTarget(table, target.provider, target.model, `lane_defaults.${lane}`);
+  }
+  return table;
 }
 
 /**

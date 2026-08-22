@@ -173,9 +173,9 @@ function laneDeadReason(
 /**
  * HED-106 expansion walk (HED-264 fallback-not-refusal). Called only when a class's declared route is
  * genuinely dead. Tries, in order: the class's declared FALLBACK (its author's own escape hatch, with
- * its specific model), then the cross-lane tier LADDER (within-tier siblings → descend to minTier →
- * ascend to maxTier). Routes to the FIRST live candidate; the next live one becomes the runtime
- * fallback. If nothing is live it returns the ORIGINAL dead target unchanged — the sole S1 caller has a
+ * its specific model — if it clears the capability gate), then the cross-lane tier LADDER (within-tier
+ * siblings → descend to minTier → ascend to maxTier). Routes to the FIRST live+capable candidate with
+ * NO runtime-failure fallback (that is HED-332). If nothing is live it returns the ORIGINAL dead target unchanged — the sole S1 caller has a
  * claude target, so planDispatch's `no-dispatchable-account` refusal fires — with the whole walk
  * narrated (route_reason + checks) for R's nightly audit.
  */
@@ -188,20 +188,25 @@ function walkLadder(
   const minTier: Tier = ctx.minTier ?? DEFAULT_MIN_TIER;
   const maxTier: Tier = ctx.maxTier ?? tierOfProvider(ctx.declaredProvider, lanes, ctx.laneDefaults) ?? DEFAULT_MIN_TIER;
   const excluded = new Set<string>([deadTarget.provider, ...(declaredFallback ? [declaredFallback.provider] : []), ...ctx.excludeProviders]);
-  const eligible = (t: RouteTarget, tier: Tier): boolean => {
-    if (excluded.has(t.provider)) return false;
-    if (ctx.editsCode && tier === 'T0') return false;                           // T0 lanes are read-only by construction
-    if (ctx.mcp.length > 0 && !mcpAttachable(t.provider, ctx.mcp)) return false; // must attach the class MCP (HED-249 guard)
-    if (ctx.requiresWeb && !webCapable(t.provider, ctx.grantedCapabilities)) return false;
-    return true;
-  };
+  // Capability gate (MCP attachability + web) — must pass for EVERY candidate, the declared fallback
+  // included: a caller mcp override or a requiresWeb class can make even the class's own declared
+  // fallback unattachable, and selecting it would throw in runTarget instead of continuing (qodo HIGH).
+  const capable = (t: RouteTarget): boolean =>
+    (ctx.mcp.length === 0 || mcpAttachable(t.provider, ctx.mcp)) &&
+    (!ctx.requiresWeb || webCapable(t.provider, ctx.grantedCapabilities));
+  const eligible = (t: RouteTarget, tier: Tier): boolean =>
+    !excluded.has(t.provider) && !(ctx.editsCode && tier === 'T0') && capable(t); // T0 lanes are read-only by construction
   const ladder = buildLadder(tierOfProvider(deadTarget.provider, lanes, ctx.laneDefaults), minTier, maxTier, lanes, ctx.laneDefaults, eligible);
   const candidates: { target: RouteTarget; label: string }[] = [];
-  // The declared fallback is already enriched by resolveRoute (its own or the class's skills/mcp/caps)
-  // — leave it. A bare lane_defaults candidate is ALSO a fallback route, so it inherits the class's
-  // skills/mcp/capabilities here; without this a walked worker loses its task-fit + mandate packs and
-  // its verified MCP attachment, running discovery-less and tripping the memtrace-first hook (ledger 206).
-  if (declaredFallback) candidates.push({ target: declaredFallback, label: 'declared-fallback' });
+  // The declared fallback (resolveRoute-enriched) leads the walk — but only if it clears the capability
+  // gate above; an unattachable declared fallback is skipped (with a check) rather than selected-then-
+  // thrown. A bare lane_defaults candidate inherits the class skills/mcp/capabilities so a walked worker
+  // keeps its task-fit + mandate packs and its verified MCP attachment (else discovery-less → ledger 206).
+  if (declaredFallback && capable(declaredFallback)) {
+    candidates.push({ target: declaredFallback, label: 'declared-fallback' });
+  } else if (declaredFallback) {
+    checks.push(`declared fallback ${declaredFallback.provider}/${declaredFallback.model} skipped — cannot attach the effective mcp/web capability`);
+  }
   for (const c of ladder) {
     candidates.push({ target: { ...c.target, skills: ctx.skills, mcp: ctx.mcp, capabilities: ctx.grantedCapabilities }, label: `t${c.tier[1]}` });
   }
@@ -215,10 +220,14 @@ function walkLadder(
       checks.push(`walk: ${c.target.provider}/${c.target.model} skipped (${c.dead})`);
       continue;
     }
-    const next = evaluated.slice(i + 1).find((n) => !n.dead);
     checks.push(`WALK → ${c.target.provider}/${c.target.model} (${c.label})`);
     return {
-      target: c.target, fallback: next?.target, routedAwayForCap: true,
+      // fallback: undefined — the walk provides NO runtime-failure fallback in S1. Threading the next
+      // live candidate through the existing `fallback` field would mis-attribute `fell_back_from` (that
+      // path records the class route, not the walked target) and would not re-run the ladder if the
+      // snapshot died by runtime (codeant/codex). Ladder-aware runtime retry — covering this AND the
+      // symmetric under-threshold path — is HED-332. Symmetric with Point B, which also drops its fallback.
+      target: c.target, fallback: undefined, routedAwayForCap: true,
       routeReason: `cap:expand ${deadNote}${tried.length ? `; ${tried.join('; ')}` : ''} → ${c.target.provider}/${c.target.model} (${c.label})`,
       checks,
     };
