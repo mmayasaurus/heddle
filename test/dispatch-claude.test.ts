@@ -206,28 +206,35 @@ describe('regression PR#250 — Claude dispatches require an addressable registe
     return readProviderCaps({ usageDir, nowS }).claude;
   };
 
-  it('refuses without a worker run when every registered account has a fresh billing or logged-out signal', async () => {
+  // HED-106 S1 / HED-264 (fallback-not-refusal) FLIP: PR#250 made a dead-account claude PRIMARY REFUSE.
+  // The tier-ladder walk now routes it to the class's declared NON-claude fallback instead — PR#250's
+  // safety property still holds (we never run claude on a dead account; we run CODEX), but the old
+  // 26%-failure refusal becomes a live route. The refusal is PRESERVED where there is no live lane:
+  // a claude runtime-FALLBACK with no account, a pinned dead account, and a claude-only class (below).
+  it('walks a billing/logged-out claude PRIMARY to its declared codex fallback instead of refusing (HED-264)', async () => {
     const fake = fakeAdapter(undefined, { readAgents: false }); const ledger = tempLedger();
     const outcome = await dispatch({
       taskClass: 'research-summarize', prompt: 'x', cwd: tempDir(), identity: unbound, accounts: registry,
       caps: { claude: capsWithSignals([{ account: 'acct1', reason: 'billing' }, { account: 'acct2', reason: 'logged-out' }]) },
     }, ledger, () => fake.adapter);
 
-    expect(outcome).toMatchObject({ ok: false, refusal: { code: 'no-dispatchable-account' } });
-    expect(outcome.refusal?.reason).toContain('all 2 registered accounts are logged-out or non-dispatchable');
-    expect(fake.calls).toHaveLength(0); expect(ledger.inFlight()).toEqual([]);
-    expect(ledger.recent(1)[0]).toMatchObject({ refusal: 'no-dispatchable-account', account: null });
+    expect(outcome.ok).toBe(true); expect(outcome.refusal).toBeUndefined();
+    expect(fake.calls).toHaveLength(1); expect(fake.calls[0].opts.model).toBe('gpt-5.6-luna');
+    expect(outcome.routeReason).toContain('cap:expand'); expect(outcome.routeReason).toContain('claude/haiku dead(no-account)');
+    expect(outcome.routeReason).toContain('codex/gpt-5.6-luna');
+    expect(ledger.recent(1)[0]).toMatchObject({ provider: 'codex', model: 'gpt-5.6-luna', ok: 1 });
   });
 
-  it('refuses without a worker run when every registered account is logged out', async () => {
+  it('walks a fully logged-out claude PRIMARY to its declared codex fallback (HED-264)', async () => {
     const fake = fakeAdapter(undefined, { readAgents: false }); const ledger = tempLedger();
     const outcome = await dispatch({
       taskClass: 'research-summarize', prompt: 'x', cwd: tempDir(), identity: unbound,
       accounts: registry.map((account) => ({ ...account, loggedIn: false })), caps: { claude: claudeCaps([]) },
     }, ledger, () => fake.adapter);
 
-    expect(outcome.refusal?.code).toBe('no-dispatchable-account');
-    expect(fake.calls).toHaveLength(0); expect(ledger.inFlight()).toEqual([]);
+    expect(outcome.ok).toBe(true); expect(outcome.refusal).toBeUndefined();
+    expect(fake.calls).toHaveLength(1); expect(fake.calls[0].opts.model).toBe('gpt-5.6-luna');
+    expect(ledger.recent(1)[0]).toMatchObject({ provider: 'codex', model: 'gpt-5.6-luna', ok: 1 });
   });
 
   it('runs when a registered Claude account remains addressable', async () => {
@@ -262,16 +269,15 @@ describe('regression PR#250 — Claude dispatches require an addressable registe
     expect(nonClaude.ok).toBe(true); expect(codex.calls).toHaveLength(1);
   });
 
-  it('keeps the dry-run summary aligned with no-dispatchable-account refusal', () => {
+  it('dry-run summary shows the HED-264 walk to the codex fallback (dispatch/plan parity, HED-250)', () => {
     const plan = planDispatch({
       taskClass: 'research-summarize', prompt: 'x', cwd: tempDir(), identity: unbound,
       accounts: registry.map((account) => ({ ...account, loggedIn: false })), caps: { claude: claudeCaps([]) },
     });
 
-    expect(summarizePlan(plan)).toMatchObject({
-      would_run: null,
-      refusal: { code: 'no-dispatchable-account' },
-    });
+    const summary = summarizePlan(plan);
+    expect(summary).toMatchObject({ would_run: 'codex/gpt-5.6-luna', routed_away_for_cap: true, refusal: null });
+    expect(String(summary.route_reason)).toContain('cap:expand');
   });
 
   it('preserves the failed primary ledger outcome when a Claude failure fallback has no addressable account', async () => {

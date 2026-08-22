@@ -8,6 +8,7 @@ import {
   loadRouting, resolveRoute, directRoute, providerExecution, structuralCaps, listTaskClasses, providerConfig,
   type Route, type RouteTarget, type RoutingTable, type StructuralCaps,
 } from './routing.js';
+import { loadLanes, type LanesConfig } from './lanes.js';
 import { materializeAgentsMd, readPack, withMandatoryPacks, composePacks, modelFamilyPack, ALL_FAMILY_PACKS } from './skillpacks.js';
 
 /**
@@ -1152,6 +1153,10 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
   // that never consult it (PR #24 — the eager read hit every codex/cursor/gemini dispatch).
   let claudeAccountsCache: ClaudeAccount[] | undefined;
   const claudeAccounts = (): ClaudeAccount[] => (claudeAccountsCache ??= req.accounts ?? readClaudeAccounts());
+  // Lanes are read LAZILY too (HED-106): the tier-ladder walk only fires when a class's declared route
+  // is genuinely dead, so a healthy / codex / cursor plan pays no lanes.yaml read (same PR #24 discipline).
+  let lanesCache: LanesConfig | undefined;
+  const lanesFn = (): LanesConfig => (lanesCache ??= loadLanes());
   // A non-dispatchable class is refused regardless, so no cap decision is made for it.
   const decision: RouteDecision = notDispatchable
     ? { target, fallback, routedAwayForCap: false, routeReason: 'not-dispatchable', checks: ['class is dispatchable: false — refused before any route'] }
@@ -1160,6 +1165,24 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
         // Memoized thunk: accounts.json is read AT MOST once per plan, and never for a route that
         // does not consult it (codex/cursor/gemini plans do zero disk IO here — PR #24).
         claudeAccounts: () => claudeAccounts(),
+        // HED-106 tier-ladder: when this class's declared route is genuinely dead (S1: a claude route
+        // with no addressable account), expand across lanes.yaml instead of refusing (HED-264). Bounds
+        // come from the class; the author family is excluded for review classes; lanes read lazily.
+        // NEVER for an in-session dispatch: in-session runs on the orchestrator's OWN account (it needs
+        // no dispatchable worker account), so a dead-account walk to a headless codex would wrongly
+        // replace the claude-in-session instruction — the ladder is a HEADLESS-worker mechanism only.
+        ladder: req.inSession ? undefined : {
+          lanes: lanesFn,
+          laneDefaults: table.laneDefaults ?? {},
+          declaredProvider: route.provider,
+          minTier: route.minTier,
+          maxTier: route.maxTier,
+          editsCode: route.editsCode,
+          requiresWeb: route.requiresWeb,
+          mcp: req.mcp ?? route.mcp ?? [],
+          grantedCapabilities: target.capabilities ?? [],
+          excludeProviders: route.reviewerPool && author ? [author] : [],
+        },
       });
   target = decision.target;
   fallback = decision.fallback;
