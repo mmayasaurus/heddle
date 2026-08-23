@@ -11,6 +11,10 @@ import { listPacks, withMandatoryPacks } from './skillpacks.js';
 import { classifyEffort, assessResult } from './classify.js';
 import { resolveIdentity } from './identity.js';
 import { loadProjectRegistry, DEFAULT_PROJECTS_PATH } from './projects.js';
+import { isDispatchExcluded, pickClaudeAccount, readClaudeAccounts } from './capaware.js';
+import { bindingMeter, claudeFloorsFrom, headroomPct, isFloored } from './floors.js';
+import { loadLanes } from './lanes.js';
+import { LIMITS_JSON_MAX_AGE_S, readProviderCaps } from './usage.js';
 
 /**
  * heddle CLI — the surface orchestrators (and later the dashboard) drive.
@@ -64,6 +68,7 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
                                  or owner process provably gone (outcome='orphaned'); dry-run lists only
   heddle ledger report-in-session <id> (--ok | --failed) [--error "<why>"] [--input-tokens N] [--cached-input-tokens N] [--output-tokens N] [--reasoning-tokens N] [--duration-ms N] [--json]  administrative path: may report any orchestrator's handoff
   heddle usage [--since <iso>] [--json]    per-provider totals
+  heddle account pick [--for <letter>] [--json] [--explain]   healthiest addressable Claude account for a fleet relaunch
   heddle reviews [--limit N] [--json]      adversarial-review scoreboard (author→reviewer pairs) + recent reviews
   heddle review-outcome <dispatch-id> --total N --accepted M [--notes "…"]   record how many findings you accepted
 `;
@@ -191,6 +196,121 @@ try {
         (summary.account_pick ? `\n  ${summary.account_pick.reason}` : '') +
         (summary.account_advice ? `\n  ${summary.account_advice}` : '') +
         `\n  checks:\n    - ${summary.checks.join('\n    - ')}`);
+      break;
+    }
+
+    case 'account': {
+      if (process.argv[3] !== 'pick') {
+        console.error('usage: heddle account pick [--for <letter>] [--json] [--explain]');
+        process.exit(2);
+      }
+      const accounts = readClaudeAccounts();
+      const caps = readProviderCaps();
+      const floors = claudeFloorsFrom(loadLanes());
+      // Residency-balancing by --for is a later increment; this identifies the agent being launched only.
+      const forAgent = arg('--for');
+      if (has('--for') && (!forAgent || forAgent.startsWith('--'))) {
+        console.error('usage: heddle account pick [--for <letter>] [--json] [--explain]');
+        process.exit(2);
+      }
+      const claudeCaps = caps.claude;
+      // Exit 2 = cannot decide (missing/stale meters); distinct from exit 1 = decided, none healthy.
+      // Age-key on capturedAt, NOT the `stale` flag alone: the flag can read fresh while the data is
+      // hours old (HED-348 keeper bug — limits.json rewritten ~every 5 min bumps the file's writtenAt
+      // while a provider entry's capturedAt lags), and picking on 45–50%-wrong caps is the exact
+      // rollover risk this guard exists to stop. A surfaced capture older than the mirror freshness
+      // window (or an absent capturedAt) is UNKNOWN → refuse, never pick (R nod 2026-08-22). Safe now;
+      // useful once HED-348/HED-337 land and fresh caps surface. Keep the flag too (belt + suspenders).
+      const capturedAt = claudeCaps?.capturedAt ?? null;
+      const ageS = capturedAt === null ? null : Math.max(0, Math.floor(Date.now() / 1000) - capturedAt);
+      if (!claudeCaps || claudeCaps.source === 'none' || claudeCaps.stale || ageS === null || ageS > LIMITS_JSON_MAX_AGE_S) {
+        const age = ageS === null
+          ? 'unknown (capturedAt unavailable)'
+          : `${ageS}s (capturedAt ${capturedAt}, budget ${LIMITS_JSON_MAX_AGE_S}s)`;
+        console.error(`heddle: cannot decide Claude account pick: caps are missing or stale (data age ${age}); use an explicit account prompt`);
+        process.exit(2);
+      }
+      const pick = pickClaudeAccount(claudeCaps, accounts, { floors });
+      const usedOf = (id: string): number | null => {
+        const row = claudeCaps.accounts.find((account) => account.id === id);
+        return row && !row.stale ? row.fiveHour.usedPercentage : null;
+      };
+      const used7dOf = (id: string): number | null => {
+        const row = claudeCaps.accounts.find((account) => account.id === id);
+        return row && !row.stale ? row.sevenDay.usedPercentage : null;
+      };
+      const accountRows = accounts.map((account) => {
+        const usedPct = usedOf(account.id);
+        const usedPct7d = used7dOf(account.id);
+        const meter = bindingMeter(usedPct, usedPct7d);
+        const floored = isFloored(usedPct, usedPct7d, floors);
+        const loggedOut = account.loggedIn === false;
+        const dispatchExcluded = isDispatchExcluded(caps.claude, account.id);
+        return {
+          account: account.id,
+          usedPct5h: usedPct,
+          usedPct7d,
+          headroomPct: meter === '5h' ? headroomPct(usedPct) : meter === '7d' ? headroomPct(usedPct7d) : null,
+          bindingMeter: meter,
+          floored,
+          loggedOut,
+          dispatchExcluded,
+          excluded: floored || loggedOut || dispatchExcluded,
+        };
+      });
+      if (!pick) {
+        if (accounts.length === 0) {
+          console.error('heddle: refusing Claude account pick: no accounts registered in ~/.heddle/accounts.json');
+          process.exit(1);
+        }
+        // Classify each unavailable account by ONE reason (priority logged-out → dispatch-excluded →
+        // floored) so the counts sum to the registry size rather than double-count an account that is
+        // several at once (e.g. a logged-out account also over the floor).
+        let loggedOut = 0, dispatchExcluded = 0, floored = 0;
+        for (const account of accountRows) {
+          if (account.loggedOut) loggedOut++;
+          else if (account.dispatchExcluded) dispatchExcluded++;
+          else if (account.floored) floored++;
+        }
+        console.error(`heddle: refusing Claude account pick: none of ${accounts.length} registered account(s) is healthy — ` +
+          `${floored} floored (5h or 7d headroom ≤ ${floors.neverBelowPct}%), ${loggedOut} logged-out, ${dispatchExcluded} dispatch-excluded`);
+        process.exit(1);
+      }
+      const selectedRow = claudeCaps.accounts.find((account) => account.id === pick.account.id);
+      const meter = bindingMeter(pick.usedPct, pick.usedPct7d);
+      const resetsAt = meter === '5h' ? selectedRow?.fiveHour.resetsAt ?? null
+        : meter === '7d' ? selectedRow?.sevenDay.resetsAt ?? null : null;
+      const data = {
+        account: pick.account.id,
+        configDir: pick.account.configDir,
+        unsetConfigDir: pick.envUnset.includes('CLAUDE_CONFIG_DIR'),
+        usedPct5h: pick.usedPct,
+        usedPct7d: pick.usedPct7d,
+        bindingMeter: meter,
+        resetsAt,
+        reason: pick.reason,
+        ...(forAgent ? { for: forAgent } : {}),
+        ...(has('--explain') ? { accounts: accountRows } : {}),
+      };
+      out(json, data, () => {
+        const config = pick.account.configDir
+          ? `CLAUDE_CONFIG_DIR=${pick.account.configDir}`
+          : 'default login — leave CLAUDE_CONFIG_DIR unset';
+        const selected = `${pick.account.id}  ${config}  ${pick.reason}` + (forAgent ? `  for: ${forAgent}` : '');
+        if (!has('--explain')) return selected;
+        const details = accountRows.map((account) => {
+          const state = [
+            account.floored ? 'floored' : null,
+            account.loggedOut ? 'logged-out' : null,
+            account.dispatchExcluded ? 'dispatch-excluded' : null,
+          ].filter(Boolean).join(', ') || 'eligible';
+          const meter = account.bindingMeter === null ? 'no known meter' : `${account.bindingMeter} binds`;
+          return `${account.account}: 5h ${account.usedPct5h === null ? 'unknown' : `${account.usedPct5h.toFixed(0)}%`}, ` +
+            `7d ${account.usedPct7d === null ? 'unknown' : `${account.usedPct7d.toFixed(0)}%`}, ` +
+            `headroom ${account.headroomPct === null ? 'unknown' : `${account.headroomPct.toFixed(0)}%`} (${meter}), ${state}`;
+        }).join('\n');
+        return `${selected}\n${details}`;
+      });
       break;
     }
 
