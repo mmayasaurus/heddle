@@ -92,7 +92,10 @@ export function pickClaudeAccountsBatch(
   const rows = claudeAccountRows(caps, accounts, floors, residents);
   const accountById = new Map(accounts.map((account) => [account.id, account]));
   const assignments: Record<string, BatchAssignment> = {};
-  const isAtCap = (row: ClaudeAccountRow): boolean => row.headroomPct !== null && row.headroomPct < floors.residencyCapBelowPct &&
+  // INCLUSIVE boundary, matching the ratified floor (HED-261, R nod 2026-08-22): the ticket's
+  // "≤10%-remaining accounts carry max N" → headroom ≤ residency_cap_below_pct triggers the cap. The
+  // field name reads exclusive but the ratified semantic wins, exactly as never_below_pct is inclusive.
+  const isAtCap = (row: ClaudeAccountRow): boolean => row.headroomPct !== null && row.headroomPct <= floors.residencyCapBelowPct &&
     (residents.get(row.account) ?? 0) >= floors.residencyMax;
 
   for (const agent of agents) {

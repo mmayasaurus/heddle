@@ -273,6 +273,22 @@ describe('heddle account pick CLI', () => {
     ]));
   }, 30_000);
 
+  it('applies the residency cap INCLUSIVELY at exactly residency_cap_below_pct headroom', async () => {
+    // headroom EXACTLY 10 (used 90, = residency_cap_below_pct) must trigger the cap — the ratified
+    // "≤10%" + the inclusive floor precedent. A strict `< 10` would wrongly place all three.
+    const { accountsPath, usageDir } = fixture([{ id: 'edge', configDir: '/tmp/edge' }], { edge: 90 });
+
+    const result = await runCli(['account', 'pick', '--for', 'R,S,U', '--json'], {
+      env: { HEDDLE_ACCOUNTS: accountsPath, HEDDLE_USAGE_DIR: usageDir },
+    });
+
+    expect(result.code).toBe(1);
+    const a = JSON.parse(result.stdout).assignments;
+    expect(a.R.account).toBe('edge');
+    expect(a.S.account).toBe('edge');
+    expect(a.U).toMatchObject({ refused: true, reason: expect.stringMatching(/residency cap/) });
+  }, 30_000);
+
   it('never assigns a 7d-floored account in batch mode', async () => {
     const { accountsPath, usageDir } = fixture([
       { id: 'weekly-wall', configDir: '/tmp/weekly-wall' }, { id: 'healthy', configDir: '/tmp/healthy' },
