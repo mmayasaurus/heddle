@@ -289,6 +289,8 @@ try {
         bindingMeter: meter,
         resetsAt,
         reason: pick.reason,
+        ...(forAgent ? { for: forAgent } : {}),
+        ...(has('--explain') ? { accounts: accountRows } : {}),
       };
       out(json, data, () => {
         const config = pick.account.configDir

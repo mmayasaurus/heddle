@@ -61,6 +61,17 @@ describe('claude floors (HED-261)', () => {
     expect(isFloored(50, 50, floors)).toBe(false);
     expect(isFloored(null, null, floors)).toBe(false); // both unknown never decides
   });
+
+  it('binds on 7d when 5h is unknown or healthier — a bad 7d floors even if 5h is fine/unknown', () => {
+    // 5h-null must NOT short-circuit to "not floored" when 7d is known-bad (guards a sloppy
+    // `if (used5hPct == null) return false` port — grok adversarial review, HED-261).
+    expect(isFloored(null, 97, floors)).toBe(true);   // 5h unknown, 7d headroom 3 ≤ 3 → floored
+    expect(isFloored(null, 96, floors)).toBe(false);  // 5h unknown, 7d headroom 4 > 3 → allowed
+    expect(bindingMeter(null, 97)).toBe('7d');
+    // 7d inclusive boundary while 5h is healthy — the 7d meter binds.
+    expect(isFloored(50, 97, floors)).toBe(true);     // 7d headroom 3 ≤ 3 → floored
+    expect(isFloored(50, 96, floors)).toBe(false);    // 7d headroom 4 > 3 → allowed
+  });
 });
 
 describe('pickClaudeAccount floor integration (HED-261, opt-in only)', () => {

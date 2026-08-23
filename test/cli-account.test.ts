@@ -50,19 +50,24 @@ describe('heddle account pick CLI', () => {
     expect(result.stdout).toMatch(/floored.*floored/);
   }, 30_000);
 
-  it('regression PR#87 — excludes an account floored only by 7d and explains the binding meter', async () => {
+  it('regression PR#87 — a 7d-floored account with the BEST 5h headroom is still excluded from the pick', async () => {
+    // incident has the LOWEST 5h used% (a 5h-only ranking would select it) but is 7d-exhausted; the
+    // pre-fix 5h-only floor would relaunch onto it. The two-meter floor must exclude it and pick the
+    // 7d-healthy account — asserted via which CLAUDE_CONFIG_DIR the selected line emits, so the test
+    // fails on the pre-fix behavior (grok adversarial review, HED-261).
     const { accountsPath, usageDir } = fixture([
       { id: 'incident', configDir: '/tmp/incident' },
       { id: 'healthy', configDir: '/tmp/healthy' },
-    ], { incident: 50, healthy: 40 }, { used7d: { incident: 98, healthy: 50 } });
+    ], { incident: 10, healthy: 40 }, { used7d: { incident: 98, healthy: 50 } });
 
     const result = await runCli(['account', 'pick', '--explain'], {
       env: { HEDDLE_ACCOUNTS: accountsPath, HEDDLE_USAGE_DIR: usageDir },
     });
 
     expect(result).toMatchObject({ code: 0, stderr: '' });
-    expect(result.stdout).toMatch(/incident:.*7d 98%.*7d binds.*floored/);
-    expect(result.stdout).toContain('healthy');
+    expect(result.stdout).toContain('CLAUDE_CONFIG_DIR=/tmp/healthy');      // healthy is the PICK
+    expect(result.stdout).not.toContain('CLAUDE_CONFIG_DIR=/tmp/incident'); // incident excluded, not picked
+    expect(result.stdout).toMatch(/incident:.*7d 98%.*7d binds.*floored/);  // explain shows why
   }, 30_000);
 
   it('refuses when all registered accounts are floored', async () => {
@@ -81,7 +86,7 @@ describe('heddle account pick CLI', () => {
     expect(result.stderr).toMatch(/headroom ≤ 3%/);
   }, 30_000);
 
-  it('emits the documented JSON shape', async () => {
+  it('emits the documented JSON shape, echoes --for, and carries --explain accounts', async () => {
     const { accountsPath, usageDir } = fixture([
       { id: 'default', configDir: null },
       { id: 'other', configDir: '/tmp/other' },
@@ -95,8 +100,18 @@ describe('heddle account pick CLI', () => {
     expect(JSON.parse(result.stdout)).toEqual({
       account: 'default', configDir: null, unsetConfigDir: true,
       usedPct5h: 40, usedPct7d: null, bindingMeter: '5h', resetsAt: null,
-      reason: expect.any(String),
+      reason: expect.any(String), for: 'U',
     });
+
+    // --json --explain must still carry the per-account breakdown programmatically (parity with text
+    // mode; the JSON rewrite had dropped it — grok adversarial review, HED-261).
+    const explained = await runCli(['account', 'pick', '--for', 'U', '--json', '--explain'], {
+      env: { HEDDLE_ACCOUNTS: accountsPath, HEDDLE_USAGE_DIR: usageDir },
+    });
+    const parsed = JSON.parse(explained.stdout);
+    expect(parsed.for).toBe('U');
+    expect(parsed.accounts).toHaveLength(2);
+    expect(parsed.accounts.map((a: { account: string }) => a.account).sort()).toEqual(['default', 'other']);
   }, 30_000);
 
   it('does not crash when limits.json has no Claude provider data', async () => {
