@@ -87,7 +87,8 @@ export function pickClaudeAccountsBatch(
   caps: ProviderCaps, accounts: ClaudeAccount[], floors: ClaudeFloors, agents: readonly string[],
   residentsByAccount: ReadonlyMap<string, number> = new Map(),
 ): { assignments: Record<string, BatchAssignment>; accounts: ClaudeAccountRow[] } {
-  // TODO(HED-340): seed residents from the live pid-env census once it exposes Claude account bindings.
+  // HED-340 (deferred): seed residents from the live pid-env census once it exposes Claude account
+  // bindings — that reader is not built yet, so batch currently starts every account at zero residents.
   const residents = new Map(residentsByAccount);
   const rows = claudeAccountRows(caps, accounts, floors, residents);
   const accountById = new Map(accounts.map((account) => [account.id, account]));
