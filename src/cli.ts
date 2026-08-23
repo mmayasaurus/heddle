@@ -208,7 +208,6 @@ try {
       const accounts = readClaudeAccounts();
       const caps = readProviderCaps();
       const floors = claudeFloorsFrom(loadLanes());
-      // Residency-balancing by --for is a later increment; this identifies the agent being launched only.
       const forAgent = arg('--for');
       if (has('--for') && (!forAgent || forAgent.startsWith('--'))) {
         console.error('usage: heddle account pick [--for <letter[,letter...]>] [--json] [--explain]');
@@ -226,8 +225,8 @@ try {
       }
       const claudeCaps = capsGate.caps;
       const requestedAgents = forAgent?.split(',').map((agent) => agent.trim()).filter(Boolean) ?? [];
-      if (requestedAgents.length > 1) {
-        const agents = [...new Set(requestedAgents)];
+      const agents = [...new Set(requestedAgents)];
+      if (agents.length > 1) {
         const warnings: string[] = [];
         if (agents.length !== requestedAgents.length) {
           const warning = 'heddle: duplicate --for identities were deduplicated before batch placement';
@@ -278,14 +277,14 @@ try {
         bindingMeter: meter,
         resetsAt,
         reason: pick.reason,
-        ...(forAgent ? { for: forAgent } : {}),
+        ...(agents[0] ? { for: agents[0] } : {}),
         ...(has('--explain') ? { accounts: accountRows } : {}),
       };
       out(json, data, () => {
         const config = pick.account.configDir
           ? `CLAUDE_CONFIG_DIR=${pick.account.configDir}`
           : 'default login — leave CLAUDE_CONFIG_DIR unset';
-        const selected = `${pick.account.id}  ${config}  ${pick.reason}` + (forAgent ? `  for: ${forAgent}` : '');
+        const selected = `${pick.account.id}  ${config}  ${pick.reason}` + (agents[0] ? `  for: ${agents[0]}` : '');
         if (!has('--explain')) return selected;
         const details = accountRows.map((account) => {
           const state = [

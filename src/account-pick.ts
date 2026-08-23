@@ -99,15 +99,19 @@ export function pickClaudeAccountsBatch(
     (residents.get(row.account) ?? 0) >= floors.residencyMax;
 
   for (const agent of agents) {
-    const candidates = rows.filter((row) => !row.excluded && !isAtCap(row));
+    const candidates = rows.filter((row) => !row.excluded && row.headroomPct !== null && !isAtCap(row));
     if (candidates.length === 0) {
-      const floored = rows.filter((row) => row.floored).length;
-      const capped = rows.filter((row) => !row.excluded && isAtCap(row)).length;
-      const loggedOut = rows.filter((row) => row.loggedOut).length;
-      const dispatchExcluded = rows.filter((row) => !row.loggedOut && row.dispatchExcluded).length;
+      let floored = 0, capped = 0, loggedOut = 0, dispatchExcluded = 0, unmetered = 0;
+      for (const row of rows) {
+        if (row.loggedOut) loggedOut++;
+        else if (row.dispatchExcluded) dispatchExcluded++;
+        else if (row.floored) floored++;
+        else if (isAtCap(row)) capped++;
+        else if (row.headroomPct === null) unmetered++;
+      }
       assignments[agent] = {
         refused: true,
-        reason: `no eligible Claude account: ${floored} floored, ${capped} at residency cap, ${loggedOut} logged-out, ${dispatchExcluded} dispatch-excluded`,
+        reason: `no eligible Claude account: ${floored} floored, ${capped} at residency cap, ${loggedOut} logged-out, ${dispatchExcluded} dispatch-excluded, ${unmetered} unmetered`,
       };
       continue;
     }

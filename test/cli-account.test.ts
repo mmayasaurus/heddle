@@ -9,7 +9,13 @@ const { tempDir } = useTempResources('heddle-cli-account-test-');
 function fixture(
   accounts: Array<{ id: string; configDir: string | null; loggedIn?: boolean }>,
   used: Record<string, number>,
-  options: { used7d?: Record<string, number | null>; stale?: boolean; capturedAt?: number; resetsAt?: Record<string, { fiveHour?: number; sevenDay?: number }> } = {},
+  options: {
+    used7d?: Record<string, number | null>;
+    stale?: boolean;
+    capturedAt?: number;
+    resetsAt?: Record<string, { fiveHour?: number; sevenDay?: number }>;
+    includedAccountIds?: string[];
+  } = {},
 ) {
   const dir = tempDir();
   const accountsPath = join(dir, 'accounts.json');
@@ -19,7 +25,7 @@ function fixture(
     writtenAt: nowS,
     limits: [{
       provider: 'claude', capturedAt: options.capturedAt ?? nowS, staleAfterSecs: 900, stale: options.stale,
-      accounts: accounts.map((account) => ({
+      accounts: accounts.filter((account) => options.includedAccountIds?.includes(account.id) ?? true).map((account) => ({
         id: account.id,
         fiveHour: { usedPercentage: used[account.id], resetsAt: options.resetsAt?.[account.id]?.fiveHour },
         sevenDay: options.used7d?.[account.id] === null ? {} : { usedPercentage: options.used7d?.[account.id], resetsAt: options.resetsAt?.[account.id]?.sevenDay },
@@ -224,7 +230,7 @@ describe('heddle account pick CLI', () => {
   it('balances six batch placements across three healthy accounts instead of stacking them', async () => {
     const { accountsPath, usageDir } = fixture([
       { id: 'a', configDir: '/tmp/a' }, { id: 'b', configDir: '/tmp/b' }, { id: 'c', configDir: '/tmp/c' },
-    ], { a: 10, b: 20, c: 30 });
+    ], { a: 30, b: 20, c: 10 });
 
     const result = await runCli(['account', 'pick', '--for', 'R,S,T,U,V,W', '--json'], {
       env: { HEDDLE_ACCOUNTS: accountsPath, HEDDLE_USAGE_DIR: usageDir },
@@ -236,6 +242,21 @@ describe('heddle account pick CLI', () => {
       counts[account] = (counts[account] ?? 0) + 1;
       return counts;
     }, {})).toEqual({ a: 2, b: 2, c: 2 });
+    expect(Object.values(assignments).map(({ account }) => account)).toEqual(['c', 'b', 'a', 'c', 'b', 'a']);
+  }, 30_000);
+
+  it('uses higher headroom before account id when batch residents are tied', async () => {
+    const { accountsPath, usageDir } = fixture([
+      { id: 'a-first', configDir: '/tmp/a-first' }, { id: 'z-healthier', configDir: '/tmp/z-healthier' },
+    ], { 'a-first': 30, 'z-healthier': 10 });
+
+    const result = await runCli(['account', 'pick', '--for', 'R,S', '--json'], {
+      env: { HEDDLE_ACCOUNTS: accountsPath, HEDDLE_USAGE_DIR: usageDir },
+    });
+
+    expect(result).toMatchObject({ code: 0, stderr: '' });
+    const assignments = JSON.parse(result.stdout).assignments as Record<string, { account: string }>;
+    expect(assignments.R.account).toBe('z-healthier');
   }, 30_000);
 
   it('counts its own batch placements before choosing the next account', async () => {
@@ -289,6 +310,22 @@ describe('heddle account pick CLI', () => {
     expect(a.U).toMatchObject({ refused: true, reason: expect.stringMatching(/residency cap/) });
   }, 30_000);
 
+  it('applies the residency cap when the 7d meter, not 5h, reaches the boundary', async () => {
+    const { accountsPath, usageDir } = fixture(
+      [{ id: 'weekly-edge', configDir: '/tmp/weekly-edge' }], { 'weekly-edge': 50 }, { used7d: { 'weekly-edge': 90 } },
+    );
+
+    const result = await runCli(['account', 'pick', '--for', 'R,S,U', '--json'], {
+      env: { HEDDLE_ACCOUNTS: accountsPath, HEDDLE_USAGE_DIR: usageDir },
+    });
+
+    expect(result.code).toBe(1);
+    const assignments = JSON.parse(result.stdout).assignments;
+    expect(assignments.R.account).toBe('weekly-edge');
+    expect(assignments.S.account).toBe('weekly-edge');
+    expect(assignments.U).toMatchObject({ refused: true, reason: expect.stringMatching(/residency cap/) });
+  }, 30_000);
+
   it('never assigns a 7d-floored account in batch mode', async () => {
     const { accountsPath, usageDir } = fixture([
       { id: 'weekly-wall', configDir: '/tmp/weekly-wall' }, { id: 'healthy', configDir: '/tmp/healthy' },
@@ -303,6 +340,52 @@ describe('heddle account pick CLI', () => {
     expect(assignments.S.account).toBe('healthy');
   }, 30_000);
 
+  it('regression PR#88 — never places a batch agent on an unmetered registered account', async () => {
+    const { accountsPath, usageDir } = fixture([
+      { id: 'healthy', configDir: '/tmp/healthy' }, { id: 'ghost', configDir: '/tmp/ghost' },
+    ], { healthy: 60, ghost: 0 }, { includedAccountIds: ['healthy'] });
+
+    const result = await runCli(['account', 'pick', '--for', 'R,S', '--json'], {
+      env: { HEDDLE_ACCOUNTS: accountsPath, HEDDLE_USAGE_DIR: usageDir },
+    });
+
+    expect(result).toMatchObject({ code: 0, stderr: '' });
+    const assignments = JSON.parse(result.stdout).assignments as Record<string, { account: string }>;
+    expect(assignments.R.account).toBe('healthy');
+    expect(assignments.S.account).toBe('healthy');
+    expect(Object.values(assignments).map(({ account }) => account)).not.toContain('ghost');
+  }, 30_000);
+
+  it('refuses an all-unmetered batch and identifies its exclusive refusal bucket', async () => {
+    const { accountsPath, usageDir } = fixture(
+      [{ id: 'ghost', configDir: '/tmp/ghost' }], { ghost: 0 }, { includedAccountIds: [] },
+    );
+
+    const result = await runCli(['account', 'pick', '--for', 'R,S', '--json'], {
+      env: { HEDDLE_ACCOUNTS: accountsPath, HEDDLE_USAGE_DIR: usageDir },
+    });
+
+    expect(result.code).toBe(1);
+    expect(JSON.parse(result.stdout).assignments.R).toMatchObject({
+      refused: true, reason: expect.stringMatching(/1 unmetered/),
+    });
+  }, 30_000);
+
+  it('counts an account once in batch refusal reasons by priority', async () => {
+    const { accountsPath, usageDir } = fixture(
+      [{ id: 'logged-out-and-floored', configDir: null, loggedIn: false }], { 'logged-out-and-floored': 98 },
+    );
+
+    const result = await runCli(['account', 'pick', '--for', 'R,S', '--json'], {
+      env: { HEDDLE_ACCOUNTS: accountsPath, HEDDLE_USAGE_DIR: usageDir },
+    });
+
+    expect(result.code).toBe(1);
+    const refusal = JSON.parse(result.stdout).assignments.R;
+    expect(refusal).toMatchObject({ refused: true, reason: expect.stringMatching(/1 logged-out/) });
+    expect(refusal.reason).toMatch(/0 floored/);
+  }, 30_000);
+
   it('uses the same stale-caps gate for the whole batch', async () => {
     const { accountsPath, usageDir } = fixture(
       [{ id: 'default', configDir: null }], { default: 40 }, { stale: true, capturedAt: 1 },
@@ -314,5 +397,40 @@ describe('heddle account pick CLI', () => {
 
     expect(result).toMatchObject({ code: 2, stdout: '' });
     expect(result.stderr).toMatch(/caps are missing or stale.*data age/);
+  }, 30_000);
+
+  it('regression HED-348 — exits 2 for a batch when capturedAt is old but stale is false', async () => {
+    const dir = tempDir();
+    const accountsPath = join(dir, 'accounts.json');
+    writeFileSync(accountsPath, JSON.stringify({ claude: [{ id: 'default', configDir: null }] }));
+    const nowS = Math.floor(Date.now() / 1000);
+    writeFileSync(join(dir, 'limits.json'), JSON.stringify({
+      writtenAt: nowS,
+      limits: [{
+        provider: 'claude', capturedAt: nowS - 4 * 60 * 60, stale: false,
+        accounts: [{ id: 'default', fiveHour: { usedPercentage: 40 }, sevenDay: { usedPercentage: 50 } }],
+      }],
+    }));
+
+    const result = await runCli(['account', 'pick', '--for', 'R,S', '--json'], {
+      env: { HEDDLE_ACCOUNTS: accountsPath, HEDDLE_USAGE_DIR: dir },
+    });
+
+    expect(result).toMatchObject({ code: 2, stdout: '' });
+    expect(result.stderr).toMatch(/caps are missing or stale.*data age \d+s.*budget \d+s/);
+  }, 30_000);
+
+  it('treats duplicate singleton --for identities exactly like a singleton pick', async () => {
+    const { accountsPath, usageDir } = fixture([
+      { id: 'default', configDir: null }, { id: 'other', configDir: '/tmp/other' },
+    ], { default: 40, other: 80 });
+    const env = { HEDDLE_ACCOUNTS: accountsPath, HEDDLE_USAGE_DIR: usageDir };
+
+    const singleton = await runCli(['account', 'pick', '--for', 'R', '--json'], { env });
+    const duplicates = await runCli(['account', 'pick', '--for', 'R,R', '--json'], { env });
+
+    expect(duplicates).toEqual(singleton);
+    expect(JSON.parse(duplicates.stdout)).toMatchObject({ account: 'default', configDir: null, for: 'R' });
+    expect(JSON.parse(duplicates.stdout)).not.toHaveProperty('assignments');
   }, 30_000);
 });
