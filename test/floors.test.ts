@@ -1,17 +1,17 @@
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { claudeFloorsFrom, headroomPct, isFloored, type ClaudeFloors } from '../src/floors.js';
+import { bindingMeter, claudeFloorsFrom, headroomPct, isFloored, type ClaudeFloors } from '../src/floors.js';
 import { loadLanes } from '../src/lanes.js';
 import { pickClaudeAccount, type ClaudeAccount } from '../src/capaware.js';
 import type { ProviderCaps } from '../src/usage.js';
 
 const floors: ClaudeFloors = { neverBelowPct: 3, residencyCapBelowPct: 10, residencyMax: 2 };
 
-const claudeCaps = (rows: Array<{ id: string; used: number | null }>): ProviderCaps => ({
+const claudeCaps = (rows: Array<{ id: string; used: number | null; used7d?: number | null }>): ProviderCaps => ({
   provider: 'claude', source: 'limits.json', stale: false, capturedAt: 1,
   fiveHour: { usedPercentage: null, resetsAt: null }, sevenDay: { usedPercentage: null, resetsAt: null },
   windows: {}, noteCodes: [], activeAccount: null,
-  accounts: rows.map(({ id, used }) => ({ id, fiveHour: { usedPercentage: used, resetsAt: null }, sevenDay: { usedPercentage: null, resetsAt: null }, windows: {}, noteCodes: [], limitReached: false, stale: false })),
+  accounts: rows.map(({ id, used, used7d = null }) => ({ id, fiveHour: { usedPercentage: used, resetsAt: null }, sevenDay: { usedPercentage: used7d, resetsAt: null }, windows: {}, noteCodes: [], limitReached: false, stale: false })),
 });
 const accts: ClaudeAccount[] = [{ id: 'a', configDir: null }, { id: 'b', configDir: '/x/.claude-b' }];
 
@@ -42,14 +42,24 @@ describe('claude floors (HED-261)', () => {
     expect(headroomPct(null)).toBeNull();
   });
 
+  it('regression PR#87 — floors the incident account when 7d is at 98% despite healthy 5h', () => {
+    expect(isFloored(50, 98, floors)).toBe(true);
+    expect(bindingMeter(50, 98)).toBe('7d');
+  });
+
+  it('does not floor a keeper-anchor account whose 7d reading is unknown', () => {
+    expect(isFloored(10, null, floors)).toBe(false);
+    expect(bindingMeter(10, null)).toBe('5h');
+  });
+
   it('floors an account at or below the headroom floor (INCLUSIVE) — the rollover-scare guard', () => {
-    expect(isFloored(98, floors)).toBe(true);   // headroom 2 → floored (the 98% resume the rollover hit)
-    expect(isFloored(100, floors)).toBe(true);  // headroom 0 → floored (the 100% resume)
+    expect(isFloored(98, 50, floors)).toBe(true);   // headroom 2 → floored (the 98% resume the rollover hit)
+    expect(isFloored(100, 50, floors)).toBe(true);  // headroom 0 → floored (the 100% resume)
     // boundary: ratified lanes.yaml is "never rotate INTO ≤3%" → INCLUSIVE, so headroom == the floor is floored (R nod 2026-08-22).
-    expect(isFloored(97, floors)).toBe(true);   // headroom 3 ≤ 3 → floored
-    expect(isFloored(96, floors)).toBe(false);  // headroom 4 > 3 → allowed
-    expect(isFloored(50, floors)).toBe(false);
-    expect(isFloored(null, floors)).toBe(false); // unknown never decides
+    expect(isFloored(97, 50, floors)).toBe(true);   // headroom 3 ≤ 3 → floored
+    expect(isFloored(96, 50, floors)).toBe(false);  // headroom 4 > 3 → allowed
+    expect(isFloored(50, 50, floors)).toBe(false);
+    expect(isFloored(null, null, floors)).toBe(false); // both unknown never decides
   });
 });
 
@@ -72,6 +82,12 @@ describe('pickClaudeAccount floor integration (HED-261, opt-in only)', () => {
 
   it('excludes a floored account and picks a healthy sibling', () => {
     expect(pickClaudeAccount(claudeCaps([{ id: 'a', used: 98 }, { id: 'b', used: 40 }]), accts, { floors })?.account.id).toBe('b');
+  });
+
+  it('refuses a pinned account floored only by 7d and names that binding meter', () => {
+    const one: ClaudeAccount[] = [{ id: 'a', configDir: null }];
+    expect(() => pickClaudeAccount(claudeCaps([{ id: 'a', used: 50, used7d: 98 }]), one, { pin: 'a', floors }))
+      .toThrow(/account_pin "a".*5h 50%, 7d 98% → 7d binds.*floor 3%/);
   });
 
   it('unknown/stale used is NOT floored — the picker still selects (unknown never decides)', () => {

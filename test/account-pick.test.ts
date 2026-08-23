@@ -2,6 +2,7 @@ import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { adviseClaudeAccount, bestFableWeekly, pickClaudeAccount, type ClaudeAccount } from '../src/capaware.js';
+import type { ClaudeFloors } from '../src/floors.js';
 import { readClaudeTap, readProviderCaps, type ProviderCaps } from '../src/usage.js';
 import { useTempResources } from './helpers.js';
 
@@ -50,6 +51,7 @@ describe('pickClaudeAccount', () => {
  * out of weekly allowance, so the relaunched fleet hits the weekly wall immediately.
  */
 describe('pickClaudeAccount — weekly (7d) headroom ranking', () => {
+  const floors: ClaudeFloors = { neverBelowPct: 3, residencyCapBelowPct: 10, residencyMax: 2 };
   const caps7d = (rows: Array<{ id: string; used: number | null; used7d?: number | null; stale?: boolean }>): ProviderCaps => ({
     provider: 'claude', source: 'limits.json', stale: false, capturedAt: 1,
     fiveHour: { usedPercentage: null, resetsAt: null }, sevenDay: { usedPercentage: null, resetsAt: null },
@@ -60,6 +62,16 @@ describe('pickClaudeAccount — weekly (7d) headroom ranking', () => {
     })),
   });
   const weekly = { prefer7d: true, routeAwayAtPct: 90, routeAwayAt7dPct: 90 };
+
+  it('regression PR#87 — refuses the incident account when 7d, not 5h, hits the floor', () => {
+    const account = [{ id: 'acct1', configDir: null }];
+    expect(pickClaudeAccount(caps7d([{ id: 'acct1', used: 50, used7d: 98 }]), account, { floors })).toBeNull();
+  });
+
+  it('keeps a keeper-anchor account addressable when its 7d meter is unknown', () => {
+    const account = [{ id: 'acct1', configDir: null }];
+    expect(pickClaudeAccount(caps7d([{ id: 'acct1', used: 10, used7d: null }]), account, { floors })?.account.id).toBe('acct1');
+  });
 
   it('ranks by weekly headroom, not 5h, and reports both windows', () => {
     const pick = pickClaudeAccount(
