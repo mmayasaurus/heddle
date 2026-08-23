@@ -19,54 +19,79 @@ their `.claude/settings.json` (HED-107) — drift-prone and unrepeatable for a n
 
 Installs/links the canonical discipline set into `<dir>` and registers the project. **Idempotent and
 re-runnable**: every step is a no-op when already correct; re-running after a canonical change
-re-renders only what drifted. Never destructive: existing files that differ are *reported*, never
-overwritten, unless `--force` (v1 has no `--force`; report-and-skip is the only behaviour).
+re-renders only what drifted. Never lossy: generated files (settings.json hooks, .mcp.json, .memtraceignore, the registry) are
+*merged* — everything not owned by the installer is preserved byte-for-byte in content, and every
+file whose bytes change is reported as `update` (a one-time re-serialization of a hand-formatted file
+is expected and reported). Files the installer only seeds (rules stubs, /heddle-gate) are never
+rewritten once present.
 
 ### Steps (each reported as `ok | created | updated | skipped(reason) | would-<verb>` under --dry-run)
 
 1. **Canonical root** — resolve `--canonical` (default: `HEDDLE_CANONICAL` env, else the path
    recorded in `~/.heddle/canonical.json`, else the Spinventory workspace `.claude/` — v1 default,
-   flipped by HED-96). Must contain `hooks/` with the 9 discipline hooks; otherwise fail loudly
-   with the missing list (no partial install).
-2. **`<dir>/.claude/settings.json` hook wiring** — render the 12-entry / 4-event wiring heddle's own
+   flipped by HED-96). Must contain `hooks/` with the 6 WIRED discipline hooks (the 3 workspace-only hooks are
+   optional and reported); a missing wired hook fails loudly with the list (no partial install).
+2. **`<dir>/.claude/settings.json` hook wiring** — render the 14-command / 6-event wiring heddle's own
    `.claude/settings.json` uses today (SessionStart identity+preflight; UserPromptSubmit
    remind-owned-prs; PreToolUse Bash→memtrace deny-recursive-search + enforce-query, Grep|Glob|Read→
    enforce-query, Edit|MultiEdit|Write→delegation-nudge; PostToolUse Bash→memtrace record + pr-sweep
-   record, mcp__memtrace__.*→record, mcp__serena__.*→record; Stop→memtrace stop), every entry in the
+   record, mcp__memtrace__.*→record, mcp__serena__.*→record; Stop→memtrace stop + pr-sweep
+   enforce-stop; SubagentStop→memtrace stop — the table is asserted against heddle's live file by a
+   test so it can never drift), every entry in the
    loud-fail-open form (`if [ -f "<canonical>/hooks/<h>" ]; then python3 … ; else echo "… MISSING at
    the canonical — running WITHOUT it" >&2; exit 1; fi`). MERGE into an existing settings.json:
    preserve unrelated keys and any non-discipline hooks; replace only entries whose command targets a
-   discipline hook by basename. Absolute paths are rendered from the resolved canonical (links, not
+   discipline hook — matched on the `/hooks/<name>` PATH SEGMENT, never a bare filename substring —
+   and replace them IN PLACE inside their existing matcher group (a group mixing user hooks and
+   discipline hooks keeps its user hooks and its position; never split, never duplicated). Absolute paths are rendered from the resolved canonical (links, not
    copies — "no byte-copied drift").
 3. **Rules stubs** — `<dir>/.claude/rules/{pr-review-sweep,pr-ownership,worktree-discipline}.md`
    as short stubs that REFERENCE the canonical rule by absolute path (same stub→canonical pattern
    Spinventory uses for its style guides). Skip if present.
 4. **`.mcp.json`** — ensure `memtrace` and `serena` server entries exist (merge; never drop others).
-   Entry shapes copied from heddle's own `.mcp.json` if present, else a documented default.
+   Entry shapes copied from heddle's own `.mcp.json` if present; otherwise the step is reported
+   `skip(no template)` with a human-step — never a placeholder stub that could shadow a working config.
 5. **`.memtraceignore`** — ensure `.worktrees/` and `.memdb*/` lines exist (append-only).
 6. **Per-repo `/heddle-gate` command** — `<dir>/.claude/commands/heddle-gate.md` from heddle's own
    copy if absent.
 7. **Registry** — upsert `~/.heddle/projects.json` (`src/projects.ts` schema v1): `name` (default
    basename), `workspaceRoots` += resolved `<dir>`, `agentIds`/`linearTeam`/`defaultRoom`/`launcher`
-   from flags (required on first registration, preserved on re-run). Registry is TRUTH (docs/PROJECTS.md).
-8. **memtrace-first enforcement flag** — `--enforce-memtrace` writes `<dir>` into
-   `~/.heddle/memtrace-enforce.json` as `{ "<root>": true }` (per-root flag the hook reads — see
-   "Hook parameterization"). Default OFF (record-only) for a freshly-initialized repo; Maya's call to
-   flip (per HED-84's per-root ENFORCEMENT design).
+   from flags (required on first registration, preserved on re-run). Registry is TRUTH (docs/PROJECTS.md). The upsert is VALIDATED BEFORE WRITE by round-tripping the
+   candidate through `loadProjectRegistry`'s own checks (non-empty fields, absolute roots, non-empty
+   agentIds, no agent claimed by two projects); empty strings / empty agent lists are rejected as
+   missing. A registry that would not load back is never written.
+8. **memtrace opt-in marker + enforcement flag** — ALWAYS write `<dir>` into
+   `~/.heddle/memtrace-enforce.json` as `{ "<canonicalized root>": <bool> }`: `true` with
+   `--enforce-memtrace` (hard gate), else `false` (record-only). PRESENCE in this file is what opts a
+   root into the memtrace-first hook's registry layer (see "Hook parameterization") — a root merely
+   listed in `projects.json` is NOT memtrace-managed. Default `false` for a freshly-initialized repo;
+   flipping to `true` is Maya's call (per-root ENFORCEMENT design). Other roots are preserved.
 9. **Verify** — print what was installed, what was skipped and why, and a human-steps checklist:
    register the memtrace watch (`watch_directory` is an MCP call — the installer prints the exact
    call, it cannot make it), confirm index freshness, Linear team/labels (HED-299 ws3 owns automating).
 
 ### Hook parameterization (the canonical `require-memtrace-first.py`)
 
-Today the hook hardcodes `APP_MONOREPO` / `HEDDLE_REPOS` / `ENFORCEMENT_ROOTS`. v1 adds a
-registry-driven layer WITHOUT removing the hardcoded lists (behaviour-neutral for Spinventory and
-heddle): `indexed_repo_root_for_path` also consults `~/.heddle/projects.json` `workspaceRoots`
-(longest-prefix match, realpath-canonicalized, same rules as `projects.ts`), and
-`enforcement_enabled_for` also consults `~/.heddle/memtrace-enforce.json`. Both reads are
-fail-soft (absent file → today's behaviour). The `repo_id` for a registry root = the root's
-basename (memtrace's `repo_id` convention for `index_directory`), overridable later by a registry
-field (not v1).
+Today the hook hardcodes `APP_MONOREPO` / `HEDDLE_REPOS` / `ENFORCEMENT_ROOTS`. v1 adds an OPT-IN
+registry layer WITHOUT removing the hardcoded lists, consulted only after they all miss:
+
+- A root participates ONLY if it is PRESENT as a key in `~/.heddle/memtrace-enforce.json` (the
+  installer's marker) — merely appearing in `projects.json` `workspaceRoots` does nothing. This is
+  what keeps the change behaviour-neutral: the documented example registry lists the Spinventory
+  WORKSPACE root, and without the opt-in every workspace-level cwd would have flipped from
+  "unindexed" to "indexed repo" (review ledger 514, H1).
+- Matching: longest opted-in root, path-SEGMENT boundaries (`/a/foo` never matches `/a/foobar`);
+  roots and the cwd are canonicalized the SAME way (realpath when it exists, else lexical resolve)
+  and the enforce file's keys are canonicalized before comparison (`/tmp` vs `/private/tmp`).
+  A root of `/` or a user's home is refused (never opted in).
+- `repo_id` for an opted-in root = its basename, and that id is ADDED to the hook's accepted-id set so
+  the hook's own deny message ("query memtrace with repo_id X") is satisfiable (ledger 514, H2).
+  Basename collisions across projects are a documented v1 limitation.
+- Gate: the enforce file's value (`true` = hard gate) for opted-in roots; hardcoded
+  `ENFORCEMENT_ROOTS` keep priority; absent → `ENFORCEMENT_ENABLED` (record-only today).
+- Robustness: both JSON reads are fail-soft PER ENTRY (a bad entry is skipped, the rest apply — never
+  "one typo disables every override"), capped at 1 MiB and regular files only, never raise.
+  Case-insensitive filesystems: matching is byte-exact on the canonical spelling (known limitation).
 
 ## Non-goals (v1)
 
