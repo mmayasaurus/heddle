@@ -225,6 +225,13 @@ try {
       }
       const claudeCaps = capsGate.caps;
       const requestedAgents = forAgent?.split(',').map((agent) => agent.trim()).filter(Boolean) ?? [];
+      // Each --for identity must be a real agent tag, never a flag — `--for R,--json` must not turn
+      // `--json` into an assignment key (qodo review, HED-333). The guard above only checks the whole
+      // string; validate each comma-separated entry so a flag-like value is rejected, not used as a key.
+      if (requestedAgents.some((agent) => agent.startsWith('-'))) {
+        console.error('usage: heddle account pick [--for <letter[,letter...]>] [--json] [--explain]');
+        process.exit(2);
+      }
       const agents = [...new Set(requestedAgents)];
       if (agents.length > 1) {
         const warnings: string[] = [];

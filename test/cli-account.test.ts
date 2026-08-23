@@ -227,6 +227,18 @@ describe('heddle account pick CLI', () => {
     expect(result.stderr).toMatch(/usage: heddle account pick/);
   }, 30_000);
 
+  it('rejects a flag-like entry inside a multi-value --for (never a batch key)', async () => {
+    // `--for R,--json` must not make `--json` an assignment key (qodo review, HED-333).
+    const { accountsPath, usageDir } = fixture([{ id: 'default', configDir: null }], { default: 40 });
+
+    const result = await runCli(['account', 'pick', '--for', 'R,--json'], {
+      env: { HEDDLE_ACCOUNTS: accountsPath, HEDDLE_USAGE_DIR: usageDir },
+    });
+
+    expect(result.code).toBe(2);
+    expect(result.stderr).toMatch(/usage: heddle account pick/);
+  }, 30_000);
+
   it('balances six batch placements across three healthy accounts instead of stacking them', async () => {
     const { accountsPath, usageDir } = fixture([
       { id: 'a', configDir: '/tmp/a' }, { id: 'b', configDir: '/tmp/b' }, { id: 'c', configDir: '/tmp/c' },
