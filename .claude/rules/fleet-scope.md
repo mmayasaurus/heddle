@@ -4,8 +4,9 @@
 > (`/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/rules/fleet-scope.md`, HED-355 / workspace PR #38)
 > and wins on any divergence. Cross-file references inside this rule (`worktree-discipline.md` §5,
 > `keep-moving.md`, `.claude/hooks/remind-owned-prs.py`, `.claude/hooks/agent-identity.py`,
-> `issue-tracking.md`, `DECISIONS.md`, and the launchers `resume-sessions-hed.sh`,
-> `resume-sessions-spi.sh`, `fleet-relaunch.sh`) are **workspace-repo files**, not files of this repo: the two
+> `issue-tracking.md`, `DECISIONS.md`, the launchers `resume-sessions-hed.sh`,
+> `resume-sessions-spi.sh`, `fleet-relaunch.sh`, and `~/.claude/CLAUDE.md` — Maya's machine-global
+> brain, outside every repo) are workspace-side files, not files of this repo: the two
 > SCOPE-injecting hooks run FROM the workspace checkout via this repo's `.claude/settings.json`
 > (vendoring deferred — HED-96), and this repo's own `worktree-discipline.md` is a different file that
 > has no §5. "heddle" as a scope term always means BOTH heddle repos (`heddle`, `heddle-dashboard`).
