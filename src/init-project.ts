@@ -1,8 +1,8 @@
-import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loadProjectRegistry, PROJECTS_SCHEMA_VERSION, validateRegistry } from './projects.js';
+import { isAncestorOrEqual, PROJECTS_SCHEMA_VERSION, validateRegistry } from './projects.js';
 
 /** v1 default; HED-96 flips to heddle's fleet/ */
 export const V1_CANONICAL_DEFAULT = '/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude';
@@ -49,6 +49,12 @@ function readJson(path: string, description: string): any {
   catch (error) { throw new Error(`${description} at ${path} is not valid JSON: ${(error as Error).message}`); }
 }
 function json(value: unknown): string { return JSON.stringify(value, null, 2) + '\n'; }
+let atomicWriteSequence = 0;
+function atomicWriteFile(path: string, content: string): void {
+  const temporary = join(dirname(path), `.${basename(path)}.${process.pid}.${atomicWriteSequence++}.tmp`);
+  writeFileSync(temporary, content);
+  renameSync(temporary, path);
+}
 function stepFor(path: string, step: string, content: string, dryRun: boolean, exists = existsSync(path)): InstallStep {
   const same = exists && readFileSync(path, 'utf8') === content;
   const action = same ? 'ok' : exists ? (dryRun ? 'would-update' : 'update') : (dryRun ? 'would-create' : 'create');
@@ -57,6 +63,11 @@ function stepFor(path: string, step: string, content: string, dryRun: boolean, e
 function hookCommand(canonical: string, hook: string, args?: string): string {
   const hookPath = join(canonical, 'hooks', hook);
   return `if [ -f "${hookPath}" ]; then python3 "${hookPath}"${args ? ` ${args}` : ''}; else echo "heddle: discipline hook ${hook} MISSING at the canonical — running WITHOUT it (heddle init-project)" >&2; exit 1; fi`;
+}
+function assertShellSafeCanonical(canonical: string): void {
+  if (/["`$;\r\n]/.test(canonical)) {
+    throw new Error(`canonical path contains unsupported shell character: ${JSON.stringify(canonical)}`);
+  }
 }
 function disciplineHook(entry: any): typeof WIRED_HOOKS[number] | undefined {
   const command = entry?.command;
@@ -72,7 +83,7 @@ function renderedSettings(path: string, canonical: string): { content: string; m
   const misplaced: string[] = [];
   const disciplineTargets = new Map<string, { group: any; index?: number }>();
   for (const [event, groups] of Object.entries(source.hooks ?? {})) {
-    if (!Array.isArray(groups)) { hooks[event] = groups as any; continue; }
+    if (!Array.isArray(groups)) throw new Error(`settings.json at ${path}: hooks.${event} must be an array`);
     const preserved: any[] = [];
     for (const group of groups) {
       if (!group || typeof group !== 'object' || !Array.isArray(group.hooks)) { preserved.push(group); continue; }
@@ -130,15 +141,24 @@ function rulesContent(canonical: string, file: string): string {
 export function planInstall(input: InstallOptions): InstallPlan {
   const homeDir = input.homeDir ?? homedir();
   const dir = canonicalizePath(input.dir);
+  const targetParent = dirname(dir);
+  if (!existsSync(dir) && !existsSync(targetParent)) {
+    throw new Error(`target parent does not exist: ${targetParent} — create it or fix the path`);
+  }
   const canonicalConfig = join(homeDir, '.heddle', 'canonical.json');
   const configCanonical = existsSync(canonicalConfig) ? readJson(canonicalConfig, 'canonical.json')?.canonical : undefined;
   const canonical = canonicalizePath(input.canonical ?? process.env.HEDDLE_CANONICAL ?? configCanonical ?? V1_CANONICAL_DEFAULT);
+  assertShellSafeCanonical(canonical);
   const missing = WIRED_HOOKS.filter((hook) => !existsSync(join(canonical, 'hooks', hook)));
   if (missing.length) throw new Error(`canonical ${canonical} is missing required discipline hooks: ${missing.join(', ')}`);
   const name = input.name ?? basename(dir);
   const registryPath = join(homeDir, '.heddle', 'projects.json');
-  const registry = loadProjectRegistry(registryPath);
+  const rawRegistry = existsSync(registryPath)
+    ? readJson(registryPath, 'projects.json')
+    : { schemaVersion: PROJECTS_SCHEMA_VERSION, projects: [] };
+  const registry = validateRegistry(rawRegistry, registryPath);
   const prior = registry.projects.find((project) => project.name === name);
+  const rawPrior = rawRegistry.projects.find((project: any) => project.name === name);
   const supplied = (flag: 'team' | 'agents' | 'room' | 'launcher'): string | undefined => {
     const value = input[flag];
     if (value !== undefined && !value.trim()) throw new Error('--' + flag + ' must not be empty');
@@ -181,19 +201,35 @@ export function planInstall(input: InstallOptions): InstallPlan {
   const gatePath = join(dir, '.claude', 'commands', 'heddle-gate.md');
   if (existsSync(gatePath)) steps.push({ step: 'heddle-gate', path: gatePath, action: 'skip', reason: 'exists' });
   else steps.push(stepFor(gatePath, 'heddle-gate', readFileSync(installerAsset('.claude', 'commands', 'heddle-gate.md'), 'utf8'), dryRun, false));
-  const project = prior ? { ...prior, workspaceRoots: prior.workspaceRoots.includes(dir) ? prior.workspaceRoots : [...prior.workspaceRoots, dir], agentIds: parsedAgents ?? prior.agentIds, linearTeam: team ?? prior.linearTeam, defaultRoom: room ?? prior.defaultRoom, launcher: launcher ?? prior.launcher } : { name, workspaceRoots: [dir], agentIds: parsedAgents!, linearTeam: team!, defaultRoom: room!, launcher: launcher! };
-  const nextRegistry = { schemaVersion: PROJECTS_SCHEMA_VERSION, projects: prior ? registry.projects.map((candidate) => candidate.name === name ? project : candidate) : [...registry.projects, project] };
+  const project = prior
+    ? {
+      ...rawPrior,
+      workspaceRoots: prior.workspaceRoots.includes(dir) ? rawPrior.workspaceRoots : [...rawPrior.workspaceRoots, dir],
+      agentIds: parsedAgents ?? rawPrior.agentIds,
+      linearTeam: team ?? rawPrior.linearTeam,
+      defaultRoom: room ?? rawPrior.defaultRoom,
+      launcher: launcher ?? rawPrior.launcher,
+    }
+    : { name, workspaceRoots: [dir], agentIds: parsedAgents!, linearTeam: team!, defaultRoom: room!, launcher: launcher! };
+  const nextRegistry = {
+    ...rawRegistry,
+    projects: prior ? rawRegistry.projects.map((candidate: any) => candidate.name === name ? project : candidate) : [...rawRegistry.projects, project],
+  };
   validateRegistry(nextRegistry, registryPath);
   steps.push(stepFor(registryPath, 'registry', json(nextRegistry), dryRun));
   const enforcePath = join(homeDir, '.heddle', 'memtrace-enforce.json'); const existing = existsSync(enforcePath) ? readJson(enforcePath, 'memtrace-enforce.json') : {};
-  steps.push(stepFor(enforcePath, 'memtrace-enforce', json({ ...existing, [dir]: input.enforceMemtrace === true }), dryRun));
+  const priorEnforceValue = existing[dir];
+  steps.push(stepFor(enforcePath, 'memtrace-enforce', json({ ...existing, [dir]: input.enforceMemtrace === true ? true : (priorEnforceValue ?? false) }), dryRun));
   return { options: { ...input, dir, canonical, name, homeDir }, steps };
 }
 
 export function applyInstall(plan: InstallPlan, dryRun = false): InstallReport {
+  const skipWrites = dryRun || plan.options.dryRun === true;
   for (const step of plan.steps) {
-    if (dryRun || !step.content || step.action === 'ok' || step.action === 'skip') continue;
-    mkdirSync(dirname(step.path), { recursive: true }); writeFileSync(step.path, step.content);
+    if (skipWrites || !step.content || step.action === 'ok' || step.action === 'skip') continue;
+    mkdirSync(dirname(step.path), { recursive: true });
+    if (step.step === 'registry' || step.step === 'memtrace-enforce') atomicWriteFile(step.path, step.content);
+    else writeFileSync(step.path, step.content);
   }
   const root = plan.options.dir;
   return { steps: plan.steps, humanSteps: [`watch_directory(path=${root}, repo_id=${basename(root)})`, 'confirm index freshness', 'Linear team/labels — HED-299 ws3'] };
@@ -201,7 +237,8 @@ export function applyInstall(plan: InstallPlan, dryRun = false): InstallReport {
 
 export function redactReport(report: InstallReport, showContent: boolean, homeDir: string): InstallReport {
   if (showContent) return report;
-  return { ...report, steps: report.steps.map(({ content, ...step }) => content && step.path.startsWith(homeDir)
+  const heddleDir = resolve(homeDir, '.heddle');
+  return { ...report, steps: report.steps.map(({ content, ...step }) => content && isAncestorOrEqual(heddleDir, resolve(step.path))
     ? { ...step, bytes: Buffer.byteLength(content) }
     : { ...step, ...(content ? { content } : {}) }) };
 }

@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFi
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { applyInstall, DISCIPLINE_WIRING, planInstall, redactReport } from '../src/init-project.js';
+import { applyInstall, DISCIPLINE_WIRING, planInstall, redactReport, V1_CANONICAL_DEFAULT } from '../src/init-project.js';
 import { useTempResources } from './helpers.js';
 
 const WIRED_HOOKS = [
@@ -13,11 +13,11 @@ const WIRED_HOOKS = [
 
 function fixture(base: string) {
   const canonical = join(base, 'canonical');
-  const target = join(base, 'target');
   const homeDir = join(base, 'home');
+  const target = join(homeDir, 'target');
   mkdirSync(join(canonical, 'hooks'), { recursive: true });
   for (const hook of WIRED_HOOKS) writeFileSync(join(canonical, 'hooks', hook), '');
-  mkdirSync(target);
+  mkdirSync(target, { recursive: true });
   return { canonical, target, homeDir };
 }
 
@@ -98,7 +98,7 @@ describe('init-project', () => {
     expect(bash[0].hooks[0].command).toBe('echo custom');
     expect(bash[0].hooks).toHaveLength(3);
     expect(bash[1].hooks).toEqual([]);
-    expect(JSON.stringify(settings)).not.toContain('old/require-memtrace-first.py');
+    expect(JSON.stringify(settings)).not.toContain('old/hooks/require-memtrace-first.py');
   });
 
   it('reports and removes discipline entries placed under an unwired matcher', () => {
@@ -142,7 +142,7 @@ describe('init-project', () => {
     expect(groups[2].hooks.map((entry: any) => entry.command)).toEqual(['echo user2']);
   });
 
-  it('redacts home-directory contents unless show-content is selected', () => {
+  it('redacts only heddle configuration contents unless show-content is selected', () => {
     const opts = options(tempDir());
     const report = applyInstall(planInstall(opts));
     const redacted = redactReport(report, false, opts.homeDir);
@@ -150,14 +150,16 @@ describe('init-project', () => {
     const settings = redacted.steps.find((step) => step.step === 'settings')!;
     expect(registry).toMatchObject({ bytes: expect.any(Number) });
     expect(registry.content).toBeUndefined();
-    expect(JSON.stringify(redacted)).not.toContain('Z');
+    expect(JSON.stringify(redacted)).not.toContain('agentIds');
     expect(settings.content).toBeDefined();
     expect(redactReport(report, true, opts.homeDir).steps.find((step) => step.step === 'registry')?.content).toContain('"agentIds": [\n        "Z"');
   });
 
-  it('includes the human steps in a dry-run report', () => {
+  it('does not apply a plan built for dry-run and includes its human watch step', () => {
     const opts = { ...options(tempDir()), dryRun: true };
-    expect(applyInstall(planInstall(opts), true).humanSteps).toHaveLength(3);
+    const report = applyInstall(planInstall(opts));
+    expect(existsSync(join(opts.dir, '.claude', 'settings.json'))).toBe(false);
+    expect(report.humanSteps).toContain(`watch_directory(path=${realpathSync.native(opts.dir)}, repo_id=target)`);
   });
 
   it('fails before writes when a wired canonical hook is missing', () => {
@@ -184,9 +186,35 @@ describe('init-project', () => {
     expect(readFileSync(path, 'utf8')).toBe('{bad');
   });
 
-  it('always writes the per-root memtrace opt-in marker and preserves other roots', () => {
+  it('rejects a non-array hook group with the installer error before writing', () => {
+    const opts = options(tempDir());
+    mkdirSync(join(opts.dir, '.claude'));
+    writeFileSync(join(opts.dir, '.claude', 'settings.json'), JSON.stringify({ hooks: { PreToolUse: {} } }));
+    expect(() => planInstall(opts)).toThrow(`settings.json at ${realpathSync.native(join(opts.dir, '.claude', 'settings.json'))}: hooks.PreToolUse must be an array`);
+    expect(existsSync(join(opts.homeDir, '.heddle', 'projects.json'))).toBe(false);
+  });
+
+  it('refuses a canonical path that cannot safely be rendered in a shell command', () => {
+    const opts = options(tempDir());
+    const unsafe = join(tempDir(), 'canonical$unsafe');
+    mkdirSync(join(unsafe, 'hooks'), { recursive: true });
+    for (const hook of WIRED_HOOKS) writeFileSync(join(unsafe, 'hooks', hook), '');
+    expect(() => planInstall({ ...opts, canonical: unsafe })).toThrow(/canonical path contains unsupported shell character/);
+  });
+
+  it('refuses a missing target parent rather than creating it', () => {
+    const opts = options(tempDir());
+    const parent = join(tempDir(), 'missing-parent');
+    const target = join(parent, 'target');
+    expect(() => planInstall({ ...opts, dir: target })).toThrow(`target parent does not exist: ${parent} — create it or fix the path`);
+    expect(existsSync(parent)).toBe(false);
+  });
+
+  it('writes the per-root memtrace opt-in marker, preserving a prior enforcement choice and other roots', () => {
     const opts = options(tempDir());
     applyInstall(planInstall({ ...opts, enforceMemtrace: true }));
+    expect(JSON.parse(readFileSync(join(opts.homeDir, '.heddle', 'memtrace-enforce.json'), 'utf8'))[realpathSync.native(opts.dir)]).toBe(true);
+    applyInstall(planInstall(opts));
     expect(JSON.parse(readFileSync(join(opts.homeDir, '.heddle', 'memtrace-enforce.json'), 'utf8'))[realpathSync.native(opts.dir)]).toBe(true);
     const off = options(tempDir());
     mkdirSync(join(off.homeDir, '.heddle'), { recursive: true });
@@ -221,14 +249,16 @@ describe('init-project', () => {
     expect(() => planInstall({ ...opts, team: '' })).toThrow(/--team/);
   });
 
-  it('preserves registration fields and other projects byte-for-byte on a valid rerun', () => {
+  it('preserves registration fields and unrelated raw registry objects byte-for-byte', () => {
     const opts = options(tempDir()); mkdirSync(join(opts.homeDir, '.heddle'), { recursive: true });
-    const other = { name: 'other', workspaceRoots: [join(opts.homeDir, 'other')], agentIds: ['O'], linearTeam: 'O', defaultRoom: '#o', launcher: 'o.sh' };
-    const own = { name: 'toy', workspaceRoots: [realpathSync.native(opts.dir)], agentIds: ['Z', 'Y'], linearTeam: 'NEW', defaultRoom: '#toy', launcher: 'resume-toy.sh' };
-    writeFileSync(join(opts.homeDir, '.heddle', 'projects.json'), JSON.stringify({ schemaVersion: 1, projects: [other, own] }, null, 2) + '\n');
-    const { team, agents, room, launcher, ...rerun } = opts; applyInstall(planInstall(rerun));
+    const other = { name: 'other', workspaceRoots: [join(opts.homeDir, 'elsewhere', '..', 'other')], agentIds: ['O'], linearTeam: 'O', defaultRoom: '#o', launcher: 'o.sh', note: 'keep' };
+    const source = JSON.stringify({ schemaVersion: 1, projects: [other] }, null, 2) + '\n';
+    const originalOther = source.match(/    \{[\s\S]*?\n    \}/)?.[0];
+    writeFileSync(join(opts.homeDir, '.heddle', 'projects.json'), source);
+    applyInstall(planInstall(opts));
     const registry = JSON.parse(readFileSync(join(opts.homeDir, '.heddle', 'projects.json'), 'utf8'));
-    expect(registry.projects).toEqual([other, own]);
+    expect(registry.projects[0]).toEqual(other);
+    expect(readFileSync(join(opts.homeDir, '.heddle', 'projects.json'), 'utf8')).toContain(originalOther);
   });
 
   it('guards a defaulted name collision with a different root', () => {
@@ -250,13 +280,21 @@ describe('init-project', () => {
     applyInstall(plan); expect(JSON.parse(readFileSync(join(opts.dir, '.mcp.json'), 'utf8')).mcpServers).toEqual({ other: { command: 'other' } });
   });
 
-  it('uses flag, environment, canonical.json, then default precedence', () => {
+  it('uses flag, environment, canonical.json, then the V1 default precedence', () => {
     const opts = options(tempDir()); const configCanonical = join(tempDir(), 'config'); mkdirSync(join(configCanonical, 'hooks'), { recursive: true }); for (const hook of WIRED_HOOKS) writeFileSync(join(configCanonical, 'hooks', hook), '');
     const envCanonical = join(tempDir(), 'env'); mkdirSync(join(envCanonical, 'hooks'), { recursive: true }); for (const hook of WIRED_HOOKS) writeFileSync(join(envCanonical, 'hooks', hook), '');
     mkdirSync(join(opts.homeDir, '.heddle'), { recursive: true }); writeFileSync(join(opts.homeDir, '.heddle', 'canonical.json'), JSON.stringify({ canonical: configCanonical }));
     const old = process.env.HEDDLE_CANONICAL; process.env.HEDDLE_CANONICAL = envCanonical;
     const { canonical, ...withoutFlag } = opts;
-    try { expect(planInstall(withoutFlag).options.canonical).toBe(realpathSync.native(envCanonical)); expect(planInstall({ ...withoutFlag, canonical: opts.canonical }).options.canonical).toBe(realpathSync.native(opts.canonical)); }
+    try {
+      expect(planInstall(withoutFlag).options.canonical).toBe(realpathSync.native(envCanonical));
+      expect(planInstall({ ...withoutFlag, canonical: opts.canonical }).options.canonical).toBe(realpathSync.native(opts.canonical));
+      delete process.env.HEDDLE_CANONICAL;
+      expect(planInstall(withoutFlag).options.canonical).toBe(realpathSync.native(configCanonical));
+      const defaultOpts = options(tempDir());
+      const { canonical: _defaultCanonical, ...withoutSources } = defaultOpts;
+      expect(planInstall(withoutSources).options.canonical).toBe(realpathSync.native(V1_CANONICAL_DEFAULT));
+    }
     finally { if (old === undefined) delete process.env.HEDDLE_CANONICAL; else process.env.HEDDLE_CANONICAL = old; }
   });
 

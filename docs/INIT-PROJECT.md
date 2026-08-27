@@ -54,7 +54,8 @@ rewritten once present.
    Spinventory uses for its style guides). Skip if present.
 4. **`.mcp.json`** — ensure `memtrace` and `serena` server entries exist (merge; never drop others).
    Entry shapes copied from heddle's own `.mcp.json` if present; otherwise the step is reported
-   `skip(no template)` with a human-step — never a placeholder stub that could shadow a working config.
+   `skip(no template)` until heddle ships its own `.mcp.json` — never a placeholder stub that could
+   shadow a working config.
 5. **`.memtraceignore`** — ensure `.worktrees/` and `.memdb*/` lines exist (append-only).
 6. **Per-repo `/heddle-gate` command** — `<dir>/.claude/commands/heddle-gate.md` from heddle's own
    copy if absent.
@@ -66,9 +67,10 @@ rewritten once present.
    missing. A registry that would not load back is never written.
 8. **memtrace opt-in marker + enforcement flag** — ALWAYS write `<dir>` into
    `~/.heddle/memtrace-enforce.json` as `{ "<canonicalized root>": <bool> }`: `true` with
-   `--enforce-memtrace` (hard gate), else `false` (record-only). PRESENCE in this file is what opts a
-   root into the memtrace-first hook's registry layer (see "Hook parameterization") — a root merely
-   listed in `projects.json` is NOT memtrace-managed. Default `false` for a freshly-initialized repo;
+   `--enforce-memtrace` (hard gate), else the prior value, or `false` on first registration
+   (record-only). PRESENCE in this file is what opts a root into the memtrace-first hook's registry
+   layer (see "Hook parameterization") — a root merely listed in `projects.json` is NOT
+   memtrace-managed. Default `false` for a freshly-initialized repo;
    flipping to `true` is Maya's call (per-root ENFORCEMENT design). Other roots are preserved.
 9. **Verify** — print what was installed, what was skipped and why, and a human-steps checklist:
    register the memtrace watch (`watch_directory` is an MCP call — the installer prints the exact
@@ -107,6 +109,7 @@ guides, vault, SPI reviewer fleet) — those stay project-local by design.
 
 A toy repo: `heddle init-project /tmp/newthing --name newthing --team NEW --agents Z --room #newthing
 --launcher resume-new.sh` → `.claude/settings.json` wired to the canonical (loud-fail-open), rules
-stubs + `.mcp.json` + `.memtraceignore` + `/heddle-gate` present, project in `~/.heddle/projects.json`,
+stubs + `.memtraceignore` + `/heddle-gate` present, `.mcp.json` reported `skip(no template)` until
+heddle ships its own `.mcp.json`, project in `~/.heddle/projects.json`,
 `heddle projects` lists it; a second run reports all `ok`, changes nothing (byte-identical files);
 `--dry-run` on a fresh dir writes nothing and reports every `would-create`.

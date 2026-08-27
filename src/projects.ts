@@ -176,7 +176,7 @@ export function loadProjectRegistry(path: string = DEFAULT_PROJECTS_PATH): Proje
  * this could over-match two roots differing only by case — an acceptable, negligible risk for a
  * project registry, versus the real macOS/Windows cwd-casing miss it prevents).
  */
-function isAncestorOrEqual(root: string, target: string): boolean {
+export function isAncestorOrEqual(root: string, target: string): boolean {
   const rootLower = root.toLowerCase();
   const targetLower = target.toLowerCase();
   if (rootLower === targetLower) return true;
