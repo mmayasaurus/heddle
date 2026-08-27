@@ -749,7 +749,7 @@ export async function dispatch(
   // prior rate-limit that may already have reset), and a preemptive jump to the class fallback bypassed
   // both that fallback's own account selection and the HED-261 floor. Run the primary as usual — a real
   // rate-limit then cools + fails over (below), and a genuinely dead pool reaches the normal fallback path.
-  const primary = await runTarget(target, req, ctx, route, plan.decision.routedAwayForCap ? `${route.provider}/${route.model}` : null);
+  let primary = await runTarget(target, req, ctx, route, plan.decision.routedAwayForCap ? `${route.provider}/${route.model}` : null);
   // Capability-fit fallback: when the PRIMARY provider merely lacks the knob (`unenforceable`) and
   // the class declares a fallback whose provider CAN enforce every requested capability, route there
   // — that's fit-routing, same spirit as the model fallback. Caller/operator errors stay terminal;
@@ -782,7 +782,21 @@ export async function dispatch(
     if (retry && retry.id !== from) {
       ctx.rotationAccount = retry; ctx.account = retry.id;
       ctx.routeReason = `${plan.decision.routeReason}; account-failover:${from}→${retry.id} (rate-limit); ${retry.reason}`;
-      return runTarget(target, req, ctx, route, `${target.provider}/${target.model} (account-failover)`);
+      let retryOutcome = await runTarget(target, req, ctx, route, `${target.provider}/${target.model} (account-failover)`);
+      if (primary.destroyed && !retryOutcome.destroyed) retryOutcome = { ...retryOutcome, destroyed: primary.destroyed };
+      else if (primary.destroyed && retryOutcome.destroyed) {
+        retryOutcome = { ...retryOutcome, destroyed: { ...retryOutcome.destroyed, note: `${primary.destroyed.note}; then ${retryOutcome.destroyed.note}` } };
+      }
+      if (primary.escape && !retryOutcome.escape) retryOutcome = { ...retryOutcome, escape: primary.escape };
+      else if (primary.escape && retryOutcome.escape) {
+        retryOutcome = { ...retryOutcome, escape: { ...retryOutcome.escape, note: `${primary.escape.note}; then ${retryOutcome.escape.note}` } };
+      }
+      primary = retryOutcome;
+      if (primary.ok || primary.refusal || primary.review?.mandateOk === false || req.noFallback) return primary;
+      if (classifyRotationRefusal(target.provider, primary) === 'rate-limit') {
+        cooling.lanes[`${target.provider}:${retry.id}`] = { cooledAt: req.nowS ?? Math.floor(Date.now() / 1000), reason: 'rate-limit', cooldownS: DEFAULT_COOLDOWN_S };
+        writeCooling(coolingPath, cooling);
+      }
     }
   }
 
@@ -861,7 +875,7 @@ export async function dispatch(
   // The account pick's REASON rides along too (the plan path already does this): without it a
   // runtime-fallback row records which account ran but never why it was chosen — the fable-headroom
   // / 5h-headroom evidence the scoreboard is built on (PR #24, found by the dispatched test worker).
-  ctx.routeReason = `${plan.decision.routeReason}; ${target.provider}/${target.model} failed → class fallback`
+  ctx.routeReason = `${ctx.routeReason ?? plan.decision.routeReason}; ${target.provider}/${target.model} failed → class fallback`
     + (ctx.claudeAccount ? `; ${ctx.claudeAccount.reason}` : ctx.rotationAccount ? `; ${ctx.rotationAccount.reason}` : '');
   let fbOutcome = await runTarget(fallback, req, ctx, route, `${route.provider}/${route.model}`);
   // A PRIMARY that escaped its worktree and then FAILED must not have that warning discarded when

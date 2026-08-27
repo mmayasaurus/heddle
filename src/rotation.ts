@@ -8,8 +8,8 @@ export const DEFAULT_ROTATION_ACCOUNTS_PATH = join(homedir(), '.heddle', 'accoun
 export const DEFAULT_COOLING_PATH = join(homedir(), '.heddle', 'usage', 'cooling.json');
 export const DEFAULT_COOLDOWN_S = 3600;
 
-export interface CodexAccount { id: string; codexHome: string | null; preferUntil?: string; note?: string }
-export interface CursorAccount { id: string; keyFile: string | null; preferUntil?: string; note?: string }
+export interface CodexAccount { id: string; codexHome: string | null; /** UTC civil day through which this account is preferred. */ preferUntil?: string; note?: string }
+export interface CursorAccount { id: string; keyFile: string | null; /** UTC civil day through which this account is preferred. */ preferUntil?: string; note?: string }
 export interface RotationAccounts { codex: CodexAccount[]; cursor: CursorAccount[] }
 export interface CoolingLane { cooledAt: number; reason: string; cooldownS: number }
 export interface CoolingStore { schemaVersion: 1; lanes: Record<string, CoolingLane> }
@@ -21,7 +21,7 @@ const emptyCooling = (): CoolingStore => ({ schemaVersion: 1, lanes: {} });
 function dateIsActive(date: string | undefined, nowS: number): boolean {
   if (!date) return false;
   const time = Date.parse(`${date}T00:00:00.000Z`);
-  return Number.isFinite(time) && nowS < time / 1000;
+  return Number.isFinite(time) && nowS < time / 1000 + 86400;
 }
 
 function parseAccounts<T extends 'codex' | 'cursor'>(raw: unknown, kind: T): T extends 'codex' ? CodexAccount[] : CursorAccount[] {
@@ -65,6 +65,7 @@ export function writeCooling(path: string, cooling: CoolingStore): void {
   const temp = `${path}.tmp`;
   try {
     mkdirSync(dirname(path), { recursive: true });
+    try { unlinkSync(temp); } catch { /* a missing temp is normal */ }
     writeFileSync(temp, JSON.stringify(cooling, null, 2) + '\n', { encoding: 'utf8', mode: 0o600 });
     renameSync(temp, path);
   } catch (error) {
@@ -108,6 +109,7 @@ export function pickCursorAccount(model: string, registry: RotationAccounts, coo
   if (isCursorNativeModel(model)) return machine ? { id: machine.id, keyFile: null, reason: `account:${machine.id} cursor included pool` } : null;
   const skipped: string[] = [];
   for (const account of preferred(registry.cursor, nowS)) {
+    if (account.keyFile === null) continue;
     if (unavailable.has(account.id)) { skipped.push(`cursor-${account.id} unavailable`); continue; }
     const note = coolingNote(cooling, 'cursor', account.id, nowS);
     if (note) { skipped.push(note); continue; }
@@ -120,17 +122,15 @@ export function pickCursorAccount(model: string, registry: RotationAccounts, coo
 export function readCursorKey(path: string): string | null {
   try {
     const mode = statSync(path).mode & 0o777;
+    // Warn-and-use: refusing a readable loose key would silently degrade rotation to machine login.
     if ((mode & 0o077) !== 0) process.stderr.write(`heddle: Cursor key file ${path} permissions are looser than 0600\n`);
     const key = readFileSync(path, 'utf8').trim();
     return key || null;
   } catch { return null; }
 }
 
-export function classifyRotationRefusal(provider: 'codex' | 'cursor', result: Pick<WorkerResult, 'ok' | 'output' | 'error' | 'exitCode'>): 'rate-limit' | null {
+export function classifyRotationRefusal(_provider: 'codex' | 'cursor', result: Pick<WorkerResult, 'ok' | 'output' | 'error' | 'exitCode'>): 'rate-limit' | null {
   if (result.ok) return null;
-  const text = `${result.error ?? ''}\n${result.output ?? ''}`.slice(-2000);
-  const pattern = provider === 'codex'
-    ? /rate.?limit|too many requests|\b429\b|quota|usage.?cap|exhaust/i
-    : /rate.?limit|too many requests|\b429\b|quota|usage.?cap|exhaust/i;
-  return pattern.test(text) ? 'rate-limit' : null;
+  const pattern = /rate.?limit|too many requests|\b429\b|(?<!disk )quota (?:exceeded|reached)|usage (?:limit|cap)|limit reached|you'?ve hit your|overloaded/i;
+  return pattern.test((result.error ?? '').slice(-2000)) || pattern.test((result.output ?? '').slice(-2000)) ? 'rate-limit' : null;
 }

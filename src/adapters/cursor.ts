@@ -80,7 +80,7 @@ export class CursorAdapter implements WorkerAdapter {
       usage,
       durationMs: result.duration_ms ?? durationMs,
       exitCode,
-      error: ok ? undefined : `cursor-agent is_error=${result.is_error} (exit ${exitCode})`,
+      error: ok ? undefined : `cursor-agent is_error=${result.is_error} (exit ${exitCode}); stderr tail: ${stderr.slice(-400)}`,
       raw: result,
     };
   }

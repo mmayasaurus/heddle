@@ -1,4 +1,5 @@
-import { chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
@@ -20,14 +21,14 @@ describe('rotation registry', () => {
     expect(readRotationAccounts(join(dir, 'accounts.json'))).toEqual({ codex: [], cursor: [] });
   });
 
-  it('preserves registry preference but boosts active preferUntil entries', () => {
+  it('preserves registry preference but boosts entries through their inclusive preferUntil day', () => {
     const dir = tempDir(); const path = join(dir, 'accounts.json');
     writeFileSync(path, JSON.stringify({ codex: [
       { id: 'first', codexHome: '/a' }, { id: 'bonus', codexHome: '/b', preferUntil: '2026-09-03' },
     ] }));
     const registry = readRotationAccounts(path);
-    expect(pickCodexAccount(registry, { schemaVersion: 1, lanes: {} }, undefined, 1_788_300_800)?.id).toBe('bonus');
-    expect(pickCodexAccount(registry, { schemaVersion: 1, lanes: {} }, undefined, 1_788_473_600)?.id).toBe('first');
+    expect(pickCodexAccount(registry, { schemaVersion: 1, lanes: {} }, undefined, Date.parse('2026-09-03T12:00:00Z') / 1000)?.id).toBe('bonus');
+    expect(pickCodexAccount(registry, { schemaVersion: 1, lanes: {} }, undefined, Date.parse('2026-09-04T00:00:00Z') / 1000)?.id).toBe('first');
   });
 });
 
@@ -48,6 +49,13 @@ describe('rotation cooling', () => {
     expect(JSON.parse(readFileSync(path, 'utf8'))).toMatchObject({ schemaVersion: 1, lanes: { 'cursor:a': { reason: 'quota' } } });
     expect(existsSync(`${path}.tmp`)).toBe(false);
   });
+
+  it('recreates a leftover cooling temp file with private permissions', () => {
+    const dir = tempDir(); const path = join(dir, 'cooling.json');
+    writeFileSync(`${path}.tmp`, 'leftover'); chmodSync(`${path}.tmp`, 0o644);
+    writeCooling(path, { schemaVersion: 1, lanes: {} });
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+  });
 });
 
 describe('rotation classifier and selectors', () => {
@@ -56,6 +64,14 @@ describe('rotation classifier and selectors', () => {
     expect(classifyRotationRefusal('cursor', { ok: false, output: 'usage cap exhausted', exitCode: 1 })).toBe('rate-limit');
     expect(classifyRotationRefusal('codex', { ok: false, output: '', error: 'socket closed', exitCode: 1 })).toBeNull();
     expect(classifyRotationRefusal('cursor', { ok: false, output: '', error: 'invalid request', exitCode: 1 })).toBeNull();
+  });
+
+  it('finds refusal signals in either error stream while rejecting generic resource failures', () => {
+    expect(classifyRotationRefusal('cursor', { ok: false, error: 'cursor-agent is_error=true (exit 1)', output: "You've hit your usage limit", exitCode: 1 })).toBe('rate-limit');
+    expect(classifyRotationRefusal('codex', { ok: false, error: 'HTTP 429 rate limit exceeded', output: 'x'.repeat(2500), exitCode: 1 })).toBe('rate-limit');
+    expect(classifyRotationRefusal('codex', { ok: false, error: 'ENOMEM: memory exhausted', output: '', exitCode: 1 })).toBeNull();
+    expect(classifyRotationRefusal('cursor', { ok: false, error: 'retries exhausted', output: '', exitCode: 1 })).toBeNull();
+    expect(classifyRotationRefusal('cursor', { ok: false, error: 'disk quota exceeded', output: '', exitCode: 1 })).toBeNull();
   });
 
   it('honors a codex pin even while cooled and explains that cooling is advisory', () => {
@@ -74,6 +90,14 @@ describe('rotation classifier and selectors', () => {
     const cooling: CoolingStore = { schemaVersion: 1, lanes: {} };
     expect(pickCursorAccount('cursor-fast', registry, cooling, 1_788_300_800)).toEqual({ id: 'machine', keyFile: null, reason: 'account:machine cursor included pool' });
     expect(pickCursorAccount('kimi-k3', registry, cooling, 1_788_300_800)).toMatchObject({ id: 'api', keyFile: key });
+  });
+
+  it('keeps machine login fallback-only for metered Cursor models', () => {
+    const registry = { codex: [], cursor: [{ id: 'machine', keyFile: null }, { id: 'api', keyFile: '/k' }] };
+    const cooling: CoolingStore = { schemaVersion: 1, lanes: {} };
+    expect(pickCursorAccount('kimi-k3', registry, cooling, 1)).toMatchObject({ id: 'api', keyFile: '/k' });
+    cooling.lanes['cursor:api'] = { cooledAt: 1, cooldownS: 3600, reason: 'rate-limit' };
+    expect(pickCursorAccount('kimi-k3', registry, cooling, 1)).toMatchObject({ id: 'machine', keyFile: null, reason: expect.stringContaining('fallback') });
   });
 });
 
@@ -109,6 +133,38 @@ describe('rotation dispatch wiring', () => {
     expect(fake.calls).toHaveLength(2); expect(fake.calls.map((call) => call.opts.env?.CODEX_HOME)).toEqual(['/one', '/two']);
     expect(outcome.account).toBe('two'); expect(outcome.routeReason).toContain('account-failover:one→two (rate-limit)');
     expect(readCooling(coolingPath).lanes['codex:one']).toMatchObject({ cooledAt: 100, reason: 'rate-limit' });
+  });
+
+  it('falls through to the class fallback when both rotated codex accounts rate-limit', async () => {
+    const fake = fakeAdapter(undefined, { readAgents: false }); const cwd = tempDir(); const coolingPath = join(tempDir(), 'cooling.json');
+    const adapter = { ...fake.adapter, dispatch: async (prompt: string, opts: Parameters<typeof fake.adapter.dispatch>[1]) => {
+      await fake.adapter.dispatch(prompt, opts);
+      return fake.calls.length < 3 ? { ok: false, output: '', error: '429 rate limit', exitCode: 1 } : { ok: true, output: 'done', exitCode: 0 };
+    } };
+    const outcome = await dispatch({ taskClass: 'bulk-mechanical', prompt: 'x', cwd, identity: IDENTITIES.unbound,
+      rotationAccounts: { codex: [{ id: 'one', codexHome: '/one' }, { id: 'two', codexHome: '/two' }], cursor: [] }, coolingPath, nowS: 100 }, tempLedger(), () => adapter);
+    expect(fake.calls).toHaveLength(3); expect(fake.calls[2].opts.model).toBe('composer-2.5-fast');
+    expect(readCooling(coolingPath).lanes['codex:one']).toMatchObject({ cooledAt: 100, reason: 'rate-limit' });
+    expect(readCooling(coolingPath).lanes['codex:two']).toMatchObject({ cooledAt: 100, reason: 'rate-limit' });
+    expect(outcome.routeReason).toContain('account-failover:one→two (rate-limit)');
+    expect(outcome.routeReason).toContain('failed → class fallback');
+  });
+
+  it('preserves a primary escape warning when a rotated retry succeeds', async () => {
+    const root = join(tempDir(), 'repo'); mkdirSync(root);
+    const git = (...args: string[]) => execFileSync('git', args, { cwd: root, encoding: 'utf8' });
+    git('init', '-q'); git('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '--allow-empty', '-q', '-m', 'init');
+    const cwd = join(root, '.worktrees', 'worker'); mkdirSync(join(root, '.worktrees'));
+    appendFileSync(join(root, '.git', 'info', 'exclude'), '\n.worktrees/\n'); git('worktree', 'add', '-q', cwd, '-b', 'worker');
+    const fake = fakeAdapter(undefined, { readAgents: false }); let calls = 0;
+    const adapter = { ...fake.adapter, dispatch: async (prompt: string, opts: Parameters<typeof fake.adapter.dispatch>[1]) => {
+      calls += 1; if (calls === 1) writeFileSync(join(root, 'escaped.txt'), 'x');
+      await fake.adapter.dispatch(prompt, opts);
+      return calls === 1 ? { ok: false, output: '', error: '429 rate limit', exitCode: 1 } : { ok: true, output: 'done', exitCode: 0 };
+    } };
+    const outcome = await dispatch({ taskClass: 'bulk-mechanical', prompt: 'x', cwd, identity: IDENTITIES.unbound,
+      rotationAccounts: { codex: [{ id: 'one', codexHome: '/one' }, { id: 'two', codexHome: '/two' }], cursor: [] }, coolingPath: join(tempDir(), 'cooling.json'), nowS: 100 }, tempLedger(), () => adapter);
+    expect(outcome.ok).toBe(true); expect(outcome.escape?.note).toContain('escaped.txt');
   });
 
   it('does not cool generic codex failures and uses the existing provider fallback', async () => {

@@ -28,4 +28,11 @@ describe('subprocess adapters forward envUnset to run (HED-268 account-selector 
     expect(mockedRun).toHaveBeenCalledTimes(1);
     expect(mockedRun.mock.calls[0][5]).toEqual(['CURSOR_API_KEY']);
   });
+
+  it('includes Cursor stderr on a parsed is_error result', async () => {
+    mockedRun.mockClear();
+    mockedRun.mockResolvedValueOnce({ stdout: JSON.stringify({ type: 'result', is_error: true, result: '', duration_ms: 1 }), stderr: 'rate limit diagnostic', exitCode: 1, timedOut: false });
+    const result = await new CursorAdapter().dispatch('x', { model: 'kimi-k3', cwd: '/tmp' });
+    expect(result.error).toContain('stderr tail: rate limit diagnostic');
+  });
 });
