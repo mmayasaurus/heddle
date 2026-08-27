@@ -1,11 +1,8 @@
-import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isAncestorOrEqual, PROJECTS_SCHEMA_VERSION, validateRegistry } from './projects.js';
-
-/** v1 default; HED-96 flips to heddle's fleet/ */
-export const V1_CANONICAL_DEFAULT = '/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude';
 
 const WIRED_HOOKS = ['agent-identity.py', 'agent-preflight.py', 'remind-owned-prs.py', 'require-memtrace-first.py', 'delegation-nudge.py', 'require-pr-sweep.py'] as const;
 const OPTIONAL_HOOKS = ['protect-workspace.py', 'require-vault-search.py', 'auto-reindex-vault.py'] as const;
@@ -17,7 +14,7 @@ export interface InstallOptions {
   enforceMemtrace?: boolean; dryRun?: boolean; homeDir?: string; showContent?: boolean;
 }
 export interface InstallStep {
-  step: string; path: string; action: 'ok' | 'create' | 'update' | 'skip' | 'would-create' | 'would-update'; reason?: string; content?: string; bytes?: number;
+  step: string; path: string; action: 'ok' | 'create' | 'update' | 'skip' | 'would-create' | 'would-update'; reason?: string; content?: string; bytes?: number; expectedContent?: string | null;
 }
 export interface InstallPlan { options: Required<Pick<InstallOptions, 'dir' | 'canonical' | 'name' | 'homeDir'>> & InstallOptions; steps: InstallStep[]; }
 export interface InstallReport { steps: InstallStep[]; humanSteps: string[]; }
@@ -57,7 +54,7 @@ function atomicWriteFile(path: string, content: string): void {
   const temporary = join(dirname(path), `.${basename(path)}.${process.pid}.${atomicWriteSequence++}.tmp`);
   try {
     writeFileSync(temporary, content);
-    // Single-user CLI: concurrent invocations are last-writer-wins.
+    if (existsSync(path)) chmodSync(temporary, statSync(path).mode);
     renameSync(temporary, path);
   } finally {
     try { if (existsSync(temporary)) unlinkSync(temporary); } catch { /* preserve the original write/rename failure */ }
@@ -79,17 +76,16 @@ function assertShellSafeCanonical(canonical: string): void {
 }
 function disciplineHook(entry: any): typeof WIRED_HOOKS[number] | undefined {
   const command = entry?.command;
-  return typeof command === 'string' ? [...DISCIPLINE_HOOKS].find((hook) =>
-    // Terminator is END, whitespace, or a quote — never `\b`, which fires before the `.` in
-    // `require-pr-sweep.py.bak` and would purge a user's disabled backup script (review ledger 523).
-    new RegExp('(^|[\\s"\\x27/])hooks/' + hook.replace(/\./g, '\\.') + '($|[\\s"\\x27])').test(command)) : undefined;
+  if (typeof command !== 'string') return undefined;
+  return [...DISCIPLINE_HOOKS].find((hook) => {
+    const index = command.indexOf(`/hooks/${hook}`);
+    const terminator = command[index + `/hooks/${hook}`.length];
+    // A bare filename is not owned; a suffix such as `.py.bak` is also not owned.
+    return index >= 0 && (terminator === undefined || /[\s"']/.test(terminator));
+  });
 }
-function renderedSettings(path: string, canonical: string): { content: string; misplaced: string[] } {
-  const source = existsSync(path) ? readJson(path, 'settings.json') : {};
-  if (!source || typeof source !== 'object' || Array.isArray(source)) throw new Error(`settings.json at ${path} must be a JSON object`);
+function preservedHookGroups(source: any, path: string, misplaced: string[], targets: Map<string, { group: any; index?: number }>): Record<string, any[]> {
   const hooks: Record<string, any[]> = {};
-  const misplaced: string[] = [];
-  const disciplineTargets = new Map<string, { group: any; index?: number }>();
   for (const [event, groups] of Object.entries(source.hooks ?? {})) {
     if (!Array.isArray(groups)) throw new Error(`settings.json at ${path}: hooks.${event} must be an array`);
     const preserved: any[] = [];
@@ -107,10 +103,13 @@ function renderedSettings(path: string, canonical: string): { content: string; m
       }
       const next = { ...group, hooks: retained };
       preserved.push(next);
-      if (isWiredMatcher && !disciplineTargets.has(key)) disciplineTargets.set(key, { group: next, index: firstDisciplineIndex });
+      if (isWiredMatcher && !targets.has(key)) targets.set(key, { group: next, index: firstDisciplineIndex });
     }
     hooks[event] = preserved;
   }
+  return hooks;
+}
+function wireDisciplineHooks(hooks: Record<string, any[]>, targets: Map<string, { group: any; index?: number }>, canonical: string): void {
   const wiringByTarget = new Map<string, typeof DISCIPLINE_WIRING>();
   for (const entry of DISCIPLINE_WIRING) {
     const key = `${entry.event}\u0000${entry.matcher}`;
@@ -121,7 +120,7 @@ function renderedSettings(path: string, canonical: string): { content: string; m
   for (const [key, wiring] of wiringByTarget) {
     const [event, matcher] = key.split('\u0000');
     const groups = hooks[event] ?? (hooks[event] = []);
-    let target = disciplineTargets.get(key);
+    let target = targets.get(key);
     if (!target) {
       const group = { matcher, hooks: [] as any[] };
       groups.push(group);
@@ -130,6 +129,14 @@ function renderedSettings(path: string, canonical: string): { content: string; m
     const block = wiring.map((entry) => ({ type: 'command', command: hookCommand(canonical, entry.hook, entry.args), timeout: entry.timeout }));
     target.group.hooks.splice(target.index ?? target.group.hooks.length, 0, ...block);
   }
+}
+function renderedSettings(path: string, canonical: string): { content: string; misplaced: string[] } {
+  const source = existsSync(path) ? readJson(path, 'settings.json') : {};
+  if (!source || typeof source !== 'object' || Array.isArray(source)) throw new Error(`settings.json at ${path} must be a JSON object`);
+  const misplaced: string[] = [];
+  const targets = new Map<string, { group: any; index?: number }>();
+  const hooks = preservedHookGroups(source, path, misplaced, targets);
+  wireDisciplineHooks(hooks, targets, canonical);
   const { hooks: _oldHooks, ...rest } = source;
   return { content: json({ ...rest, hooks }), misplaced };
 }
@@ -145,6 +152,48 @@ function mcpTemplate(): Record<string, unknown> | null {
 function rulesContent(canonical: string, file: string): string {
   return `# ${file.replace(/\.md$/, '').replace(/-/g, ' ')}\n\nThis project delegates this discipline rule to the canonical source.\n\nCanonical: ${join(canonical, 'rules', file)}\n\nInvoke/Read the canonical before acting.\n`;
 }
+function valueFor(flag: string, value: string | undefined): string | undefined {
+  if (value !== undefined && (!value.trim() || value.startsWith('--'))) throw new Error(`${flag} requires a value`);
+  return value;
+}
+function endOfJsonValue(source: string, start: number): number {
+  let depth = 0; let quoted = false; let escaped = false;
+  for (let index = start; index < source.length; index++) {
+    const char = source[index];
+    if (quoted) { if (escaped) escaped = false; else if (char === '\\') escaped = true; else if (char === '"') quoted = false; continue; }
+    if (char === '"') { quoted = true; continue; }
+    if (char === '{' || char === '[') depth++;
+    if (char === '}' || char === ']') { depth--; if (depth === 0) return index + 1; }
+    if (depth === 0 && (char === ',' || char === ']')) return index;
+  }
+  throw new Error('projects.json has an unterminated JSON value');
+}
+function projectObjectRange(source: string, name: string): { start: number; end: number } | undefined {
+  const projects = source.indexOf('"projects"');
+  const arrayStart = projects < 0 ? -1 : source.indexOf('[', projects);
+  if (arrayStart < 0) return undefined;
+  for (let index = arrayStart + 1; source[index] !== ']';) {
+    while (/\s|,/.test(source[index])) index++;
+    const end = endOfJsonValue(source, index);
+    const candidate = JSON.parse(source.slice(index, end));
+    if (candidate?.name === name) return { start: index, end };
+    index = end;
+  }
+  return undefined;
+}
+function replaceProjectInRawRegistry(source: string | undefined, name: string, project: unknown): string {
+  if (source === undefined) return json({ schemaVersion: PROJECTS_SCHEMA_VERSION, projects: [project] });
+  const range = projectObjectRange(source, name);
+  if (!range) return source;
+  const lineStart = source.lastIndexOf('\n', range.start - 1) + 1;
+  const prefix = source.slice(lineStart, range.start).match(/^[ \t]*/)?.[0] ?? '';
+  const replacement = JSON.stringify(project, null, jsonIndent(source)).replace(/\n/g, `\n${prefix}`);
+  return source.slice(0, range.start) + replacement + source.slice(range.end);
+}
+function registryContent(raw: any, rawContent: string | undefined, prior: any, project: any, name: string): string {
+  if (prior && rawContent !== undefined) return replaceProjectInRawRegistry(rawContent, name, project);
+  return json({ ...raw, projects: prior ? raw.projects.map((candidate: any) => candidate.name === name ? project : candidate) : [...raw.projects, project] }, jsonIndent(rawContent));
+}
 
 export function planInstall(input: InstallOptions): InstallPlan {
   const homeDir = input.homeDir ?? homedir();
@@ -155,28 +204,31 @@ export function planInstall(input: InstallOptions): InstallPlan {
   }
   // The parent exists by the guard above, so this is stable before and after mkdirSync creates the leaf.
   const dir = existsSync(requestedDir) ? canonicalizePath(requestedDir) : join(realpathSync.native(targetParent), basename(requestedDir));
+  const canonicalHome = canonicalizePath(homeDir);
+  if (dir === '/') throw new Error('refuses filesystem root as an install target');
+  if (dir === canonicalHome) throw new Error('refuses the home directory as an install target');
   const canonicalConfig = join(homeDir, '.heddle', 'canonical.json');
   const configCanonical = existsSync(canonicalConfig) ? readJson(canonicalConfig, 'canonical.json')?.canonical : undefined;
-  const canonical = canonicalizePath(input.canonical ?? process.env.HEDDLE_CANONICAL ?? configCanonical ?? V1_CANONICAL_DEFAULT);
+  const canonicalSource = valueFor('--canonical', input.canonical) ?? process.env.HEDDLE_CANONICAL ?? configCanonical;
+  if (!canonicalSource) throw new Error('canonical is required: pass --canonical <path>, set HEDDLE_CANONICAL, or create ~/.heddle/canonical.json');
+  const canonical = canonicalizePath(canonicalSource);
   assertShellSafeCanonical(canonical);
   const missing = WIRED_HOOKS.filter((hook) => !existsSync(join(canonical, 'hooks', hook)));
   if (missing.length) throw new Error(`canonical ${canonical} is missing required discipline hooks: ${missing.join(', ')}`);
-  const name = input.name ?? basename(dir);
+  const name = valueFor('--name', input.name) ?? basename(dir);
   const registryPath = join(homeDir, '.heddle', 'projects.json');
   const rawRegistryContent = existsSync(registryPath) ? readFileSync(registryPath, 'utf8') : undefined;
   const rawRegistry = rawRegistryContent === undefined ? { schemaVersion: PROJECTS_SCHEMA_VERSION, projects: [] } : readJson(registryPath, 'projects.json');
   const registry = validateRegistry(rawRegistry, registryPath);
-  const prior = registry.projects.find((project) => project.name === name);
-  const rawPrior = rawRegistry.projects.find((project: any) => project.name === name);
-  const supplied = (flag: 'team' | 'agents' | 'room' | 'launcher'): string | undefined => {
-    const value = input[flag];
-    if (value !== undefined && !value.trim()) throw new Error('--' + flag + ' must not be empty');
-    return value;
-  };
+  if (registry.projects.some((project) => project.workspaceRoots.some((root) => dir !== root && isAncestorOrEqual(dir, root)))) throw new Error(`refuses install target ${dir}: it is an ancestor of a registered workspace root`);
+  const namedPrior = registry.projects.find((project) => project.name === name);
+  const prior = registry.projects.find((project) => project.workspaceRoots.includes(dir)) ?? namedPrior;
+  const rawPrior = prior ? rawRegistry.projects.find((project: any) => project.name === prior.name) : undefined;
+  const supplied = (flag: 'team' | 'agents' | 'room' | 'launcher'): string | undefined => valueFor('--' + flag, input[flag]);
   const team = supplied('team'); const agents = supplied('agents'); const room = supplied('room'); const launcher = supplied('launcher');
   const parsedAgents = agents?.split(',').map((agent) => agent.trim()).filter(Boolean);
   if (agents !== undefined && !parsedAgents?.length) throw new Error('--agents must include at least one agent');
-  if (!input.name && prior && !prior.workspaceRoots.includes(dir)) throw new Error('project name "' + name + '" is already registered to a different root; provide an explicit --name');
+  if (!input.name && namedPrior && !namedPrior.workspaceRoots.includes(dir)) throw new Error('project name "' + name + '" is already registered to a different root; provide an explicit --name');
   if (!prior) {
     const missingFlags = [['team', team], ['agents', parsedAgents?.length ? agents : undefined], ['room', room], ['launcher', launcher]].filter(([, value]) => !value).map(([flag]) => '--' + flag);
     if (missingFlags.length) throw new Error(`first registration requires ${missingFlags.join(', ')}`);
@@ -210,6 +262,7 @@ export function planInstall(input: InstallOptions): InstallPlan {
   const gatePath = join(dir, '.claude', 'commands', 'heddle-gate.md');
   if (existsSync(gatePath)) steps.push({ step: 'heddle-gate', path: gatePath, action: 'skip', reason: 'exists' });
   else steps.push(stepFor(gatePath, 'heddle-gate', readFileSync(installerAsset('.claude', 'commands', 'heddle-gate.md'), 'utf8'), dryRun, false));
+  const projectName = prior?.name ?? name;
   const project = prior
     ? {
       ...rawPrior,
@@ -219,13 +272,10 @@ export function planInstall(input: InstallOptions): InstallPlan {
       defaultRoom: room ?? rawPrior.defaultRoom,
       launcher: launcher ?? rawPrior.launcher,
     }
-    : { name, workspaceRoots: [dir], agentIds: parsedAgents!, linearTeam: team!, defaultRoom: room!, launcher: launcher! };
-  const nextRegistry = {
-    ...rawRegistry,
-    projects: prior ? rawRegistry.projects.map((candidate: any) => candidate.name === name ? project : candidate) : [...rawRegistry.projects, project],
-  };
+    : { name: projectName, workspaceRoots: [dir], agentIds: parsedAgents!, linearTeam: team!, defaultRoom: room!, launcher: launcher! };
+  const nextRegistry = { ...rawRegistry, projects: prior ? rawRegistry.projects.map((candidate: any) => candidate.name === projectName ? project : candidate) : [...rawRegistry.projects, project] };
   validateRegistry(nextRegistry, registryPath);
-  steps.push(stepFor(registryPath, 'registry', json(nextRegistry, jsonIndent(rawRegistryContent)), dryRun));
+  steps.push({ ...stepFor(registryPath, 'registry', registryContent(rawRegistry, rawRegistryContent, rawPrior, project, projectName), dryRun), expectedContent: rawRegistryContent ?? null });
   const enforcePath = join(homeDir, '.heddle', 'memtrace-enforce.json'); const existing = existsSync(enforcePath) ? readJson(enforcePath, 'memtrace-enforce.json') : {};
   const aliases = Object.entries(existing).filter(([key]) => canonicalizePath(key) === dir);
   const priorEnforceValue = aliases[0]?.[1];
@@ -239,6 +289,10 @@ export function applyInstall(plan: InstallPlan, dryRun = false): InstallReport {
   for (const step of plan.steps) {
     if (skipWrites || !step.content || step.action === 'ok' || step.action === 'skip') continue;
     mkdirSync(dirname(step.path), { recursive: true });
+    if (step.expectedContent !== undefined) {
+      const current = existsSync(step.path) ? readFileSync(step.path, 'utf8') : null;
+      if (current !== step.expectedContent) throw new Error('registry changed underneath this install plan — re-run heddle init-project');
+    }
     atomicWriteFile(step.path, step.content);
   }
   const root = plan.options.dir;

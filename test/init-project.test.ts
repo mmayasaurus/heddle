@@ -1,9 +1,9 @@
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { applyInstall, DISCIPLINE_WIRING, planInstall, redactReport, V1_CANONICAL_DEFAULT } from '../src/init-project.js';
+import { applyInstall, DISCIPLINE_WIRING, planInstall, redactReport } from '../src/init-project.js';
 import { useTempResources } from './helpers.js';
 
 const WIRED_HOOKS = [
@@ -298,7 +298,7 @@ describe('init-project', () => {
     applyInstall(plan); expect(JSON.parse(readFileSync(join(opts.dir, '.mcp.json'), 'utf8')).mcpServers).toEqual({ other: { command: 'other' } });
   });
 
-  it('uses flag, environment, canonical.json, then the V1 default precedence', () => {
+  it('uses flag, environment, then canonical.json and requires a canonical source otherwise', () => {
     const opts = options(tempDir()); const configCanonical = join(tempDir(), 'config'); mkdirSync(join(configCanonical, 'hooks'), { recursive: true }); for (const hook of WIRED_HOOKS) writeFileSync(join(configCanonical, 'hooks', hook), '');
     const envCanonical = join(tempDir(), 'env'); mkdirSync(join(envCanonical, 'hooks'), { recursive: true }); for (const hook of WIRED_HOOKS) writeFileSync(join(envCanonical, 'hooks', hook), '');
     mkdirSync(join(opts.homeDir, '.heddle'), { recursive: true }); writeFileSync(join(opts.homeDir, '.heddle', 'canonical.json'), JSON.stringify({ canonical: configCanonical }));
@@ -311,7 +311,7 @@ describe('init-project', () => {
       expect(planInstall(withoutFlag).options.canonical).toBe(realpathSync.native(configCanonical));
       const defaultOpts = options(tempDir());
       const { canonical: _defaultCanonical, ...withoutSources } = defaultOpts;
-      expect(planInstall(withoutSources).options.canonical).toBe(realpathSync.native(V1_CANONICAL_DEFAULT));
+      expect(() => planInstall(withoutSources)).toThrow(/--canonical.*HEDDLE_CANONICAL.*canonical\.json/);
     }
     finally { if (old === undefined) delete process.env.HEDDLE_CANONICAL; else process.env.HEDDLE_CANONICAL = old; }
   });
@@ -324,5 +324,62 @@ describe('init-project', () => {
     expect(planInstall(opts).steps.find((step) => step.step === 'settings')?.action).toBe('ok');
     const source = join(dirname(fileURLToPath(import.meta.url)), '..', '.claude', 'commands', 'heddle-gate.md');
     expect(readFileSync(join(opts.dir, '.claude', 'commands', 'heddle-gate.md'))).toEqual(readFileSync(source));
+  });
+
+  describe('regression PR#91 — installer safety and lossless registry updates', () => {
+    it('rejects home and filesystem-root targets before any write', () => {
+      const opts = options(tempDir());
+      expect(() => planInstall({ ...opts, dir: opts.homeDir })).toThrow(/refuses.*home directory/i);
+      expect(existsSync(join(opts.homeDir, '.heddle'))).toBe(false);
+      expect(() => planInstall({ ...opts, dir: '/' })).toThrow(/refuses.*filesystem root/i);
+      expect(existsSync(join(opts.homeDir, '.heddle'))).toBe(false);
+    });
+
+    it('rejects a flag token passed as a required registration value', () => {
+      const opts = options(tempDir());
+      expect(() => planInstall({ ...opts, team: '--agents' })).toThrow(/--team/);
+    });
+
+    it('updates a custom-named project by its canonical workspace root on a bare re-run', () => {
+      const opts = options(tempDir());
+      applyInstall(planInstall({ ...opts, name: 'custom' }));
+      applyInstall(planInstall({ ...opts, name: undefined, team: undefined, agents: undefined, room: undefined, launcher: undefined }));
+      const projects = JSON.parse(readFileSync(join(opts.homeDir, '.heddle', 'projects.json'), 'utf8')).projects;
+      expect(projects).toHaveLength(1);
+      expect(projects[0]).toMatchObject({ name: 'custom', workspaceRoots: [realpathSync.native(opts.dir)] });
+    });
+
+    it('fails rather than silently overwriting a registry changed after planning', () => {
+      const opts = options(tempDir());
+      mkdirSync(join(opts.homeDir, '.heddle'), { recursive: true });
+      const registryPath = join(opts.homeDir, '.heddle', 'projects.json');
+      writeFileSync(registryPath, JSON.stringify({ schemaVersion: 1, projects: [{ name: 'before', workspaceRoots: [join(opts.homeDir, 'before')], agentIds: ['B'], linearTeam: 'B', defaultRoom: '#b', launcher: 'before.sh' }] }));
+      const plan = planInstall(opts);
+      writeFileSync(registryPath, JSON.stringify({ schemaVersion: 1, projects: [{ name: 'other', workspaceRoots: [join(opts.homeDir, 'other')], agentIds: ['O'], linearTeam: 'O', defaultRoom: '#o', launcher: 'other.sh' }] }));
+      expect(() => applyInstall(plan)).toThrow(/registry changed underneath/i);
+      expect(readFileSync(registryPath, 'utf8')).toContain('"other"');
+    });
+
+    it('preserves an unrelated oversized JSON integer byte-exact when updating a project', () => {
+      const opts = options(tempDir());
+      mkdirSync(join(opts.homeDir, '.heddle'), { recursive: true });
+      const registryPath = join(opts.homeDir, '.heddle', 'projects.json');
+      const target = { name: 'toy', workspaceRoots: [realpathSync.native(opts.dir)], agentIds: ['Z'], linearTeam: 'OLD', defaultRoom: '#toy', launcher: 'old.sh' };
+      const future = `{"name":"future","workspaceRoots":["${join(opts.homeDir, 'future')}"],"agentIds":["F"],"linearTeam":"F","defaultRoom":"#f","launcher":"future.sh","futureField":9007199254740993}`;
+      const source = `{"schemaVersion":1,"projects":[${JSON.stringify(target)},${future}]}`;
+      writeFileSync(registryPath, source);
+      applyInstall(planInstall({ ...opts, team: 'NEW' }));
+      expect(readFileSync(registryPath, 'utf8').slice(readFileSync(registryPath, 'utf8').indexOf(future))).toBe(`${future}]}`);
+    });
+
+    it('preserves the destination mode when replacing a settings file atomically', () => {
+      const opts = options(tempDir());
+      mkdirSync(join(opts.dir, '.claude'), { recursive: true });
+      const settingsPath = join(opts.dir, '.claude', 'settings.json');
+      writeFileSync(settingsPath, JSON.stringify({ hooks: {} }));
+      chmodSync(settingsPath, 0o600);
+      applyInstall(planInstall(opts));
+      expect(statSync(settingsPath).mode & 0o777).toBe(0o600);
+    });
   });
 });

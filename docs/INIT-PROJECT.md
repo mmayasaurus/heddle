@@ -27,9 +27,10 @@ rewritten once present.
 
 ### Steps (each reported as `ok | created | updated | skipped(reason) | would-<verb>` under --dry-run)
 
-1. **Canonical root** — resolve `--canonical` (default: `HEDDLE_CANONICAL` env, else the path
-   recorded in `~/.heddle/canonical.json`, else the Spinventory workspace `.claude/` — v1 default,
-   flipped by HED-96). Must contain `hooks/` with the 6 WIRED discipline hooks (the 3 workspace-only hooks are
+1. **Canonical root** — resolve `--canonical`, else `HEDDLE_CANONICAL`, else the path
+   recorded in `~/.heddle/canonical.json`. One of these is required: heddle does not yet ship a
+   vendored discipline-hook set (that relocation is HED-96), so a machine-specific fallback would
+   be non-portable. The selected root must contain `hooks/` with the 6 WIRED discipline hooks (the 3 workspace-only hooks are
    optional and reported); a missing wired hook fails loudly with the list (no partial install).
 2. **`<dir>/.claude/settings.json` hook wiring** — render the 14-command / 6-event wiring heddle's own
    `.claude/settings.json` uses today (SessionStart identity+preflight; UserPromptSubmit
@@ -110,7 +111,7 @@ guides, vault, SPI reviewer fleet) — those stay project-local by design.
 
 ## Acceptance (the HED-96 demo's first half)
 
-A toy repo: `heddle init-project /tmp/newthing --name newthing --team NEW --agents Z --room #newthing
+A toy repo: `heddle init-project /tmp/newthing --canonical /path/to/canonical --name newthing --team NEW --agents Z --room '#newthing'
 --launcher resume-new.sh` → `.claude/settings.json` wired to the canonical (loud-fail-open), rules
 stubs + `.memtraceignore` + `/heddle-gate` present, `.mcp.json` reported `skip(no template)` until
 heddle ships its own `.mcp.json`, project in `~/.heddle/projects.json`,
@@ -118,4 +119,6 @@ heddle ships its own `.mcp.json`, project in `~/.heddle/projects.json`,
 `--dry-run` on a fresh dir writes nothing and reports every `would-create`.
 
 Generated settings, MCP, ignore, registry, and enforcement files are written through a same-directory
-temporary file and rename. A concurrent single-user CLI invocation is last-writer-wins.
+temporary file and rename, preserving an existing destination's mode. The registry records its planned
+bytes and refuses to overwrite it if another invocation changes it before apply; re-run the command in
+that case. Install targets may not be `/`, the user's home directory, or an ancestor of a registered root.
