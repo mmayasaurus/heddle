@@ -62,16 +62,19 @@ rewritten once present.
 7. **Registry** — upsert `~/.heddle/projects.json` (`src/projects.ts` schema v1): `name` (default
    basename), `workspaceRoots` += resolved `<dir>`, `agentIds`/`linearTeam`/`defaultRoom`/`launcher`
    from flags (required on first registration, preserved on re-run). Registry is TRUTH (docs/PROJECTS.md). The upsert is VALIDATED BEFORE WRITE by round-tripping the
-   candidate through `loadProjectRegistry`'s own checks (non-empty fields, absolute roots, non-empty
+   candidate through the in-memory `validateRegistry` checks also used by `loadProjectRegistry` (non-empty fields, absolute roots, non-empty
    agentIds, no agent claimed by two projects); empty strings / empty agent lists are rejected as
-   missing. A registry that would not load back is never written.
+   missing. A registry that would not load back is never written. Existing space/tab indentation is
+   retained, so standard formatted registries do not reformat unrelated project objects or unknown keys.
 8. **memtrace opt-in marker + enforcement flag** — ALWAYS write `<dir>` into
    `~/.heddle/memtrace-enforce.json` as `{ "<canonicalized root>": <bool> }`: `true` with
    `--enforce-memtrace` (hard gate), else the prior value, or `false` on first registration
    (record-only). PRESENCE in this file is what opts a root into the memtrace-first hook's registry
    layer (see "Hook parameterization") — a root merely listed in `projects.json` is NOT
    memtrace-managed. Default `false` for a freshly-initialized repo;
-   flipping to `true` is Maya's call (per-root ENFORCEMENT design). Other roots are preserved.
+   flipping to `true` is Maya's call (per-root ENFORCEMENT design). The root is resolved from its
+   existing parent at plan time, making the key stable when the target directory is first created;
+   any existing aliases of that same canonical root are folded into one key. Other roots are preserved.
 9. **Verify** — print what was installed, what was skipped and why, and a human-steps checklist:
    register the memtrace watch (`watch_directory` is an MCP call — the installer prints the exact
    call, it cannot make it), confirm index freshness, Linear team/labels (HED-299 ws3 owns automating).
@@ -113,3 +116,6 @@ stubs + `.memtraceignore` + `/heddle-gate` present, `.mcp.json` reported `skip(n
 heddle ships its own `.mcp.json`, project in `~/.heddle/projects.json`,
 `heddle projects` lists it; a second run reports all `ok`, changes nothing (byte-identical files);
 `--dry-run` on a fresh dir writes nothing and reports every `would-create`.
+
+Generated settings, MCP, ignore, registry, and enforcement files are written through a same-directory
+temporary file and rename. A concurrent single-user CLI invocation is last-writer-wins.

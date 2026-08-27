@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -48,12 +48,20 @@ function readJson(path: string, description: string): any {
   try { return JSON.parse(readFileSync(path, 'utf8')); }
   catch (error) { throw new Error(`${description} at ${path} is not valid JSON: ${(error as Error).message}`); }
 }
-function json(value: unknown): string { return JSON.stringify(value, null, 2) + '\n'; }
+function json(value: unknown, indent: string | number = 2): string { return JSON.stringify(value, null, indent) + '\n'; }
+function jsonIndent(source: string | undefined): string | number {
+  return source?.match(/\n([ \t]+)"/)?.[1] ?? 2;
+}
 let atomicWriteSequence = 0;
 function atomicWriteFile(path: string, content: string): void {
   const temporary = join(dirname(path), `.${basename(path)}.${process.pid}.${atomicWriteSequence++}.tmp`);
-  writeFileSync(temporary, content);
-  renameSync(temporary, path);
+  try {
+    writeFileSync(temporary, content);
+    // Single-user CLI: concurrent invocations are last-writer-wins.
+    renameSync(temporary, path);
+  } finally {
+    try { if (existsSync(temporary)) unlinkSync(temporary); } catch { /* preserve the original write/rename failure */ }
+  }
 }
 function stepFor(path: string, step: string, content: string, dryRun: boolean, exists = existsSync(path)): InstallStep {
   const same = exists && readFileSync(path, 'utf8') === content;
@@ -140,11 +148,13 @@ function rulesContent(canonical: string, file: string): string {
 
 export function planInstall(input: InstallOptions): InstallPlan {
   const homeDir = input.homeDir ?? homedir();
-  const dir = canonicalizePath(input.dir);
-  const targetParent = dirname(dir);
-  if (!existsSync(dir) && !existsSync(targetParent)) {
+  const requestedDir = resolve(input.dir);
+  const targetParent = dirname(requestedDir);
+  if (!existsSync(requestedDir) && !existsSync(targetParent)) {
     throw new Error(`target parent does not exist: ${targetParent} — create it or fix the path`);
   }
+  // The parent exists by the guard above, so this is stable before and after mkdirSync creates the leaf.
+  const dir = existsSync(requestedDir) ? canonicalizePath(requestedDir) : join(realpathSync.native(targetParent), basename(requestedDir));
   const canonicalConfig = join(homeDir, '.heddle', 'canonical.json');
   const configCanonical = existsSync(canonicalConfig) ? readJson(canonicalConfig, 'canonical.json')?.canonical : undefined;
   const canonical = canonicalizePath(input.canonical ?? process.env.HEDDLE_CANONICAL ?? configCanonical ?? V1_CANONICAL_DEFAULT);
@@ -153,9 +163,8 @@ export function planInstall(input: InstallOptions): InstallPlan {
   if (missing.length) throw new Error(`canonical ${canonical} is missing required discipline hooks: ${missing.join(', ')}`);
   const name = input.name ?? basename(dir);
   const registryPath = join(homeDir, '.heddle', 'projects.json');
-  const rawRegistry = existsSync(registryPath)
-    ? readJson(registryPath, 'projects.json')
-    : { schemaVersion: PROJECTS_SCHEMA_VERSION, projects: [] };
+  const rawRegistryContent = existsSync(registryPath) ? readFileSync(registryPath, 'utf8') : undefined;
+  const rawRegistry = rawRegistryContent === undefined ? { schemaVersion: PROJECTS_SCHEMA_VERSION, projects: [] } : readJson(registryPath, 'projects.json');
   const registry = validateRegistry(rawRegistry, registryPath);
   const prior = registry.projects.find((project) => project.name === name);
   const rawPrior = rawRegistry.projects.find((project: any) => project.name === name);
@@ -216,10 +225,12 @@ export function planInstall(input: InstallOptions): InstallPlan {
     projects: prior ? rawRegistry.projects.map((candidate: any) => candidate.name === name ? project : candidate) : [...rawRegistry.projects, project],
   };
   validateRegistry(nextRegistry, registryPath);
-  steps.push(stepFor(registryPath, 'registry', json(nextRegistry), dryRun));
+  steps.push(stepFor(registryPath, 'registry', json(nextRegistry, jsonIndent(rawRegistryContent)), dryRun));
   const enforcePath = join(homeDir, '.heddle', 'memtrace-enforce.json'); const existing = existsSync(enforcePath) ? readJson(enforcePath, 'memtrace-enforce.json') : {};
-  const priorEnforceValue = existing[dir];
-  steps.push(stepFor(enforcePath, 'memtrace-enforce', json({ ...existing, [dir]: input.enforceMemtrace === true ? true : (priorEnforceValue ?? false) }), dryRun));
+  const aliases = Object.entries(existing).filter(([key]) => canonicalizePath(key) === dir);
+  const priorEnforceValue = aliases[0]?.[1];
+  const nextEnforcement = Object.fromEntries(Object.entries(existing).filter(([key]) => canonicalizePath(key) !== dir));
+  steps.push(stepFor(enforcePath, 'memtrace-enforce', json({ ...nextEnforcement, [dir]: input.enforceMemtrace === true ? true : (priorEnforceValue ?? false) }), dryRun));
   return { options: { ...input, dir, canonical, name, homeDir }, steps };
 }
 
@@ -228,8 +239,7 @@ export function applyInstall(plan: InstallPlan, dryRun = false): InstallReport {
   for (const step of plan.steps) {
     if (skipWrites || !step.content || step.action === 'ok' || step.action === 'skip') continue;
     mkdirSync(dirname(step.path), { recursive: true });
-    if (step.step === 'registry' || step.step === 'memtrace-enforce') atomicWriteFile(step.path, step.content);
-    else writeFileSync(step.path, step.content);
+    atomicWriteFile(step.path, step.content);
   }
   const root = plan.options.dir;
   return { steps: plan.steps, humanSteps: [`watch_directory(path=${root}, repo_id=${basename(root)})`, 'confirm index freshness', 'Linear team/labels — HED-299 ws3'] };

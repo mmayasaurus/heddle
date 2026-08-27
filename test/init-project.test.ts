@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -223,6 +223,17 @@ describe('init-project', () => {
     expect(JSON.parse(readFileSync(join(off.homeDir, '.heddle', 'memtrace-enforce.json'), 'utf8'))).toMatchObject({ '/other': true, [realpathSync.native(off.dir)]: false });
   });
 
+  it('keeps one canonical memtrace-enforce key for a target created after planning', () => {
+    const base = tempDir(); const realParent = join(base, 'real-parent'); const aliasParent = join(base, 'alias-parent');
+    mkdirSync(realParent); symlinkSync(realParent, aliasParent);
+    const opts = { ...options(base), dir: join(aliasParent, 'newthing') };
+    applyInstall(planInstall(opts));
+    const second = planInstall(opts);
+    const enforce = JSON.parse(readFileSync(join(opts.homeDir, '.heddle', 'memtrace-enforce.json'), 'utf8'));
+    expect(Object.keys(enforce)).toEqual([join(realpathSync.native(realParent), 'newthing')]);
+    expect(second.steps.find((step) => step.step === 'memtrace-enforce')?.action).toBe('ok');
+  });
+
   it('matches all 14 live heddle discipline entries exactly', () => {
     const settingsPath = join(dirname(fileURLToPath(import.meta.url)), '..', '.claude', 'settings.json');
     const settings = JSON.parse(readFileSync(settingsPath, 'utf8'));
@@ -251,14 +262,21 @@ describe('init-project', () => {
 
   it('preserves registration fields and unrelated raw registry objects byte-for-byte', () => {
     const opts = options(tempDir()); mkdirSync(join(opts.homeDir, '.heddle'), { recursive: true });
-    const other = { name: 'other', workspaceRoots: [join(opts.homeDir, 'elsewhere', '..', 'other')], agentIds: ['O'], linearTeam: 'O', defaultRoom: '#o', launcher: 'o.sh', note: 'keep' };
-    const source = JSON.stringify({ schemaVersion: 1, projects: [other] }, null, 2) + '\n';
-    const originalOther = source.match(/    \{[\s\S]*?\n    \}/)?.[0];
+    const other = { name: 'other', workspaceRoots: [join(opts.homeDir, 'some', '.', 'other')], agentIds: ['O'], linearTeam: 'O', defaultRoom: '#o', launcher: 'o.sh', unknownKey: { preserve: true } };
+    const source = JSON.stringify({ schemaVersion: 1, projects: [other] }, null, 4) + '\n';
+    const originalOther = source.match(/        \{[\s\S]*?\n        \}/)?.[0];
     writeFileSync(join(opts.homeDir, '.heddle', 'projects.json'), source);
     applyInstall(planInstall(opts));
     const registry = JSON.parse(readFileSync(join(opts.homeDir, '.heddle', 'projects.json'), 'utf8'));
     expect(registry.projects[0]).toEqual(other);
     expect(readFileSync(join(opts.homeDir, '.heddle', 'projects.json'), 'utf8')).toContain(originalOther);
+  });
+
+  it('cleans up an atomic temp file when a target settings rename fails', () => {
+    const opts = options(tempDir()); const plan = planInstall(opts); const settingsPath = join(opts.dir, '.claude', 'settings.json');
+    mkdirSync(settingsPath, { recursive: true });
+    expect(() => applyInstall(plan)).toThrow();
+    expect(readdirSync(dirname(settingsPath)).filter((name) => name.endsWith('.tmp'))).toEqual([]);
   });
 
   it('guards a defaulted name collision with a different root', () => {
