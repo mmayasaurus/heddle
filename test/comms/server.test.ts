@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, mkdirSync, rmSync, readFileSync, writeFileSync, statSync, existsSync, chmodSync, symlinkSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -105,6 +105,23 @@ describe('heddle-comms server (in-process)', () => {
       expect(bound.text).toContain('from V to #fleet');
       expect(session.server.identity).toBe('V');
     });
+
+    it('keeps the broker pump running after an initially unbound session binds lazily', async () => {
+      const cacheDir = join(dir, 'identity-cache');
+      mkdirSync(cacheDir);
+      const server = createCommsServer({ env: { ...baseEnv(), HEDDLE_IDENTITY_CACHE_DIR: cacheDir }, cwd: dir, warn: (m) => warnings.push(m), operatorTokenPath: tokenPath });
+      const pump = vi.spyOn(server.broker, 'pump');
+      const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+      const client = new Client({ name: 'test', version: '0' }, { capabilities: {} });
+      await server.start(serverSide);
+      await client.connect(clientSide);
+      servers.push(server); clients.push(client);
+
+      writeFileSync(bridgePath(cacheDir), 'V\n');
+      expect((await call(client, 'post_message', { to: '#fleet', body: 'bind then pump' })).parsed).toMatchObject({ outcome: 'logged' });
+      await new Promise((resolve) => setTimeout(resolve, 1_100));
+      expect(pump).toHaveBeenCalled();
+    }, 10_000);
 
     it('keeps the env identity ahead of the PID bridge', async () => {
       const cacheDir = join(dir, 'identity-cache');
@@ -231,6 +248,23 @@ describe('heddle-comms server (in-process)', () => {
       rmSync(cacheDir, { recursive: true, force: true });
       expect((await call(session.client, 'post_message', { to: '#fleet', body: 'no more bridge reads' })).text).toContain('from V to #fleet');
       expect(warnings.some((m) => m.includes('cache is not a directory'))).toBe(false);
+    });
+
+    it('latches the post-pin check when the PID bridge disappears', async () => {
+      const cacheDir = join(dir, 'identity-cache');
+      mkdirSync(cacheDir);
+      const session = await connect({ HEDDLE_IDENTITY_CACHE_DIR: cacheDir });
+
+      writeFileSync(bridgePath(cacheDir), 'V\n');
+      expect((await call(session.client, 'post_message', { to: '#fleet', body: 'bind' })).text).toContain('from V to #fleet');
+      rmSync(bridgePath(cacheDir));
+      expect((await call(session.client, 'post_message', { to: '#fleet', body: 'bridge absent' })).text).toContain('from V to #fleet');
+      writeFileSync(bridgePath(cacheDir), 'R\n');
+      // Third post stays within the broker's burst limit (3/1s) and fully proves the latch: the
+      // single post-pin check was consumed by the bridge-absent call, so this divergent file is
+      // never even read — no rebind, no divergence warning.
+      expect((await call(session.client, 'post_message', { to: '#fleet', body: 'still pinned' })).text).toContain('from V to #fleet');
+      expect(warnings.some((m) => m.includes('identity changed after binding'))).toBe(false);
     });
 
     it('never rebinds a startup-bound HEDDLE_AGENT session even when a PID bridge names another agent', async () => {

@@ -427,14 +427,15 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
     const resolved = resolveCommsBinding(env, cwd, warn, tokenPath, warnPidBridgeOnce);
     // A session that did not start as operator never gains operator authority through lazy binding.
     const candidate = resolved.isOperator ? null : resolved.identity;
-    if (!candidate) return;
     if (!me) {
+      if (!candidate) return;
       me = candidate;
       bindingSource = resolved.bindingSource;
       return;
     }
     postPinDivergenceChecked = true;
-    if (candidate !== me && !identityChangeWarned) {
+    // A vanished bridge file is not a divergence — only a DIFFERENT resolvable label warns.
+    if (candidate && candidate !== me && !identityChangeWarned) {
       identityChangeWarned = true;
       warn(`comms identity changed after binding (${me} → ${candidate}) — keeping pinned identity ${me}`);
     }
@@ -581,7 +582,21 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
 
   async function start(transport: McpTransport): Promise<void> {
     await mcp.connect(transport);
-    if (!me) return;
+    // One loop, never overlapping: the next cycle is scheduled only after this one finished.
+    // It deliberately does not depend on an identity: a lazy-bound session may gain its sender
+    // identity after startup, but its broker still owns held-message retries from the outset.
+    const cycle = async () => {
+      if (stopping) return;
+      if (!operatorStillValid()) { await revokeOperator(); return; } // stop pumping for a revoked operator
+      if (inbound) { try { await inbound.tick(); } catch (err) { warn(`inbound tick failed: ${errorMessage(err)}`); } }
+      try { await broker.pump(); } catch (err) { warn(`pump failed: ${errorMessage(err)}`); }
+      if (!stopping) { timer = setTimeout(cycle, 1_000); timer.unref(); }
+    };
+    const scheduleCycle = () => {
+      timer = setTimeout(cycle, 1_000);
+      timer.unref();
+    };
+    if (!me) { scheduleCycle(); return; }
     const startupIdentity = me;
     if (pushEnabled) {
       log.registerSession({
@@ -650,16 +665,7 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
     } else {
       warn(`push disabled (HEDDLE_COMMS_PUSH is not 1): ${startupIdentity} is pull-only — no presence row, no channel events`);
     }
-    // One loop, never overlapping: the next cycle is scheduled only after this one finished.
-    const cycle = async () => {
-      if (stopping) return;
-      if (!operatorStillValid()) { await revokeOperator(); return; } // stop pumping for a revoked operator
-      if (inbound) { try { await inbound.tick(); } catch (err) { warn(`inbound tick failed: ${errorMessage(err)}`); } }
-      try { await broker.pump(); } catch (err) { warn(`pump failed: ${errorMessage(err)}`); }
-      if (!stopping) { timer = setTimeout(cycle, 1_000); timer.unref(); }
-    };
-    timer = setTimeout(cycle, 1_000);
-    timer.unref();
+    scheduleCycle();
   }
 
   async function stop(): Promise<void> {
