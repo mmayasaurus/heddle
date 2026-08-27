@@ -44,8 +44,11 @@ export class CursorAdapter implements WorkerAdapter {
     args.push(...(opts.extraFlags ?? []), prompt);
 
     const started = Date.now();
+    // envUnset forwarded for parity with claude/codex (HED-268): rotation unsets CURSOR_API_KEY for the
+    // machine-login account. (buildWorkerEnv already vendor-strips CURSOR_*, so this is belt-and-suspenders,
+    // but the adapters must be uniform so no future selector-unset is silently dropped here.)
     const { stdout, stderr, exitCode } =
-      await run(this.bin, args, opts.cwd, opts.timeoutMs ?? 600_000, opts.env);
+      await run(this.bin, args, opts.cwd, opts.timeoutMs ?? 600_000, opts.env, opts.envUnset);
     const durationMs = Date.now() - started;
 
     // The result object is the last JSON line on stdout (progress noise may precede it).

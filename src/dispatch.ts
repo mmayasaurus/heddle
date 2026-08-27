@@ -40,6 +40,7 @@ import {
 } from './capaware.js';
 import { basename } from 'node:path';
 import type { WorkerAdapter, WorkerResult } from './types.js';
+import { classifyRotationRefusal, DEFAULT_COOLDOWN_S, DEFAULT_COOLING_PATH, pickCodexAccount, pickCursorAccount, readCooling, readCursorKey, readRotationAccounts, writeCooling, type RotationAccounts } from './rotation.js';
 
 /**
  * The dispatcher: task class → routed worker → recorded outcome.
@@ -88,6 +89,12 @@ export interface DispatchRequest {
   resume?: string;
   /** Per-dispatch account selection (CODEX_HOME, CURSOR_API_KEY, …). See src/env.ts. */
   env?: Record<string, string>;
+  /** Optional test/operator injection for the codex/cursor registry; absent reads accounts.json. */
+  rotationAccounts?: RotationAccounts;
+  /** Optional cooling-store path; absent is ~/.heddle/usage/cooling.json. */
+  coolingPath?: string;
+  /** Injected epoch seconds for deterministic account selection tests. */
+  nowS?: number;
   /**
    * HED-95: WHY this dispatch routes around the routing table. Required on the DIRECT path
    * (provider+model with no task class) — benches, probes and judgment calls are all legitimate,
@@ -222,6 +229,8 @@ interface DispatchContext {
   account?: string | null;
   /** HED-78: the Claude account (env) a headless claude worker runs under. */
   claudeAccount?: AccountPick | null;
+  /** Selected non-Claude account env, resolved with the route alongside Claude account selection. */
+  rotationAccount?: { provider: 'codex' | 'cursor'; id: string; env: Record<string, string>; unset: string[]; reason: string } | null;
   /** HED-3: set for review classes. */
   review?: { authorProvider: string | null; authorModel: string | null; authorDispatchId: number | null; reviewerPick?: string };
 }
@@ -384,6 +393,7 @@ async function runTarget(
   // CLAUDE_CONFIG_DIR (unset for the default login).
   const isClaude = target.provider === 'claude';
   const acct = isClaude ? ctx.claudeAccount ?? null : null;
+  const rotation = (target.provider === 'codex' || target.provider === 'cursor') ? ctx.rotationAccount ?? null : null;
   let restoreSkills: () => void = () => {};
   let restoreMcp: () => void = () => {};
   let before: ReturnType<typeof snapshotWorktree> | null = null;
@@ -448,8 +458,8 @@ async function runTarget(
       extraFlags,
       timeoutMs: req.timeoutMs,
       resume: req.resume,
-      env: { ...req.env, ...acct?.env, ...stamps },
-      envUnset: acct?.envUnset,
+      env: { ...req.env, ...acct?.env, ...rotation?.env, ...stamps },
+      envUnset: [...(acct?.envUnset ?? []), ...(rotation?.unset ?? [])],
       capabilities: caps.granted,
       systemPromptAppend,
       mcpConfigPath,
@@ -647,6 +657,7 @@ export async function dispatch(
   ctx.routeReason = plan.decision.routeReason;
   ctx.account = plan.account;
   ctx.claudeAccount = plan.accountPick;
+  ctx.rotationAccount = plan.rotationAccount;
   const { route, target, fallback, origin, skillsForRefusal } = plan;
   // Review rows (and the pair scoreboard) are for classes WITH reviewer semantics; a generic
   // read_only class still gets the mandate snapshot below, just no reviews row.
@@ -734,6 +745,10 @@ export async function dispatch(
   }
 
   // ---- Run (capabilities + max-children are decided per target inside runTarget) --------------
+  // A fully-cooled codex/cursor pool is NOT skipped preemptively: cooling is advisory (a heuristic from a
+  // prior rate-limit that may already have reset), and a preemptive jump to the class fallback bypassed
+  // both that fallback's own account selection and the HED-261 floor. Run the primary as usual — a real
+  // rate-limit then cools + fails over (below), and a genuinely dead pool reaches the normal fallback path.
   const primary = await runTarget(target, req, ctx, route, plan.decision.routedAwayForCap ? `${route.provider}/${route.model}` : null);
   // Capability-fit fallback: when the PRIMARY provider merely lacks the knob (`unenforceable`) and
   // the class declares a fallback whose provider CAN enforce every requested capability, route there
@@ -752,7 +767,26 @@ export async function dispatch(
   }
   // A read-only MANDATE VIOLATION is a policy failure of the reviewer, not a provider failure — never
   // "retry" it on the fallback (that would re-run in an already-mutated tree and mask the violation).
-  if (primary.ok || primary.refusal || primary.review?.mandateOk === false || req.noFallback || !fallback) return primary;
+  if (primary.ok || primary.refusal || primary.review?.mandateOk === false || req.noFallback) return primary;
+
+  // HED-268: a clear provider quota refusal cools the selected codex/cursor account and gets ONE
+  // same-provider retry before the class's normal provider fallback. Generic failures never rotate.
+  if ((target.provider === 'codex' || target.provider === 'cursor') && ctx.rotationAccount
+      && classifyRotationRefusal(target.provider, primary) === 'rate-limit') {
+    const coolingPath = req.coolingPath ?? DEFAULT_COOLING_PATH;
+    const cooling = readCooling(coolingPath);
+    const from = ctx.rotationAccount.id;
+    cooling.lanes[`${target.provider}:${from}`] = { cooledAt: req.nowS ?? Math.floor(Date.now() / 1000), reason: 'rate-limit', cooldownS: DEFAULT_COOLDOWN_S };
+    writeCooling(coolingPath, cooling);
+    const retry = resolveRotationAccount(target, req, req.rotationAccounts ?? readRotationAccounts(), cooling);
+    if (retry && retry.id !== from) {
+      ctx.rotationAccount = retry; ctx.account = retry.id;
+      ctx.routeReason = `${plan.decision.routeReason}; account-failover:${from}→${retry.id} (rate-limit); ${retry.reason}`;
+      return runTarget(target, req, ctx, route, `${target.provider}/${target.model} (account-failover)`);
+    }
+  }
+
+  if (!fallback) return primary;
 
   // Primary failed and the table names a fallback — try it, recording the origin so the ledger
   // shows which routes actually hold up in practice. A fallback that is itself in-session (custom
@@ -815,13 +849,20 @@ export async function dispatch(
     }
   } else {
     ctx.claudeAccount = null;
-    ctx.account = fallback.provider === 'codex' && req.env?.CODEX_HOME ? basename(req.env.CODEX_HOME) : null;
+    if (fallback.provider === 'codex' || fallback.provider === 'cursor') {
+      const registry = req.rotationAccounts ?? readRotationAccounts();
+      ctx.rotationAccount = resolveRotationAccount(fallback, req, registry, readCooling(req.coolingPath ?? DEFAULT_COOLING_PATH));
+      ctx.account = ctx.rotationAccount?.id ?? (fallback.provider === 'codex' && req.env?.CODEX_HOME ? basename(req.env.CODEX_HOME) : null);
+    } else {
+      ctx.rotationAccount = null;
+      ctx.account = null;
+    }
   }
   // The account pick's REASON rides along too (the plan path already does this): without it a
   // runtime-fallback row records which account ran but never why it was chosen — the fable-headroom
   // / 5h-headroom evidence the scoreboard is built on (PR #24, found by the dispatched test worker).
   ctx.routeReason = `${plan.decision.routeReason}; ${target.provider}/${target.model} failed → class fallback`
-    + (ctx.claudeAccount ? `; ${ctx.claudeAccount.reason}` : '');
+    + (ctx.claudeAccount ? `; ${ctx.claudeAccount.reason}` : ctx.rotationAccount ? `; ${ctx.rotationAccount.reason}` : '');
   let fbOutcome = await runTarget(fallback, req, ctx, route, `${route.provider}/${route.model}`);
   // A PRIMARY that escaped its worktree and then FAILED must not have that warning discarded when
   // the fallback succeeds — the parent checkout is still dirty and someone has to know (PR #28).
@@ -1006,6 +1047,7 @@ export interface DispatchPlan {
   /** HED-78: the Claude account a headless worker will run on. `undefined` = in-session/non-Claude;
    *  `null` = a registry was consulted but none is addressable (or it has no entries). */
   accountPick?: AccountPick | null;
+  rotationAccount?: DispatchContext['rotationAccount'];
   /** Number of registered Claude accounts consulted for the effective Claude target. */
   claudeAccountCount: number;
   /** True for a `dispatchable: false` class — dispatch() refuses before any route runs. */
@@ -1050,6 +1092,27 @@ function excludedClaudePin(err: unknown): { pin: string; reason: string } | null
   const message = err instanceof Error ? err.message : String(err);
   const match = /^account_pin "([^"]+)" is registered but NOT dispatchable \(([^)]+)\)/.exec(message);
   return match ? { pin: match[1], reason: message } : null;
+}
+
+function resolveRotationAccount(target: RouteTarget, req: DispatchRequest, registry: RotationAccounts, cooling: ReturnType<typeof readCooling>): DispatchContext['rotationAccount'] {
+  const nowS = req.nowS ?? Math.floor(Date.now() / 1000);
+  if (target.provider === 'codex') {
+    const pick = pickCodexAccount(registry, cooling, req.env?.CODEX_HOME, nowS);
+    return pick ? { provider: 'codex', id: pick.id, env: pick.codexHome ? { CODEX_HOME: pick.codexHome } : {}, unset: pick.codexHome ? [] : ['CODEX_HOME'], reason: pick.reason } : null;
+  }
+  if (target.provider === 'cursor') {
+    const unavailable = new Set<string>();
+    for (;;) {
+      const pick = pickCursorAccount(target.model, registry, cooling, nowS, unavailable);
+      if (!pick) return null;
+      if (pick.keyFile === null) return { provider: 'cursor', id: pick.id, env: {}, unset: ['CURSOR_API_KEY'], reason: pick.reason };
+      const key = readCursorKey(pick.keyFile);
+      if (key) return { provider: 'cursor', id: pick.id, env: { CURSOR_API_KEY: key }, unset: [], reason: pick.reason };
+      unavailable.add(pick.id);
+      process.stderr.write(`heddle: Cursor account ${pick.id} skipped — key file unavailable (${pick.keyFile})\n`);
+    }
+  }
+  return null;
 }
 
 /**
@@ -1228,9 +1291,15 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
   let account: string | null = null;
   let accountAdvice: AccountAdvice | undefined;
   let accountPick: AccountPick | null | undefined;
+  let rotationAccount: DispatchContext['rotationAccount'];
   let claudeAccountCount = 0;
   let pinnedExcludedAccount: { pin: string; reason: string } | undefined;
-  if (target.provider === 'codex' && req.env?.CODEX_HOME) account = basename(req.env.CODEX_HOME);
+  if (target.provider === 'codex' || target.provider === 'cursor') {
+    const registry = req.rotationAccounts ?? readRotationAccounts();
+    rotationAccount = resolveRotationAccount(target, req, registry, readCooling(req.coolingPath ?? DEFAULT_COOLING_PATH));
+    account = rotationAccount?.id ?? (target.provider === 'codex' && req.env?.CODEX_HOME ? basename(req.env.CODEX_HOME) : null);
+    if (rotationAccount) decision.routeReason = `${decision.routeReason}; ${rotationAccount.reason}`;
+  }
   if (target.provider === 'claude') {
     const accounts = claudeAccounts();
     claudeAccountCount = accounts.length;
@@ -1270,7 +1339,7 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
   const requiresWebRefusal = reachesRunTarget && !dryCaps.refusal && route.requiresWeb && !webCapable(target.provider, dryCaps.granted)
     ? webRefusalReason(route.taskClass, target.provider)
     : undefined;
-  return { route, target, fallback, origin, execution, decision, skillsForRefusal, account, accountAdvice, accountPick, claudeAccountCount, notDispatchable, reviewerPick, sameProviderReview, pinnedExcludedAccount, overrideReasonRequired, capabilityRefusal, requiresWebRefusal };
+  return { route, target, fallback, origin, execution, decision, skillsForRefusal, account, accountAdvice, accountPick, rotationAccount, claudeAccountCount, notDispatchable, reviewerPick, sameProviderReview, pinnedExcludedAccount, overrideReasonRequired, capabilityRefusal, requiresWebRefusal };
 }
 
 /** One shared dry-run summary for `heddle route` and the `plan_dispatch` MCP tool (identical fields). */
