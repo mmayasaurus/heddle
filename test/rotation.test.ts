@@ -60,7 +60,8 @@ describe('rotation cooling', () => {
     const dir = tempDir(); const path = join(dir, 'cooling.json');
     const first = coolingTempPath(path); const second = coolingTempPath(path);
     expect(first).not.toBe(second);
-    expect(first).toMatch(new RegExp(`^${path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.${process.pid}\\.\\d+\\.tmp$`));
+    expect(first.startsWith(`${path}.${process.pid}.`)).toBe(true); // per-writer prefix (no dynamic RegExp — Codacy)
+    expect(first).toMatch(/\.\d+\.tmp$/); // monotonic sequence + .tmp suffix
     writeFileSync(`${path}.tmp`, '{foreign'); chmodSync(`${path}.tmp`, 0o644);
     writeCooling(path, { schemaVersion: 1, lanes: { 'codex:one': { cooledAt: 1, cooldownS: 60, reason: 'quota' } } });
     expect(JSON.parse(readFileSync(path, 'utf8')).lanes['codex:one']).toMatchObject({ reason: 'quota' });
