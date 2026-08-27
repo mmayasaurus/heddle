@@ -58,45 +58,61 @@ function hookCommand(canonical: string, hook: string, args?: string): string {
   const hookPath = join(canonical, 'hooks', hook);
   return `if [ -f "${hookPath}" ]; then python3 "${hookPath}"${args ? ` ${args}` : ''}; else echo "heddle: discipline hook ${hook} MISSING at the canonical — running WITHOUT it (heddle init-project)" >&2; exit 1; fi`;
 }
-function isDisciplineEntry(entry: any): boolean {
+function disciplineHook(entry: any): typeof WIRED_HOOKS[number] | undefined {
   const command = entry?.command;
-  return typeof command === 'string' && [...DISCIPLINE_HOOKS].some((hook) =>
+  return typeof command === 'string' ? [...DISCIPLINE_HOOKS].find((hook) =>
     // Terminator is END, whitespace, or a quote — never `\b`, which fires before the `.` in
     // `require-pr-sweep.py.bak` and would purge a user's disabled backup script (review ledger 523).
-    new RegExp('(^|[\\s"\\x27/])hooks/' + hook.replace(/\./g, '\\.') + '($|[\\s"\\x27])').test(command));
+    new RegExp('(^|[\\s"\\x27/])hooks/' + hook.replace(/\./g, '\\.') + '($|[\\s"\\x27])').test(command)) : undefined;
 }
-function renderedSettings(path: string, canonical: string): string {
+function renderedSettings(path: string, canonical: string): { content: string; misplaced: string[] } {
   const source = existsSync(path) ? readJson(path, 'settings.json') : {};
   if (!source || typeof source !== 'object' || Array.isArray(source)) throw new Error(`settings.json at ${path} must be a JSON object`);
   const hooks: Record<string, any[]> = {};
+  const misplaced: string[] = [];
+  const disciplineTargets = new Map<string, { group: any; index?: number }>();
   for (const [event, groups] of Object.entries(source.hooks ?? {})) {
     if (!Array.isArray(groups)) { hooks[event] = groups as any; continue; }
-    const merged: any[] = [];
-    const byMatcher = new Map<string, any>();
+    const preserved: any[] = [];
     for (const group of groups) {
-      if (!group || typeof group !== 'object' || !Array.isArray(group.hooks)) { merged.push(group); continue; }
-      const retained = group.hooks.filter((entry: any) => !isDisciplineEntry(entry));
-      const existing = byMatcher.get(group.matcher);
-      if (existing) {
-        for (const [key, value] of Object.entries(group)) if (!(key in existing)) existing[key] = value;
-        existing.hooks.push(...retained);
+      if (!group || typeof group !== 'object' || !Array.isArray(group.hooks)) { preserved.push(group); continue; }
+      const key = `${event}\u0000${group.matcher}`;
+      const isWiredMatcher = DISCIPLINE_WIRING.some((wiring) => wiring.event === event && wiring.matcher === group.matcher);
+      const retained: any[] = [];
+      let firstDisciplineIndex: number | undefined;
+      for (const entry of group.hooks) {
+        const hook = disciplineHook(entry);
+        if (!hook) { retained.push(entry); continue; }
+        if (firstDisciplineIndex === undefined) firstDisciplineIndex = retained.length;
+        if (!isWiredMatcher) misplaced.push(`${event}/${group.matcher} ${hook}`);
       }
-      else {
-        const next = { ...group, hooks: retained };
-        byMatcher.set(group.matcher, next);
-        merged.push(next);
-      }
+      const next = { ...group, hooks: retained };
+      preserved.push(next);
+      if (isWiredMatcher && !disciplineTargets.has(key)) disciplineTargets.set(key, { group: next, index: firstDisciplineIndex });
     }
-    hooks[event] = merged;
+    hooks[event] = preserved;
   }
-  for (const wiring of DISCIPLINE_WIRING) {
-    const groups = hooks[wiring.event] ?? (hooks[wiring.event] = []);
-    let group = groups.find((candidate: any) => candidate?.matcher === wiring.matcher && Array.isArray(candidate.hooks));
-    if (!group) { group = { matcher: wiring.matcher, hooks: [] }; groups.push(group); }
-    group.hooks.push({ type: 'command', command: hookCommand(canonical, wiring.hook, wiring.args), timeout: wiring.timeout });
+  const wiringByTarget = new Map<string, typeof DISCIPLINE_WIRING>();
+  for (const entry of DISCIPLINE_WIRING) {
+    const key = `${entry.event}\u0000${entry.matcher}`;
+    const existing = wiringByTarget.get(key);
+    if (existing) existing.push(entry);
+    else wiringByTarget.set(key, [entry]);
+  }
+  for (const [key, wiring] of wiringByTarget) {
+    const [event, matcher] = key.split('\u0000');
+    const groups = hooks[event] ?? (hooks[event] = []);
+    let target = disciplineTargets.get(key);
+    if (!target) {
+      const group = { matcher, hooks: [] as any[] };
+      groups.push(group);
+      target = { group };
+    }
+    const block = wiring.map((entry) => ({ type: 'command', command: hookCommand(canonical, entry.hook, entry.args), timeout: entry.timeout }));
+    target.group.hooks.splice(target.index ?? target.group.hooks.length, 0, ...block);
   }
   const { hooks: _oldHooks, ...rest } = source;
-  return json({ ...rest, hooks });
+  return { content: json({ ...rest, hooks }), misplaced };
 }
 function installerAsset(...parts: string[]): string { return join(here, '..', ...parts); }
 function mcpTemplate(): Record<string, unknown> | null {
@@ -139,7 +155,10 @@ export function planInstall(input: InstallOptions): InstallPlan {
   const dryRun = input.dryRun === true;
   const steps: InstallStep[] = [{ step: 'canonical', path: canonical, action: 'ok', reason: OPTIONAL_HOOKS.filter((hook) => !existsSync(join(canonical, 'hooks', hook))).length ? `optional hooks absent: ${OPTIONAL_HOOKS.filter((hook) => !existsSync(join(canonical, 'hooks', hook))).join(', ')}` : undefined }];
   const settingsPath = join(dir, '.claude', 'settings.json');
-  steps.push(stepFor(settingsPath, 'settings', renderedSettings(settingsPath, canonical), dryRun));
+  const settings = renderedSettings(settingsPath, canonical);
+  const settingsStep = stepFor(settingsPath, 'settings', settings.content, dryRun);
+  if (settings.misplaced.length) settingsStep.reason = `moved ${settings.misplaced.length} misplaced discipline entr${settings.misplaced.length === 1 ? 'y' : 'ies'}: ${settings.misplaced.join(', ')}`;
+  steps.push(settingsStep);
   for (const file of ['pr-review-sweep.md', 'pr-ownership.md', 'worktree-discipline.md']) {
     const path = join(dir, '.claude', 'rules', file);
     steps.push(existsSync(path) ? { step: `rule:${file}`, path, action: 'skip', reason: 'exists' } : stepFor(path, `rule:${file}`, rulesContent(canonical, file), dryRun, false));
@@ -178,4 +197,11 @@ export function applyInstall(plan: InstallPlan, dryRun = false): InstallReport {
   }
   const root = plan.options.dir;
   return { steps: plan.steps, humanSteps: [`watch_directory(path=${root}, repo_id=${basename(root)})`, 'confirm index freshness', 'Linear team/labels — HED-299 ws3'] };
+}
+
+export function redactReport(report: InstallReport, showContent: boolean, homeDir: string): InstallReport {
+  if (showContent) return report;
+  return { ...report, steps: report.steps.map(({ content, ...step }) => content && step.path.startsWith(homeDir)
+    ? { ...step, bytes: Buffer.byteLength(content) }
+    : { ...step, ...(content ? { content } : {}) }) };
 }

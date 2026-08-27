@@ -43,7 +43,11 @@ rewritten once present.
    preserve unrelated keys and any non-discipline hooks; replace only entries whose command targets a
    discipline hook — matched on the `/hooks/<name>` PATH SEGMENT, never a bare filename substring —
    and replace them IN PLACE inside their existing matcher group (a group mixing user hooks and
-   discipline hooks keeps its user hooks and its position; never split, never duplicated). Absolute paths are rendered from the resolved canonical (links, not
+   discipline hooks keeps its user hooks and its position; the rebuilt discipline block takes the
+   first removed discipline entry's position. Same-matcher groups separated by another matcher stay
+   separate: only the first receives the discipline block, and later groups retain only their user
+   hooks. Misplaced discipline entries are removed and reported; the table is the only placement.
+   Absolute paths are rendered from the resolved canonical (links, not
    copies — "no byte-copied drift").
 3. **Rules stubs** — `<dir>/.claude/rules/{pr-review-sweep,pr-ownership,worktree-discipline}.md`
    as short stubs that REFERENCE the canonical rule by absolute path (same stub→canonical pattern

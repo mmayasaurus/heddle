@@ -11,7 +11,7 @@ import { listPacks, withMandatoryPacks } from './skillpacks.js';
 import { classifyEffort, assessResult } from './classify.js';
 import { resolveIdentity } from './identity.js';
 import { loadProjectRegistry, DEFAULT_PROJECTS_PATH } from './projects.js';
-import { applyInstall, planInstall } from './init-project.js';
+import { applyInstall, planInstall, redactReport } from './init-project.js';
 import { isDispatchExcluded, pickClaudeAccount, readClaudeAccounts } from './capaware.js';
 import { bindingMeter, claudeFloorsFrom, headroomPct, isFloored } from './floors.js';
 import { loadLanes } from './lanes.js';
@@ -563,7 +563,7 @@ try {
       }
       const plan = planInstall({ dir, canonical: arg('--canonical'), name: arg('--name'), team: arg('--team'), agents: arg('--agents'), room: arg('--room'), launcher: arg('--launcher'), enforceMemtrace: has('--enforce-memtrace'), dryRun: has('--dry-run'), showContent: has('--show-content') });
       const report = applyInstall(plan, has('--dry-run'));
-      const output = has('--show-content') ? report : { ...report, steps: report.steps.map(({ content, ...step }) => content && step.path.startsWith(plan.options.homeDir) ? { ...step, bytes: Buffer.byteLength(content) } : { ...step, ...(content ? { content } : {}) }) };
+      const output = redactReport(report, has('--show-content'), plan.options.homeDir);
       out(json, output, () => [...report.steps.map((step) => `${step.action} ${step.step}: ${step.path}${step.reason ? ` (${step.reason})` : ''}`), ...report.humanSteps.map((step) => `- ${step}`)].join('\n'));
       break;
     }

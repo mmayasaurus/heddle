@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFi
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { applyInstall, DISCIPLINE_WIRING, planInstall } from '../src/init-project.js';
+import { applyInstall, DISCIPLINE_WIRING, planInstall, redactReport } from '../src/init-project.js';
 import { useTempResources } from './helpers.js';
 
 const WIRED_HOOKS = [
@@ -85,7 +85,7 @@ describe('init-project', () => {
     expect(plan.steps.some((step) => step.action === 'would-create')).toBe(true);
   });
 
-  it('merges discipline wiring in place while preserving user hooks and groups', () => {
+  it('renders discipline wiring in the first matching group while preserving user hooks and groups', () => {
     const opts = options(tempDir());
     mkdirSync(join(opts.dir, '.claude'));
     writeFileSync(join(opts.dir, '.claude', 'settings.json'), JSON.stringify({ keep: true, hooks: { PreToolUse: [{ matcher: 'Custom', extra: 'preserve', hooks: [{ type: 'command', command: 'echo custom' }] }, { matcher: 'Bash', keep: true, hooks: [{ type: 'command', command: 'echo custom' }, { type: 'command', command: 'python old/hooks/require-memtrace-first.py deny-recursive-search' }] }, { matcher: 'Bash', hooks: [{ type: 'command', command: 'python old/hooks/require-memtrace-first.py record' }] }] } }));
@@ -94,10 +94,70 @@ describe('init-project', () => {
     expect(settings.keep).toBe(true);
     expect(settings.hooks.PreToolUse[0]).toMatchObject({ matcher: 'Custom', extra: 'preserve' });
     const bash = settings.hooks.PreToolUse.filter((group: any) => group.matcher === 'Bash');
-    expect(bash).toHaveLength(1);
+    expect(bash).toHaveLength(2);
     expect(bash[0].hooks[0].command).toBe('echo custom');
     expect(bash[0].hooks).toHaveLength(3);
+    expect(bash[1].hooks).toEqual([]);
     expect(JSON.stringify(settings)).not.toContain('old/require-memtrace-first.py');
+  });
+
+  it('reports and removes discipline entries placed under an unwired matcher', () => {
+    const opts = options(tempDir()); mkdirSync(join(opts.dir, '.claude'));
+    writeFileSync(join(opts.dir, '.claude', 'settings.json'), JSON.stringify({ hooks: { PreToolUse: [{ matcher: 'Write', hooks: [
+      { type: 'command', command: 'python /old/hooks/require-memtrace-first.py enforce-query' },
+    ] }] } }));
+    const plan = planInstall(opts);
+    expect(plan.steps.find((step) => step.step === 'settings')?.reason).toBe('moved 1 misplaced discipline entry: PreToolUse/Write require-memtrace-first.py');
+    applyInstall(plan);
+    const settings = JSON.parse(readFileSync(join(opts.dir, '.claude', 'settings.json'), 'utf8'));
+    expect(settings.hooks.PreToolUse.find((group: any) => group.matcher === 'Write').hooks).toEqual([]);
+  });
+
+  it('keeps a discipline block at the first removed entry position within its group', () => {
+    const opts = options(tempDir()); mkdirSync(join(opts.dir, '.claude'));
+    writeFileSync(join(opts.dir, '.claude', 'settings.json'), JSON.stringify({ hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [
+      { type: 'command', command: 'echo user1' },
+      { type: 'command', command: 'python /old/hooks/require-memtrace-first.py record' },
+      { type: 'command', command: 'echo user2' },
+    ] }] } }));
+    applyInstall(planInstall(opts));
+    const hooks = JSON.parse(readFileSync(join(opts.dir, '.claude', 'settings.json'), 'utf8')).hooks.PreToolUse.find((group: any) => group.matcher === 'Bash').hooks;
+    expect(hooks.map((entry: any) => entry.command)).toMatchObject(['echo user1', expect.stringContaining('require-memtrace-first.py'), expect.stringContaining('require-memtrace-first.py'), 'echo user2']);
+    expect(hooks).toHaveLength(4);
+  });
+
+  it('keeps separate same-matcher groups around intervening groups', () => {
+    const opts = options(tempDir()); mkdirSync(join(opts.dir, '.claude'));
+    writeFileSync(join(opts.dir, '.claude', 'settings.json'), JSON.stringify({ hooks: { PreToolUse: [
+      { matcher: 'Bash', hooks: [{ type: 'command', command: 'echo user1' }, { type: 'command', command: 'python /old/hooks/require-memtrace-first.py record' }] },
+      { matcher: 'Custom', hooks: [{ type: 'command', command: 'echo custom' }] },
+      { matcher: 'Bash', hooks: [{ type: 'command', command: 'echo user2' }, { type: 'command', command: 'python /old/hooks/require-memtrace-first.py enforce-query' }] },
+    ] } }));
+    applyInstall(planInstall(opts));
+    const groups = JSON.parse(readFileSync(join(opts.dir, '.claude', 'settings.json'), 'utf8')).hooks.PreToolUse;
+    expect(groups.map((group: any) => group.matcher)).toEqual(['Bash', 'Custom', 'Bash', 'Grep|Glob|Read', 'Edit|MultiEdit|Write']);
+    expect(groups[0].hooks.map((entry: any) => entry.command)).toHaveLength(3);
+    expect(groups[0].hooks[0].command).toBe('echo user1');
+    expect(groups[1].hooks[0].command).toBe('echo custom');
+    expect(groups[2].hooks.map((entry: any) => entry.command)).toEqual(['echo user2']);
+  });
+
+  it('redacts home-directory contents unless show-content is selected', () => {
+    const opts = options(tempDir());
+    const report = applyInstall(planInstall(opts));
+    const redacted = redactReport(report, false, opts.homeDir);
+    const registry = redacted.steps.find((step) => step.step === 'registry')!;
+    const settings = redacted.steps.find((step) => step.step === 'settings')!;
+    expect(registry).toMatchObject({ bytes: expect.any(Number) });
+    expect(registry.content).toBeUndefined();
+    expect(JSON.stringify(redacted)).not.toContain('Z');
+    expect(settings.content).toBeDefined();
+    expect(redactReport(report, true, opts.homeDir).steps.find((step) => step.step === 'registry')?.content).toContain('"agentIds": [\n        "Z"');
+  });
+
+  it('includes the human steps in a dry-run report', () => {
+    const opts = { ...options(tempDir()), dryRun: true };
+    expect(applyInstall(planInstall(opts), true).humanSteps).toHaveLength(3);
   });
 
   it('fails before writes when a wired canonical hook is missing', () => {
