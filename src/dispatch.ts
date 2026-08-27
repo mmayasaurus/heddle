@@ -762,12 +762,28 @@ export async function dispatch(
     if (!fbCaps.refusal && providerExecution(table, fallback.provider) !== 'in-session-subagent') {
       const targetCapabilities = [...new Set([...(target.capabilities ?? []), ...(req.capabilities ?? [])])];
       ctx.routeReason = `${plan.decision.routeReason}; capability-fit fallback: ${target.provider} cannot enforce [${targetCapabilities.join(', ')}] → ${fallback.provider}/${fallback.model}`;
+      if (fallback.provider === 'codex' || fallback.provider === 'cursor') {
+        const registry = req.rotationAccounts ?? readRotationAccounts();
+        ctx.rotationAccount = resolveRotationAccount(fallback, req, registry, readCooling(req.coolingPath ?? DEFAULT_COOLING_PATH));
+        ctx.account = ctx.rotationAccount?.id ?? (fallback.provider === 'codex' && req.env?.CODEX_HOME ? basename(req.env.CODEX_HOME) : null);
+        if (ctx.rotationAccount) ctx.routeReason += `; ${ctx.rotationAccount.reason}`;
+      }
       return runTarget(fallback, req, ctx, route, `${route.provider}/${route.model} (capability-unenforceable)`);
     }
   }
   // A read-only MANDATE VIOLATION is a policy failure of the reviewer, not a provider failure — never
   // "retry" it on the fallback (that would re-run in an already-mutated tree and mask the violation).
-  if (primary.ok || primary.refusal || primary.review?.mandateOk === false || req.noFallback) return primary;
+  if (primary.ok || primary.refusal || primary.review?.mandateOk === false) return primary;
+  if (req.noFallback) {
+    if ((target.provider === 'codex' || target.provider === 'cursor') && ctx.rotationAccount
+        && classifyRotationRefusal(target.provider, primary) === 'rate-limit') {
+      const coolingPath = req.coolingPath ?? DEFAULT_COOLING_PATH;
+      const cooling = readCooling(coolingPath);
+      cooling.lanes[`${target.provider}:${ctx.rotationAccount.id}`] = { cooledAt: req.nowS ?? Math.floor(Date.now() / 1000), reason: 'rate-limit', cooldownS: DEFAULT_COOLDOWN_S };
+      writeCooling(coolingPath, cooling);
+    }
+    return primary;
+  }
 
   // HED-268: a clear provider quota refusal cools the selected codex/cursor account and gets ONE
   // same-provider retry before the class's normal provider fallback. Generic failures never rotate.
@@ -1110,6 +1126,23 @@ function excludedClaudePin(err: unknown): { pin: string; reason: string } | null
 
 function resolveRotationAccount(target: RouteTarget, req: DispatchRequest, registry: RotationAccounts, cooling: ReturnType<typeof readCooling>): DispatchContext['rotationAccount'] {
   const nowS = req.nowS ?? Math.floor(Date.now() / 1000);
+  // HED-392 will recover the original account from the ledger; until then, resumed sessions stay on an explicit home or the default login.
+  if (req.resume) {
+    if (target.provider === 'codex') {
+      const pick = req.env?.CODEX_HOME ? pickCodexAccount(registry, cooling, req.env.CODEX_HOME, nowS) : null;
+      return pick ? { provider: 'codex', id: pick.id, env: { CODEX_HOME: pick.codexHome ?? req.env!.CODEX_HOME! }, unset: [], reason: pick.reason }
+        : { provider: 'codex', id: 'default', env: {}, unset: ['CODEX_HOME'], reason: 'account:default resumed default login' };
+    }
+    if (target.provider === 'cursor') {
+      const explicitKey = req.env?.CURSOR_API_KEY;
+      if (explicitKey) {
+        const matched = registry.cursor.find((account) => account.keyFile !== null && readCursorKey(account.keyFile) === explicitKey);
+        return { provider: 'cursor', id: matched?.id ?? 'manual', env: { CURSOR_API_KEY: explicitKey }, unset: [], reason: `account:${matched?.id ?? 'manual'} resumed explicit key` };
+      }
+      const machine = registry.cursor.find((account) => account.keyFile === null);
+      return { provider: 'cursor', id: machine?.id ?? 'default', env: {}, unset: ['CURSOR_API_KEY'], reason: `account:${machine?.id ?? 'default'} resumed machine login` };
+    }
+  }
   if (target.provider === 'codex') {
     const pick = pickCodexAccount(registry, cooling, req.env?.CODEX_HOME, nowS);
     return pick ? { provider: 'codex', id: pick.id, env: pick.codexHome ? { CODEX_HOME: pick.codexHome } : {}, unset: pick.codexHome ? [] : ['CODEX_HOME'], reason: pick.reason } : null;

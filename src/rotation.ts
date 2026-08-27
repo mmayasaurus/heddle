@@ -17,6 +17,12 @@ export interface CodexAccountPick { id: string; codexHome: string | null; reason
 export interface CursorAccountPick { id: string; keyFile: string | null; reason: string }
 
 const emptyCooling = (): CoolingStore => ({ schemaVersion: 1, lanes: {} });
+let coolingTempSequence = 0;
+
+export function coolingTempPath(path: string): string {
+  coolingTempSequence += 1;
+  return `${path}.${process.pid}.${coolingTempSequence}.tmp`;
+}
 
 function dateIsActive(date: string | undefined, nowS: number): boolean {
   if (!date) return false;
@@ -62,9 +68,10 @@ export function readCooling(path = DEFAULT_COOLING_PATH): CoolingStore {
 
 /** Best-effort durable store: rotation is advisory and an unwritable state file must not fail work. */
 export function writeCooling(path: string, cooling: CoolingStore): void {
-  const temp = `${path}.tmp`;
+  const temp = coolingTempPath(path);
   try {
     mkdirSync(dirname(path), { recursive: true });
+    // Advisory cooling accepts the cross-process read-modify-write race; a lost lane self-corrects on the next rate-limit.
     try { unlinkSync(temp); } catch { /* a missing temp is normal */ }
     writeFileSync(temp, JSON.stringify(cooling, null, 2) + '\n', { encoding: 'utf8', mode: 0o600 });
     renameSync(temp, path);
@@ -95,11 +102,17 @@ export function pickCodexAccount(registry: RotationAccounts, cooling: CoolingSto
     if (account) return { id: account.id, codexHome: account.codexHome, reason: `account:${account.id} pinned${coolingNote(cooling, 'codex', account.id, nowS) ? ` (${coolingNote(cooling, 'codex', account.id, nowS)}; advisory)` : ''}` };
     return { id: basename(pin), codexHome: pin, reason: `account:${basename(pin)} pinned (manual CODEX_HOME)` };
   }
+  const accounts = preferred(registry.codex, nowS);
   const skipped: string[] = [];
-  for (const account of preferred(registry.codex, nowS)) {
+  for (const account of accounts) {
     const note = coolingNote(cooling, 'codex', account.id, nowS);
     if (note) { skipped.push(note); continue; }
     return { id: account.id, codexHome: account.codexHome, reason: `account:${account.id}${skipped.length ? ` (${skipped.join(', ')})` : ''}` };
+  }
+  const first = accounts[0];
+  if (first) {
+    const note = coolingNote(cooling, 'codex', first.id, nowS);
+    return { id: first.id, codexHome: first.codexHome, reason: `account:${first.id} (${note}; advisory; all registered accounts cooling)` };
   }
   return null;
 }
