@@ -13,9 +13,10 @@ import { resolveIdentity } from './identity.js';
 import { loadProjectRegistry, DEFAULT_PROJECTS_PATH } from './projects.js';
 import { applyInstall, planInstall, redactReport } from './init-project.js';
 import { isDispatchExcluded, pickClaudeAccount, readClaudeAccounts } from './capaware.js';
+import { claudeAccountRows, pickClaudeAccountsBatch, usableClaudeCaps } from './account-pick.js';
 import { bindingMeter, claudeFloorsFrom, headroomPct, isFloored } from './floors.js';
 import { loadLanes } from './lanes.js';
-import { LIMITS_JSON_MAX_AGE_S, readProviderCaps } from './usage.js';
+import { readProviderCaps } from './usage.js';
 
 /**
  * heddle CLI — the surface orchestrators (and later the dashboard) drive.
@@ -70,7 +71,7 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
                                  or owner process provably gone (outcome='orphaned'); dry-run lists only
   heddle ledger report-in-session <id> (--ok | --failed) [--error "<why>"] [--input-tokens N] [--cached-input-tokens N] [--output-tokens N] [--reasoning-tokens N] [--duration-ms N] [--json]  administrative path: may report any orchestrator's handoff
   heddle usage [--since <iso>] [--json]    per-provider totals
-  heddle account pick [--for <letter>] [--json] [--explain]   healthiest addressable Claude account for a fleet relaunch
+  heddle account pick [--for <letter[,letter...]>] [--json] [--explain]   healthiest addressable Claude account for a fleet relaunch
   heddle reviews [--limit N] [--json]      adversarial-review scoreboard (author→reviewer pairs) + recent reviews
   heddle review-outcome <dispatch-id> --total N --accepted M [--notes "…"]   record how many findings you accepted
 `;
@@ -203,63 +204,57 @@ try {
 
     case 'account': {
       if (process.argv[3] !== 'pick') {
-        console.error('usage: heddle account pick [--for <letter>] [--json] [--explain]');
+        console.error('usage: heddle account pick [--for <letter[,letter...]>] [--json] [--explain]');
         process.exit(2);
       }
       const accounts = readClaudeAccounts();
       const caps = readProviderCaps();
       const floors = claudeFloorsFrom(loadLanes());
-      // Residency-balancing by --for is a later increment; this identifies the agent being launched only.
       const forAgent = arg('--for');
       if (has('--for') && (!forAgent || forAgent.startsWith('--'))) {
-        console.error('usage: heddle account pick [--for <letter>] [--json] [--explain]');
+        console.error('usage: heddle account pick [--for <letter[,letter...]>] [--json] [--explain]');
         process.exit(2);
       }
-      const claudeCaps = caps.claude;
       // Exit 2 = cannot decide (missing/stale meters); distinct from exit 1 = decided, none healthy.
       // Age-key on capturedAt, NOT the `stale` flag alone: the flag can read fresh while the data is
       // hours old (HED-348 keeper bug — limits.json rewritten ~every 5 min bumps the file's writtenAt
       // while a provider entry's capturedAt lags), and picking on 45–50%-wrong caps is the exact
-      // rollover risk this guard exists to stop. A surfaced capture older than the mirror freshness
-      // window (or an absent capturedAt) is UNKNOWN → refuse, never pick (R nod 2026-08-22). Safe now;
-      // useful once HED-348/HED-337 land and fresh caps surface. Keep the flag too (belt + suspenders).
-      const capturedAt = claudeCaps?.capturedAt ?? null;
-      const ageS = capturedAt === null ? null : Math.max(0, Math.floor(Date.now() / 1000) - capturedAt);
-      if (!claudeCaps || claudeCaps.source === 'none' || claudeCaps.stale || ageS === null || ageS > LIMITS_JSON_MAX_AGE_S) {
-        const age = ageS === null
-          ? 'unknown (capturedAt unavailable)'
-          : `${ageS}s (capturedAt ${capturedAt}, budget ${LIMITS_JSON_MAX_AGE_S}s)`;
-        console.error(`heddle: cannot decide Claude account pick: caps are missing or stale (data age ${age}); use an explicit account prompt`);
+      // rollover risk this guard exists to stop. This shared gate protects both the single and batch paths.
+      const capsGate = usableClaudeCaps(caps.claude);
+      if (!capsGate.usable) {
+        console.error(`heddle: cannot decide Claude account pick: caps are missing or stale (data age ${capsGate.age}); use an explicit account prompt`);
         process.exit(2);
       }
-      const pick = pickClaudeAccount(claudeCaps, accounts, { floors });
-      const usedOf = (id: string): number | null => {
-        const row = claudeCaps.accounts.find((account) => account.id === id);
-        return row && !row.stale ? row.fiveHour.usedPercentage : null;
-      };
-      const used7dOf = (id: string): number | null => {
-        const row = claudeCaps.accounts.find((account) => account.id === id);
-        return row && !row.stale ? row.sevenDay.usedPercentage : null;
-      };
-      const accountRows = accounts.map((account) => {
-        const usedPct = usedOf(account.id);
-        const usedPct7d = used7dOf(account.id);
-        const meter = bindingMeter(usedPct, usedPct7d);
-        const floored = isFloored(usedPct, usedPct7d, floors);
-        const loggedOut = account.loggedIn === false;
-        const dispatchExcluded = isDispatchExcluded(caps.claude, account.id);
-        return {
-          account: account.id,
-          usedPct5h: usedPct,
-          usedPct7d,
-          headroomPct: meter === '5h' ? headroomPct(usedPct) : meter === '7d' ? headroomPct(usedPct7d) : null,
-          bindingMeter: meter,
-          floored,
-          loggedOut,
-          dispatchExcluded,
-          excluded: floored || loggedOut || dispatchExcluded,
+      const claudeCaps = capsGate.caps;
+      const requestedAgents = forAgent?.split(',').map((agent) => agent.trim()).filter(Boolean) ?? [];
+      // Each --for identity must be a real agent tag, never a flag — `--for R,--json` must not turn
+      // `--json` into an assignment key (qodo review, HED-333). The guard above only checks the whole
+      // string; validate each comma-separated entry so a flag-like value is rejected, not used as a key.
+      if (requestedAgents.some((agent) => agent.startsWith('-'))) {
+        console.error('usage: heddle account pick [--for <letter[,letter...]>] [--json] [--explain]');
+        process.exit(2);
+      }
+      const agents = [...new Set(requestedAgents)];
+      if (agents.length > 1) {
+        const warnings: string[] = [];
+        if (agents.length !== requestedAgents.length) {
+          const warning = 'heddle: duplicate --for identities were deduplicated before batch placement';
+          warnings.push(warning);
+          console.error(warning);
+        }
+        const batch = pickClaudeAccountsBatch(claudeCaps, accounts, floors, agents);
+        const data = {
+          assignments: batch.assignments,
+          warnings,
+          ...(has('--explain') ? { accounts: batch.accounts } : {}),
         };
-      });
+        // Batch results are always JSON: wrappers compose the per-agent map rather than parse text.
+        console.log(JSON.stringify(data, null, 2));
+        process.exit(Object.values(batch.assignments).some((assignment) => 'refused' in assignment) ? 1 : 0);
+      }
+      const pick = pickClaudeAccount(claudeCaps, accounts, { floors });
+      // Keep the singleton explain payload byte-stable: residents is batch-only context.
+      const accountRows = claudeAccountRows(claudeCaps, accounts, floors).map(({ residents: _residents, ...row }) => row);
       if (!pick) {
         if (accounts.length === 0) {
           console.error('heddle: refusing Claude account pick: no accounts registered in ~/.heddle/accounts.json');
@@ -291,14 +286,14 @@ try {
         bindingMeter: meter,
         resetsAt,
         reason: pick.reason,
-        ...(forAgent ? { for: forAgent } : {}),
+        ...(agents[0] ? { for: agents[0] } : {}),
         ...(has('--explain') ? { accounts: accountRows } : {}),
       };
       out(json, data, () => {
         const config = pick.account.configDir
           ? `CLAUDE_CONFIG_DIR=${pick.account.configDir}`
           : 'default login — leave CLAUDE_CONFIG_DIR unset';
-        const selected = `${pick.account.id}  ${config}  ${pick.reason}` + (forAgent ? `  for: ${forAgent}` : '');
+        const selected = `${pick.account.id}  ${config}  ${pick.reason}` + (agents[0] ? `  for: ${agents[0]}` : '');
         if (!has('--explain')) return selected;
         const details = accountRows.map((account) => {
           const state = [
