@@ -87,6 +87,68 @@ describe('heddle-comms server (in-process)', () => {
     expect(resolveCommsIdentity({ ...baseEnv() }, dir, (m) => w.push(m), tokenPath)).toEqual({ identity: null, isOperator: false });
   });
 
+  describe('regression PR#387 — late Claude identity binding', () => {
+    const bridgePath = (cacheDir: string) => join(cacheDir, `pid-${process.ppid}.label`);
+
+    it('binds the same unbound server on its next sender-requiring tool call after the PID bridge appears', async () => {
+      const cacheDir = join(dir, 'identity-cache');
+      mkdirSync(cacheDir);
+      const session = await connect({ HEDDLE_IDENTITY_CACHE_DIR: cacheDir });
+
+      const unbound = await call(session.client, 'post_message', { to: '#fleet', body: 'before rename' });
+      expect(unbound.isError).toBe(true);
+      expect(unbound.text).toMatch(/no bound comms identity/);
+
+      writeFileSync(bridgePath(cacheDir), 'V\n');
+      const bound = await call(session.client, 'post_message', { to: '#fleet', body: 'after rename' });
+      expect(bound.parsed).toMatchObject({ outcome: 'logged' });
+      expect(bound.text).toContain('from V to #fleet');
+      expect(session.server.identity).toBe('V');
+    });
+
+    it('keeps the env identity ahead of the PID bridge', async () => {
+      const cacheDir = join(dir, 'identity-cache');
+      mkdirSync(cacheDir);
+      writeFileSync(bridgePath(cacheDir), 'R\n');
+      const session = await connect({ HEDDLE_AGENT: 'V', HEDDLE_IDENTITY_CACHE_DIR: cacheDir });
+
+      expect((await call(session.client, 'post_message', { to: '#fleet', body: 'env wins' })).text).toContain('from V to #fleet');
+      expect(session.server.identity).toBe('V');
+    });
+
+    it('refuses an operator PID bridge label and stays unbound', async () => {
+      const cacheDir = join(dir, 'identity-cache');
+      mkdirSync(cacheDir);
+      writeFileSync(bridgePath(cacheDir), 'operator\n');
+      const session = await connect({ HEDDLE_IDENTITY_CACHE_DIR: cacheDir });
+
+      const result = await call(session.client, 'post_message', { to: '#fleet', body: 'not operator' });
+      expect(result.isError).toBe(true);
+      expect(result.text).toMatch(/no bound comms identity/);
+      expect(session.server.identity).toBeNull();
+    });
+
+    it('pins a PID-bridge identity after binding even if the label file later changes', async () => {
+      const cacheDir = join(dir, 'identity-cache');
+      mkdirSync(cacheDir);
+      const session = await connect({ HEDDLE_IDENTITY_CACHE_DIR: cacheDir });
+
+      writeFileSync(bridgePath(cacheDir), 'V\n');
+      expect((await call(session.client, 'post_message', { to: '#fleet', body: 'first label' })).text).toContain('from V to #fleet');
+      writeFileSync(bridgePath(cacheDir), 'R\n');
+      expect((await call(session.client, 'post_message', { to: '#fleet', body: 'second label' })).text).toContain('from V to #fleet');
+      expect(session.server.identity).toBe('V');
+      expect(warnings.filter((m) => m.includes('identity changed after binding')).length).toBe(1);
+    });
+
+    it('keeps the startup-bound HEDDLE_AGENT path unchanged', async () => {
+      const session = await connect({ HEDDLE_AGENT: 'V' });
+
+      expect(session.server.identity).toBe('V');
+      expect((await call(session.client, 'post_message', { to: '#fleet', body: 'startup bound' })).text).toContain('from V to #fleet');
+    });
+  });
+
   // ── HED-187: the RAW fleet identity, extracted so the rotator can see through the operator binding ──
 
   it('resolveFleetIdentity: the raw chain (HEDDLE_AGENT → FLEET_AGENT → HEDDLE_COMMS_ADDRESS → .fleet-agent → null)', () => {

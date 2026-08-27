@@ -1,7 +1,7 @@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import type { Transport as McpTransport } from '@modelcontextprotocol/sdk/shared/transport.js';
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
@@ -23,7 +23,7 @@ import { TIERS, MESSAGE_KINDS, type Tier, type MessageKind } from './types.js';
  * constructible unit so it can be tested in-process (InMemoryTransport) and shipped as a bin
  * (src/comms/channel-server.ts wires stdio + signals).
  *
- * Identity is bound ONCE at construction from the ENVIRONMENT (never chosen by the model):
+ * Identity is bound from trusted process configuration (never chosen by the model):
  *   operator   — only via the configuration-level credential: HEDDLE_COMMS_ROLE=operator AND
  *                HEDDLE_COMMS_OPERATOR_TOKEN equal to ~/.heddle/operator.token (created once with
  *                `heddle-comms --init-operator-token`, 0600; `--rotate` invalidates the old one).
@@ -34,8 +34,13 @@ import { TIERS, MESSAGE_KINDS, type Tier, type MessageKind } from './types.js';
  *                every privileged call AND in the push/heartbeat loop, so a rotation revokes a running
  *                session immediately (tools refused, presence unregistered, push stopped).
  *   agent/child — HEDDLE_AGENT → FLEET_AGENT → HEDDLE_COMMS_ADDRESS (a heddle-dispatched worker)
- *                → a `.fleet-agent` file walking up from cwd → unbound (tools that need a sender
- *                refuse). `operator` is REFUSED from these sources. HEDDLE_WORKER=1 forbids
+ *                → a `.fleet-agent` file walking up from cwd → a Claude PID bridge label at
+ *                `<cacheDir>/pid-<ppid>.label` → unbound (tools that need a sender refuse).
+ *                `cacheDir` defaults to `~/.claude/fleet-identity-cache` and can be overridden
+ *                with HEDDLE_IDENTITY_CACHE_DIR for tests. The PID bridge accepts agent labels
+ *                only — never operator or child. A session that begins unbound retries this full
+ *                chain on sender-requiring tool calls until it binds, then pins that label for its
+ *                lifetime. `operator` is REFUSED from the agent sources. HEDDLE_WORKER=1 forbids
  *                mint_child (depth 1).
  *
  * PUSH IS OPT-IN (HEDDLE_COMMS_PUSH=1): Claude Code gives a server no way to know whether it was
@@ -86,6 +91,7 @@ const RESUME_DIRECTIVE = 'FLEET RESUMED — the pause is lifted; carry on.';
 
 /** The operator trust root. Fixed on purpose — no env var may move it (see CommsServerOptions.operatorTokenPath). */
 export const OPERATOR_TOKEN_PATH = join(homedir(), '.heddle', 'operator.token');
+const DEFAULT_IDENTITY_CACHE_DIR = join(homedir(), '.claude', 'fleet-identity-cache');
 
 /**
  * Create (or, with rotate, replace) the operator token file (0600 — enforced with chmod even on an
@@ -120,7 +126,41 @@ export function operatorTokenMatches(env: NodeJS.ProcessEnv, path: string = OPER
  * rotator's in-session guard (HED-187), which needs the fleet letter even when the operator binding
  * has masked it to 'operator'.
  */
-export function resolveFleetIdentity(env: NodeJS.ProcessEnv, cwd: string, warn: (m: string) => void): string | null {
+function resolvePidBridgeIdentity(env: NodeJS.ProcessEnv, warn: (m: string) => void): string | null {
+  const ppid = process.ppid;
+  if (!Number.isInteger(ppid) || ppid <= 1) {
+    warn(`PID identity bridge unavailable: unexpected parent pid ${String(ppid)} — continuing unbound`);
+    return null;
+  }
+  const cacheDir = env.HEDDLE_IDENTITY_CACHE_DIR?.trim() || DEFAULT_IDENTITY_CACHE_DIR;
+  try {
+    if (!statSync(cacheDir).isDirectory()) {
+      warn(`PID identity bridge cache is not a directory: ${cacheDir} — continuing unbound`);
+      return null;
+    }
+  } catch (err) {
+    // An absent bridge is the expected pre-/rename state; other stat failures are diagnostic only.
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+      warn(`could not stat PID identity bridge cache ${cacheDir}: ${errorMessage(err)} — continuing unbound`);
+    }
+    return null;
+  }
+  const path = join(cacheDir, `pid-${ppid}.label`);
+  try {
+    const label = readFileSync(path, 'utf8').trim();
+    if (parseAddress(label)?.kind === 'agent') return label;
+    warn(`PID identity bridge label at ${path} is not a fleet agent address — continuing unbound`);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+      warn(`could not read PID identity bridge label ${path}: ${errorMessage(err)} — continuing unbound`);
+    }
+  }
+  return null;
+}
+
+export function resolveFleetIdentity(
+  env: NodeJS.ProcessEnv, cwd: string, warn: (m: string) => void, pidBridgeWarn: (m: string) => void = warn,
+): string | null {
   // TODO(HED-65/HED-2): switch to Agent U's src/identity.ts once it lands (same order, one module).
   const bindable = (v: string | undefined): string | null => {
     const s = v?.trim();
@@ -144,14 +184,16 @@ export function resolveFleetIdentity(env: NodeJS.ProcessEnv, cwd: string, warn: 
       }
     }
     const up = dirname(dir);
-    if (up === dir) return null;
+    if (up === dir) break;
     dir = up;
   }
+  return resolvePidBridgeIdentity(env, pidBridgeWarn);
 }
 
 /** Bind the comms identity from the environment (see the module doc). */
 export function resolveCommsIdentity(
   env: NodeJS.ProcessEnv, cwd: string, warn: (m: string) => void, tokenPath: string = OPERATOR_TOKEN_PATH,
+  pidBridgeWarn: (m: string) => void = warn,
 ): { identity: string | null; isOperator: boolean } {
   if (env.HEDDLE_COMMS_ROLE === 'operator') {
     // A worker, or anything a heddle dispatch stamped, is never the operator — even if it inherited
@@ -165,7 +207,7 @@ export function resolveCommsIdentity(
       return { identity: null, isOperator: false };
     }
   }
-  const fleet = resolveFleetIdentity(env, cwd, warn);
+  const fleet = resolveFleetIdentity(env, cwd, warn, pidBridgeWarn);
   return { identity: fleet, isOperator: false };
 }
 
@@ -189,7 +231,13 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
   const inFlightSource: InFlightSource | null =
     ledger && typeof (ledger as { inFlight?: unknown }).inFlight === 'function' ? (ledger as InFlightSource) : null;
   const tokenPath = opts.operatorTokenPath ?? OPERATOR_TOKEN_PATH;
-  const { identity: me, isOperator } = resolveCommsIdentity(env, cwd, warn, tokenPath);
+  let pidBridgeWarningShown = false;
+  const warnPidBridgeOnce = (message: string) => {
+    if (!pidBridgeWarningShown) { pidBridgeWarningShown = true; warn(message); }
+  };
+  let { identity: me, isOperator } = resolveCommsIdentity(env, cwd, warn, tokenPath, warnPidBridgeOnce);
+  const lazyIdentity = me === null && !isOperator;
+  let identityChangeWarned = false;
   const isWorker = env.HEDDLE_WORKER === '1';
   const pushEnabled = env.HEDDLE_COMMS_PUSH === '1';
   const channelLoadedProbe = opts.channelLoadedProbe ?? (() => {
@@ -295,8 +343,24 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
   /** The bound identity, re-verified for the operator on every call so a token rotation bites immediately. */
   let revoked = false;
   const operatorStillValid = (): boolean => !isOperator || operatorTokenMatches(env, tokenPath);
+  const refreshLazyIdentity = (): void => {
+    if (!lazyIdentity) return;
+    const resolved = resolveCommsIdentity(env, cwd, warn, tokenPath, warnPidBridgeOnce);
+    // A session that did not start as operator never gains operator authority through lazy binding.
+    const candidate = resolved.isOperator ? null : resolved.identity;
+    if (!candidate) return;
+    if (!me) {
+      me = candidate;
+      return;
+    }
+    if (candidate !== me && !identityChangeWarned) {
+      identityChangeWarned = true;
+      warn(`comms identity changed after binding (${me} → ${candidate}) — keeping pinned identity ${me}`);
+    }
+  };
   const requireMe = (): string => {
-    if (!me) throw new Error('no bound comms identity: set HEDDLE_AGENT (or FLEET_AGENT / .fleet-agent) — or, for the operator, HEDDLE_COMMS_ROLE=operator + the token — before starting the session');
+    refreshLazyIdentity();
+    if (!me) throw new Error('no bound comms identity: set HEDDLE_AGENT (or FLEET_AGENT / .fleet-agent), provide the Claude PID bridge label, or, for the operator, HEDDLE_COMMS_ROLE=operator + the token — before starting the session');
     if (!operatorStillValid()) { void revokeOperator(); throw new Error('operator token no longer matches (rotated?): restart the session with the current token'); }
     return me;
   };
@@ -435,22 +499,23 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
   async function start(transport: McpTransport): Promise<void> {
     await mcp.connect(transport);
     if (!me) return;
+    const startupIdentity = me;
     if (pushEnabled) {
       log.registerSession({
-        address: me, sessionId: instanceId, sessionName,
+        address: startupIdentity, sessionId: instanceId, sessionName,
         pid: env.CLAUDE_PID ? Number(env.CLAUDE_PID) : process.ppid, socket: env.CLAUDE_CODE_MESSAGING_SOCKET ?? null, // the hosting Claude session, not this child
       });
       if (pushDelivery === 'suspect-channel-not-loaded') {
-        warn(`push suspect: ${me} was launched WITHOUT --dangerously-load-development-channels server:heddle-comms — `
+        warn(`push suspect: ${startupIdentity} was launched WITHOUT --dangerously-load-development-channels server:heddle-comms — `
           + 'Claude Code will DROP channel events silently (they still record as channel-written). '
           + PUSH_SUSPECT_RELAUNCH_REMEDY);
         try {
-          const alreadyNoted = log.transcript({ pair: [me, me] })
-            .some((row) => row.from === me && row.to === me && row.meta?.diagnostic === 'push-suspect');
+          const alreadyNoted = log.transcript({ pair: [startupIdentity, startupIdentity] })
+            .some((row) => row.from === startupIdentity && row.to === startupIdentity && row.meta?.diagnostic === 'push-suspect');
           // A later re-break will not re-note; comms_whoami.pushDelivery remains the live warning surface.
           if (!alreadyNoted) {
             log.append({
-              from: me, to: me,
+              from: startupIdentity, to: startupIdentity,
               body: '⚠️ heddle-comms PUSH SUSPECT: this session was launched WITHOUT '
                 + '--dangerously-load-development-channels server:heddle-comms. Channel events may be dropped '
                 + 'silently by Claude Code (they still record as channel-written). You are effectively PULL-ONLY. '
@@ -460,13 +525,13 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
           }
         } catch (err) { warn(`push-suspect self-note failed: ${errorMessage(err)}`); }
       }
-      inbound = new InboundPump(log, me, (event) => {
+      inbound = new InboundPump(log, startupIdentity, (event) => {
         for (const k of Object.keys(event.meta)) if (!IDENTIFIER.test(k)) delete event.meta[k]; // Claude Code drops these silently — never send them
         return mcp.notification({ method: 'notifications/claude/channel', params: { content: event.content, meta: event.meta } });
       });
       heartbeat = setInterval(() => {
         if (!operatorStillValid()) { void revokeOperator(); return; }
-        try { log.heartbeatSession(me, instanceId); } catch (err) { warn(`heartbeat failed: ${errorMessage(err)}`); }
+        try { log.heartbeatSession(startupIdentity, instanceId); } catch (err) { warn(`heartbeat failed: ${errorMessage(err)}`); }
       }, 30_000);
       heartbeat.unref();
 
@@ -500,7 +565,7 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
         nudger.unref();
       }
     } else {
-      warn(`push disabled (HEDDLE_COMMS_PUSH is not 1): ${me} is pull-only — no presence row, no channel events`);
+      warn(`push disabled (HEDDLE_COMMS_PUSH is not 1): ${startupIdentity} is pull-only — no presence row, no channel events`);
     }
     // One loop, never overlapping: the next cycle is scheduled only after this one finished.
     const cycle = async () => {
@@ -526,7 +591,7 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
     if (ownsLedger) { try { (ledger as Ledger | null)?.close?.(); } catch (err) { warn(`ledger close failed: ${errorMessage(err)}`); } }
   }
 
-  return { mcp, broker, log, identity: me, isOperator, pushEnabled, start, stop };
+  return { mcp, broker, log, get identity() { return me; }, isOperator, pushEnabled, start, stop };
 }
 
 // ---------------------------------------------------------------------------- tools
