@@ -53,6 +53,19 @@ describe('init-project', () => {
     expect(registry.projects[0]).toMatchObject({ name: 'toy', workspaceRoots: [realpathSync.native(opts.dir)] });
   });
 
+  it('never purges a suffixed backup of a discipline hook (.py.bak / .py-disabled)', () => {
+    const opts = options(tempDir());
+    mkdirSync(join(opts.dir, '.claude'));
+    writeFileSync(join(opts.dir, '.claude', 'settings.json'), JSON.stringify({ hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [
+      { type: 'command', command: 'python /old/hooks/require-pr-sweep.py.bak record' },
+      { type: 'command', command: 'python /old/hooks/delegation-nudge.py-disabled' },
+    ] }] } }));
+    applyInstall(planInstall(opts));
+    const text = readFileSync(join(opts.dir, '.claude', 'settings.json'), 'utf8');
+    expect(text).toContain('require-pr-sweep.py.bak');
+    expect(text).toContain('delegation-nudge.py-disabled');
+  });
+
   it('is byte-identical on a second run', () => {
     const opts = options(tempDir());
     applyInstall(planInstall(opts));

@@ -61,7 +61,9 @@ function hookCommand(canonical: string, hook: string, args?: string): string {
 function isDisciplineEntry(entry: any): boolean {
   const command = entry?.command;
   return typeof command === 'string' && [...DISCIPLINE_HOOKS].some((hook) =>
-    new RegExp('(^|[\\s"\\x27/])hooks/' + hook.replace('.', '\\.') + '(\\b|["\\x27 ])').test(command));
+    // Terminator is END, whitespace, or a quote — never `\b`, which fires before the `.` in
+    // `require-pr-sweep.py.bak` and would purge a user's disabled backup script (review ledger 523).
+    new RegExp('(^|[\\s"\\x27/])hooks/' + hook.replace(/\./g, '\\.') + '($|[\\s"\\x27])').test(command));
 }
 function renderedSettings(path: string, canonical: string): string {
   const source = existsSync(path) ? readJson(path, 'settings.json') : {};
