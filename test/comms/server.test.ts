@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, mkdirSync, rmSync, readFileSync, writeFileSync, statSync, existsSync, chmodSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, readFileSync, writeFileSync, statSync, existsSync, chmodSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -116,6 +116,57 @@ describe('heddle-comms server (in-process)', () => {
       expect(session.server.identity).toBe('V');
     });
 
+    it('caps a PID-bridge-bound orchestrator at agent-message while an env-bound orchestrator keeps directive lineage', async () => {
+      const cacheDir = join(dir, 'identity-cache');
+      mkdirSync(cacheDir);
+      writeFileSync(bridgePath(cacheDir), 'V\n');
+      const bridge = await connect({ HEDDLE_IDENTITY_CACHE_DIR: cacheDir });
+      const env = await connect({ HEDDLE_AGENT: 'R' });
+
+      expect((await call(bridge.client, 'mint_child', { label: 'worker' })).parsed).toMatchObject({ address: 'V.1' });
+      expect((await call(env.client, 'mint_child', { label: 'worker' })).parsed).toMatchObject({ address: 'R.1' });
+
+      expect((await call(bridge.client, 'post_message', { to: 'V.1', body: 'bridge forged directive' })).parsed)
+        .toMatchObject({ tier: 'agent-message' });
+      expect((await call(env.client, 'post_message', { to: 'R.1', body: 'env directive' })).parsed)
+        .toMatchObject({ tier: 'orchestrator-directive' });
+      expect((await call(bridge.client, 'comms_whoami')).parsed)
+        .toMatchObject({ identity: 'V', bindingSource: 'pid-bridge', tierCap: 'agent-message' });
+      expect((await call(env.client, 'comms_whoami')).parsed)
+        .toMatchObject({ identity: 'R', bindingSource: 'env', tierCap: null });
+    });
+
+    it('does not bind a worker from the PID bridge', async () => {
+      const cacheDir = join(dir, 'identity-cache');
+      mkdirSync(cacheDir);
+      writeFileSync(bridgePath(cacheDir), 'V\n');
+      const session = await connect({ HEDDLE_WORKER: '1', HEDDLE_IDENTITY_CACHE_DIR: cacheDir });
+
+      const result = await call(session.client, 'post_message', { to: '#fleet', body: 'worker bridge' });
+      expect(result.isError).toBe(true);
+      expect(result.text).toMatch(/no bound comms identity/);
+      expect((await call(session.client, 'comms_whoami')).parsed).toMatchObject({ identity: null, bindingSource: null, tierCap: null });
+    });
+
+    it('refuses symlinked and oversized PID bridge labels with one warning', async () => {
+      const cacheDir = join(dir, 'identity-cache');
+      mkdirSync(cacheDir);
+      const outside = join(dir, 'outside-label');
+      writeFileSync(outside, 'V\n');
+      symlinkSync(outside, bridgePath(cacheDir));
+      const symlinked = await connect({ HEDDLE_IDENTITY_CACHE_DIR: cacheDir });
+      expect((await call(symlinked.client, 'post_message', { to: '#fleet', body: 'symlink label' })).isError).toBe(true);
+      expect((await call(symlinked.client, 'post_message', { to: '#fleet', body: 'symlink retry' })).isError).toBe(true);
+      expect(warnings.filter((m) => m.includes('must be a regular file')).length).toBe(1);
+
+      rmSync(bridgePath(cacheDir));
+      writeFileSync(bridgePath(cacheDir), 'V'.repeat(257));
+      const oversized = await connect({ HEDDLE_IDENTITY_CACHE_DIR: cacheDir });
+      expect((await call(oversized.client, 'post_message', { to: '#fleet', body: 'oversized label' })).isError).toBe(true);
+      expect((await call(oversized.client, 'post_message', { to: '#fleet', body: 'oversized retry' })).isError).toBe(true);
+      expect(warnings.filter((m) => m.includes('exceeds 256 bytes')).length).toBe(1);
+    });
+
     it('refuses an operator PID bridge label and stays unbound', async () => {
       const cacheDir = join(dir, 'identity-cache');
       mkdirSync(cacheDir);
@@ -141,11 +192,31 @@ describe('heddle-comms server (in-process)', () => {
       expect(warnings.filter((m) => m.includes('identity changed after binding')).length).toBe(1);
     });
 
-    it('keeps the startup-bound HEDDLE_AGENT path unchanged', async () => {
-      const session = await connect({ HEDDLE_AGENT: 'V' });
+    it('does one post-pin divergence check, then no longer reads the PID bridge', async () => {
+      const cacheDir = join(dir, 'identity-cache');
+      mkdirSync(cacheDir);
+      const session = await connect({ HEDDLE_IDENTITY_CACHE_DIR: cacheDir });
+
+      writeFileSync(bridgePath(cacheDir), 'V\n');
+      expect((await call(session.client, 'post_message', { to: '#fleet', body: 'bind' })).text).toContain('from V to #fleet');
+      writeFileSync(bridgePath(cacheDir), 'R\n');
+      expect((await call(session.client, 'post_message', { to: '#fleet', body: 'divergence check' })).text).toContain('from V to #fleet');
+      rmSync(cacheDir, { recursive: true, force: true });
+      expect((await call(session.client, 'post_message', { to: '#fleet', body: 'no more bridge reads' })).text).toContain('from V to #fleet');
+      expect(warnings.some((m) => m.includes('cache is not a directory'))).toBe(false);
+    });
+
+    it('never rebinds a startup-bound HEDDLE_AGENT session even when a PID bridge names another agent', async () => {
+      const cacheDir = join(dir, 'identity-cache');
+      mkdirSync(cacheDir);
+      writeFileSync(bridgePath(cacheDir), 'R\n');
+      const session = await connect({ HEDDLE_AGENT: 'V', HEDDLE_IDENTITY_CACHE_DIR: cacheDir });
 
       expect(session.server.identity).toBe('V');
-      expect((await call(session.client, 'post_message', { to: '#fleet', body: 'startup bound' })).text).toContain('from V to #fleet');
+      for (const body of ['startup bound', 'still pinned', 'still V']) {
+        expect((await call(session.client, 'post_message', { to: '#fleet', body })).text).toContain('from V to #fleet');
+      }
+      expect(warnings.some((m) => m.includes('identity changed after binding'))).toBe(false);
     });
   });
 
@@ -172,6 +243,15 @@ describe('heddle-comms server (in-process)', () => {
     writeFileSync(join(dir, '.fleet-agent'), 'V\n');
     expect(resolveFleetIdentity({ ...baseEnv() }, deep, warn)).toBe('V');
     expect(resolveCommsIdentity({ ...baseEnv() }, deep, warn, tokenPath)).toEqual({ identity: 'V', isOperator: false });
+  });
+
+  it('resolveFleetIdentity ignores a PID bridge unless the caller opts in', () => {
+    const cacheDir = join(dir, 'identity-cache');
+    mkdirSync(cacheDir);
+    writeFileSync(join(cacheDir, `pid-${process.ppid}.label`), 'V\n');
+    const env = { ...baseEnv(), HEDDLE_IDENTITY_CACHE_DIR: cacheDir };
+    expect(resolveFleetIdentity(env, dir, () => undefined)).toBeNull();
+    expect(resolveFleetIdentity(env, dir, () => undefined, () => undefined, { allowPidBridge: true })).toBe('V');
   });
 
   it('resolveFleetIdentity sees the fleet letter THROUGH the operator binding that masks it (the rotator guard)', () => {

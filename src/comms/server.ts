@@ -1,7 +1,7 @@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import type { Transport as McpTransport } from '@modelcontextprotocol/sdk/shared/transport.js';
-import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
@@ -40,8 +40,9 @@ import { TIERS, MESSAGE_KINDS, type Tier, type MessageKind } from './types.js';
  *                with HEDDLE_IDENTITY_CACHE_DIR for tests. The PID bridge accepts agent labels
  *                only — never operator or child. A session that begins unbound retries this full
  *                chain on sender-requiring tool calls until it binds, then pins that label for its
- *                lifetime. `operator` is REFUSED from the agent sources. HEDDLE_WORKER=1 forbids
- *                mint_child (depth 1).
+ *                lifetime. A PID-bridge binding is capped to `agent-message` on every send; it is
+ *                never trusted to emit a directive. `operator` is REFUSED from the agent sources.
+ *                HEDDLE_WORKER=1 disables the PID bridge and forbids mint_child (depth 1).
  *
  * PUSH IS OPT-IN (HEDDLE_COMMS_PUSH=1): Claude Code gives a server no way to know whether it was
  * loaded as a channel and drops channel events silently when it was not, so presence (the
@@ -82,6 +83,9 @@ export interface CommsServer {
   /** Unregister presence, stop loops, close db handles. Idempotent. */
   stop(): Promise<void>;
 }
+
+export type BindingSource = 'env' | 'fleet-file' | 'pid-bridge';
+type FleetBinding = { identity: string; source: BindingSource };
 
 const IDENTIFIER = /^[a-z0-9_]+$/;
 const PUSH_SUSPECT_RELAUNCH_REMEDY = 'Relaunch with --dangerously-load-development-channels server:heddle-comms (and --dangerously-skip-permissions).';
@@ -126,7 +130,7 @@ export function operatorTokenMatches(env: NodeJS.ProcessEnv, path: string = OPER
  * rotator's in-session guard (HED-187), which needs the fleet letter even when the operator binding
  * has masked it to 'operator'.
  */
-function resolvePidBridgeIdentity(env: NodeJS.ProcessEnv, warn: (m: string) => void): string | null {
+function resolvePidBridgeIdentity(env: NodeJS.ProcessEnv, warn: (m: string) => void): FleetBinding | null {
   const ppid = process.ppid;
   if (!Number.isInteger(ppid) || ppid <= 1) {
     warn(`PID identity bridge unavailable: unexpected parent pid ${String(ppid)} — continuing unbound`);
@@ -147,8 +151,17 @@ function resolvePidBridgeIdentity(env: NodeJS.ProcessEnv, warn: (m: string) => v
   }
   const path = join(cacheDir, `pid-${ppid}.label`);
   try {
+    const labelStat = lstatSync(path);
+    if (!labelStat.isFile()) {
+      warn(`PID identity bridge label at ${path} must be a regular file — continuing unbound`);
+      return null;
+    }
+    if (labelStat.size > 256) {
+      warn(`PID identity bridge label at ${path} exceeds 256 bytes — continuing unbound`);
+      return null;
+    }
     const label = readFileSync(path, 'utf8').trim();
-    if (parseAddress(label)?.kind === 'agent') return label;
+    if (parseAddress(label)?.kind === 'agent') return { identity: label, source: 'pid-bridge' };
     warn(`PID identity bridge label at ${path} is not a fleet agent address — continuing unbound`);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
@@ -160,7 +173,15 @@ function resolvePidBridgeIdentity(env: NodeJS.ProcessEnv, warn: (m: string) => v
 
 export function resolveFleetIdentity(
   env: NodeJS.ProcessEnv, cwd: string, warn: (m: string) => void, pidBridgeWarn: (m: string) => void = warn,
+  opts: { allowPidBridge?: boolean } = {},
 ): string | null {
+  return resolveFleetBinding(env, cwd, warn, pidBridgeWarn, opts)?.identity ?? null;
+}
+
+function resolveFleetBinding(
+  env: NodeJS.ProcessEnv, cwd: string, warn: (m: string) => void, pidBridgeWarn: (m: string) => void = warn,
+  opts: { allowPidBridge?: boolean } = {},
+): FleetBinding | null {
   // TODO(HED-65/HED-2): switch to Agent U's src/identity.ts once it lands (same order, one module).
   const bindable = (v: string | undefined): string | null => {
     const s = v?.trim();
@@ -171,14 +192,14 @@ export function resolveFleetIdentity(
     return null;
   };
   const fromEnv = bindable(env.HEDDLE_AGENT) ?? bindable(env.FLEET_AGENT) ?? bindable(env.HEDDLE_COMMS_ADDRESS);
-  if (fromEnv) return fromEnv;
+  if (fromEnv) return { identity: fromEnv, source: 'env' };
   let dir = cwd;
   for (;;) {
     const f = join(dir, '.fleet-agent');
     if (existsSync(f)) {
       try {
         const v = bindable(readFileSync(f, 'utf8'));
-        if (v) return v;
+        if (v) return { identity: v, source: 'fleet-file' };
       } catch (err) {
         warn(`could not read ${f}: ${errorMessage(err)} — continuing unbound`);
       }
@@ -187,7 +208,7 @@ export function resolveFleetIdentity(
     if (up === dir) break;
     dir = up;
   }
-  return resolvePidBridgeIdentity(env, pidBridgeWarn);
+  return opts.allowPidBridge === true && env.HEDDLE_WORKER !== '1' ? resolvePidBridgeIdentity(env, pidBridgeWarn) : null;
 }
 
 /** Bind the comms identity from the environment (see the module doc). */
@@ -207,8 +228,26 @@ export function resolveCommsIdentity(
       return { identity: null, isOperator: false };
     }
   }
-  const fleet = resolveFleetIdentity(env, cwd, warn, pidBridgeWarn);
-  return { identity: fleet, isOperator: false };
+  const fleet = resolveFleetBinding(env, cwd, warn, pidBridgeWarn, { allowPidBridge: true });
+  return { identity: fleet?.identity ?? null, isOperator: false };
+}
+
+function resolveCommsBinding(
+  env: NodeJS.ProcessEnv, cwd: string, warn: (m: string) => void, tokenPath: string = OPERATOR_TOKEN_PATH,
+  pidBridgeWarn: (m: string) => void = warn,
+): { identity: string | null; isOperator: boolean; bindingSource: BindingSource | null } {
+  if (env.HEDDLE_COMMS_ROLE === 'operator') {
+    if (env.HEDDLE_WORKER === '1' || env.HEDDLE_COMMS_ADDRESS) {
+      warn('HEDDLE_COMMS_ROLE=operator inside a worker process — refusing (workers are never the operator); binding as the worker instead');
+    } else if (operatorTokenMatches(env, tokenPath)) {
+      return { identity: 'operator', isOperator: true, bindingSource: 'env' };
+    } else {
+      warn('HEDDLE_COMMS_ROLE=operator but the operator token is missing or does not match — refusing to bind operator (unbound)');
+      return { identity: null, isOperator: false, bindingSource: null };
+    }
+  }
+  const fleet = resolveFleetBinding(env, cwd, warn, pidBridgeWarn, { allowPidBridge: true });
+  return { identity: fleet?.identity ?? null, isOperator: false, bindingSource: fleet?.source ?? null };
 }
 
 /** The dispatch ledger is consulted opportunistically for lineage; never created as a side effect. */
@@ -235,9 +274,11 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
   const warnPidBridgeOnce = (message: string) => {
     if (!pidBridgeWarningShown) { pidBridgeWarningShown = true; warn(message); }
   };
-  let { identity: me, isOperator } = resolveCommsIdentity(env, cwd, warn, tokenPath, warnPidBridgeOnce);
+  let { identity: me, isOperator, bindingSource } = resolveCommsBinding(env, cwd, warn, tokenPath, warnPidBridgeOnce);
   const lazyIdentity = me === null && !isOperator;
   let identityChangeWarned = false;
+  let postPinDivergenceChecked = false;
+  const tierCap = (): 'agent-message' | null => bindingSource === 'pid-bridge' ? 'agent-message' : null;
   const isWorker = env.HEDDLE_WORKER === '1';
   const pushEnabled = env.HEDDLE_COMMS_PUSH === '1';
   const channelLoadedProbe = opts.channelLoadedProbe ?? (() => {
@@ -261,7 +302,9 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
     { name: 'heddle-comms', version: '0.0.1' },
     {
       capabilities: { experimental: { 'claude/channel': {} }, tools: {} },
-      instructions: CHANNEL_INSTRUCTIONS + (me ? ` You are ${me}.` : ' (This session has NO bound comms identity — post_message will refuse until HEDDLE_AGENT / FLEET_AGENT / .fleet-agent is set.)'),
+      instructions: CHANNEL_INSTRUCTIONS + (me
+        ? ` You are ${me} (identity source: ${bindingSource}).`
+        : ' (This session has NO bound comms identity. It can bind from env at startup or lazily after Claude rename from the PID bridge; check comms_whoami for the live identity and source.)'),
     },
   );
   const broker = new Broker({ log, ledger, transport: new ChannelTransport(log), onWarning: warn, ...(opts.now ? { now: opts.now } : {}) });
@@ -285,6 +328,7 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
     const why = reason ?? 'account rotation';
     const posted = await broker.post({
       from: who, to: BROADCAST, kind: 'status',
+      tierCap: tierCap(),
       body: `FLEET PAUSE REQUESTED — ${why}. Park your work now: commit or push anything uncommitted, stop starting new dispatches, then call ack_pause with work_parked=true. Do not resume until the operator says so.`,
       // No timestamp in meta: the broker stamps ts on the row, and pause_status reads it back.
       meta: { fleetPause: { reason: why } },
@@ -310,6 +354,7 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
     const body = note ? `${RESUME_DIRECTIVE} ${note}` : RESUME_DIRECTIVE;
     const posted = await broker.post({
       from: who, to: BROADCAST, kind: 'status', replyTo: pause.id, body,
+      tierCap: tierCap(),
       meta: { fleetResume: { pauseId: pause.id } },
     });
     // A refused post appends no row, so the pause is still in force: say so instead of reporting a
@@ -334,6 +379,7 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
     const ackSessionId = log.session(who)?.sessionId ?? null;
     const posted = await broker.post({
       from: who, to: OPERATOR, kind: 'status', replyTo: pause.id,
+      tierCap: tierCap(),
       body: note ?? (workParked ? 'paused; work parked' : 'paused; work NOT parked'),
       meta: { pauseAck: true, workParked, ackSessionId },
     });
@@ -345,14 +391,17 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
   const operatorStillValid = (): boolean => !isOperator || operatorTokenMatches(env, tokenPath);
   const refreshLazyIdentity = (): void => {
     if (!lazyIdentity) return;
-    const resolved = resolveCommsIdentity(env, cwd, warn, tokenPath, warnPidBridgeOnce);
+    if (me && postPinDivergenceChecked) return;
+    const resolved = resolveCommsBinding(env, cwd, warn, tokenPath, warnPidBridgeOnce);
     // A session that did not start as operator never gains operator authority through lazy binding.
     const candidate = resolved.isOperator ? null : resolved.identity;
     if (!candidate) return;
     if (!me) {
       me = candidate;
+      bindingSource = resolved.bindingSource;
       return;
     }
+    postPinDivergenceChecked = true;
     if (candidate !== me && !identityChangeWarned) {
       identityChangeWarned = true;
       warn(`comms identity changed after binding (${me} → ${candidate}) — keeping pinned identity ${me}`);
@@ -433,6 +482,7 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
         }
         case 'comms_whoami': return text({
           identity: operatorStillValid() ? me : null, revoked: !operatorStillValid(), sessionName, worker: isWorker, operator: isOperator && operatorStillValid(), pushEnabled, pushDelivery, session: me ? log.session(me) : null,
+          bindingSource, tierCap: tierCap(),
           rooms: me ? log.roomsFor(me).map((r) => r.name) : [], liveSessions: log.liveSessions(), sendMessageLimits: SENDMESSAGE_LIMITS,
         });
         default: return errorText(`unknown tool: ${name}`);
@@ -444,6 +494,7 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
     const res = await broker.post({
       from: who, to: requireStr(a.to, 'to'), body: requireStr(a.body, 'body'), kind: str(a.kind) as MessageKind | undefined,
       requestedTier: (str(a.requested_tier) as Tier | undefined) ?? null, replyTo: num(a.reply_to) ?? null,
+      tierCap: tierCap(),
       issue: str(a.issue) ?? null, thread: str(a.thread) ?? null, meta: { transport: 'heddle-comms' },
       mentions: validMentionsArg(a.mentions),
       holdFloor: a.hold_floor === true, releaseFloor: a.release_floor === true,
