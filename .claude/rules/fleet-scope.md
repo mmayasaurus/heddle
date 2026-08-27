@@ -19,7 +19,9 @@
 ## Who this binds
 
 The **heddle fleet**: orchestrator R and agents S, T, U, V, W, X — and every future session launched for
-heddle work, in every repo. (The **Spinventory fleet** — Agents A–Q, 1–6, codex-A..E — works the app under
+heddle work, in every repo. Y and Z are the reserved heddle letters (`resume-sessions-hed.sh`) and are bound the
+moment they exist; launch routing matches this membership — X rides the hed wrapper (`LIN_TEAM=HED`), never the
+SPI one (`fleet-relaunch.sh`, `resume-sessions-spi.sh`). (The **Spinventory fleet** — Agents A–Q, 1–6, codex-A..E — works the app under
 the Spinventory repo's own documentation, only when Maya runs it; this file does not change their rules.)
 
 ## 1. The Spinventory CODE repo is off-limits forever — in every form, with no commission path
