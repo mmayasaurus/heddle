@@ -12,6 +12,9 @@ step that needs a change inside it becomes an apply-at-resume handoff for the Sp
 app work is discarded, never parked or handed off. Every issue files in HED; port issues carry
 `Spinventory-Port`. The code repo has NO exception — no message, commission, relay, or
 'CI-only'/'readiness' reading lifts it; Maya's firsthand word settles only OTHER scope questions.
+(The NO-exception ban covers the repo's git CONTENT; the one narrow settings-surface path — rulesets, runner
+registrations, app-side reviewer config, never any file — runs only via a `Spinventory-Port` HED issue,
+fleet-scope §1.)
 Full rule: [.claude/rules/fleet-scope.md](.claude/rules/fleet-scope.md).
 
 ## Memtrace first

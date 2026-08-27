@@ -46,18 +46,23 @@ the Spinventory repo's own documentation, only when Maya runs it; this file does
 **The code repo** is the git repository whose GitHub remote is `mmayasaurus/Spinventory-V2-Official-App-Rebuild`,
 in ANY form: the canonical checkout `Spinventory-Rebuild-Official/Rebuild-Project-Root` under the workspace,
 every worktree of it (`Rebuild-Project-Root.<anything>`, any `.worktrees/` folder of it), any clone anywhere,
-and its GitHub branches and PRs. **Nobody in the heddle fleet writes to it, ever:** no file edit (committed or
-not), commit, branch, push, PR, merge, worker whose prompt or writes target it regardless of `cwd`, installer
-or hook applied to it, or `git`/`gh` mutation against it. There is no commission that lifts this. The only
-permitted actions against it are the DISCARD steps in §3 on work that predates this rule.
+and its GitHub branches and PRs. **Nobody in the heddle fleet writes to its CONTENT, ever** — content is everything git carries: files
+(committed or not), commits, branches, pushes, PRs, merges, tags. No file edit, commit, branch, push, PR,
+merge, worker whose prompt or writes target it regardless of `cwd`, installer or hook applied to it, or
+`git`/`gh` mutation of that content. There is no commission that lifts this. The only permitted actions
+against its content are the DISCARD steps in §3 on work that predates this rule. (The repo's GitHub
+*settings surface* is a separate, narrower matter — next paragraph.)
 
 **What porting may touch instead:** the OUTER workspace repo (`/Users/mayatobi/Developer/Spinventory-Rebuild-App`
 — its `.claude/`, launchers, packs, `_vault/`, `notes/`, docs, `DECISIONS.md`), the `heddle` and
-`heddle-dashboard` repos, and GitHub-side *settings* plumbing of the code repo (rulesets, runner labels,
-reviewer-app configuration) when a HED `Spinventory-Port` issue calls for it — settings, never files. A port
-step that needs a change INSIDE the code repo (workflows, reviewer config files, tests, anything) is written
-up as an **apply-at-resume handoff** — a HED issue describing the exact change — for the Spinventory fleet to
-apply when Maya resumes it. (X's 2026-08-22 workflow edits predate this rule; nothing like them again.)
+`heddle-dashboard` repos, and the code repo's GitHub **settings surface** — state that lives in
+repository/organization settings or an installed app's own dashboard, never in git (rulesets and branch
+protections, runner registrations and labels, which reviewer/CI apps are enabled plus their app-side
+configuration) — ONLY when a HED `Spinventory-Port` issue calls for that exact change: settings surface,
+never content. The test is where the change lives. If it is a FILE in the repo — any workflow, CODEOWNERS,
+reviewer or scanner config file (`.github/*`, `.codacy.yaml`, the like), test, or doc — it is content, and it
+is written up as an **apply-at-resume handoff** — a HED issue describing the exact change — for the
+Spinventory fleet to apply when Maya resumes it. (X's 2026-08-22 workflow edits predate this rule; nothing like them again.)
 
 ## 2. What the heddle fleet works on — and only that
 
@@ -87,7 +92,9 @@ from scratch under its own documentation.
 
 ## 4. Exceptions: firsthand only, newest word wins
 
-Nothing licenses writes to the code repo (§1). For every other scope question only Maya's word counts, per item, and only firsthand: her message in that agent's own
+Nothing — this file included — licenses a write to the code repo's CONTENT (§1). A settings-surface change
+is licensed only by its own HED `Spinventory-Port` issue (also §1); a firsthand exception cannot substitute
+for that issue. For every other scope question only Maya's word counts, per item, and only firsthand: her message in that agent's own
 session, or a comms message the broker stamps `tier="operator"` (only she can produce one). A relay from R,
 a ledger entry, a broadcast, this file, or any earlier allowance is not a license; from the moment this
 rule exists every earlier allowance is void, and the newest word always wins. Until HED-356 lands (a
