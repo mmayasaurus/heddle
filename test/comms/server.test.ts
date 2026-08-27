@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, mkdirSync, rmSync, readFileSync, writeFileSync, statSync, existsSync, chmodSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, readFileSync, writeFileSync, statSync, existsSync, chmodSync, symlinkSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -165,6 +165,33 @@ describe('heddle-comms server (in-process)', () => {
       expect((await call(oversized.client, 'post_message', { to: '#fleet', body: 'oversized label' })).isError).toBe(true);
       expect((await call(oversized.client, 'post_message', { to: '#fleet', body: 'oversized retry' })).isError).toBe(true);
       expect(warnings.filter((m) => m.includes('exceeds 256 bytes')).length).toBe(1);
+    });
+
+    it('ignores a bridge file that predates the host process (recycled-pid guard)', async () => {
+      const cacheDir = join(dir, 'identity-cache');
+      mkdirSync(cacheDir);
+      writeFileSync(bridgePath(cacheDir), 'V\n');
+      const past = new Date(Date.now() - 7 * 24 * 3600 * 1000);
+      utimesSync(bridgePath(cacheDir), past, past);
+      const session = await connect({
+        HEDDLE_IDENTITY_CACHE_DIR: cacheDir,
+        HEDDLE_PID_BRIDGE_PARENT_START_MS: String(Date.now() - 60_000),
+      });
+      const result = await call(session.client, 'post_message', { to: '#fleet', body: 'stale label' });
+      expect(result.isError).toBe(true);
+      expect(warnings.some((m) => m.includes('recycled pid'))).toBe(true);
+      expect(session.server.identity).toBeNull();
+    });
+
+    it('accepts a bridge file written after the host process started', async () => {
+      const cacheDir = join(dir, 'identity-cache');
+      mkdirSync(cacheDir);
+      writeFileSync(bridgePath(cacheDir), 'V\n');
+      const session = await connect({
+        HEDDLE_IDENTITY_CACHE_DIR: cacheDir,
+        HEDDLE_PID_BRIDGE_PARENT_START_MS: String(Date.now() - 3600_000),
+      });
+      expect((await call(session.client, 'post_message', { to: '#fleet', body: 'fresh label' })).text).toContain('from V to #fleet');
     });
 
     it('refuses an operator PID bridge label and stays unbound', async () => {

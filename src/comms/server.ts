@@ -5,6 +5,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, statSync, wr
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { CommsLog, DEFAULT_COMMS_PATH } from './log.js';
 import { channelLoadedFromParentArgv } from './channel-loaded-probe.js';
 import { Ledger, DEFAULT_LEDGER_PATH } from '../ledger.js';
@@ -40,7 +41,9 @@ import { TIERS, MESSAGE_KINDS, type Tier, type MessageKind } from './types.js';
  *                with HEDDLE_IDENTITY_CACHE_DIR for tests. The PID bridge accepts agent labels
  *                only — never operator or child. A session that begins unbound retries this full
  *                chain on sender-requiring tool calls until it binds, then pins that label for its
- *                lifetime. A PID-bridge binding is capped to `agent-message` on every send; it is
+ *                lifetime. A bridge file whose mtime predates the hosting process's start is ignored
+ *                (recycled-pid guard; the writer hook refreshes it every turn, so live sessions stay
+ *                fresh). A PID-bridge binding is capped to `agent-message` on every send; it is
  *                never trusted to emit a directive. `operator` is REFUSED from the agent sources.
  *                HEDDLE_WORKER=1 disables the PID bridge and forbids mint_child (depth 1).
  *
@@ -86,6 +89,25 @@ export interface CommsServer {
 
 export type BindingSource = 'env' | 'fleet-file' | 'pid-bridge';
 type FleetBinding = { identity: string; source: BindingSource };
+
+let parentStartMsCache: number | null | undefined;
+/**
+ * The hosting (parent) process's start time in epoch ms, via `ps -o etime=` — cached per process;
+ * null = unverifiable. Used by the PID-bridge recycle guard: a label file OLDER than the hosting
+ * claude process cannot have been written for it (macOS recycles pids across reboots; the cache dir
+ * survives them), so it is ignored. Tests override via HEDDLE_PID_BRIDGE_PARENT_START_MS.
+ */
+function parentProcessStartMs(): number | null {
+  if (parentStartMsCache !== undefined) return parentStartMsCache;
+  try {
+    const out = execFileSync('ps', ['-o', 'etime=', '-p', String(process.ppid)], { timeout: 1500 }).toString().trim();
+    const m = /^(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)$/.exec(out);
+    if (!m) { parentStartMsCache = null; return null; }
+    const elapsedMs = (((Number(m[1] ?? 0) * 24 + Number(m[2] ?? 0)) * 60 + Number(m[3])) * 60 + Number(m[4])) * 1000;
+    parentStartMsCache = Date.now() - elapsedMs;
+  } catch { parentStartMsCache = null; }
+  return parentStartMsCache;
+}
 
 const IDENTIFIER = /^[a-z0-9_]+$/;
 const PUSH_SUSPECT_RELAUNCH_REMEDY = 'Relaunch with --dangerously-load-development-channels server:heddle-comms (and --dangerously-skip-permissions).';
@@ -158,6 +180,16 @@ function resolvePidBridgeIdentity(env: NodeJS.ProcessEnv, warn: (m: string) => v
     }
     if (labelStat.size > 256) {
       warn(`PID identity bridge label at ${path} exceeds 256 bytes — continuing unbound`);
+      return null;
+    }
+    const startOverride = env.HEDDLE_PID_BRIDGE_PARENT_START_MS?.trim();
+    const startMs = startOverride && /^\d+$/.test(startOverride) ? Number(startOverride) : parentProcessStartMs();
+    if (startMs === null) {
+      warn('PID identity bridge freshness unverifiable (ps failed) — continuing unbound');
+      return null;
+    }
+    if (labelStat.mtimeMs < startMs - 5000) {
+      warn(`PID identity bridge label at ${path} predates this session's host process — stale (recycled pid?); continuing unbound`);
       return null;
     }
     const label = readFileSync(path, 'utf8').trim();
