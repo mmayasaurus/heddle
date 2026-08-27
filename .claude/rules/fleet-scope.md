@@ -1,5 +1,14 @@
 # Fleet scope — heddle ONLY; the Spinventory app is never touched (Maya, firsthand 2026-08-23)
 
+> **Bridge copy** — the canonical file lives in the workspace repo
+> (`/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/rules/fleet-scope.md`, HED-355 / workspace PR #38)
+> and wins on any divergence. Cross-file references inside this rule (`worktree-discipline.md` §5,
+> `keep-moving.md`, `.claude/hooks/remind-owned-prs.py`, `.claude/hooks/agent-identity.py`,
+> `issue-tracking.md`, `DECISIONS.md`) are **workspace-repo files**, not files of this repo: the two
+> SCOPE-injecting hooks run FROM the workspace checkout via this repo's `.claude/settings.json`
+> (vendoring deferred — HED-96), and this repo's own `worktree-discipline.md` is a different file that
+> has no §5. "heddle" as a scope term always means BOTH heddle repos (`heddle`, `heddle-dashboard`).
+
 > Maya, 2026-08-23 01:37Z, in R's session, verbatim: *"Nobody should EVER be touching Spinventory app code.
 > At all. EVER. All work is EXCLUSIVELY FOR HEDDLE. The entire point of this whole fleet is to get HEDDLE
 > ready so that I can use it to build Spinventory, with the other fleet, that's been working on Spinventory
