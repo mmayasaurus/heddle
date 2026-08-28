@@ -382,8 +382,8 @@ One process per Claude Code session, spawned from `.mcp.json`:
   `HEDDLE_AGENT` → `FLEET_AGENT` → `HEDDLE_COMMS_ADDRESS` (a heddle-dispatched worker) → a
   `.fleet-agent` file walking up from cwd. An otherwise-unbound Claude session may then bind
   lazily after rename from its PID-bridge label; use `comms_whoami` to see the live identity and
-  binding source. PID-bridge sessions are capped to `agent-message` on every send, never an
-  orchestrator directive. Only agent/child addresses bind here — `operator` is refused from these
+  binding source. Any LATE-bound session (started unbound, then bound from env/.fleet-agent/pid-bridge) is capped to
+  `agent-message` on every send — never an orchestrator directive; a late source may be model-influenced. Only agent/child addresses bind here — `operator` is refused from these
   sources (the operator surface binds it, HED-65). `HEDDLE_WORKER=1` disables the PID bridge and
   forbids `mint_child` (depth 1). A late-bound session remains pull-only and has no presence row
   until it is relaunched with its identity at startup; this is by design. `HEDDLE_COMMS_DB` /

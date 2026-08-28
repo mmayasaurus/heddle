@@ -164,6 +164,34 @@ describe('heddle-comms server (in-process)', () => {
         .toMatchObject({ identity: 'R', bindingSource: 'env', tierCap: null });
     });
 
+    it('caps a LATE .fleet-agent binding at agent-message (a model could write that file post-startup)', async () => {
+      // on-PR HIGH (#92): lazy re-resolution accepts a cwd .fleet-agent, whose source is 'fleet-file'
+      // (tierCap null at STARTUP) — but bound LATE it must still be capped, or the model escalates.
+      const cacheDir = join(dir, 'identity-cache');
+      mkdirSync(cacheDir);
+      const session = await connect({ HEDDLE_IDENTITY_CACHE_DIR: cacheDir });
+      expect((await call(session.client, 'post_message', { to: '#fleet', body: 'unbound' })).isError).toBe(true);
+      // The model writes .fleet-agent in its cwd AFTER startup, naming an orchestrator.
+      writeFileSync(join(dir, '.fleet-agent'), 'V\n');
+      await call(session.client, 'mint_child', { label: 'w' });
+      expect((await call(session.client, 'post_message', { to: 'V.1', body: 'late fleet-file directive?' })).parsed)
+        .toMatchObject({ tier: 'agent-message' });
+      expect((await call(session.client, 'comms_whoami')).parsed)
+        .toMatchObject({ identity: 'V', bindingSource: 'fleet-file', tierCap: 'agent-message' });
+      rmSync(join(dir, '.fleet-agent'));
+    });
+
+    it('comms_whoami reports the identity immediately after a lazy rename bind', async () => {
+      const cacheDir = join(dir, 'identity-cache');
+      mkdirSync(cacheDir);
+      const session = await connect({ HEDDLE_IDENTITY_CACHE_DIR: cacheDir });
+      expect((await call(session.client, 'comms_whoami')).parsed).toMatchObject({ identity: null });
+      writeFileSync(bridgePath(cacheDir), 'V\n');
+      // whoami itself must resolve the pending bind — no other sender-requiring call first.
+      expect((await call(session.client, 'comms_whoami')).parsed)
+        .toMatchObject({ identity: 'V', bindingSource: 'pid-bridge', tierCap: 'agent-message' });
+    });
+
     it('does not bind a worker from the PID bridge', async () => {
       const cacheDir = join(dir, 'identity-cache');
       mkdirSync(cacheDir);
