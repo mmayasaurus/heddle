@@ -164,13 +164,23 @@ describe('dispatch — repo-aware quality gates (HED-389)', () => {
     const heddleCwd = initRepo(join(base, 'heddle'), '.worktrees/S-hed389', { linkedWorktree: true });
     // A git hook exports GIT_DIR; an orchestrator launched from one would inherit it. Point the env
     // at the APP repository and dispatch into the heddle worktree.
-    const saved = { GIT_DIR: process.env.GIT_DIR, GIT_WORK_TREE: process.env.GIT_WORK_TREE };
+    const names = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0'] as const;
+    const saved = Object.fromEntries(names.map((name) => [name, process.env[name]]));
     process.env.GIT_DIR = join(appRoot, '.git');
     process.env.GIT_WORK_TREE = appRoot;
     try {
       const { agents, skills } = await editingDispatch(heddleCwd);
       expect(skills).toEqual(['worker-role', 'worker-hygiene', 'repo-heddle-core', 'family-codex']);
       for (const text of APP_TEXT) expect(agents).not.toContain(text);
+
+      // The config-injection channel (round-2 review #1): plant an app `origin` on an UNKNOWN repo.
+      delete process.env.GIT_DIR; delete process.env.GIT_WORK_TREE;
+      process.env.GIT_CONFIG_COUNT = '1';
+      process.env.GIT_CONFIG_KEY_0 = 'remote.origin.url';
+      process.env.GIT_CONFIG_VALUE_0 = 'git@github.com:maya/Spinventory-V2-Official-App-Rebuild.git';
+      const injected = await editingDispatch(initRepo(join(base, 'unknown-repo'), 'worker'));
+      expect(injected.skills).toEqual(NO_GATE);
+      for (const text of APP_TEXT) expect(injected.agents).not.toContain(text);
     } finally {
       for (const [name, value] of Object.entries(saved)) {
         if (value === undefined) delete process.env[name]; else process.env[name] = value;
@@ -194,6 +204,25 @@ describe('dispatch — repo-aware quality gates (HED-389)', () => {
     expect(outcome.refusal?.instruction).toContain('repo-heddle-core');
     expect(outcome.refusal?.instruction).not.toContain('quality-gate');
     expect(ledger.recent(1)[0].skills).toBe('worker-role,worker-hygiene,code-discovery,repo-heddle-core,family-claude');
+  });
+
+  it('applies the review-class pack UNION on the dry-run path exactly as on the real run (round-2 review #2)', async () => {
+    const cwd = initRepo(join(tempDir(), 'heddle'), '.worktrees/S-hed389', { linkedWorktree: true });
+    // A review class with an explicit skills list: the class packs (the find-only mandate) are
+    // unioned in, and the requested app gate resolves to the repo gate — on BOTH paths.
+    const expected = ['worker-role', 'worker-hygiene', 'adversarial-review', 'repo-heddle-core', 'family-cursor'];
+    const plan = planDispatch({ taskClass: 'adversarial-review', authorProvider: 'claude', skills: ['quality-gate'], prompt: 'x', cwd, identity: IDENTITIES.unbound });
+    expect(plan.skillsForRefusal).toEqual(expected);
+
+    const fake = fakeAdapter();
+    const ledger = tempLedger();
+    const outcome = await dispatch({ taskClass: 'adversarial-review', authorProvider: 'claude', skills: ['quality-gate'], prompt: 'x', cwd, identity: IDENTITIES.unbound }, ledger, () => fake.adapter);
+    expect(outcome.skills).toEqual(expected);
+    expect(fake.calls[0].agents).toContain('### adversarial-review');
+    expect(fake.calls[0].agents).toContain('### repo-heddle-core');
+    // A review class auto-assesses, which appends its own ledger row after the dispatch's — find ours.
+    const row = ledger.recent(5).find((r) => r.task_class === 'adversarial-review');
+    expect(row?.skills).toBe(expected.join(','));
   });
 });
 
@@ -224,6 +253,10 @@ describe('qualityGateForRepository — identity rules (pure)', () => {
     expect(originRepoName('git@github.com:maya/heddle')).toBe('heddle');
     expect(originRepoName('ssh://git@github.com/maya/heddle-dashboard.git/')).toBe('heddle-dashboard');
     expect(originRepoName(null)).toBeNull();
+    // A `/` inside a query or fragment is not a path segment (round-2 review #3).
+    expect(originRepoName('https://example.invalid/unrelated.git?redirect=/Spinventory-V2-Official-App-Rebuild.git')).toBe('unrelated');
+    expect(originRepoName('https://github.com/maya/heddle.git#/Spinventory-Rebuild-Workspace')).toBe('heddle');
+    expect(qualityGateForRepository({ topLevel: '/x/clone', mainRoot: '/x/clone', originUrl: 'https://example.invalid/unrelated.git?redirect=/Spinventory-V2-Official-App-Rebuild.git' })).toBeNull();
     expect(qualityGateForRepository({ topLevel: '/x/clone', mainRoot: '/x/clone', originUrl: 'git@github.com:maya/Spinventory-Rebuild-Workspace-fork.git' })).toBeNull();
     expect(qualityGateForRepository({ topLevel: '/x/clone', mainRoot: '/x/clone', originUrl: 'git@github.com:maya/Spinventory-V2-Official-App-Rebuild.git' })).toBe('quality-gate');
   });

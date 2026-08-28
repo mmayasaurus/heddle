@@ -28,6 +28,21 @@ export function packsFor(provider: string, requested: readonly string[], cwd: st
   const family = modelFamilyPack(provider);
   return family && !base.includes(family) ? [...base, family] : base;
 }
+
+/**
+ * The packs a request asks for, before packsFor's mandatory/gate resolution: an explicit `skills`
+ * list REPLACES the class default — except for review classes (a reviewerPool), whose class packs
+ * carry the find-only MANDATE and are UNIONED with the explicit list, never dropped. ONE definition
+ * for the real run and every dry-run/refusal path: those used to replace unconditionally, so a
+ * review dry run advertised a set the worker never got (PR #34 parity; HED-389 round-2 review #2).
+ */
+export function requestedPacks(
+  reviewerPool: readonly unknown[] | undefined, classSkills: readonly string[] | undefined,
+  explicit: readonly string[] | undefined,
+): string[] {
+  if (reviewerPool) return [...new Set([...(classSkills ?? []), ...(explicit ?? [])])];
+  return [...(explicit ?? classSkills ?? [])];
+}
 import { materializeWorkerMcp, validateWorkerMcp, mcpAttachable, codexMcpFlags, claudeMcpConfigFile, webCapable } from './mcp.js';
 import { classifyEffort, assessResult, type ResultAssessment } from './classify.js';
 import { pickReviewer, snapshotWorktree, sameSnapshot, diffInstruction, embeddedDiff, normalizeProvider, type ReviewerPick } from './review.js';
@@ -301,11 +316,9 @@ async function runTarget(
   // Caller's explicit list REPLACES the table default; the mandatory governance pack(s) are unioned
   // into whichever applies (see skillpacks.ts) — the ledger records the result, so it is auditable.
   // Review classes: the class packs carry the find-only MANDATE — an explicit skills list may add
-  // packs but can never drop them (same posture as the worker-role union).
-  const asked = route.reviewerPool
-    ? [...new Set([...(target.skills ?? []), ...(req.skills ?? [])])]
-    : (req.skills ?? target.skills ?? []);
-  const skills = packsFor(target.provider, asked, req.cwd);
+  // packs but can never drop them (same posture as the worker-role union). requestedPacks is the
+  // single definition every dry-run/refusal path shares.
+  const skills = packsFor(target.provider, requestedPacks(route.reviewerPool, target.skills, req.skills), req.cwd);
   // mcp is a REQUIREMENT, not best-effort: validateWorkerMcp (below) THROWS if the resolved provider
   // has no attachment path. HED-249 reverses HED-205's graceful-degrade — an mcp-carrying class may
   // only resolve to mcp-attachable providers (a routing.v0.yaml CI invariant enforces this for
@@ -684,7 +697,7 @@ export async function dispatch(
     // The class's declared fallback rides along even on the explicit path — the instruction can still
     // name a subprocess route (class = policy). Account advice (HED-68) is appended.
     return refuseInSession(
-      { ...target, taskClass: route.taskClass, dispatchable: route.dispatchable, fallback: route.fallback },
+      { ...target, taskClass: route.taskClass, dispatchable: route.dispatchable, fallback: route.fallback, reviewerPool: route.reviewerPool },
       req, ctx, plan.execution, origin, plan.decision.routedAwayForCap ? `${route.provider}/${route.model}` : null,
       plan.accountAdvice,
     );
@@ -765,7 +778,7 @@ export async function dispatch(
     : providerExecution(table, fallback.provider);
   if (fbExecution === 'in-session-subagent') {
     return refuseInSession(
-      { ...fallback, taskClass: route.taskClass, dispatchable: route.dispatchable, fallback: undefined },
+      { ...fallback, taskClass: route.taskClass, dispatchable: route.dispatchable, fallback: undefined, reviewerPool: route.reviewerPool },
       req, ctx, fbExecution, 'fallback', `${route.provider}/${route.model}`, plan.accountAdvice,
     );
   }
@@ -1223,7 +1236,7 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
     : providerExecution(table, target.provider);
   // Same list the worker would actually get, family pack included — a refusal or dry run that
   // advertises a different set than runTarget materializes is a lie the operator acts on (PR #34).
-  const skillsForRefusal = packsFor(target.provider, req.skills ?? target.skills ?? [], req.cwd);
+  const skillsForRefusal = packsFor(target.provider, requestedPacks(route.reviewerPool, target.skills, req.skills), req.cwd);
 
   // Account (HED-68/78): codex → the CODEX_HOME the caller selected; claude → the registry account
   // with the most 5h headroom (headless worker) — or advice only when the caller wants in-session.
@@ -1335,7 +1348,7 @@ function refuseDepth1(req: DispatchRequest, ctx: DispatchContext, table: Routing
       target = req.provider && req.model ? { ...route, provider: req.provider, model: req.model } : route;
       // Same list a real dispatch would materialize (packsFor), not just the mandatory union —
       // a refusal that names a different set is the dry-run-lies bug in another costume (PR #34).
-      skills = route.dispatchable ? packsFor(target.provider, req.skills ?? route.skills ?? [], req.cwd) : (req.skills ?? route.skills ?? []);
+      skills = route.dispatchable ? packsFor(target.provider, requestedPacks(route.reviewerPool, route.skills, req.skills), req.cwd) : (req.skills ?? route.skills ?? []);
     }
   } catch (err) {
     // Best-effort — the refusal stands regardless; but the enrichment failure is visible, not silent.
@@ -1357,14 +1370,14 @@ function refuseNotDispatchable(route: Route, req: DispatchRequest, ctx: Dispatch
 }
 
 function refuseInSession(
-  route: RouteTarget & { taskClass: string; dispatchable: boolean; fallback?: RouteTarget },
+  route: RouteTarget & { taskClass: string; dispatchable: boolean; fallback?: RouteTarget; reviewerPool?: Route['reviewerPool'] },
   req: DispatchRequest, ctx: DispatchContext, execution: string, origin: InSessionOrigin,
   fellBackFrom: string | null = null, accountAdvice?: AccountAdvice,
 ): DispatchOutcome {
   // (Non-dispatchable classes never reach here — refuseNotDispatchable handles them earlier.)
   // This instruction tells the orchestrator which packs to hand its OWN subagent, so it must name
   // exactly what a dispatch to that provider would materialize — family pack included (PR #34).
-  const skills = packsFor(route.provider, req.skills ?? route.skills ?? [], req.cwd);
+  const skills = packsFor(route.provider, requestedPacks(route.reviewerPool, route.skills, req.skills), req.cwd);
   const mcp = req.mcp ?? route.mcp ?? []; // the caller's override wins, exactly as it would on a run
   const alt = route.fallback ? ` To run it as a subprocess instead, name provider+model explicitly ` +
     `(e.g. provider="${route.fallback.provider}", model="${route.fallback.model}" — the class's ` +

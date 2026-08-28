@@ -142,7 +142,9 @@ const GATE_BY_ORIGIN_NAME: ReadonlyMap<string, string> = new Map([
 /** The repository name in a remote URL (`…/owner/name.git`, `git@host:owner/name`), else null. */
 export function originRepoName(url: string | null): string | null {
   if (!url) return null;
-  const tail = url.replace(/\/+$/, '').split(/[/:]/).pop() ?? '';
+  // The path part only: a `/` inside a query or fragment must not manufacture a name (round-2 #3).
+  const path = url.split(/[?#]/, 1)[0].replace(/\/+$/, '');
+  const tail = path.split(/[/:]/).pop() ?? '';
   const name = tail.endsWith('.git') ? tail.slice(0, -4) : tail;
   return name || null;
 }

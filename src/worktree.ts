@@ -29,17 +29,26 @@ import { join } from 'node:path';
  */
 
 /**
- * Environment variables through which git ignores the working directory: GIT_DIR / GIT_WORK_TREE
- * / GIT_COMMON_DIR / GIT_INDEX_FILE / GIT_OBJECT_DIRECTORY redirect every command here to whatever
- * repository they name. An orchestrator process inherits them (a git hook exports GIT_DIR), and
- * everything in this module reasons about the WORKER'S CWD — its identity, its quality gate, its
- * confinement — so they are stripped once, for every consumer (HED-389 round-1 review, #1).
+ * Environment variables through which git ignores the working directory or its own config files:
+ * GIT_DIR / GIT_WORK_TREE / GIT_COMMON_DIR / GIT_INDEX_FILE / GIT_OBJECT_DIRECTORY redirect every
+ * command here to whatever repository they name, and the config-injection channel —
+ * GIT_CONFIG_COUNT + GIT_CONFIG_KEY_n/VALUE_n, GIT_CONFIG_PARAMETERS, GIT_CONFIG(_GLOBAL/_SYSTEM) —
+ * can plant `remote.origin.url` or `core.worktree` without touching any file. An orchestrator
+ * process inherits them (a git hook exports GIT_DIR), and everything in this module reasons about
+ * the WORKER'S CWD — its identity, its quality gate, its confinement — so they are stripped once,
+ * for every consumer (HED-389 review rounds 1 #1 and 2 #1).
  */
-const GIT_ENV_OVERRIDES = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY'];
+const GIT_ENV_OVERRIDES = new Set([
+  'GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY',
+  'GIT_CONFIG', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM', 'GIT_CONFIG_COUNT', 'GIT_CONFIG_PARAMETERS',
+]);
+const GIT_ENV_OVERRIDE_RE = /^GIT_CONFIG_(?:KEY|VALUE)_\d+$/;
 
 function gitEnv(): NodeJS.ProcessEnv {
-  const env = { ...process.env };
-  for (const name of GIT_ENV_OVERRIDES) delete env[name];
+  const env: NodeJS.ProcessEnv = {};
+  for (const [name, value] of Object.entries(process.env)) {
+    if (!GIT_ENV_OVERRIDES.has(name) && !GIT_ENV_OVERRIDE_RE.test(name)) env[name] = value;
+  }
   return env;
 }
 
@@ -90,7 +99,9 @@ export function gitRepositoryFor(cwd: string): GitRepository | null {
       mainRoot = first ? first.slice('worktree '.length).trim() || null : null;
     } catch { /* unlistable — identity unknown; consumers treat null as "no claim", never as topLevel */ }
     let originUrl: string | null = null;
-    try { originUrl = git(cwd, ['config', '--get', 'remote.origin.url']).trim() || null; }
+    // --local: the repository's own config file only (shared by its linked worktrees) — never a
+    // global/system file or an env-injected value, which could name a repository this is not.
+    try { originUrl = git(cwd, ['config', '--local', '--get', 'remote.origin.url']).trim() || null; }
     catch { /* no origin is normal for a local checkout */ }
     return { topLevel, mainRoot, originUrl };
   } catch {
