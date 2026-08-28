@@ -87,6 +87,22 @@ describe('heddle-comms server (in-process)', () => {
     expect(resolveCommsIdentity({ ...baseEnv() }, dir, (m) => w.push(m), tokenPath)).toEqual({ identity: null, isOperator: false });
   });
 
+  it('post_message records meta.important for an ⭐-tagged message, absent otherwise (HED-328)', async () => {
+    const { client } = await connect({ HEDDLE_AGENT: 'V' });
+    const idOf = (r: { parsed: unknown }) => (r.parsed as { messageId: number }).messageId;
+    const flagged = idOf(await call(client, 'post_message', { to: '#fleet', body: 'urgent', important: true }));
+    const plain = idOf(await call(client, 'post_message', { to: '#fleet', body: 'normal' }));
+    const db = new DatabaseSync(dbPath);
+    try {
+      const metaOf = (id: number) =>
+        JSON.parse((db.prepare('SELECT meta FROM messages WHERE id = ?').get(id) as { meta: string }).meta) as Record<string, unknown>;
+      expect(metaOf(flagged).important).toBe(true);       // the flag persists for the collector (328b) to read
+      expect(metaOf(plain).important).toBeUndefined();     // a normal post is never marked important
+    } finally {
+      db.close();
+    }
+  });
+
   // ── HED-187: the RAW fleet identity, extracted so the rotator can see through the operator binding ──
 
   it('resolveFleetIdentity: the raw chain (HEDDLE_AGENT → FLEET_AGENT → HEDDLE_COMMS_ADDRESS → .fleet-agent → null)', () => {
