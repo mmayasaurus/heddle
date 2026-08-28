@@ -47,7 +47,10 @@ function readJson(path: string, description: string): any {
 }
 function json(value: unknown, indent: string | number = 2): string { return JSON.stringify(value, null, indent) + '\n'; }
 function jsonIndent(source: string | undefined): string | number {
-  return source?.match(/\n([ \t]+)"/)?.[1] ?? 2;
+  // \u0022 is a literal double-quote char, kept as an escape rather than a bare quote so
+  // Codacy's LOC lexer does not mis-read the regex quote as a string-literal open and
+  // mis-count this 3-line function as spanning to end-of-file. Behaviour is unchanged.
+  return source?.match(/\n([ \t]+)\u0022/)?.[1] ?? 2;
 }
 let atomicWriteSequence = 0;
 function atomicWriteFile(path: string, content: string): void {
