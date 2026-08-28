@@ -1,5 +1,5 @@
 import { isCodeEditingClass, resolveRoute, type Route, type RoutingTable } from './routing.js';
-import { MANDATORY_PACKS, withMandatoryPacks } from './skillpacks.js';
+import { MANDATORY_PACKS, resolveQualityGateForCwd, withMandatoryPacks } from './skillpacks.js';
 
 /**
  * Dispatch-time guidance — the pure logic behind the `dispatch_worker` PreToolUse hook
@@ -31,6 +31,8 @@ export interface DispatchGuidanceInput {
   model?: string;
   skills?: string[];
   opt_in?: boolean;
+  /** The dispatch cwd: with it, the quality gate is resolved per repository exactly as the dispatch will (HED-389). */
+  cwd?: string;
 }
 
 export type GuidanceCode = 'code-editing-class-without-skills' | 'opt-in-required' | 'subagent-dispatch';
@@ -48,8 +50,18 @@ export interface GuidanceWarning {
  */
 export function taskFitPacks(table: RoutingTable, input: DispatchGuidanceInput): string[] {
   const route = input.task_class ? resolveRoute(table, input.task_class) : undefined;
-  const effective = withMandatoryPacks(input.skills ?? route?.skills ?? []);
-  return effective.filter((p) => !(MANDATORY_PACKS as readonly string[]).includes(p));
+  return fitPacks(input.skills ?? route?.skills ?? [], input.cwd);
+}
+
+/**
+ * Task-fit packs of a list: mandatory packs removed and — when the cwd is known — the quality gate
+ * resolved per repository, so the guidance judges the list the worker will actually receive, not
+ * the routing default (an unknown repository drops the app gate; codex P2 on PR #95).
+ */
+function fitPacks(skills: readonly string[], cwd: string | undefined): string[] {
+  const effective = withMandatoryPacks(skills);
+  const resolved = cwd ? resolveQualityGateForCwd(cwd, effective) : effective;
+  return resolved.filter((p) => !(MANDATORY_PACKS as readonly string[]).includes(p));
 }
 
 export function dispatchGuidance(table: RoutingTable, input: DispatchGuidanceInput): GuidanceWarning[] {
@@ -72,7 +84,8 @@ function codeEditingWarning(
   table: RoutingTable, input: DispatchGuidanceInput, route: Route, cls: string, optInMissing: boolean,
 ): GuidanceWarning | null {
   const defaults = withMandatoryPacks(route.skills ?? []);
-  const recommended = defaults.filter((p) => !(MANDATORY_PACKS as readonly string[]).includes(p));
+  const tabled = defaults.filter((p) => !(MANDATORY_PACKS as readonly string[]).includes(p));
+  const recommended = fitPacks(route.skills ?? [], input.cwd); // the defaults as THIS cwd resolves them
   const carried = taskFitPacks(table, input);
   const missingFit = recommended.length ? !recommended.some((p) => carried.includes(p)) : carried.length === 0;
   if (!missingFit) return null;
@@ -82,6 +95,11 @@ function codeEditingWarning(
   const adviceText = recommended.length
     ? `Recommended for ${cls}: ${recommended.join(', ')} — omit \`skills\` to get the class default ` +
       `[${defaults.join(', ')}], or pass an explicit list that includes at least one of them.`
+    : tabled.length
+    ? `The class default [${tabled.join(', ')}] resolves to NO gate for cwd ${input.cwd}: quality-gate is the ` +
+      `Spinventory app gate and is dropped outside a recognized repository (HED-389). Dispatch from a ` +
+      `recognized checkout, or pass an explicit list naming the right repo gate pack (repo-heddle-core, ` +
+      `repo-heddle-dashboard, repo-workspace).`
     : `The routing table lists no default packs for ${cls} either — consider quality-gate ` +
       `(verification) and code-discovery (graph-first navigation), or add defaults to routing.v0.yaml.`;
   return {

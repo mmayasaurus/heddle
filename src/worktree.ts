@@ -41,6 +41,9 @@ import { join } from 'node:path';
 const GIT_ENV_OVERRIDES = new Set([
   'GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY',
   'GIT_CONFIG', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM', 'GIT_CONFIG_COUNT', 'GIT_CONFIG_PARAMETERS',
+  // Discovery limits: an inherited ceiling below the checkout makes git stop before the root, which
+  // drops the gate AND silently disables linked-worktree confinement (codex P2 on PR #95).
+  'GIT_CEILING_DIRECTORIES', 'GIT_DISCOVERY_ACROSS_FILESYSTEM',
 ]);
 const GIT_ENV_OVERRIDE_RE = /^GIT_CONFIG_(?:KEY|VALUE)_\d+$/;
 

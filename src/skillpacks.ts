@@ -161,8 +161,10 @@ export function originRepoName(url: string | null): string | null {
  *   2. the app checkout by LAYOUT (main checkout `Rebuild-Project-Root` under a
  *      `Spinventory-Rebuild-Official` parent) → `quality-gate`, checked first so no later rule can
  *      strip the app gate from the app, whatever its `origin` says;
- *   3. the main checkout's exact folder name, and the exact repository name of `origin` — when
- *      both are known they must AGREE, otherwise the identity is ambiguous → null.
+ *   3. the main checkout's exact folder name, corroborated by `origin` when one is configured: a
+ *      known folder whose origin names a DIFFERENT or unrecognized repository is ambiguous → null
+ *      (codex P2 on PR #95: a folder called `heddle` pointing at `other-project.git` is not heddle);
+ *      a known origin alone identifies a renamed or relocated clone.
  * Substring and prefix matches are deliberately absent: an origin that merely CONTAINS a known name,
  * or a folder that starts with one, is not that repository.
  */
@@ -173,7 +175,7 @@ export function qualityGateForRepository(repo: GitRepository | null): string | n
   const byFolder = GATE_BY_FOLDER_NAME.get(rootName) ?? null;
   const origin = originRepoName(repo.originUrl);
   const byOrigin = origin ? GATE_BY_ORIGIN_NAME.get(origin) ?? null : null;
-  if (byFolder && byOrigin && byFolder !== byOrigin) return null; // ambiguous — no claim
+  if (byFolder && origin && byOrigin !== byFolder) return null; // origin present but not corroborating — no claim
   return byFolder ?? byOrigin;
 }
 
@@ -185,6 +187,11 @@ export function qualityGateForRepository(repo: GitRepository | null): string | n
  */
 export function resolveQualityGateForCwd(cwd: string, skills: readonly string[]): string[] {
   if (!skills.includes('quality-gate')) return [...skills];
+  // A CONSUMER pack named quality-gate (HEDDLE_PACKS shadowing the built-in) is that project's own
+  // gate, chosen by its configuration and read by readPack ahead of the built-in — keep it. Only
+  // heddle's built-in quality-gate, the Spinventory APP gate, is repository-resolved (codex P2, #95).
+  const packDir = packDirFor('quality-gate');
+  if (packDir && packDir !== builtinPacksDir()) return [...skills];
   const gate = qualityGateForRepository(gitRepositoryFor(cwd));
   if (gate === 'quality-gate') return [...skills];
   const swapped = skills.flatMap((pack) => pack === 'quality-gate' ? (gate ? [gate] : []) : [pack]);

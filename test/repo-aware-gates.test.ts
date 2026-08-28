@@ -1,10 +1,9 @@
-import { execFileSync } from 'node:child_process';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { dispatch, planDispatch } from '../src/dispatch.js';
 import { originRepoName, qualityGateForRepository } from '../src/skillpacks.js';
-import { fakeAdapter, IDENTITIES, useTempResources } from './helpers.js';
+import { fakeAdapter, IDENTITIES, initRepoFixture, useTempResources } from './helpers.js';
 
 /**
  * HED-389: `quality-gate` is the Spinventory APP gate (`npm run gate`, expo-router, `cd` into
@@ -20,38 +19,7 @@ import { fakeAdapter, IDENTITIES, useTempResources } from './helpers.js';
 const APP_TEXT = ['Spinventory-Rebuild-Official/Rebuild-Project-Root', 'npm run gate', 'expo-router'];
 const NO_GATE = ['worker-role', 'worker-hygiene', 'family-codex'];
 
-// Hermetic git: no operator global/system config (gpgsign, hooksPath, …) and none of the env vars
-// through which git ignores cwd — the very leak the code under test must be immune to.
-const GIT_ENV = (() => {
-  const env: NodeJS.ProcessEnv = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
-  for (const name of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY']) delete env[name];
-  return env;
-})();
-
-function git(cwd: string, ...args: string[]): void {
-  execFileSync('git', args, { cwd, stdio: ['ignore', 'pipe', 'pipe'], env: GIT_ENV });
-}
-
-/**
- * A `git init` repository at `root`. The returned cwd is `root/<relativeCwd>` — a plain subdirectory,
- * or (linkedWorktree) a real linked worktree created with `git worktree add`, which may sit outside
- * `root` (`../Rebuild-Project-Root.<feature>` is how the Spinventory fleet lays its worktrees out).
- */
-function initRepo(
-  root: string, relativeCwd: string, opts: { remote?: string; linkedWorktree?: boolean } = {},
-): string {
-  mkdirSync(root, { recursive: true });
-  git(root, 'init', '-q');
-  if (opts.remote) git(root, 'remote', 'add', 'origin', opts.remote);
-  const cwd = join(root, relativeCwd);
-  if (opts.linkedWorktree) {
-    git(root, '-c', 'user.email=t@t', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', 'commit', '--allow-empty', '-q', '-m', 'init');
-    git(root, 'worktree', 'add', '-q', cwd, '-b', 'worker');
-  } else {
-    mkdirSync(cwd, { recursive: true });
-  }
-  return cwd;
-}
+const initRepo = initRepoFixture;
 
 describe('dispatch — repo-aware quality gates (HED-389)', () => {
   const { tempDir, tempLedger } = useTempResources('heddle-repo-aware-gate-');
@@ -143,6 +111,23 @@ describe('dispatch — repo-aware quality gates (HED-389)', () => {
     const other = await editingDispatch(initRepo(join(tempDir(), 'Other-Org', 'Rebuild-Project-Root'), '../Rebuild-Project-Root.forms', { linkedWorktree: true }));
     expect(other.skills).toEqual(NO_GATE);
     for (const text of APP_TEXT) expect(other.agents).not.toContain(text);
+  });
+
+  it('keeps a CONSUMER-shadowed quality-gate pack (HEDDLE_PACKS) — only the built-in app gate is repository-resolved', async () => {
+    const packs = join(tempDir(), 'consumer-packs');
+    mkdirSync(packs, { recursive: true });
+    writeFileSync(join(packs, 'quality-gate.md'), '# Consumer gate\nCONSUMER-GATE-MARKER: run `make verify`.\n');
+    const saved = process.env.HEDDLE_PACKS;
+    process.env.HEDDLE_PACKS = packs;
+    try {
+      const { agents, skills } = await editingDispatch(initRepo(join(tempDir(), 'unknown-repo'), 'worker'));
+      expect(skills).toEqual(['worker-role', 'worker-hygiene', 'quality-gate', 'family-codex']);
+      expect(agents).toContain('### quality-gate');
+      expect(agents).toContain('CONSUMER-GATE-MARKER');
+      for (const text of APP_TEXT) expect(agents).not.toContain(text);
+    } finally {
+      if (saved === undefined) delete process.env.HEDDLE_PACKS; else process.env.HEDDLE_PACKS = saved;
+    }
   });
 
   it('fails safe in an unknown repository: no gate at all rather than the app gate', async () => {
@@ -246,6 +231,8 @@ describe('qualityGateForRepository — identity rules (pure)', () => {
     expect(qualityGateForRepository({ topLevel: '/x/heddle', mainRoot: '/x/heddle', originUrl: 'https://github.com/mmayasaurus/heddle-dashboard.git' })).toBeNull();
     expect(qualityGateForRepository({ topLevel: '/x/heddle', mainRoot: '/x/heddle', originUrl: 'https://github.com/mmayasaurus/heddle.git' })).toBe('repo-heddle-core');
     expect(qualityGateForRepository({ topLevel: '/x/Spinventory-Rebuild-App-2', mainRoot: '/x/Spinventory-Rebuild-App-2', originUrl: null })).toBeNull(); // prefix is not identity
+    // A known folder whose origin is PRESENT but unrecognized is not that repository (codex P2, #95).
+    expect(qualityGateForRepository({ topLevel: '/x/heddle', mainRoot: '/x/heddle', originUrl: 'git@github.com:someone/other-project.git' })).toBeNull();
   });
 
   it('matches origin by exact repository name, in every common URL form', () => {

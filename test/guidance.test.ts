@@ -1,4 +1,6 @@
 import { describe, it, expect } from 'vitest';
+import { join } from 'node:path';
+import { initRepoFixture, useTempResources } from './helpers.js';
 import { dispatchGuidance, hookResponse, taskFitPacks } from '../src/guidance.js';
 import type { RoutingTable } from '../src/routing.js';
 
@@ -9,6 +11,7 @@ const table: RoutingTable = {
   taskClasses: {
     'edit-with-defaults': { provider: 'codex', model: 'm1', edits_code: true, skills: ['worker-role', 'quality-gate', 'code-discovery'] },
     'edit-no-defaults': { provider: 'codex', model: 'm1', edits_code: true },
+    'edit-gate-only': { provider: 'codex', model: 'm1', edits_code: true, skills: ['worker-role', 'quality-gate'] },
     review: { provider: 'cursor', model: 'k1', edits_code: false, skills: ['worker-role'] },
     gated: { provider: 'cursor', model: 'k1', edits_code: false, requires_explicit_opt_in: true, note: 'burns the metered pool' },
     'gated-edit': { provider: 'codex', model: 'm1', edits_code: true, requires_explicit_opt_in: true, note: 'costly' },
@@ -194,5 +197,35 @@ describe('dispatchGuidance — review fixes', () => {
     const [defaultRoute] = dispatchGuidance(table, { task_class: 'gated' });
     expect(defaultRoute.message).toContain('Routes to cursor/k1');
     expect(defaultRoute.message).not.toContain('explicit route');
+  });
+});
+
+describe('dispatchGuidance — repository-resolved gate (HED-389)', () => {
+  const { tempDir } = useTempResources('heddle-guidance-gate-');
+
+  it('warns when the class default gate resolves to nothing for the dispatch cwd (unknown repository)', () => {
+    const cwd = initRepoFixture(join(tempDir(), 'unknown-repo'), 'worker');
+    // A class whose ONLY default is the gate (the real bulk-mechanical): nothing is left to recommend.
+    const gateOnly = dispatchGuidance(table, { task_class: 'edit-gate-only', cwd });
+    expect(gateOnly).toHaveLength(1);
+    expect(gateOnly[0].code).toBe('code-editing-class-without-skills');
+    expect(gateOnly[0].message).toContain('resolves to NO gate');
+    expect(gateOnly[0].message).toContain('HED-389');
+    // A class with another default: the recommendation names what survives resolution.
+    const withDiscovery = dispatchGuidance(table, { task_class: 'edit-with-defaults', skills: ['quality-gate'], cwd });
+    expect(withDiscovery).toHaveLength(1);
+    expect(withDiscovery[0].message).toContain('Recommended for edit-with-defaults: code-discovery');
+    // Without the cwd the same call is judged on the routing default and passes — the parity gap codex named.
+    expect(dispatchGuidance(table, { task_class: 'edit-gate-only' })).toEqual([]);
+  });
+
+  it('stays silent when the default gate resolves to the repository gate the worker will carry', () => {
+    const cwd = initRepoFixture(join(tempDir(), 'heddle'), '.worktrees/S-hed389', { linkedWorktree: true });
+    expect(taskFitPacks(table, { task_class: 'edit-with-defaults', skills: ['quality-gate'], cwd })).toEqual(['repo-heddle-core']);
+    expect(dispatchGuidance(table, { task_class: 'edit-with-defaults', skills: ['quality-gate'], cwd })).toEqual([]);
+  });
+
+  it('without a cwd judges the routing default as written (unchanged behaviour)', () => {
+    expect(taskFitPacks(table, { task_class: 'edit-with-defaults' })).toEqual(['quality-gate', 'code-discovery']);
   });
 });
