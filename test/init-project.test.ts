@@ -387,6 +387,19 @@ describe('init-project', () => {
       expect(readFileSync(enforcePath, 'utf8')).toContain('/repoC');
     });
 
+    it('aborts rather than clobbering a target merge file (settings.json) edited between plan and apply (CAS)', () => {
+      const opts = options(tempDir());
+      mkdirSync(join(opts.dir, '.claude'), { recursive: true });
+      const settingsPath = join(opts.dir, '.claude', 'settings.json');
+      writeFileSync(settingsPath, JSON.stringify({ hooks: {} }));
+      const plan = planInstall(opts);
+      // Concurrent edit: a user adds an unrelated key to settings.json after planning.
+      writeFileSync(settingsPath, JSON.stringify({ hooks: {}, permissions: { allow: ['Read'] } }));
+      expect(() => applyInstall(plan)).toThrow(/settings changed underneath/i);
+      // The added key survives — the CAS aborts instead of the stale plan overwriting it.
+      expect(readFileSync(settingsPath, 'utf8')).toContain('permissions');
+    });
+
     it('preserves an unrelated oversized JSON integer byte-exact when updating a project', () => {
       const opts = options(tempDir());
       mkdirSync(join(opts.homeDir, '.heddle'), { recursive: true });

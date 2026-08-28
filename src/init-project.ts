@@ -41,9 +41,12 @@ export const DISCIPLINE_WIRING: Array<{ event: string; matcher: string; hook: ty
   { event: 'SubagentStop', matcher: '*', hook: 'require-memtrace-first.py', args: 'stop', timeout: 5 },
 ];
 
-function readJson(path: string, description: string): any {
-  try { return JSON.parse(readFileSync(path, 'utf8')); }
+function parseJson(text: string, path: string, description: string): any {
+  try { return JSON.parse(text); }
   catch (error) { throw new Error(`${description} at ${path} is not valid JSON: ${(error as Error).message}`); }
+}
+function readJson(path: string, description: string): any {
+  return parseJson(readFileSync(path, 'utf8'), path, description);
 }
 function json(value: unknown, indent: string | number = 2): string { return JSON.stringify(value, null, indent) + '\n'; }
 function jsonIndent(source: string | undefined): string | number {
@@ -133,15 +136,16 @@ function wireDisciplineHooks(hooks: Record<string, any[]>, targets: Map<string, 
     target.group.hooks.splice(target.index ?? target.group.hooks.length, 0, ...block);
   }
 }
-function renderedSettings(path: string, canonical: string): { content: string; misplaced: string[] } {
-  const source = existsSync(path) ? readJson(path, 'settings.json') : {};
+function renderedSettings(path: string, canonical: string): { content: string; misplaced: string[]; raw: string | undefined } {
+  const raw = existsSync(path) ? readFileSync(path, 'utf8') : undefined;
+  const source = raw === undefined ? {} : parseJson(raw, path, 'settings.json');
   if (!source || typeof source !== 'object' || Array.isArray(source)) throw new Error(`settings.json at ${path} must be a JSON object`);
   const misplaced: string[] = [];
   const targets = new Map<string, { group: any; index?: number }>();
   const hooks = preservedHookGroups(source, path, misplaced, targets);
   wireDisciplineHooks(hooks, targets, canonical);
   const { hooks: _oldHooks, ...rest } = source;
-  return { content: json({ ...rest, hooks }), misplaced };
+  return { content: json({ ...rest, hooks }), misplaced, raw };
 }
 function installerAsset(...parts: string[]): string { return join(here, '..', ...parts); }
 function mcpTemplate(): Record<string, unknown> | null {
@@ -225,7 +229,9 @@ function resolveCanonical(input: InstallOptions, homeDir: string): string {
 function registryState(homeDir: string): { path: string; content: string | undefined; raw: any; registry: any } {
   const path = join(homeDir, '.heddle', 'projects.json');
   const content = existsSync(path) ? readFileSync(path, 'utf8') : undefined;
-  const raw = content === undefined ? { schemaVersion: PROJECTS_SCHEMA_VERSION, projects: [] } : readJson(path, 'projects.json');
+  // Parse the SAME captured bytes we later CAS against (expectedContent), never a second read that
+  // could diverge from the snapshot (HED-84 review, ledger 652).
+  const raw = content === undefined ? { schemaVersion: PROJECTS_SCHEMA_VERSION, projects: [] } : parseJson(content, path, 'projects.json');
   return { path, content, raw, registry: validateRegistry(raw, path) };
 }
 function registrationDetails(input: InstallOptions, dir: string, registry: any, rawRegistry: any): any {
@@ -252,7 +258,7 @@ function canonicalStep(canonical: string): InstallStep {
 function renderSettingsStep(dir: string, canonical: string, dryRun: boolean): InstallStep {
   const path = join(dir, '.claude', 'settings.json');
   const settings = renderedSettings(path, canonical);
-  const step = stepFor(path, 'settings', settings.content, dryRun);
+  const step: InstallStep = { ...stepFor(path, 'settings', settings.content, dryRun), expectedContent: settings.raw ?? null };
   if (settings.misplaced.length) step.reason = `moved ${settings.misplaced.length} misplaced discipline entr${settings.misplaced.length === 1 ? 'y' : 'ies'}: ${settings.misplaced.join(', ')}`;
   return step;
 }
@@ -266,18 +272,22 @@ function renderMcpStep(dir: string, dryRun: boolean): InstallStep {
   const path = join(dir, '.mcp.json');
   const template = mcpTemplate();
   if (!template) return { step: 'mcp', path, action: 'skip', reason: 'no template (heddle/.mcp.json)' };
-  const existingMcp = existsSync(path) ? readJson(path, '.mcp.json') : {};
+  const rawContent = existsSync(path) ? readFileSync(path, 'utf8') : undefined;
+  const existingMcp = rawContent === undefined ? {} : parseJson(rawContent, path, '.mcp.json');
   const mcpServers = { ...existingMcp.mcpServers };
   for (const [key, value] of Object.entries(template)) if (!(key in mcpServers)) mcpServers[key] = value;
-  return stepFor(path, 'mcp', json({ ...existingMcp, mcpServers }), dryRun);
+  return { ...stepFor(path, 'mcp', json({ ...existingMcp, mcpServers }), dryRun), expectedContent: rawContent ?? null };
 }
 function renderIgnoreStep(dir: string, dryRun: boolean): InstallStep {
   const path = join(dir, '.memtraceignore');
-  const ignore = existsSync(path) ? readFileSync(path, 'utf8') : '';
+  // absent (undefined) != empty (''): merge treats absent as empty, but expectedContent must be null
+  // for an absent file so a fresh install is not falsely aborted by the pre-pass (current=null vs '').
+  const raw = existsSync(path) ? readFileSync(path, 'utf8') : undefined;
+  const ignore = raw ?? '';
   const missing = ['.worktrees/', '.memdb*/'].filter((entry) => !ignore.split(/\r?\n/).includes(entry));
   const newline = ignore.includes('\r\n') ? '\r\n' : '\n';
   const content = missing.length ? `${ignore}${ignore && !ignore.endsWith('\n') ? newline : ''}${missing.join(newline)}${newline}` : ignore;
-  return stepFor(path, 'memtraceignore', content, dryRun);
+  return { ...stepFor(path, 'memtraceignore', content, dryRun), expectedContent: raw ?? null };
 }
 function renderGateStep(dir: string, dryRun: boolean): InstallStep {
   const path = join(dir, '.claude', 'commands', 'heddle-gate.md');
@@ -295,7 +305,7 @@ function registryStep(input: InstallOptions, dir: string, state: any, details: a
 function enforceMarkerStep(input: InstallOptions, dir: string, homeDir: string, dryRun: boolean): InstallStep {
   const path = join(homeDir, '.heddle', 'memtrace-enforce.json');
   const rawContent = existsSync(path) ? readFileSync(path, 'utf8') : undefined;
-  const existing = rawContent === undefined ? {} : readJson(path, 'memtrace-enforce.json');
+  const existing = rawContent === undefined ? {} : parseJson(rawContent, path, 'memtrace-enforce.json');
   const aliases = Object.entries(existing).filter(([key]) => canonicalizePath(key) === dir);
   const priorValue = aliases[0]?.[1];
   const next = Object.fromEntries(Object.entries(existing).filter(([key]) => canonicalizePath(key) !== dir));
@@ -317,10 +327,13 @@ export function planInstall(input: InstallOptions): InstallPlan {
 
 export function applyInstall(plan: InstallPlan, dryRun = false): InstallReport {
   const skipWrites = dryRun || plan.options.dryRun === true;
-  // CAS pre-pass: verify EVERY compare-and-swap precondition (registry + memtrace-enforce) BEFORE
-  // writing anything. Otherwise a stale expectedContent throws only when its step is reached — after
-  // the target repo's settings/rules/ignore/gate were already written — leaving a half-installed repo
-  // that is not in projects.json. Checking first makes a raced apply abort before any mutation.
+  // CAS pre-pass: verify EVERY compare-and-swap precondition (registry, memtrace-enforce, and every
+  // read-then-merge target file — settings / .mcp.json / .memtraceignore) BEFORE writing anything.
+  // Otherwise a stale expectedContent throws only when its step is reached — after earlier target-repo
+  // files were already written — leaving a half-installed repo. Checking first makes a raced apply
+  // abort before any mutation. Residual: the sub-millisecond interleave between this pre-pass and the
+  // write loop is NOT closed without a filesystem lock — a rare, recoverable (re-run is idempotent)
+  // race tracked as HED-418.
   if (!skipWrites) {
     for (const step of plan.steps) {
       if (step.expectedContent === undefined) continue;
