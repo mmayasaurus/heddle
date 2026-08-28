@@ -378,14 +378,18 @@ One process per Claude Code session, spawned from `.mcp.json`:
 { "mcpServers": { "heddle-comms": { "command": "heddle-comms" } } }
 ```
 
-- **Identity is bound once at startup**, never chosen by the model: `HEDDLE_AGENT` →
-  `FLEET_AGENT` → `HEDDLE_COMMS_ADDRESS` (a heddle-dispatched worker) → a `.fleet-agent` file
-  walking up from cwd → unbound (sender-requiring tools refuse). Only agent/child addresses bind
-  here — `operator` is refused from these sources (the operator surface binds it, HED-65).
-  `HEDDLE_WORKER=1` forbids `mint_child` (depth 1). `HEDDLE_COMMS_DB` / `HEDDLE_LEDGER_DB`
-  override the db paths (tests); the dispatch ledger is opened only if it already exists (never
-  created as a side effect). This is HED-65's comms half; it will switch to the shared
-  `src/identity.ts` when that lands.
+- **Identity is process-bound, never chosen by the model.** At startup it binds from
+  `HEDDLE_AGENT` → `FLEET_AGENT` → `HEDDLE_COMMS_ADDRESS` (a heddle-dispatched worker) → a
+  `.fleet-agent` file walking up from cwd. An otherwise-unbound Claude session may then bind
+  lazily after rename from its PID-bridge label; use `comms_whoami` to see the live identity and
+  binding source. Any LATE-bound session (started unbound, then bound from env/.fleet-agent/pid-bridge) is capped to
+  `agent-message` on every send — never an orchestrator directive; a late source may be model-influenced. Only agent/child addresses bind here — `operator` is refused from these
+  sources (the operator surface binds it, HED-65). `HEDDLE_WORKER=1` disables the PID bridge and
+  forbids `mint_child` (depth 1). A late-bound session remains pull-only and has no presence row
+  until it is relaunched with its identity at startup; this is by design. `HEDDLE_COMMS_DB` /
+  `HEDDLE_LEDGER_DB` override the db paths (tests); the dispatch ledger is opened only if it
+  already exists (never created as a side effect). This is HED-65's comms half; it will switch to
+  the shared `src/identity.ts` when that lands.
 - **Push is opt-in — `HEDDLE_COMMS_PUSH=1`.** Claude Code gives a server no way to know whether it
   was loaded as a channel and drops channel events silently when it was not, so presence and the
   inbound pump run only when the launcher says the flag is on. Without it the session is pull-only
@@ -598,8 +602,9 @@ adapter before assuming a shared config reaches workers:
 
 The fleet launchers already work. `resolveCommsIdentity` (`src/comms/server.ts`)
 binds the first of `HEDDLE_AGENT`, `FLEET_AGENT`, `HEDDLE_COMMS_ADDRESS` (the worker address), then
-walks parent directories for a `.fleet-agent` file, then stays unbound. The operator identity is
-never bindable this way — it needs `HEDDLE_COMMS_ROLE=operator` plus the token.
+walks parent directories for a `.fleet-agent` file. An otherwise-unbound Claude session can bind
+later from its PID bridge after rename; `comms_whoami` reports which source won. The operator
+identity is never bindable this way — it needs `HEDDLE_COMMS_ROLE=operator` plus the token.
 `~/.local/bin/codex-a…e` export
 `FLEET_AGENT=codex-A…E`, so a Codex orchestrator launched that way binds as `codex-A` with no
 change; `HEDDLE_AGENT` wins when both are set and disagree. Verified 2026-08-16 against

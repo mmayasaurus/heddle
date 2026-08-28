@@ -11,6 +11,7 @@ import { listPacks, withMandatoryPacks } from './skillpacks.js';
 import { classifyEffort, assessResult } from './classify.js';
 import { resolveIdentity } from './identity.js';
 import { loadProjectRegistry, DEFAULT_PROJECTS_PATH } from './projects.js';
+import { applyInstall, planInstall, redactReport } from './init-project.js';
 import { pickClaudeAccount, readClaudeAccounts } from './capaware.js';
 import { claudeAccountRows, pickClaudeAccountsBatch, usableClaudeCaps } from './account-pick.js';
 import { bindingMeter, claudeFloorsFrom } from './floors.js';
@@ -64,6 +65,7 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
   heddle mode [desktop|mobile|away] [--note "<t>"] [--json]   operator mode (HED-336): no arg prints
                                  the current mode; a mode word sets it (~/.heddle/operator-mode.json —
                                  the pocket console and desktop app write the same file)
+  heddle init-project <dir> [--canonical <path>] [--name <n>] [--team <KEY>] [--agents A,B,…] [--room <#room>] [--launcher <script>] [--enforce-memtrace] [--dry-run] [--json] [--show-content]
   heddle whoami [--json]         this process's bound identity (HEDDLE_AGENT / FLEET_AGENT / .fleet-agent) + worker context
   heddle workers [--stale <hours>] [--json]   dispatches still in flight (--stale: only orphans older than N hours)
   heddle ledger [--issue SPI-n] [--limit N] [--json]
@@ -583,6 +585,19 @@ try {
       const state = writeOperatorMode(requested, note);
       out(json, state, () => `operator mode → ${state.mode}` +
         (state.note ? `  (${state.note})` : '') + `  [${state.since}]`);
+      break;
+    }
+
+    case 'init-project': {
+      const dir = process.argv[3];
+      if (!dir || dir.startsWith('--')) {
+        console.error('usage: heddle init-project <dir> [--canonical <path>] [--name <n>] [--team <KEY>] [--agents A,B,…] [--room <#room>] [--launcher <script>] [--enforce-memtrace] [--dry-run] [--json] [--show-content]');
+        process.exit(2);
+      }
+      const plan = planInstall({ dir, canonical: arg('--canonical'), name: arg('--name'), team: arg('--team'), agents: arg('--agents'), room: arg('--room'), launcher: arg('--launcher'), enforceMemtrace: has('--enforce-memtrace'), dryRun: has('--dry-run'), showContent: has('--show-content') });
+      const report = applyInstall(plan, has('--dry-run'));
+      const output = redactReport(report, has('--show-content'), plan.options.homeDir);
+      out(json, output, () => [...report.steps.map((step) => `${step.action} ${step.step}: ${step.path}${step.reason ? ` (${step.reason})` : ''}`), ...report.humanSteps.map((step) => `- ${step}`)].join('\n'));
       break;
     }
 
