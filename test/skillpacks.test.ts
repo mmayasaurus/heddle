@@ -53,13 +53,13 @@ describe('dispatch — mandatory skill materialization', () => {
     );
 
     expect(fake.calls[0].agents).toContain('### worker-role');
-    expect(fake.calls[0].agents).toContain('### quality-gate');
+    expect(fake.calls[0].agents).not.toContain('### quality-gate');
     expect(existsSync(join(cwd, 'AGENTS.md'))).toBe(false);
     const [row] = ledger.recent(1);
-    expect(row.skills).toBe('worker-role,worker-hygiene,quality-gate,family-codex');
+    expect(row.skills).toBe('worker-role,worker-hygiene,family-codex');
     expect(row.task_class).toBe('direct:codex/gpt-5.6-luna');
     expect(row.ok).toBe(1);
-    expect(outcome.skills).toEqual(['worker-role', 'worker-hygiene', 'quality-gate', 'family-codex']);
+    expect(outcome.skills).toEqual(['worker-role', 'worker-hygiene', 'family-codex']);
   });
 
   it('unions worker-role into routing defaults before materializing a bulk-mechanical dispatch', async () => {
@@ -71,9 +71,9 @@ describe('dispatch — mandatory skill materialization', () => {
     await dispatch({ taskClass: 'bulk-mechanical', prompt: 'x', cwd }, ledger, () => adapter);
 
     expect(fake.calls[0].agents).toContain('### worker-role');
-    expect(fake.calls[0].agents).toContain('### quality-gate');
+    expect(fake.calls[0].agents).not.toContain('### quality-gate');
     const [row] = ledger.recent(1);
-    expect(row.skills).toBe('worker-role,worker-hygiene,quality-gate,family-codex');
+    expect(row.skills).toBe('worker-role,worker-hygiene,family-codex');
     expect(row.task_class).toBe('bulk-mechanical');
   });
 });
@@ -99,10 +99,10 @@ describe('dispatch — fallback carries the class packs', () => {
 
     expect(calls).toHaveLength(2);
     expect(calls[1].model).toBe('composer-2.5-fast');
-    expect(calls[1].agents).toContain('### quality-gate');
+    expect(calls[1].agents).not.toContain('### quality-gate');
     expect(calls[1].agents).toContain('### worker-role');
     expect(outcome.usedFallback).toBe(true);
-    expect(outcome.skills).toEqual(['worker-role', 'worker-hygiene', 'quality-gate', 'family-cursor']);
-    expect(ledger.recent(2)[0]).toMatchObject({ fell_back_from: 'codex/gpt-5.6-luna', skills: 'worker-role,worker-hygiene,quality-gate,family-cursor' });
+    expect(outcome.skills).toEqual(['worker-role', 'worker-hygiene', 'family-cursor']);
+    expect(ledger.recent(2)[0]).toMatchObject({ fell_back_from: 'codex/gpt-5.6-luna', skills: 'worker-role,worker-hygiene,family-cursor' });
   });
 });

@@ -1,7 +1,7 @@
 import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { join } from 'node:path';
 import { Ledger } from '../src/ledger.js';
-import { useTempResources } from './helpers.js';
+import { useTempResources, initRepoFixture } from './helpers.js';
 import { ensureBuilt, withTempHome } from './helpers/cli.js';
 import { startMcp, type McpHarness } from './helpers/mcp.js';
 
@@ -81,4 +81,22 @@ describe('heddle MCP tools', () => {
     expect(ledger.get(id)).toMatchObject({ orchestrator: 'OTHER', refusal: 'claude-in-session', ok: 0 });
     ledger.close();
   }, 30_000);
+});
+
+describe('plan_dispatch — the dry run names the gate the dispatch would resolve for its cwd (HED-389)', () => {
+  const { tempDir } = useTempResources('heddle-plan-cwd-');
+
+  it('resolves the repository gate for the given cwd, and drops the app gate for an unknown repository', async () => {
+    const mcp = await startMcp();
+    const heddle = initRepoFixture(join(tempDir(), 'heddle'), '.worktrees/S-hed389', { linkedWorktree: true });
+    const unknown = initRepoFixture(join(tempDir(), 'unknown-repo'), 'worker');
+
+    const inHeddle = JSON.stringify(await mcp.callTool('plan_dispatch', { task_class: 'bulk-mechanical', cwd: heddle }));
+    expect(inHeddle).toContain('repo-heddle-core');
+    expect(inHeddle).not.toContain('quality-gate');
+
+    const inUnknown = JSON.stringify(await mcp.callTool('plan_dispatch', { task_class: 'bulk-mechanical', cwd: unknown }));
+    expect(inUnknown).not.toContain('repo-heddle-core');
+    expect(inUnknown).not.toContain('quality-gate');
+  });
 });

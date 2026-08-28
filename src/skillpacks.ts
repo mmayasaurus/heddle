@@ -1,7 +1,8 @@
-import { readFileSync, existsSync, writeFileSync, unlinkSync, readdirSync } from 'node:fs';
+import { readFileSync, existsSync, writeFileSync, unlinkSync, readdirSync, realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { delimiter, dirname, join } from 'node:path';
+import { basename, delimiter, dirname, join, resolve } from 'node:path';
 import { withFileLock } from './matlock.js';
+import { gitRepositoryFor, type GitRepository } from './worktree.js';
 
 /**
  * Skill-pack materializer.
@@ -120,6 +121,103 @@ export function withMandatoryPacks(skills: readonly string[] | undefined): strin
     if (!out.includes(p)) out.push(p);
   }
   return out;
+}
+
+/** The Spinventory app checkout, by layout: `<parent>/<dir>` — the only place `quality-gate` belongs. */
+const APP_CHECKOUT = { dir: 'Rebuild-Project-Root', parent: 'Spinventory-Rebuild-Official' } as const;
+/** Main-checkout folder name → that repository's gate pack (exact names only). */
+const GATE_BY_FOLDER_NAME: ReadonlyMap<string, string> = new Map([
+  ['heddle', 'repo-heddle-core'],
+  ['heddle-dashboard', 'repo-heddle-dashboard'],
+  ['Spinventory-Rebuild-App', 'repo-workspace'],
+]);
+/** `origin` repository name (the GitHub name) → gate pack; covers a renamed or relocated clone. */
+const GATE_BY_ORIGIN_NAME: ReadonlyMap<string, string> = new Map([
+  ['heddle', 'repo-heddle-core'],
+  ['heddle-dashboard', 'repo-heddle-dashboard'],
+  ['Spinventory-Rebuild-Workspace', 'repo-workspace'],
+  ['Spinventory-V2-Official-App-Rebuild', 'quality-gate'],
+]);
+
+/** The repository name in a remote URL (`…/owner/name.git`, `git@host:owner/name`), else null. */
+export function originRepoName(url: string | null): string | null {
+  if (!url) return null;
+  // The path part only: a `/` inside a query or fragment must not manufacture a name (round-2 #3).
+  const path = url.split(/[?#]/, 1)[0].replace(/\/+$/, '');
+  const tail = path.split(/[/:]/).pop() ?? '';
+  const name = tail.endsWith('.git') ? tail.slice(0, -4) : tail;
+  return name || null;
+}
+
+/**
+ * The gate pack for a repository, or null when the repository is UNKNOWN — the caller then DROPS
+ * `quality-gate` rather than guess. `quality-gate` is the Spinventory APP gate (`npm run gate`,
+ * expo-router, `cd` into the app checkout); handing it to a worker anywhere else is the fleet-scope
+ * violation HED-389 exists to stop, so an unknown identity gets no gate at all.
+ *
+ * Identity is EXACT, and decided in this order (round-1 review #2/#3/#7):
+ *   1. unknown — not a repository, or its main checkout is unlistable → null (never the worktree
+ *      folder name, which for a real dispatch cwd is the WORKTREE's name, not the repo's);
+ *   2. the app checkout by LAYOUT (main checkout `Rebuild-Project-Root` under a
+ *      `Spinventory-Rebuild-Official` parent) → `quality-gate`, checked first so no later rule can
+ *      strip the app gate from the app, whatever its `origin` says;
+ *   3. the main checkout's exact folder name, corroborated by `origin` when one is configured: a
+ *      known folder whose origin names a DIFFERENT or unrecognized repository is ambiguous → null
+ *      (codex P2 on PR #95: a folder called `heddle` pointing at `other-project.git` is not heddle);
+ *      a known origin alone identifies a renamed or relocated clone.
+ * Substring and prefix matches are deliberately absent: an origin that merely CONTAINS a known name,
+ * or a folder that starts with one, is not that repository.
+ */
+export function qualityGateForRepository(repo: GitRepository | null): string | null {
+  if (!repo?.mainRoot) return null;
+  const rootName = basename(repo.mainRoot);
+  if (rootName === APP_CHECKOUT.dir && basename(dirname(repo.mainRoot)) === APP_CHECKOUT.parent) return 'quality-gate';
+  const byFolder = GATE_BY_FOLDER_NAME.get(rootName) ?? null;
+  const origin = originRepoName(repo.originUrl);
+  const byOrigin = origin ? GATE_BY_ORIGIN_NAME.get(origin) ?? null : null;
+  if (byFolder && origin && byOrigin !== byFolder) return null; // origin present but not corroborating — no claim
+  return byFolder ?? byOrigin;
+}
+
+/** A directory's canonical identity: its real path when it exists, else its absolute form. */
+function canonicalDir(dir: string): string {
+  try { return realpathSync(dir); } catch { return resolve(dir); }
+}
+
+/**
+ * True when the quality-gate pack readPack would serve is heddle's OWN — the built-in directory (by
+ * canonical path, so a HEDDLE_PACKS entry with a trailing slash, a relative form or a symlink still
+ * counts) or a byte-identical copy of it (HEDDLE_PACKS pointing at another heddle checkout's
+ * skills/). Only that pack is the Spinventory app gate to be resolved per repository; a consumer's
+ * own quality-gate pack is theirs to keep. Unreadable → treated as built-in, so app text can never
+ * survive by accident (round-3 review #1).
+ */
+function servesBuiltinQualityGate(): boolean {
+  const dir = packDirFor('quality-gate');
+  if (!dir || canonicalDir(dir) === canonicalDir(builtinPacksDir())) return true;
+  try {
+    return readFileSync(join(dir, 'quality-gate.md')).equals(readFileSync(join(builtinPacksDir(), 'quality-gate.md')));
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Replace the app-specific quality gate with the gate for the repository that will receive the
+ * worker (qualityGateForRepository, from the dispatch cwd). Unknown repositories deliberately
+ * receive no quality gate: emitting app instructions into an unrelated checkout is less safe than
+ * omitting this task-fit pack.
+ */
+export function resolveQualityGateForCwd(cwd: string, skills: readonly string[]): string[] {
+  if (!skills.includes('quality-gate')) return [...skills];
+  // A CONSUMER pack named quality-gate (HEDDLE_PACKS shadowing the built-in) is that project's own
+  // gate, chosen by its configuration and read by readPack ahead of the built-in — keep it. Only
+  // heddle's built-in quality-gate, the Spinventory APP gate, is repository-resolved (codex P2, #95).
+  if (!servesBuiltinQualityGate()) return [...skills];
+  const gate = qualityGateForRepository(gitRepositoryFor(cwd));
+  if (gate === 'quality-gate') return [...skills];
+  const swapped = skills.flatMap((pack) => pack === 'quality-gate' ? (gate ? [gate] : []) : [pack]);
+  return swapped.filter((pack, i) => swapped.indexOf(pack) === i); // a caller may already name the repo gate
 }
 
 export function readPack(name: string): string {
