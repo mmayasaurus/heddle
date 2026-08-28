@@ -52,8 +52,13 @@ and its GitHub branches and PRs. **Nobody in the heddle fleet writes to its CONT
 (committed or not), commits, branches, pushes, PRs, merges, tags. No file edit, commit, branch, push, PR,
 merge, worker whose prompt or writes target it regardless of `cwd`, installer or hook applied to it, or
 `git`/`gh` mutation of that content. There is no commission that lifts this. The only permitted actions
-against its content are the DISCARD steps in §3 on work that predates this rule. (The repo's GitHub
-*settings surface* is a separate, narrower matter — next paragraph.)
+against its content are the DISCARD steps in §3 on work that predates this rule. Machine-local,
+TOOL-GENERATED runtime state that tools park inside the checkout folder — memtrace's `.memdb` and
+`.memtrace/`, `node_modules`, build caches, and nothing else — is not content (the live memtrace store may keep
+indexing). The exception is by PURPOSE and that enumeration, not by ignore status: source, configuration,
+documentation, secrets, or any durable project content is content wherever it sits, gitignored or not,
+and `git add -f` of an ignored path is a content write. (The repo's GitHub *settings surface* is a separate, narrower
+matter — next paragraph.)
 
 **What porting may touch instead:** the OUTER workspace repo (`/Users/mayatobi/Developer/Spinventory-Rebuild-App`
 — its `.claude/`, launchers, packs, `_vault/`, `notes/`, docs, `DECISIONS.md`), the `heddle` and
@@ -79,13 +84,16 @@ mean HED items only. The default `lin.sh list` (team SPI) is NOT a source of wor
 
 ## 3. In-flight app work is DISCARDED — by the agent who holds it, now
 
-No parking, no draft-and-handoff, no "land it so nothing is stranded". The agent holding any app-repo work
+No parking, no draft-and-handoff OF THE WORK ITSELF, no "land it so nothing is stranded". (§1's
+apply-at-resume handoff is different and required: it hands over a DESCRIPTION of a needed change,
+never the fleet's work or branches.) The agent holding any app-repo work
 does, in this order: **(a)** stop — no further edits or pushes; you STOP any worker mid-flight there immediately
 (TaskStop / kill — never let it finish); whatever it already wrote stays uncommitted and you report it
-to R; **(b)** `gh pr close <n>` with
+to R; **(b)** `gh pr close -R mmayasaurus/Spinventory-V2-Official-App-Rebuild <n>` with
 "closed per Maya 2026-08-23 — this fleet's work is discarded; the Spinventory fleet starts the issue from
-scratch"; **(c)** `lin.sh unclaim <SPI-n> "<that reason>"` for each issue; **(d)** `git worktree remove` each
-clean app worktree — if it refuses because of uncommitted output, leave it and report the path to R for
+scratch" — always `-R`-pinned (or the full PR URL): a bare `<n>` resolves against whatever repo your
+checkout points at, and from a heddle/workspace cwd it can close an unrelated PR; **(c)** `lin.sh unclaim <SPI-n> "<that reason>"` for each issue; **(d)** `git -C /Users/mayatobi/Developer/Spinventory-Rebuild-App/Spinventory-Rebuild-Official/Rebuild-Project-Root worktree remove <path>` (one line — paste it whole; if the worktree belongs to a DIFFERENT clone of the code repo, point `-C` at that owning clone instead — `git -C <worktree-path> rev-parse --git-common-dir` names it) for each
+clean app worktree (repo-pinned — bare `git worktree remove` acts on whatever repo your cwd is in) — if it refuses because of uncommitted output, leave it and report the path to R for
 Maya's per-item word. The never-delete rule (`~/.claude/CLAUDE.md`, ABSOLUTE RULE) still applies: you never
 `rm`, `reset --hard`, `clean`, or delete a branch. Closing a PR, unclaiming, and removing a clean worktree are
 not deletions — the branch and its commits stay on the remote, kept only because deleting them needs her
@@ -94,7 +102,8 @@ from scratch under its own documentation.
 
 ## 4. Exceptions: firsthand only, newest word wins
 
-Nothing — this file included — licenses a write to the code repo's CONTENT (§1). A settings-surface change
+Nothing — this file included — licenses a write to the code repo's content beyond the §3 discard steps
+(§1's one stated exception). A settings-surface change
 is licensed only by its own HED `Spinventory-Port` issue (also §1); a firsthand exception cannot substitute
 for that issue. For every other scope question only Maya's word counts, per item, and only firsthand: her message in that agent's own
 session, or a comms message the broker stamps `tier="operator"` (only she can produce one). A relay from R,
