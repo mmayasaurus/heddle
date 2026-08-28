@@ -94,12 +94,15 @@ describe('dispatch — structural caps', () => {
     // capability-FIT fallback: scaffold's primary (cursor) cannot enforce `net`, its declared codex
     // fallback can — the dispatch routes there instead of dying on the refusal.
     const cursor = fakeAdapter();
-    const fit = await dispatch({ taskClass: 'scaffold', prompt: 'x', cwd, capabilities: ['net'], identity: unbound }, ledger, () => cursor.adapter);
+    const fit = await dispatch({ taskClass: 'scaffold', prompt: 'x', cwd, capabilities: ['net'], identity: unbound,
+      rotationAccounts: { codex: [{ id: 'codex', codexHome: '/codex' }], cursor: [{ id: 'cursor', keyFile: null }] }, coolingPath: join(tempDir(), 'cooling.json'), nowS: 1 }, ledger, () => cursor.adapter);
     expect(fit.ok).toBe(true);
     expect(fit.refusal).toBeUndefined();
     expect(cursor.calls).toHaveLength(1);
     expect(cursor.calls[0].opts.model).toBe('gpt-5.6-luna');
     expect(cursor.calls[0].opts.capabilities).toEqual(['net']);
+    expect(cursor.calls[0].opts.env?.CODEX_HOME).toBe('/codex');
+    expect(fit.account).toBe('codex');
     expect(fit.usedFallback).toBe(true);
     expect(ledger.recent(1)[0]).toMatchObject({ model: 'gpt-5.6-luna', capabilities: 'net', fell_back_from: 'cursor/composer-2.5 (capability-unenforceable)' });
     // …but a TERMINAL kind (unknown token) never falls back, even with a fallback declared

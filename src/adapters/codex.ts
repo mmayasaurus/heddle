@@ -62,8 +62,11 @@ export class CodexAdapter implements WorkerAdapter {
     const args = this.buildArgs(prompt, opts);
 
     const started = Date.now();
+    // envUnset MUST be forwarded (HED-268): rotation unsets CODEX_HOME for the default account, and
+    // CODEX_HOME is deliberately NOT vendor-stripped by buildWorkerEnv, so a stray inherited one would
+    // otherwise leak and defeat the pick. Mirrors ClaudeAdapter's CLAUDE_CONFIG_DIR unset.
     const { stdout, stderr, exitCode } =
-      await run(this.bin, args, opts.cwd, opts.timeoutMs ?? 600_000, opts.env);
+      await run(this.bin, args, opts.cwd, opts.timeoutMs ?? 600_000, opts.env, opts.envUnset);
     const durationMs = Date.now() - started;
 
     if (stdout.trim().length === 0) {
