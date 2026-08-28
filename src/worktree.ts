@@ -35,6 +35,30 @@ function git(cwd: string, args: string[]): string {
   });
 }
 
+/** Git repository identity for cwd-based policy decisions; null outside a readable Git repository. */
+export interface GitRepository {
+  topLevel: string;
+  originUrl: string | null;
+}
+
+/**
+ * Resolve a cwd to its Git top level and, when configured, origin URL. Consumers use the top
+ * level as the primary identity and the remote only for repository names that are not stable on
+ * disk (for example a workspace checkout with a local worktree suffix).
+ */
+export function gitRepositoryFor(cwd: string): GitRepository | null {
+  try {
+    const topLevel = git(cwd, ['rev-parse', '--show-toplevel']).trim();
+    if (!topLevel) return null;
+    let originUrl: string | null = null;
+    try { originUrl = git(cwd, ['config', '--get', 'remote.origin.url']).trim() || null; }
+    catch { /* no origin is normal for a local checkout */ }
+    return { topLevel, originUrl };
+  } catch {
+    return null;
+  }
+}
+
 export interface WorktreeContext {
   /** The canonical (main) checkout this linked worktree belongs to. */
   parentRoot: string;
@@ -53,7 +77,8 @@ export interface WorktreeContext {
  */
 export function parentCheckoutOf(cwd: string): WorktreeContext | null {
   try {
-    const worktreeRoot = git(cwd, ['rev-parse', '--show-toplevel']).trim();
+    const repo = gitRepositoryFor(cwd);
+    const worktreeRoot = repo?.topLevel ?? '';
     if (!worktreeRoot) return null;
     const listed = git(cwd, ['worktree', 'list', '--porcelain']);
     const first = listed.split('\n').find((l) => l.startsWith('worktree '));

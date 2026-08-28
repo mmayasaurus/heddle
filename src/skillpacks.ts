@@ -1,7 +1,8 @@
 import { readFileSync, existsSync, writeFileSync, unlinkSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { delimiter, dirname, join } from 'node:path';
+import { basename, delimiter, dirname, join } from 'node:path';
 import { withFileLock } from './matlock.js';
+import { gitRepositoryFor } from './worktree.js';
 
 /**
  * Skill-pack materializer.
@@ -120,6 +121,30 @@ export function withMandatoryPacks(skills: readonly string[] | undefined): strin
     if (!out.includes(p)) out.push(p);
   }
   return out;
+}
+
+/**
+ * Replace the app-specific quality gate with the gate for the repository that will receive the
+ * worker. Unknown repositories deliberately receive no quality gate: emitting app instructions
+ * into an unrelated checkout is less safe than omitting this task-fit pack.
+ */
+export function resolveQualityGateForCwd(cwd: string, skills: readonly string[]): string[] {
+  if (!skills.includes('quality-gate')) return [...skills];
+
+  const repo = gitRepositoryFor(cwd);
+  if (!repo) return skills.filter((pack) => pack !== 'quality-gate');
+
+  const rootName = basename(repo.topLevel);
+  const parentName = basename(dirname(repo.topLevel));
+  let gate: string | null = null;
+  if (rootName === 'heddle') gate = 'repo-heddle-core';
+  else if (rootName === 'heddle-dashboard') gate = 'repo-heddle-dashboard';
+  else if (rootName.startsWith('Spinventory-Rebuild-App') || repo.originUrl?.includes('Spinventory-Rebuild-Workspace')) gate = 'repo-workspace';
+  else if (rootName === 'Rebuild-Project-Root' && parentName === 'Spinventory-Rebuild-Official') gate = 'quality-gate';
+
+  return gate === 'quality-gate'
+    ? [...skills]
+    : skills.flatMap((pack) => pack === 'quality-gate' ? (gate ? [gate] : []) : [pack]);
 }
 
 export function readPack(name: string): string {

@@ -9,7 +9,7 @@ import {
   type Route, type RouteTarget, type RoutingTable, type StructuralCaps,
 } from './routing.js';
 import { loadLanes, type LanesConfig } from './lanes.js';
-import { materializeAgentsMd, readPack, withMandatoryPacks, composePacks, modelFamilyPack, ALL_FAMILY_PACKS } from './skillpacks.js';
+import { materializeAgentsMd, readPack, withMandatoryPacks, composePacks, modelFamilyPack, ALL_FAMILY_PACKS, resolveQualityGateForCwd } from './skillpacks.js';
 
 /**
  * The exact pack list a dispatch to `provider` materializes (HED-93). Shared by runTarget AND
@@ -20,9 +20,10 @@ import { materializeAgentsMd, readPack, withMandatoryPacks, composePacks, modelF
  * explicit family-codex on a route that falls back to cursor would hand the worker two conflicting
  * instruction styles. The dispatcher's choice wins.
  */
-export function packsFor(provider: string, requested: readonly string[]): string[] {
+export function packsFor(provider: string, requested: readonly string[], cwd?: string): string[] {
   const withoutForeignFamilies = requested.filter((p) => !ALL_FAMILY_PACKS.has(p));
-  const base = withMandatoryPacks(withoutForeignFamilies);
+  const mandatory = withMandatoryPacks(withoutForeignFamilies);
+  const base = cwd ? resolveQualityGateForCwd(cwd, mandatory) : mandatory;
   const family = modelFamilyPack(provider);
   return family && !base.includes(family) ? [...base, family] : base;
 }
@@ -303,7 +304,7 @@ async function runTarget(
   const asked = route.reviewerPool
     ? [...new Set([...(target.skills ?? []), ...(req.skills ?? [])])]
     : (req.skills ?? target.skills ?? []);
-  const skills = packsFor(target.provider, asked);
+  const skills = packsFor(target.provider, asked, req.cwd);
   // mcp is a REQUIREMENT, not best-effort: validateWorkerMcp (below) THROWS if the resolved provider
   // has no attachment path. HED-249 reverses HED-205's graceful-degrade — an mcp-carrying class may
   // only resolve to mcp-attachable providers (a routing.v0.yaml CI invariant enforces this for
@@ -1221,7 +1222,7 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
     : providerExecution(table, target.provider);
   // Same list the worker would actually get, family pack included — a refusal or dry run that
   // advertises a different set than runTarget materializes is a lie the operator acts on (PR #34).
-  const skillsForRefusal = packsFor(target.provider, req.skills ?? target.skills ?? []);
+  const skillsForRefusal = packsFor(target.provider, req.skills ?? target.skills ?? [], req.cwd);
 
   // Account (HED-68/78): codex → the CODEX_HOME the caller selected; claude → the registry account
   // with the most 5h headroom (headless worker) — or advice only when the caller wants in-session.
@@ -1333,7 +1334,7 @@ function refuseDepth1(req: DispatchRequest, ctx: DispatchContext, table: Routing
       target = req.provider && req.model ? { ...route, provider: req.provider, model: req.model } : route;
       // Same list a real dispatch would materialize (packsFor), not just the mandatory union —
       // a refusal that names a different set is the dry-run-lies bug in another costume (PR #34).
-      skills = route.dispatchable ? packsFor(target.provider, req.skills ?? route.skills ?? []) : (req.skills ?? route.skills ?? []);
+      skills = route.dispatchable ? packsFor(target.provider, req.skills ?? route.skills ?? [], req.cwd) : (req.skills ?? route.skills ?? []);
     }
   } catch (err) {
     // Best-effort — the refusal stands regardless; but the enrichment failure is visible, not silent.
@@ -1362,7 +1363,7 @@ function refuseInSession(
   // (Non-dispatchable classes never reach here — refuseNotDispatchable handles them earlier.)
   // This instruction tells the orchestrator which packs to hand its OWN subagent, so it must name
   // exactly what a dispatch to that provider would materialize — family pack included (PR #34).
-  const skills = packsFor(route.provider, req.skills ?? route.skills ?? []);
+  const skills = packsFor(route.provider, req.skills ?? route.skills ?? [], req.cwd);
   const mcp = req.mcp ?? route.mcp ?? []; // the caller's override wins, exactly as it would on a run
   const alt = route.fallback ? ` To run it as a subprocess instead, name provider+model explicitly ` +
     `(e.g. provider="${route.fallback.provider}", model="${route.fallback.model}" — the class's ` +

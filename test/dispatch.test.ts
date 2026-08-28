@@ -15,9 +15,9 @@ describe('dispatch — class + explicit route, and in-session refusal', () => {
     );
     expect(fake.calls[0].opts.model).toBe('gpt-5.6-sol');
     expect(outcome).toMatchObject({ taskClass: 'bulk-mechanical', provider: 'codex', model: 'gpt-5.6-sol', usedFallback: false });
-    expect(outcome.skills).toEqual(['worker-role', 'worker-hygiene', 'quality-gate', 'family-codex']);
-    expect(fake.calls[0].agents).toContain('### quality-gate');
-    expect(ledger.recent(1)[0]).toMatchObject({ task_class: 'bulk-mechanical', model: 'gpt-5.6-sol', skills: 'worker-role,worker-hygiene,quality-gate,family-codex', refusal: null, ok: 1 });
+    expect(outcome.skills).toEqual(['worker-role', 'worker-hygiene', 'family-codex']);
+    expect(fake.calls[0].agents).not.toContain('### quality-gate');
+    expect(ledger.recent(1)[0]).toMatchObject({ task_class: 'bulk-mechanical', model: 'gpt-5.6-sol', skills: 'worker-role,worker-hygiene,family-codex', refusal: null, ok: 1 });
   });
 
   it('replaces class default skills with explicit skills while retaining worker-role', async () => {
@@ -79,12 +79,12 @@ describe('dispatch — class + explicit route, and in-session refusal', () => {
     expect(outcome.refusal?.code).toBe('claude-in-session');
     expect(outcome.refusal?.reason).toContain('deep-implementation');
     expect(outcome.refusal?.reason).toContain('claude/opus');
-    for (const text of ['Agent tool', 'opus', 'worker-role', 'code-discovery', 'quality-gate', 'memtrace', 'gpt-5.6-sol']) expect(outcome.refusal?.instruction).toContain(text);
+    for (const text of ['Agent tool', 'opus', 'worker-role', 'code-discovery', 'memtrace', 'gpt-5.6-sol']) expect(outcome.refusal?.instruction).toContain(text);
     // family-claude included: an in-session refusal names the packs a REAL dispatch to that
     // provider would materialize, so the orchestrator hands its subagent the same set (PR #34).
-    expect(outcome.skills).toEqual(['worker-role', 'worker-hygiene', 'code-discovery', 'quality-gate', 'family-claude']);
+    expect(outcome.skills).toEqual(['worker-role', 'worker-hygiene', 'code-discovery', 'family-claude']);
     expect(fake.calls).toHaveLength(0);
-    expect(ledger.recent(1)[0]).toMatchObject({ refusal: 'claude-in-session', ok: 0, task_class: 'deep-implementation', provider: 'claude', model: 'opus', orchestrator: 'U', issue: 'HED-1', skills: 'worker-role,worker-hygiene,code-discovery,quality-gate,family-claude' });
+    expect(ledger.recent(1)[0]).toMatchObject({ refusal: 'claude-in-session', ok: 0, task_class: 'deep-implementation', provider: 'claude', model: 'opus', orchestrator: 'U', issue: 'HED-1', skills: 'worker-role,worker-hygiene,code-discovery,family-claude' });
     expect(ledger.recent(1)[0].finished_at).not.toBeNull();
     expect(ledger.inFlight()).toEqual([]);
   });
