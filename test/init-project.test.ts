@@ -360,6 +360,33 @@ describe('init-project', () => {
       expect(readFileSync(registryPath, 'utf8')).toContain('"other"');
     });
 
+    it('writes NO target-repo files when the registry raced after planning (CAS pre-pass aborts before any write)', () => {
+      const opts = options(tempDir());
+      mkdirSync(join(opts.homeDir, '.heddle'), { recursive: true });
+      const registryPath = join(opts.homeDir, '.heddle', 'projects.json');
+      writeFileSync(registryPath, JSON.stringify({ schemaVersion: 1, projects: [{ name: 'before', workspaceRoots: [join(opts.homeDir, 'before')], agentIds: ['B'], linearTeam: 'B', defaultRoom: '#b', launcher: 'before.sh' }] }));
+      const plan = planInstall(opts);
+      // Race: the registry changes between plan and apply.
+      writeFileSync(registryPath, JSON.stringify({ schemaVersion: 1, projects: [{ name: 'other', workspaceRoots: [join(opts.homeDir, 'other')], agentIds: ['O'], linearTeam: 'O', defaultRoom: '#o', launcher: 'other.sh' }] }));
+      const settingsPath = join(opts.dir, '.claude', 'settings.json');
+      expect(() => applyInstall(plan)).toThrow(/registry changed underneath/i);
+      // The pre-pass aborts before ANY target-repo write — no half-installed repo (settings absent).
+      expect(existsSync(settingsPath)).toBe(false);
+    });
+
+    it('fails rather than dropping another root\'s key when memtrace-enforce.json changed after planning (CAS)', () => {
+      const opts = options(tempDir());
+      mkdirSync(join(opts.homeDir, '.heddle'), { recursive: true });
+      const enforcePath = join(opts.homeDir, '.heddle', 'memtrace-enforce.json');
+      writeFileSync(enforcePath, JSON.stringify({ '/repoA': true }));
+      const plan = planInstall(opts);
+      // Race: a concurrent init on a different root added its key between plan and apply.
+      writeFileSync(enforcePath, JSON.stringify({ '/repoA': true, '/repoC': false }));
+      expect(() => applyInstall(plan)).toThrow(/memtrace-enforce changed underneath/i);
+      // repoC's key survives — the CAS aborts instead of a last-writer-wins overwrite dropping it.
+      expect(readFileSync(enforcePath, 'utf8')).toContain('/repoC');
+    });
+
     it('preserves an unrelated oversized JSON integer byte-exact when updating a project', () => {
       const opts = options(tempDir());
       mkdirSync(join(opts.homeDir, '.heddle'), { recursive: true });

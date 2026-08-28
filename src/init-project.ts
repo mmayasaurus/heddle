@@ -294,11 +294,15 @@ function registryStep(input: InstallOptions, dir: string, state: any, details: a
 }
 function enforceMarkerStep(input: InstallOptions, dir: string, homeDir: string, dryRun: boolean): InstallStep {
   const path = join(homeDir, '.heddle', 'memtrace-enforce.json');
-  const existing = existsSync(path) ? readJson(path, 'memtrace-enforce.json') : {};
+  const rawContent = existsSync(path) ? readFileSync(path, 'utf8') : undefined;
+  const existing = rawContent === undefined ? {} : readJson(path, 'memtrace-enforce.json');
   const aliases = Object.entries(existing).filter(([key]) => canonicalizePath(key) === dir);
   const priorValue = aliases[0]?.[1];
   const next = Object.fromEntries(Object.entries(existing).filter(([key]) => canonicalizePath(key) !== dir));
-  return stepFor(path, 'memtrace-enforce', json({ ...next, [dir]: input.enforceMemtrace === true ? true : (priorValue ?? false) }), dryRun);
+  // expectedContent makes this a compare-and-swap like the registry step: a concurrent init on a
+  // different root that rewrote memtrace-enforce.json between plan and apply aborts instead of
+  // dropping the other root's key (last-writer-wins). Verified by the CAS pre-pass in applyInstall.
+  return { ...stepFor(path, 'memtrace-enforce', json({ ...next, [dir]: input.enforceMemtrace === true ? true : (priorValue ?? false) }), dryRun), expectedContent: rawContent ?? null };
 }
 
 export function planInstall(input: InstallOptions): InstallPlan {
@@ -313,13 +317,20 @@ export function planInstall(input: InstallOptions): InstallPlan {
 
 export function applyInstall(plan: InstallPlan, dryRun = false): InstallReport {
   const skipWrites = dryRun || plan.options.dryRun === true;
+  // CAS pre-pass: verify EVERY compare-and-swap precondition (registry + memtrace-enforce) BEFORE
+  // writing anything. Otherwise a stale expectedContent throws only when its step is reached — after
+  // the target repo's settings/rules/ignore/gate were already written — leaving a half-installed repo
+  // that is not in projects.json. Checking first makes a raced apply abort before any mutation.
+  if (!skipWrites) {
+    for (const step of plan.steps) {
+      if (step.expectedContent === undefined) continue;
+      const current = existsSync(step.path) ? readFileSync(step.path, 'utf8') : null;
+      if (current !== step.expectedContent) throw new Error(`${step.step} changed underneath this install plan — re-run heddle init-project`);
+    }
+  }
   for (const step of plan.steps) {
     if (skipWrites || !step.content || step.action === 'ok' || step.action === 'skip') continue;
     mkdirSync(dirname(step.path), { recursive: true });
-    if (step.expectedContent !== undefined) {
-      const current = existsSync(step.path) ? readFileSync(step.path, 'utf8') : null;
-      if (current !== step.expectedContent) throw new Error('registry changed underneath this install plan — re-run heddle init-project');
-    }
     atomicWriteFile(step.path, step.content);
   }
   const root = plan.options.dir;

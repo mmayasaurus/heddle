@@ -12,9 +12,9 @@ import { classifyEffort, assessResult } from './classify.js';
 import { resolveIdentity } from './identity.js';
 import { loadProjectRegistry, DEFAULT_PROJECTS_PATH } from './projects.js';
 import { applyInstall, planInstall, redactReport } from './init-project.js';
-import { isDispatchExcluded, pickClaudeAccount, readClaudeAccounts } from './capaware.js';
+import { pickClaudeAccount, readClaudeAccounts } from './capaware.js';
 import { claudeAccountRows, pickClaudeAccountsBatch, usableClaudeCaps } from './account-pick.js';
-import { bindingMeter, claudeFloorsFrom, headroomPct, isFloored } from './floors.js';
+import { bindingMeter, claudeFloorsFrom } from './floors.js';
 import { loadLanes } from './lanes.js';
 import { readProviderCaps } from './usage.js';
 
