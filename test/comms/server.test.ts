@@ -1,5 +1,5 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, mkdirSync, rmSync, readFileSync, writeFileSync, statSync, existsSync, chmodSync } from 'node:fs';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { mkdtempSync, mkdirSync, rmSync, readFileSync, writeFileSync, statSync, existsSync, chmodSync, symlinkSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -48,8 +48,8 @@ describe('heddle-comms server (in-process)', () => {
   const baseEnv = () => ({ HEDDLE_COMMS_DB: dbPath, HEDDLE_LEDGER_DB: join(dir, 'no-such-ledger.db') });
   const initToken = (opts: { rotate?: boolean } = {}) => initOperatorToken({ ...opts, path: tokenPath });
 
-  async function connect(env: Record<string, string>) {
-    const server = createCommsServer({ env: { ...baseEnv(), ...env }, cwd: dir, warn: (m) => warnings.push(m), operatorTokenPath: tokenPath });
+  async function connect(env: Record<string, string>, extra: Partial<Parameters<typeof createCommsServer>[0]> = {}) {
+    const server = createCommsServer({ env: { ...baseEnv(), ...env }, cwd: dir, warn: (m) => warnings.push(m), operatorTokenPath: tokenPath, ...extra });
     const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
     const client = new Client({ name: 'test', version: '0' }, { capabilities: {} });
     await server.start(serverSide);
@@ -85,6 +85,239 @@ describe('heddle-comms server (in-process)', () => {
     expect(resolveCommsIdentity({ ...baseEnv(), HEDDLE_AGENT: 'operator' }, dir, (m) => w.push(m), tokenPath)).toEqual({ identity: null, isOperator: false });
     expect(w.some((m) => m.includes('refusing to bind the operator identity'))).toBe(true);
     expect(resolveCommsIdentity({ ...baseEnv() }, dir, (m) => w.push(m), tokenPath)).toEqual({ identity: null, isOperator: false });
+  });
+
+  describe('regression PR#387 — late Claude identity binding', () => {
+    const bridgePath = (cacheDir: string) => join(cacheDir, `pid-${process.ppid}.label`);
+
+    it('binds the same unbound server on its next sender-requiring tool call after the PID bridge appears', async () => {
+      const cacheDir = join(dir, 'identity-cache');
+      mkdirSync(cacheDir);
+      const session = await connect({ HEDDLE_IDENTITY_CACHE_DIR: cacheDir });
+
+      const unbound = await call(session.client, 'post_message', { to: '#fleet', body: 'before rename' });
+      expect(unbound.isError).toBe(true);
+      expect(unbound.text).toMatch(/no bound comms identity/);
+
+      writeFileSync(bridgePath(cacheDir), 'V\n');
+      const bound = await call(session.client, 'post_message', { to: '#fleet', body: 'after rename' });
+      expect(bound.parsed).toMatchObject({ outcome: 'logged' });
+      expect(bound.text).toContain('from V to #fleet');
+      expect(session.server.identity).toBe('V');
+    });
+
+    it('restores and PUMPS a persisted held message after a lazily-bound restart', async () => {
+      // r3 (ledger 619): the pump must do REAL work for a lazy session — a held delivery persisted
+      // by a previous run is restored at lazy bind and released once the target unblocks.
+      const cacheDir = join(dir, 'identity-cache');
+      mkdirSync(cacheDir);
+      const states = new Map([['V.1', 'permission-gate']]);
+      const targetState = { state: (address: string) => (states.get(address) ?? 'idle') as 'idle' | 'permission-gate' };
+      const first = await connect({ HEDDLE_AGENT: 'V' }, { targetState });
+      expect((await call(first.client, 'mint_child', { label: 'worker' })).parsed).toMatchObject({ address: 'V.1' });
+      const held = await call(first.client, 'post_message', { to: 'V.1', body: 'held until the gate clears' });
+      expect(held.parsed).toMatchObject({ outcome: 'held', code: 'permission-gate' });
+
+      // Restart UNBOUND on the same log; bind lazily via the bridge; the hold must come back.
+      const second = await connect({ HEDDLE_IDENTITY_CACHE_DIR: cacheDir }, { targetState });
+      writeFileSync(bridgePath(cacheDir), 'V\n');
+      expect((await call(second.client, 'post_message', { to: '#fleet', body: 'bind' })).parsed).toMatchObject({ outcome: 'logged' });
+      expect(warnings.some((m) => m.includes('restored 1 held message'))).toBe(true);
+
+      states.set('V.1', 'idle');
+      await second.server.broker.pump();
+      // V.1 has no live channel session, so the cleared gate records a REAL delivery attempt
+      // (attempt ≥2, outcome failed/no-live-session) and stays queued for retry — the broker's
+      // documented behavior; what this test proves is that the RESTORED hold was actually pumped.
+      const attempts = second.server.log.deliveries().filter(
+        (d) => d.outcome === 'failed' && d.code === 'no-live-session' && (d.attempt ?? 0) >= 2);
+      expect(attempts.length).toBeGreaterThanOrEqual(1);
+    }, 10_000);
+
+    it('keeps the env identity ahead of the PID bridge', async () => {
+      const cacheDir = join(dir, 'identity-cache');
+      mkdirSync(cacheDir);
+      writeFileSync(bridgePath(cacheDir), 'R\n');
+      const session = await connect({ HEDDLE_AGENT: 'V', HEDDLE_IDENTITY_CACHE_DIR: cacheDir });
+
+      expect((await call(session.client, 'post_message', { to: '#fleet', body: 'env wins' })).text).toContain('from V to #fleet');
+      expect(session.server.identity).toBe('V');
+    });
+
+    it('caps a PID-bridge-bound orchestrator at agent-message while an env-bound orchestrator keeps directive lineage', async () => {
+      const cacheDir = join(dir, 'identity-cache');
+      mkdirSync(cacheDir);
+      writeFileSync(bridgePath(cacheDir), 'V\n');
+      const bridge = await connect({ HEDDLE_IDENTITY_CACHE_DIR: cacheDir });
+      const env = await connect({ HEDDLE_AGENT: 'R' });
+
+      expect((await call(bridge.client, 'mint_child', { label: 'worker' })).parsed).toMatchObject({ address: 'V.1' });
+      expect((await call(env.client, 'mint_child', { label: 'worker' })).parsed).toMatchObject({ address: 'R.1' });
+
+      expect((await call(bridge.client, 'post_message', { to: 'V.1', body: 'bridge forged directive' })).parsed)
+        .toMatchObject({ tier: 'agent-message' });
+      expect((await call(env.client, 'post_message', { to: 'R.1', body: 'env directive' })).parsed)
+        .toMatchObject({ tier: 'orchestrator-directive' });
+      expect((await call(bridge.client, 'comms_whoami')).parsed)
+        .toMatchObject({ identity: 'V', bindingSource: 'pid-bridge', tierCap: 'agent-message' });
+      expect((await call(env.client, 'comms_whoami')).parsed)
+        .toMatchObject({ identity: 'R', bindingSource: 'env', tierCap: null });
+    });
+
+    it('caps a LATE .fleet-agent binding at agent-message (a model could write that file post-startup)', async () => {
+      // on-PR HIGH (#92): lazy re-resolution accepts a cwd .fleet-agent, whose source is 'fleet-file'
+      // (tierCap null at STARTUP) — but bound LATE it must still be capped, or the model escalates.
+      const cacheDir = join(dir, 'identity-cache');
+      mkdirSync(cacheDir);
+      const session = await connect({ HEDDLE_IDENTITY_CACHE_DIR: cacheDir });
+      expect((await call(session.client, 'post_message', { to: '#fleet', body: 'unbound' })).isError).toBe(true);
+      // The model writes .fleet-agent in its cwd AFTER startup, naming an orchestrator.
+      writeFileSync(join(dir, '.fleet-agent'), 'V\n');
+      await call(session.client, 'mint_child', { label: 'w' });
+      expect((await call(session.client, 'post_message', { to: 'V.1', body: 'late fleet-file directive?' })).parsed)
+        .toMatchObject({ tier: 'agent-message' });
+      expect((await call(session.client, 'comms_whoami')).parsed)
+        .toMatchObject({ identity: 'V', bindingSource: 'fleet-file', tierCap: 'agent-message' });
+      rmSync(join(dir, '.fleet-agent'));
+    });
+
+    it('comms_whoami reports the identity immediately after a lazy rename bind', async () => {
+      const cacheDir = join(dir, 'identity-cache');
+      mkdirSync(cacheDir);
+      const session = await connect({ HEDDLE_IDENTITY_CACHE_DIR: cacheDir });
+      expect((await call(session.client, 'comms_whoami')).parsed).toMatchObject({ identity: null });
+      writeFileSync(bridgePath(cacheDir), 'V\n');
+      // whoami itself must resolve the pending bind — no other sender-requiring call first.
+      expect((await call(session.client, 'comms_whoami')).parsed)
+        .toMatchObject({ identity: 'V', bindingSource: 'pid-bridge', tierCap: 'agent-message' });
+    });
+
+    it('does not bind a worker from the PID bridge', async () => {
+      const cacheDir = join(dir, 'identity-cache');
+      mkdirSync(cacheDir);
+      writeFileSync(bridgePath(cacheDir), 'V\n');
+      const session = await connect({ HEDDLE_WORKER: '1', HEDDLE_IDENTITY_CACHE_DIR: cacheDir });
+
+      const result = await call(session.client, 'post_message', { to: '#fleet', body: 'worker bridge' });
+      expect(result.isError).toBe(true);
+      expect(result.text).toMatch(/no bound comms identity/);
+      expect((await call(session.client, 'comms_whoami')).parsed).toMatchObject({ identity: null, bindingSource: null, tierCap: null });
+    });
+
+    it('refuses symlinked and oversized PID bridge labels with one warning', async () => {
+      const cacheDir = join(dir, 'identity-cache');
+      mkdirSync(cacheDir);
+      const outside = join(dir, 'outside-label');
+      writeFileSync(outside, 'V\n');
+      symlinkSync(outside, bridgePath(cacheDir));
+      const symlinked = await connect({ HEDDLE_IDENTITY_CACHE_DIR: cacheDir });
+      expect((await call(symlinked.client, 'post_message', { to: '#fleet', body: 'symlink label' })).isError).toBe(true);
+      expect((await call(symlinked.client, 'post_message', { to: '#fleet', body: 'symlink retry' })).isError).toBe(true);
+      expect(warnings.filter((m) => m.includes('must be a regular file')).length).toBe(1);
+
+      rmSync(bridgePath(cacheDir));
+      writeFileSync(bridgePath(cacheDir), 'V'.repeat(257));
+      const oversized = await connect({ HEDDLE_IDENTITY_CACHE_DIR: cacheDir });
+      expect((await call(oversized.client, 'post_message', { to: '#fleet', body: 'oversized label' })).isError).toBe(true);
+      expect((await call(oversized.client, 'post_message', { to: '#fleet', body: 'oversized retry' })).isError).toBe(true);
+      expect(warnings.filter((m) => m.includes('exceeds 256 bytes')).length).toBe(1);
+    });
+
+    it('ignores a bridge file that predates the host process (recycled-pid guard)', async () => {
+      const cacheDir = join(dir, 'identity-cache');
+      mkdirSync(cacheDir);
+      writeFileSync(bridgePath(cacheDir), 'V\n');
+      const past = new Date(Date.now() - 7 * 24 * 3600 * 1000);
+      utimesSync(bridgePath(cacheDir), past, past);
+      const session = await connect({
+        HEDDLE_IDENTITY_CACHE_DIR: cacheDir,
+        HEDDLE_PID_BRIDGE_PARENT_START_MS: String(Date.now() - 60_000),
+      });
+      const result = await call(session.client, 'post_message', { to: '#fleet', body: 'stale label' });
+      expect(result.isError).toBe(true);
+      expect(warnings.some((m) => m.includes('recycled pid'))).toBe(true);
+      expect(session.server.identity).toBeNull();
+    });
+
+    it('accepts a bridge file written after the host process started', async () => {
+      const cacheDir = join(dir, 'identity-cache');
+      mkdirSync(cacheDir);
+      writeFileSync(bridgePath(cacheDir), 'V\n');
+      const session = await connect({
+        HEDDLE_IDENTITY_CACHE_DIR: cacheDir,
+        HEDDLE_PID_BRIDGE_PARENT_START_MS: String(Date.now() - 3600_000),
+      });
+      expect((await call(session.client, 'post_message', { to: '#fleet', body: 'fresh label' })).text).toContain('from V to #fleet');
+    });
+
+    it('refuses an operator PID bridge label and stays unbound', async () => {
+      const cacheDir = join(dir, 'identity-cache');
+      mkdirSync(cacheDir);
+      writeFileSync(bridgePath(cacheDir), 'operator\n');
+      const session = await connect({ HEDDLE_IDENTITY_CACHE_DIR: cacheDir });
+
+      const result = await call(session.client, 'post_message', { to: '#fleet', body: 'not operator' });
+      expect(result.isError).toBe(true);
+      expect(result.text).toMatch(/no bound comms identity/);
+      expect(session.server.identity).toBeNull();
+    });
+
+    it('pins a PID-bridge identity after binding even if the label file later changes', async () => {
+      const cacheDir = join(dir, 'identity-cache');
+      mkdirSync(cacheDir);
+      const session = await connect({ HEDDLE_IDENTITY_CACHE_DIR: cacheDir });
+
+      writeFileSync(bridgePath(cacheDir), 'V\n');
+      expect((await call(session.client, 'post_message', { to: '#fleet', body: 'first label' })).text).toContain('from V to #fleet');
+      writeFileSync(bridgePath(cacheDir), 'R\n');
+      expect((await call(session.client, 'post_message', { to: '#fleet', body: 'second label' })).text).toContain('from V to #fleet');
+      expect(session.server.identity).toBe('V');
+      expect(warnings.filter((m) => m.includes('identity changed after binding')).length).toBe(1);
+    });
+
+    it('does one post-pin divergence check, then no longer reads the PID bridge', async () => {
+      const cacheDir = join(dir, 'identity-cache');
+      mkdirSync(cacheDir);
+      const session = await connect({ HEDDLE_IDENTITY_CACHE_DIR: cacheDir });
+
+      writeFileSync(bridgePath(cacheDir), 'V\n');
+      expect((await call(session.client, 'post_message', { to: '#fleet', body: 'bind' })).text).toContain('from V to #fleet');
+      writeFileSync(bridgePath(cacheDir), 'R\n');
+      expect((await call(session.client, 'post_message', { to: '#fleet', body: 'divergence check' })).text).toContain('from V to #fleet');
+      rmSync(cacheDir, { recursive: true, force: true });
+      expect((await call(session.client, 'post_message', { to: '#fleet', body: 'no more bridge reads' })).text).toContain('from V to #fleet');
+      expect(warnings.some((m) => m.includes('cache is not a directory'))).toBe(false);
+    });
+
+    it('latches the post-pin check when the PID bridge disappears', async () => {
+      const cacheDir = join(dir, 'identity-cache');
+      mkdirSync(cacheDir);
+      const session = await connect({ HEDDLE_IDENTITY_CACHE_DIR: cacheDir });
+
+      writeFileSync(bridgePath(cacheDir), 'V\n');
+      expect((await call(session.client, 'post_message', { to: '#fleet', body: 'bind' })).text).toContain('from V to #fleet');
+      rmSync(bridgePath(cacheDir));
+      expect((await call(session.client, 'post_message', { to: '#fleet', body: 'bridge absent' })).text).toContain('from V to #fleet');
+      writeFileSync(bridgePath(cacheDir), 'R\n');
+      // Third post stays within the broker's burst limit (3/1s) and fully proves the latch: the
+      // single post-pin check was consumed by the bridge-absent call, so this divergent file is
+      // never even read — no rebind, no divergence warning.
+      expect((await call(session.client, 'post_message', { to: '#fleet', body: 'still pinned' })).text).toContain('from V to #fleet');
+      expect(warnings.some((m) => m.includes('identity changed after binding'))).toBe(false);
+    });
+
+    it('never rebinds a startup-bound HEDDLE_AGENT session even when a PID bridge names another agent', async () => {
+      const cacheDir = join(dir, 'identity-cache');
+      mkdirSync(cacheDir);
+      writeFileSync(bridgePath(cacheDir), 'R\n');
+      const session = await connect({ HEDDLE_AGENT: 'V', HEDDLE_IDENTITY_CACHE_DIR: cacheDir });
+
+      expect(session.server.identity).toBe('V');
+      for (const body of ['startup bound', 'still pinned', 'still V']) {
+        expect((await call(session.client, 'post_message', { to: '#fleet', body })).text).toContain('from V to #fleet');
+      }
+      expect(warnings.some((m) => m.includes('identity changed after binding'))).toBe(false);
+    });
   });
 
   it('post_message records meta.important for an ⭐-tagged message, absent otherwise (HED-328)', async () => {
@@ -126,6 +359,15 @@ describe('heddle-comms server (in-process)', () => {
     writeFileSync(join(dir, '.fleet-agent'), 'V\n');
     expect(resolveFleetIdentity({ ...baseEnv() }, deep, warn)).toBe('V');
     expect(resolveCommsIdentity({ ...baseEnv() }, deep, warn, tokenPath)).toEqual({ identity: 'V', isOperator: false });
+  });
+
+  it('resolveFleetIdentity ignores a PID bridge unless the caller opts in', () => {
+    const cacheDir = join(dir, 'identity-cache');
+    mkdirSync(cacheDir);
+    writeFileSync(join(cacheDir, `pid-${process.ppid}.label`), 'V\n');
+    const env = { ...baseEnv(), HEDDLE_IDENTITY_CACHE_DIR: cacheDir };
+    expect(resolveFleetIdentity(env, dir, () => undefined)).toBeNull();
+    expect(resolveFleetIdentity(env, dir, () => undefined, () => undefined, { allowPidBridge: true })).toBe('V');
   });
 
   it('resolveFleetIdentity sees the fleet letter THROUGH the operator binding that masks it (the rotator guard)', () => {

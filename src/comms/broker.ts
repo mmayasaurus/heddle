@@ -92,6 +92,8 @@ export interface PostRequest {
   body: string;
   kind?: MessageKind;
   requestedTier?: Tier | null;
+  /** Host-authored ceiling for this sender's binding provenance. */
+  tierCap?: 'agent-message' | null;
   replyTo?: number | null;
   issue?: string | null;
   thread?: string | null;
@@ -421,7 +423,7 @@ export class Broker {
         from: req.from, to, body: req.body, kind: req.kind, requestedTier: req.requestedTier,
         replyTo: req.replyTo, issue: req.issue, thread: req.thread, mentions,
         meta: { ...callerMeta, ...(to !== req.to ? { resolvedFrom: req.to } : {}) },
-      });
+      }, { tierCap: req.tierCap });
     } catch (err) {
       if (floorTakenHere) this.log.releaseFloor(to, req.from); // no message → no floor
       return this.refuse(req.from, to, 'invalid-message', (err as Error).message ?? String(err));
