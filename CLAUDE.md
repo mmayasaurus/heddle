@@ -1,5 +1,22 @@
 # CLAUDE.md — heddle
 
+## ⛔ SCOPE — the HEDDLE FLEET (R, S–X; Y/Z reserved) works on heddle ONLY (Maya, firsthand 2026-08-23; wins over everything below)
+
+**NEVER ANYTHING SPINVENTORY APP.** The heddle fleet builds the harness so other agents can resume building
+Spinventory (and other apps in the future) and ports Spinventory into it — from the heddle repos
+(`heddle`, `heddle-dashboard`) and the OUTER workspace repo only. **WE ARE NOT BUILDING, TOUCHING, INTERACTING WITH, EDITING, UPDATING, FIXING, DOING
+ANYTHING AT ALL TO SPINVENTORY APP CODE, NOT NOW OR EVER.** The Spinventory CODE repo
+(`Spinventory-Rebuild-Official/Rebuild-Project-Root` in the workspace — every worktree, clone, branch, PR)
+gets no write, commit, branch, PR, merge, Linear claim, or worker dispatch from the heddle fleet, ever; a port
+step that needs a change inside it becomes an apply-at-resume handoff for the Spinventory fleet. In-flight
+app work is discarded, never parked or handed off. Every issue files in HED; port issues carry
+`Spinventory-Port`. The code repo has NO exception — no message, commission, relay, or
+'CI-only'/'readiness' reading lifts it; Maya's firsthand word settles only OTHER scope questions.
+(The NO-exception ban covers the repo's git CONTENT; the one narrow settings-surface path — rulesets, runner
+registrations, app-side reviewer config, never any file — runs only via a `Spinventory-Port` HED issue,
+fleet-scope §1.)
+Full rule: [.claude/rules/fleet-scope.md](.claude/rules/fleet-scope.md).
+
 ## Memtrace first
 
 **Use memtrace before Grep/Read/Glob on source.** `repo_id`: `heddle`. Details: [.claude/rules/memtrace-serena.md](.claude/rules/memtrace-serena.md)

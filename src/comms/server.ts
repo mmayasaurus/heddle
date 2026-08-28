@@ -546,7 +546,8 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
       from: who, to: requireStr(a.to, 'to'), body: requireStr(a.body, 'body'), kind: str(a.kind) as MessageKind | undefined,
       requestedTier: (str(a.requested_tier) as Tier | undefined) ?? null, replyTo: num(a.reply_to) ?? null,
       tierCap: tierCap(),
-      issue: str(a.issue) ?? null, thread: str(a.thread) ?? null, meta: { transport: 'heddle-comms' },
+      issue: str(a.issue) ?? null, thread: str(a.thread) ?? null,
+      meta: { transport: 'heddle-comms', ...(a.important === true ? { important: true } : {}) },
       mentions: validMentionsArg(a.mentions),
       holdFloor: a.hold_floor === true, releaseFloor: a.release_floor === true,
     });
@@ -720,6 +721,7 @@ export const TOOLS = [
         mentions: { type: 'array', items: { type: 'string' }, maxItems: 16, description: 'Rooms: addresses to explicitly ping — each gets a targeted push-or-inbox delivery (never parsed from the body).' },
         hold_floor: { type: 'boolean', description: 'Rooms: take the floor before posting (multi-part reply).' },
         release_floor: { type: 'boolean', description: 'Rooms: release the floor after this post.' },
+        important: { type: 'boolean', description: 'Mark ⭐ important-for-Maya: the message is preserved as a notification (never silently dropped) atop her pocket-console Approvals feed + desktop tray until she reads it, deep-linked to this message. Tag SPARINGLY — an ⭐ is a promise the interrupt is worth her attention; orchestrators may strip abuse.' },
       },
       required: ['to', 'body'],
     },
