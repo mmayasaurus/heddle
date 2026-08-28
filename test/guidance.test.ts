@@ -229,3 +229,17 @@ describe('dispatchGuidance — repository-resolved gate (HED-389)', () => {
     expect(taskFitPacks(table, { task_class: 'edit-with-defaults' })).toEqual(['quality-gate', 'code-discovery']);
   });
 });
+
+describe('hookResponse — resolves the gate for the dispatch cwd (HED-389)', () => {
+  const { tempDir } = useTempResources('heddle-guidance-hook-');
+
+  it('warns for an editing class whose only default resolves to no gate in the given cwd, and is silent where the repo gate is carried', () => {
+    const unknown = initRepoFixture(join(tempDir(), 'unknown-repo'), 'worker');
+    const warned = hookResponse({ tool_name: 'mcp__heddle__dispatch_worker', tool_input: { task_class: 'edit-gate-only', cwd: unknown } }, table);
+    expect(warned).not.toBeNull();
+    expect(warned).toContain('resolves to NO gate');
+
+    const heddle = initRepoFixture(join(tempDir(), 'heddle'), '.worktrees/S-hed389', { linkedWorktree: true });
+    expect(hookResponse({ tool_name: 'mcp__heddle__dispatch_worker', tool_input: { task_class: 'edit-gate-only', cwd: heddle } }, table)).toBeNull();
+  });
+});

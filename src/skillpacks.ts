@@ -1,6 +1,6 @@
-import { readFileSync, existsSync, writeFileSync, unlinkSync, readdirSync } from 'node:fs';
+import { readFileSync, existsSync, writeFileSync, unlinkSync, readdirSync, realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { basename, delimiter, dirname, join } from 'node:path';
+import { basename, delimiter, dirname, join, resolve } from 'node:path';
 import { withFileLock } from './matlock.js';
 import { gitRepositoryFor, type GitRepository } from './worktree.js';
 
@@ -179,6 +179,29 @@ export function qualityGateForRepository(repo: GitRepository | null): string | n
   return byFolder ?? byOrigin;
 }
 
+/** A directory's canonical identity: its real path when it exists, else its absolute form. */
+function canonicalDir(dir: string): string {
+  try { return realpathSync(dir); } catch { return resolve(dir); }
+}
+
+/**
+ * True when the quality-gate pack readPack would serve is heddle's OWN — the built-in directory (by
+ * canonical path, so a HEDDLE_PACKS entry with a trailing slash, a relative form or a symlink still
+ * counts) or a byte-identical copy of it (HEDDLE_PACKS pointing at another heddle checkout's
+ * skills/). Only that pack is the Spinventory app gate to be resolved per repository; a consumer's
+ * own quality-gate pack is theirs to keep. Unreadable → treated as built-in, so app text can never
+ * survive by accident (round-3 review #1).
+ */
+function servesBuiltinQualityGate(): boolean {
+  const dir = packDirFor('quality-gate');
+  if (!dir || canonicalDir(dir) === canonicalDir(builtinPacksDir())) return true;
+  try {
+    return readFileSync(join(dir, 'quality-gate.md')).equals(readFileSync(join(builtinPacksDir(), 'quality-gate.md')));
+  } catch {
+    return true;
+  }
+}
+
 /**
  * Replace the app-specific quality gate with the gate for the repository that will receive the
  * worker (qualityGateForRepository, from the dispatch cwd). Unknown repositories deliberately
@@ -190,8 +213,7 @@ export function resolveQualityGateForCwd(cwd: string, skills: readonly string[])
   // A CONSUMER pack named quality-gate (HEDDLE_PACKS shadowing the built-in) is that project's own
   // gate, chosen by its configuration and read by readPack ahead of the built-in — keep it. Only
   // heddle's built-in quality-gate, the Spinventory APP gate, is repository-resolved (codex P2, #95).
-  const packDir = packDirFor('quality-gate');
-  if (packDir && packDir !== builtinPacksDir()) return [...skills];
+  if (!servesBuiltinQualityGate()) return [...skills];
   const gate = qualityGateForRepository(gitRepositoryFor(cwd));
   if (gate === 'quality-gate') return [...skills];
   const swapped = skills.flatMap((pack) => pack === 'quality-gate' ? (gate ? [gate] : []) : [pack]);

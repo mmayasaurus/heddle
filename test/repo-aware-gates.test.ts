@@ -1,8 +1,9 @@
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { dispatch, planDispatch } from '../src/dispatch.js';
-import { originRepoName, qualityGateForRepository } from '../src/skillpacks.js';
+import { builtinPacksDir, originRepoName, qualityGateForRepository } from '../src/skillpacks.js';
+import { parentCheckoutOf } from '../src/worktree.js';
 import { fakeAdapter, IDENTITIES, initRepoFixture, useTempResources } from './helpers.js';
 
 /**
@@ -125,6 +126,17 @@ describe('dispatch — repo-aware quality gates (HED-389)', () => {
       expect(agents).toContain('### quality-gate');
       expect(agents).toContain('CONSUMER-GATE-MARKER');
       for (const text of APP_TEXT) expect(agents).not.toContain(text);
+
+      // A HEDDLE_PACKS entry that is heddle's OWN pack again — a byte-identical copy of the built-in
+      // (another checkout's skills/), with a trailing slash — is NOT a consumer shadow: it is still
+      // the app gate and is still resolved (round-3 review #1).
+      const copy = join(tempDir(), 'other-heddle-checkout', 'skills');
+      mkdirSync(copy, { recursive: true });
+      copyFileSync(join(builtinPacksDir(), 'quality-gate.md'), join(copy, 'quality-gate.md'));
+      process.env.HEDDLE_PACKS = `${copy}/`;
+      const heddle = await editingDispatch(initRepo(join(tempDir(), 'heddle'), '.worktrees/S-hed389', { linkedWorktree: true }));
+      expect(heddle.skills).toEqual(['worker-role', 'worker-hygiene', 'repo-heddle-core', 'family-codex']);
+      for (const text of APP_TEXT) expect(heddle.agents).not.toContain(text);
     } finally {
       if (saved === undefined) delete process.env.HEDDLE_PACKS; else process.env.HEDDLE_PACKS = saved;
     }
@@ -149,7 +161,7 @@ describe('dispatch — repo-aware quality gates (HED-389)', () => {
     const heddleCwd = initRepo(join(base, 'heddle'), '.worktrees/S-hed389', { linkedWorktree: true });
     // A git hook exports GIT_DIR; an orchestrator launched from one would inherit it. Point the env
     // at the APP repository and dispatch into the heddle worktree.
-    const names = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0'] as const;
+    const names = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0', 'GIT_CEILING_DIRECTORIES', 'GIT_DISCOVERY_ACROSS_FILESYSTEM'] as const;
     const saved = Object.fromEntries(names.map((name) => [name, process.env[name]]));
     process.env.GIT_DIR = join(appRoot, '.git');
     process.env.GIT_WORK_TREE = appRoot;
@@ -166,6 +178,15 @@ describe('dispatch — repo-aware quality gates (HED-389)', () => {
       const injected = await editingDispatch(initRepo(join(base, 'unknown-repo'), 'worker'));
       expect(injected.skills).toEqual(NO_GATE);
       for (const text of APP_TEXT) expect(injected.agents).not.toContain(text);
+
+      // Discovery limits (codex P2 / round-3 #3): a ceiling below the checkout would stop git before
+      // the root — dropping the gate AND switching off linked-worktree confinement.
+      delete process.env.GIT_CONFIG_COUNT; delete process.env.GIT_CONFIG_KEY_0; delete process.env.GIT_CONFIG_VALUE_0;
+      process.env.GIT_CEILING_DIRECTORIES = base;
+      process.env.GIT_DISCOVERY_ACROSS_FILESYSTEM = '0';
+      const ceiled = await editingDispatch(heddleCwd);
+      expect(ceiled.skills).toEqual(['worker-role', 'worker-hygiene', 'repo-heddle-core', 'family-codex']);
+      expect(parentCheckoutOf(heddleCwd)?.parentRoot).toBeTruthy();
     } finally {
       for (const [name, value] of Object.entries(saved)) {
         if (value === undefined) delete process.env[name]; else process.env[name] = value;

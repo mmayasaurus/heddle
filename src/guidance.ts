@@ -149,7 +149,9 @@ export function hookResponse(payload: unknown, table: RoutingTable): string | nu
   // Matched by settings.json (`mcp__heddle__dispatch_worker`), but be defensive: any other tool → silent.
   if (!/(^|__)dispatch_worker$/.test(toolName)) return null;
   const input = (p.tool_input && typeof p.tool_input === 'object' ? p.tool_input : {}) as DispatchGuidanceInput;
-  const warnings = dispatchGuidance(table, input);
+  // dispatch_worker defaults an omitted cwd to the server's cwd — the same directory this hook runs
+  // in — so the guidance judges the gate the dispatch will actually resolve (round-3 review #2).
+  const warnings = dispatchGuidance(table, { ...input, cwd: input.cwd ?? process.cwd() });
   // Depth-1 (HED-2) for in-session Claude subagents: the hook payload carries `agent_id` only when
   // the call comes from inside a subagent. The server cannot see that (it is the orchestrator's own
   // MCP process), so this stays a nudge — subprocess workers are refused server-side.
