@@ -52,13 +52,11 @@ describe('subprocess run() — the shared adapter runner', () => {
 
   it('regression: hands the child closed stdin rather than an open pipe', async () => {
     const shim = join(resources.tempDir(), 'closed-stdin');
-    writeFileSync(shim, '#!/bin/sh\nif read -t 2 line; then echo READ; else echo NOINPUT; fi\n');
+    writeFileSync(shim, '#!/bin/sh\nread line; echo NOINPUT\n');
     chmodSync(shim, 0o755);
-    const started = Date.now();
-    const result = await run(shim, [], process.cwd(), 10_000);
+    const result = await run(shim, [], process.cwd(), 3_000);
 
     expect(result.stdout).toBe('NOINPUT\n');
-    // an OPEN stdin pipe would wait the shim's full 2s `read -t 2`; slack for a loaded machine
-    expect(Date.now() - started).toBeLessThan(1_500);
+    expect(result.timedOut).toBe(false);
   });
 });

@@ -363,13 +363,24 @@ try {
 
     case 'doctor': {
       const provider = arg('--provider');
+      const usageError = (message: string): void => {
+        if (json) {
+          process.stdout.write(
+            `${JSON.stringify({ ok: false, error: message, known: DOCTOR_PROVIDERS })}\n`,
+            () => process.exit(2),
+          );
+        } else {
+          console.error(message);
+          process.exit(2);
+        }
+      };
       if (process.argv.includes('--provider') && (!provider || provider.startsWith('--'))) {
-        console.error(`doctor: --provider needs a provider name (known: ${DOCTOR_PROVIDERS.join(', ')})`);
-        process.exit(2);
+        usageError(`doctor: --provider needs a provider name (known: ${DOCTOR_PROVIDERS.join(', ')})`);
+        break;
       }
       if (provider && !DOCTOR_PROVIDERS.includes(provider as typeof DOCTOR_PROVIDERS[number])) {
-        console.error(`doctor: unknown --provider "${provider}" (known: ${DOCTOR_PROVIDERS.join(', ')})`);
-        process.exit(2);
+        usageError(`doctor: unknown --provider "${provider}" (known: ${DOCTOR_PROVIDERS.join(', ')})`);
+        break;
       }
       const report = await runDoctor({ provider });
       const text = json ? JSON.stringify(report, null, 2) : formatDoctorReport(report);

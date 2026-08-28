@@ -339,15 +339,26 @@ function targetModels(
 ): Array<{ taskClass: string; model: string }> {
   const routing = loadRouting(routingPath);
   const targets: Array<{ taskClass: string; model: string }> = [];
+  const seen = new Set<string>();
+  const addTarget = (taskClass: string, target: RouteTarget): void => {
+    const key = `${target.provider}\u0000${target.model}`;
+
+    if (target.provider === provider && !seen.has(key)) {
+      seen.add(key);
+      targets.push({ taskClass, model: target.model });
+    }
+  };
 
   for (const taskClass of listTaskClasses(routing)) {
     const route = resolveRoute(routing, taskClass);
 
     for (const target of [route, route.fallback].filter(Boolean) as RouteTarget[]) {
-      if (target.provider === provider) {
-        targets.push({ taskClass, model: target.model });
-      }
+      addTarget(taskClass, target);
     }
+  }
+
+  for (const [lane, target] of Object.entries(routing.laneDefaults ?? {})) {
+    addTarget(`lane-default:${lane}`, target);
   }
 
   return targets;
@@ -375,14 +386,15 @@ function accountResult(path: string): Omit<CheckResult, 'id' | 'kind' | 'provide
         || typeof (row as Record<string, unknown>).id !== 'string'
         || ('configDir' in row
           && (typeof (row as Record<string, unknown>).configDir !== 'string'
-            && (row as Record<string, unknown>).configDir !== null)),
+            && (row as Record<string, unknown>).configDir !== null))
+        || ('loggedIn' in row && typeof (row as Record<string, unknown>).loggedIn !== 'boolean'),
     ).length;
 
     if (malformed) {
       return result(
         'fail',
         `accounts.json has ${malformed} malformed claude[] row(s) `
-          + '(each needs a string id; configDir must be a string)',
+          + '(each needs a string id; configDir string or null; loggedIn boolean)',
         'fix the file',
       );
     }
@@ -486,9 +498,16 @@ function loginCheck(harness: Harness, ctx: DoctorContext): Definition {
         );
       }
 
+      const inherited = harness.provider === 'cursor'
+        ? 'CURSOR_API_KEY'
+        : harness.provider === 'claude' ? 'CLAUDE_CODE_OAUTH_TOKEN' : undefined;
+      const inheritedNote = inherited && ctx.deps.env[inherited]
+        ? ` (inherited ${inherited} ignored — heddle workers do not receive it; register the account instead)`
+        : '';
+
       return state
-        ? result('ok', 'logged in')
-        : result('fail', 'logged out', harness.loginHint);
+        ? result('ok', `logged in${inheritedNote}`)
+        : result('fail', `logged out${inheritedNote}`, harness.loginHint);
     },
   };
 }

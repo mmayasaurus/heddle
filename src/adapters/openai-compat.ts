@@ -10,10 +10,11 @@ export function readSecretsEnvValue(keyEnv: string, path = DEFAULT_SECRETS_PATH)
   try {
     const contents = fs.readFileSync(path, 'utf8');
     for (const line of contents.split(/\r?\n/)) {
-      const match = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$/);
+      const match = line.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/);
       if (match?.[1] === keyEnv && match[2]) {
-        let value = match[2].trim();
-        value = value.replace(/^(['"])([\s\S]*)\1$/, '$2');
+        const raw = match[2];
+        const quoted = raw.match(/^(['"])(.*?)\1/);
+        const value = quoted ? quoted[2] : raw.replace(/\s+#.*$/, '').trim();
         return value || undefined;
       }
     }

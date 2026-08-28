@@ -36,6 +36,29 @@ describe('heddle ledger CLI', () => {
     expect(result.stdout).toContain('heddle — cross-provider orchestration');
   }, 30_000);
 
+  it('regression: doctor rejects a missing provider before spawning harness probes', async () => {
+    const result = await runCli(['doctor', '--provider']);
+    expect(result).toEqual(expect.objectContaining({ code: 2, stdout: '' }));
+    expect(result.stderr).toContain('doctor: --provider needs a provider name');
+  }, 30_000);
+
+  it('regression: doctor emits a JSON usage error for an unknown provider under --json', async () => {
+    const result = await runCli(['doctor', '--json', '--provider', 'nope']);
+    expect(result).toMatchObject({ code: 2, stderr: '' });
+    const body = JSON.parse(result.stdout);
+    expect(body).toMatchObject({
+      ok: false,
+      known: expect.any(Array),
+    });
+    expect(body.error).toContain('doctor: unknown --provider "nope"');
+  }, 30_000);
+
+  it('regression: doctor retains its text usage error for an unknown provider', async () => {
+    const result = await runCli(['doctor', '--provider', 'cursr']);
+    expect(result).toMatchObject({ code: 2, stdout: '' });
+    expect(result.stderr).toContain('doctor: unknown --provider "cursr"');
+  }, 30_000);
+
   it('shows a seeded finished dispatch output', async () => {
     const home = withTempHome();
     const ledger = trackLedger(new Ledger(join(home, '.heddle', 'ledger.db')));

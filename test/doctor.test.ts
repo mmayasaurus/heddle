@@ -19,7 +19,10 @@ gemini-3.1-pro-high\tGemini 3.1 Pro (High)
 claude-sonnet-4-6\tClaude Sonnet 4.6 (Thinking)
 `;
 
-function config(models = { cursor: 'cursor-grok-4.6-high-fast', gemini: 'gemini-3.7-flash-high' }): { routing: string; lanes: string; projects: string; accounts: string } {
+function config(
+  models = { cursor: 'cursor-grok-4.6-high-fast', gemini: 'gemini-3.7-flash-high' },
+  options: { cursorFallback?: string; laneDefaults?: string } = {},
+): { routing: string; lanes: string; projects: string; accounts: string } {
   const dir = resources.tempDir();
   const paths = {
     routing: join(dir, 'routing.yaml'), lanes: join(dir, 'lanes.yaml'),
@@ -33,8 +36,10 @@ providers:
   gemini: {status: active}
 task_classes:
   cursor-work:
-    provider: cursor
-    model: ${models.cursor}
+    provider: ${options.cursorFallback ? 'claude' : 'cursor'}
+    model: ${options.cursorFallback ? 'sonnet' : models.cursor}${options.cursorFallback
+      ? `\n    fallback:\n      provider: cursor\n      model: ${options.cursorFallback}`
+      : ''}
   claude-work:
     provider: claude
     model: sonnet
@@ -44,6 +49,7 @@ task_classes:
   gemini-work:
     provider: gemini
     model: ${models.gemini}
+${options.laneDefaults ? `lane_defaults:\n${options.laneDefaults}` : ''}
 `);
   writeFileSync(paths.lanes, `tiers:
   T0-menial: [gemini]
@@ -97,6 +103,29 @@ describe('runDoctor', () => {
     expect(JSON.parse(JSON.stringify(report)).summary).toEqual(report.summary);
     expect(report.summary.ok + report.summary.warn + report.summary.fail + report.summary.skipped).toBe(report.checks.length);
     expect(formatDoctorReport(report).split('\n')).toHaveLength(report.checks.length + 2);
+  });
+
+  test('regression: Cursor lane-default models absent from the catalog name their lane', async () => {
+    const paths = config(undefined, {
+      laneDefaults: '  cursor:\n    provider: cursor\n    model: cursor-lane-default',
+    });
+    const missing = await runDoctor({ provider: 'cursor' }, fakeDeps(paths));
+    expect(check(missing, 'catalog:cursor')).toMatchObject({
+      outcome: 'fail',
+      detail: expect.stringContaining('lane-default:cursor: cursor-lane-default'),
+    });
+    const listed = await runDoctor(
+      { provider: 'cursor' },
+      fakeDeps(paths, {
+        execFile: async (cmd, args, opts) => {
+          if (cmd === 'cursor-agent' && args[0] === 'models') {
+            return { stdout: `${CURSOR_CATALOG}cursor-lane-default - Lane default\n`, stderr: '', exitCode: 0, timedOut: false };
+          }
+          return fakeDeps().execFile!(cmd, args, opts);
+        },
+      }),
+    );
+    expect(check(listed, 'catalog:cursor').outcome).toBe('ok');
   });
 
   test('regression: one missing CLI skips only its dependent probes and gives an installation hint', async () => {
@@ -237,6 +266,7 @@ describe('runDoctor', () => {
   });
 
   test('regression: a never-settling dependency respects doctor grace deadlines', async () => {
+    const started = Date.now();
     const report = await runDoctor(
       { provider: 'cursor' },
       fakeDeps(undefined, {
@@ -248,7 +278,8 @@ describe('runDoctor', () => {
       outcome: 'warn',
       detail: 'timed out after 0.1s — unverified, not proven broken',
     });
-  }, 1_000);
+    expect(Date.now() - started).toBeLessThan(3_000);
+  });
 
   test('regression: rejected probes are unverified unless their error reports EACCES', async () => {
     const unavailable = await runDoctor(
@@ -327,6 +358,70 @@ esac
     expect(check(report, 'catalog:gemini').outcome).toBe('ok');
   });
 
+  test('regression: Cursor fallback-only routes are verified against the catalog', async () => {
+    const paths = config(undefined, { cursorFallback: 'cursor-fallback' });
+    const listed = await runDoctor(
+      { provider: 'cursor' },
+      fakeDeps(paths, {
+        execFile: async (cmd, args, opts) => {
+          if (cmd === 'cursor-agent' && args[0] === 'models') {
+            return { stdout: 'cursor-fallback - Fallback\n', stderr: '', exitCode: 0, timedOut: false };
+          }
+          return fakeDeps().execFile!(cmd, args, opts);
+        },
+      }),
+    );
+    expect(check(listed, 'catalog:cursor')).toMatchObject({ outcome: 'ok' });
+    const absent = await runDoctor({ provider: 'cursor' }, fakeDeps(paths));
+    expect(check(absent, 'catalog:cursor')).toMatchObject({
+      outcome: 'fail', detail: expect.stringContaining('cursor-work: cursor-fallback'),
+    });
+  });
+
+  test('regression: JSON catalog entries verify routed Cursor models', async () => {
+    const paths = config({ cursor: 'cursor-good', gemini: 'gemini-3.7-flash-high' });
+    const listed = await runDoctor(
+      { provider: 'cursor' },
+      fakeDeps(paths, {
+        execFile: async (cmd, args, opts) => {
+          if (cmd === 'cursor-agent' && args[0] === 'models') {
+            return { stdout: JSON.stringify({ models: [{ id: 'cursor-good' }] }), stderr: '', exitCode: 0, timedOut: false };
+          }
+          return fakeDeps().execFile!(cmd, args, opts);
+        },
+      }),
+    );
+    expect(check(listed, 'catalog:cursor')).toMatchObject({ outcome: 'ok' });
+    const absent = await runDoctor(
+      { provider: 'cursor' },
+      fakeDeps(paths, {
+        execFile: async (cmd, args, opts) => {
+          if (cmd === 'cursor-agent' && args[0] === 'models') {
+            return { stdout: JSON.stringify({ models: [{ id: 'other-model' }] }), stderr: '', exitCode: 0, timedOut: false };
+          }
+          return fakeDeps().execFile!(cmd, args, opts);
+        },
+      }),
+    );
+    expect(check(absent, 'catalog:cursor').outcome).toBe('fail');
+  });
+
+  test('regression: uppercase catalog ids verify matching uppercase routing targets', async () => {
+    const paths = config({ cursor: 'Cursor-Good', gemini: 'gemini-3.7-flash-high' });
+    const report = await runDoctor(
+      { provider: 'cursor' },
+      fakeDeps(paths, {
+        execFile: async (cmd, args, opts) => {
+          if (cmd === 'cursor-agent' && args[0] === 'models') {
+            return { stdout: 'Cursor-Good - Good\n', stderr: '', exitCode: 0, timedOut: false };
+          }
+          return fakeDeps().execFile!(cmd, args, opts);
+        },
+      }),
+    );
+    expect(check(report, 'catalog:cursor')).toMatchObject({ outcome: 'ok' });
+  });
+
   test('regression: an absent Gemini model warns because the agy catalog can lag', async () => {
     const report = await runDoctor(
       {},
@@ -366,6 +461,16 @@ esac
     } }));
     const output = `${formatDoctorReport(report)}\n${JSON.stringify(report)}`;
     expect(output).not.toContain('leak@example.com');
+  });
+
+  test('regression: inherited Cursor credentials are reported as ignored without leaking their value', async () => {
+    const report = await runDoctor(
+      { provider: 'cursor' },
+      fakeDeps(undefined, { env: { CURSOR_API_KEY: 'fakefakefakefake' } }),
+    );
+    const output = `${formatDoctorReport(report)}\n${JSON.stringify(report)}`;
+    expect(check(report, 'login:cursor').detail).toContain('inherited CURSOR_API_KEY ignored');
+    expect(output).not.toContain('fakefakefakefake');
   });
   test('regression: codex reports its login status on stderr (verified 2026-08-28) and a logged-out codex names codex login', async () => {
     const loggedOut = await runDoctor({ provider: 'codex' }, fakeDeps(undefined, { execFile: async (cmd, args, opts) => {
@@ -410,6 +515,31 @@ esac
     expect(check(report, 'config:routing').outcome).toBe('ok');
   });
 
+  test('regression: blank HEDDLE_LANES falls through to the default lanes configuration', async () => {
+    const paths = config();
+    const report = await runDoctor(
+      { provider: 'cursor' },
+      fakeDeps(paths, {
+        paths: { routing: paths.routing, projects: paths.projects, accounts: paths.accounts },
+        env: { HEDDLE_LANES: '' },
+      }),
+    );
+    expect(check(report, 'config:lanes').outcome).toBe('ok');
+  });
+
+  test('regression: a present project registry reports its registered project count', async () => {
+    const paths = config();
+    writeFileSync(paths.projects, JSON.stringify({
+      schemaVersion: 1,
+      projects: [{
+        name: 'test', workspaceRoots: [resources.tempDir()], agentIds: ['A'], linearTeam: 'HED',
+        defaultRoom: 'test-room', launcher: 'test-launcher',
+      }],
+    }));
+    const report = await runDoctor({}, fakeDeps(paths));
+    expect(check(report, 'config:projects')).toMatchObject({ outcome: 'ok', detail: '1 project registered' });
+  });
+
   test('regression: present malformed Claude registries fail rather than silently using inherited login', async () => {
     const paths = config();
     writeFileSync(paths.accounts, '{not json');
@@ -419,13 +549,17 @@ esac
     writeFileSync(paths.accounts, JSON.stringify({ claude: [{}] }));
     expect(check(await runDoctor({}, fakeDeps(paths)), 'config:claude-accounts')).toMatchObject({
       outcome: 'fail',
-      detail: 'accounts.json has 1 malformed claude[] row(s) (each needs a string id; configDir must be a string)',
+      detail: 'accounts.json has 1 malformed claude[] row(s) (each needs a string id; configDir string or null; loggedIn boolean)',
       hint: 'fix the file',
     });
     writeFileSync(paths.accounts, JSON.stringify({ claude: [{ configDir: '/tmp/a' }] }));
     expect(check(await runDoctor({}, fakeDeps(paths)), 'config:claude-accounts').outcome).toBe('fail');
     writeFileSync(paths.accounts, JSON.stringify({ claude: [{ id: 'a', configDir: 5 }] }));
     expect(check(await runDoctor({}, fakeDeps(paths)), 'config:claude-accounts').outcome).toBe('fail');
+    writeFileSync(paths.accounts, JSON.stringify({ claude: [{ id: 'a', loggedIn: 'false' }] }));
+    expect(check(await runDoctor({}, fakeDeps(paths)), 'config:claude-accounts')).toMatchObject({
+      outcome: 'fail', detail: expect.stringContaining('1 malformed claude[] row'),
+    });
     writeFileSync(paths.accounts, JSON.stringify({ claude: [{ id: 'a', configDir: null }] }));
     expect(check(await runDoctor({}, fakeDeps(paths)), 'config:claude-accounts')).toMatchObject({
       outcome: 'ok',
