@@ -103,10 +103,13 @@ const json = has('--json');
  * Orphan hygiene at CLI start (HED-90): close provably-dead in-flight rows so every read below sees
  * an honest ledger. Skipped for `ledger sweep` (its --dry-run must observe, not mutate) AND for
  * `ledger finish` (the operator's manual close of a real orphan must win, with THEIR reason — the
- * auto-sweep pre-empting it would discard the diagnostic and fail the command). Best-effort — a
- * hygiene failure must never break the command the operator actually ran.
+ * auto-sweep pre-empting it would discard the diagnostic and fail the command), AND for `mode` — a
+ * pure operator-mode read/write touches only ~/.heddle/operator-mode.json and has no business
+ * opening, creating, or mutating the ledger (codeant HED-336): a read-only `heddle mode` on the
+ * per-turn / pocket-console path must not incur ledger startup, migration, or SQLite locking.
+ * Best-effort — a hygiene failure must never break the command the operator actually ran.
  */
-if (!(cmd === 'ledger' && (process.argv[3] === 'sweep' || process.argv[3] === 'finish'))) {
+if (cmd !== 'mode' && !(cmd === 'ledger' && (process.argv[3] === 'sweep' || process.argv[3] === 'finish'))) {
   try {
     const { closed } = new Ledger().sweepOrphans();
     if (closed > 0) console.error(`heddle: closed ${closed} orphaned in-flight dispatch row${closed === 1 ? '' : 's'} (heddle ledger --json shows outcome='orphaned')`);
@@ -566,7 +569,18 @@ try {
         console.error(`usage: heddle mode [${OPERATOR_MODES.join('|')}] [--note "<text>"] [--json]  (got: ${requested})`);
         process.exit(2);
       }
-      const state = writeOperatorMode(requested, arg('--note') ?? null);
+      let note: string | null = null;
+      if (has('--note')) {
+        const value = arg('--note');
+        // A bare `--note` (no value) or a flag-valued `--note --json` must fail with usage, not
+        // silently persist the flag text — or null — as the note (codex/cursor HED-336).
+        if (value === undefined || value.startsWith('-')) {
+          console.error(`usage: heddle mode [${OPERATOR_MODES.join('|')}] [--note "<text>"] [--json]  (--note needs a value)`);
+          process.exit(2);
+        }
+        note = value;
+      }
+      const state = writeOperatorMode(requested, note);
       out(json, state, () => `operator mode → ${state.mode}` +
         (state.note ? `  (${state.note})` : '') + `  [${state.since}]`);
       break;

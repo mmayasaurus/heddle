@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { mkdtempSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -57,5 +57,11 @@ describe('operator-mode (HED-336 S1a)', () => {
     expect(raw.endsWith('\n')).toBe(true);
     expect(JSON.parse(raw).mode).toBe('mobile');
     expect(existsSync(`${path}.${process.pid}.tmp`)).toBe(false);
+  });
+
+  it('writes the state file 0600 — presence + note are private (owner-only)', () => {
+    const path = tmpPath();
+    writeOperatorMode('away', 'school run', path, new Date('2026-08-28T12:00:00.000Z'));
+    expect(statSync(path).mode & 0o777).toBe(0o600);
   });
 });

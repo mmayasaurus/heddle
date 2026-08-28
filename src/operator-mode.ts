@@ -73,7 +73,11 @@ export function writeOperatorMode(
   const state: OperatorModeState = { mode, since: now.toISOString(), note };
   mkdirSync(dirname(path), { recursive: true });
   const tmp = `${path}.${process.pid}.tmp`;
-  writeFileSync(tmp, JSON.stringify(state, null, 2) + '\n', 'utf8');
+  // 0600: the presence state (mobile/away) and any note ("school run") are private — a multi-user
+  // host with a 022 umask would otherwise create this 0644 and leak it to other local users, and a
+  // rename over an existing 0600 file would loosen it (codex HED-336). The temp carries the mode, so
+  // the renamed file inherits it.
+  writeFileSync(tmp, JSON.stringify(state, null, 2) + '\n', { encoding: 'utf8', mode: 0o600 });
   renameSync(tmp, path);
   return state;
 }
