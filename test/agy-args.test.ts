@@ -2,9 +2,20 @@ import { describe, it, expect } from 'vitest';
 import { AgyAdapter } from '../src/adapters/agy.js';
 
 describe('AgyAdapter.buildArgs — invocation contract', () => {
-  it('builds the default gemini invocation (effort comes from the slug, no --effort)', () => {
+  it('builds the default gemini invocation with a print timeout inside its process budget', () => {
     expect(new AgyAdapter().buildArgs('do it', { model: 'gemini-3.6-flash-low', cwd: '/tmp' })).toEqual([
       '-p', 'do it', '--output-format', 'stream-json', '--model', 'gemini-3.6-flash-low',
+      '--print-timeout', '9m',
+      '--dangerously-skip-permissions',
+    ]);
+  });
+
+  it('derives the print timeout from a custom dispatch budget', () => {
+    expect(new AgyAdapter().buildArgs('do it', {
+      model: 'gemini-3.6-flash-low', cwd: '/tmp', timeoutMs: 720_000,
+    })).toEqual([
+      '-p', 'do it', '--output-format', 'stream-json', '--model', 'gemini-3.6-flash-low',
+      '--print-timeout', '11m',
       '--dangerously-skip-permissions',
     ]);
   });
@@ -20,6 +31,7 @@ describe('AgyAdapter.buildArgs — invocation contract', () => {
     });
     expect(args).toEqual([
       '-p', 'go', '--output-format', 'stream-json', '--model', 'gemini-3.6-flash-high',
+      '--print-timeout', '9m',
       '--conversation', 'c-1', '--foo', 'bar',
     ]);
     expect(args).not.toContain('--dangerously-skip-permissions');

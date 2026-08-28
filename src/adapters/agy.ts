@@ -24,10 +24,22 @@ import { run } from './subprocess.js';
 
 /** Retry probe ceiling for the #573 hang check — a hung agy emits nothing, so this is ample. */
 const RETRY_PROBE_MS = 120_000;
+const DEFAULT_TIMEOUT_MS = 600_000;
+const PRINT_TIMEOUT_MARGIN_MS = 60_000;
 
 /** Gemini encodes reasoning effort as the model-slug suffix; agy's whole catalog is suffixed. */
 const GEMINI_SUFFIX = /-(?:low|medium|high)$/;
 const GEMINI_LEVELS = new Set(['low', 'medium', 'high']);
+
+function printTimeout(budgetMs: number): string {
+  // Keep agy's own print-mode deadline inside our subprocess deadline. The default becomes 9m,
+  // avoiding agy's 5m default while retaining a minute for result parsing and process cleanup.
+  const safetyMarginMs = Math.max(1, Math.min(PRINT_TIMEOUT_MARGIN_MS, Math.floor(budgetMs / 10)));
+  const timeoutMs = Math.max(1, budgetMs - safetyMarginMs);
+  if (timeoutMs % 60_000 === 0) return `${timeoutMs / 60_000}m`;
+  if (timeoutMs % 1_000 === 0) return `${timeoutMs / 1_000}s`;
+  return `${timeoutMs}ms`;
+}
 
 /**
  * Serializes dispatches per conversation id. Overlapping calls against the SAME conversation
@@ -92,6 +104,7 @@ export class AgyAdapter implements WorkerAdapter {
   buildArgs(prompt: string, opts: DispatchOptions): string[] {
     const model = this.resolveModel(opts.model, opts.effort);
     const args = ['-p', prompt, '--output-format', 'stream-json', '--model', model];
+    args.push('--print-timeout', printTimeout(opts.timeoutMs ?? DEFAULT_TIMEOUT_MS));
     const lvl = opts.effort?.toLowerCase();
     if (lvl && GEMINI_LEVELS.has(lvl) && !GEMINI_SUFFIX.test(model)) args.push('--effort', lvl);
     if (this.skipPermissions) args.push('--dangerously-skip-permissions');
@@ -110,7 +123,7 @@ export class AgyAdapter implements WorkerAdapter {
 
     const args = this.buildArgs(prompt, opts);
 
-    const budget = opts.timeoutMs ?? 600_000;
+    const budget = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     const started = Date.now();
     let { stdout, stderr, exitCode, timedOut } = await run(this.bin, args, opts.cwd, budget, opts.env);
 
