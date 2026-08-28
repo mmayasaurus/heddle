@@ -18,6 +18,7 @@ import { parseAddress, BROADCAST, OPERATOR } from './address.js';
 import { pauseReadiness, type InFlightSource } from './quiesce.js';
 import { dueForNudge, nudgeBody, shouldRunNudger, isElectedNudger, parseNudgeMs, type NudgeOptions } from './nudge.js';
 import { TIERS, MESSAGE_KINDS, type Tier, type MessageKind } from './types.js';
+import type { TargetStateProvider } from './broker.js';
 
 /**
  * heddle-comms — the comms broker as a Claude Code CHANNEL MCP server (HED-7 / HED-73), as a
@@ -67,6 +68,8 @@ export interface CommsServerOptions {
   channelLoadedProbe?: () => boolean | null;
   /** Epoch-ms clock passed to the Broker (rate limits, holds, floor leases); injectable for tests. */
   now?: () => number;
+  /** Injectable target-state provider for the Broker (tests build real held→released flows). */
+  targetState?: TargetStateProvider;
   /**
    * TEST-ONLY override of the operator token file. Deliberately NOT an env var: the trust root
    * must be a path only the operator controls, never one a process can point at its own file.
@@ -339,7 +342,7 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
         : ' (This session has NO bound comms identity. It can bind from env at startup or lazily after Claude rename from the PID bridge; check comms_whoami for the live identity and source.)'),
     },
   );
-  const broker = new Broker({ log, ledger, transport: new ChannelTransport(log), onWarning: warn, ...(opts.now ? { now: opts.now } : {}) });
+  const broker = new Broker({ log, ledger, transport: new ChannelTransport(log), onWarning: warn, ...(opts.now ? { now: opts.now } : {}), ...(opts.targetState ? { targetState: opts.targetState } : {}) });
   log.ensureDefaultRooms();
   if (me) {
     const restored = broker.restoreHeld({ sender: me });
@@ -431,6 +434,14 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
       if (!candidate) return;
       me = candidate;
       bindingSource = resolved.bindingSource;
+      try {
+        // r3 (ledger 619): a construction-time restoreHeld({sender}) never ran for a session that
+        // was unbound then — restore this sender's persisted holds at the moment it gains one.
+        const restored = broker.restoreHeld({ sender: me });
+        if (restored) warn(`restored ${restored} held message(s) posted by ${me}`);
+      } catch (err) {
+        warn(`restoreHeld after lazy bind failed: ${errorMessage(err)}`);
+      }
       return;
     }
     postPinDivergenceChecked = true;

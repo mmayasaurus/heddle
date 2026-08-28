@@ -48,8 +48,8 @@ describe('heddle-comms server (in-process)', () => {
   const baseEnv = () => ({ HEDDLE_COMMS_DB: dbPath, HEDDLE_LEDGER_DB: join(dir, 'no-such-ledger.db') });
   const initToken = (opts: { rotate?: boolean } = {}) => initOperatorToken({ ...opts, path: tokenPath });
 
-  async function connect(env: Record<string, string>) {
-    const server = createCommsServer({ env: { ...baseEnv(), ...env }, cwd: dir, warn: (m) => warnings.push(m), operatorTokenPath: tokenPath });
+  async function connect(env: Record<string, string>, extra: Partial<Parameters<typeof createCommsServer>[0]> = {}) {
+    const server = createCommsServer({ env: { ...baseEnv(), ...env }, cwd: dir, warn: (m) => warnings.push(m), operatorTokenPath: tokenPath, ...extra });
     const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
     const client = new Client({ name: 'test', version: '0' }, { capabilities: {} });
     await server.start(serverSide);
@@ -106,21 +106,32 @@ describe('heddle-comms server (in-process)', () => {
       expect(session.server.identity).toBe('V');
     });
 
-    it('keeps the broker pump running after an initially unbound session binds lazily', async () => {
+    it('restores and PUMPS a persisted held message after a lazily-bound restart', async () => {
+      // r3 (ledger 619): the pump must do REAL work for a lazy session — a held delivery persisted
+      // by a previous run is restored at lazy bind and released once the target unblocks.
       const cacheDir = join(dir, 'identity-cache');
       mkdirSync(cacheDir);
-      const server = createCommsServer({ env: { ...baseEnv(), HEDDLE_IDENTITY_CACHE_DIR: cacheDir }, cwd: dir, warn: (m) => warnings.push(m), operatorTokenPath: tokenPath });
-      const pump = vi.spyOn(server.broker, 'pump');
-      const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
-      const client = new Client({ name: 'test', version: '0' }, { capabilities: {} });
-      await server.start(serverSide);
-      await client.connect(clientSide);
-      servers.push(server); clients.push(client);
+      const states = new Map([['V.1', 'permission-gate']]);
+      const targetState = { state: (address: string) => (states.get(address) ?? 'idle') as 'idle' | 'permission-gate' };
+      const first = await connect({ HEDDLE_AGENT: 'V' }, { targetState });
+      expect((await call(first.client, 'mint_child', { label: 'worker' })).parsed).toMatchObject({ address: 'V.1' });
+      const held = await call(first.client, 'post_message', { to: 'V.1', body: 'held until the gate clears' });
+      expect(held.parsed).toMatchObject({ outcome: 'held', code: 'permission-gate' });
 
+      // Restart UNBOUND on the same log; bind lazily via the bridge; the hold must come back.
+      const second = await connect({ HEDDLE_IDENTITY_CACHE_DIR: cacheDir }, { targetState });
       writeFileSync(bridgePath(cacheDir), 'V\n');
-      expect((await call(client, 'post_message', { to: '#fleet', body: 'bind then pump' })).parsed).toMatchObject({ outcome: 'logged' });
-      await new Promise((resolve) => setTimeout(resolve, 1_100));
-      expect(pump).toHaveBeenCalled();
+      expect((await call(second.client, 'post_message', { to: '#fleet', body: 'bind' })).parsed).toMatchObject({ outcome: 'logged' });
+      expect(warnings.some((m) => m.includes('restored 1 held message'))).toBe(true);
+
+      states.set('V.1', 'idle');
+      await second.server.broker.pump();
+      // V.1 has no live channel session, so the cleared gate records a REAL delivery attempt
+      // (attempt ≥2, outcome failed/no-live-session) and stays queued for retry — the broker's
+      // documented behavior; what this test proves is that the RESTORED hold was actually pumped.
+      const attempts = second.server.log.deliveries().filter(
+        (d) => d.outcome === 'failed' && d.code === 'no-live-session' && (d.attempt ?? 0) >= 2);
+      expect(attempts.length).toBeGreaterThanOrEqual(1);
     }, 10_000);
 
     it('keeps the env identity ahead of the PID bridge', async () => {
