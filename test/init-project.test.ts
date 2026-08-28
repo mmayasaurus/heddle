@@ -400,6 +400,21 @@ describe('init-project', () => {
       expect(readFileSync(settingsPath, 'utf8')).toContain('permissions');
     });
 
+    it('aborts rather than clobbering .memtraceignore edited between plan and apply (CAS)', () => {
+      const opts = options(tempDir());
+      mkdirSync(opts.dir, { recursive: true });
+      const ignorePath = join(opts.dir, '.memtraceignore');
+      writeFileSync(ignorePath, 'keep-me\n');
+      const plan = planInstall(opts);
+      // Concurrent edit: a user rewrites .memtraceignore after planning.
+      writeFileSync(ignorePath, 'user-edit\n');
+      expect(() => applyInstall(plan)).toThrow(/memtraceignore changed underneath/i);
+      // The user's edit survives — the CAS aborts instead of the stale plan overwriting it.
+      // (renderIgnoreStep guards the drop of `expectedContent`; without it the suite stayed green
+      //  while a concurrent edit was silently clobbered — HED-84 review round 8, ledger 668.)
+      expect(readFileSync(ignorePath, 'utf8')).toContain('user-edit');
+    });
+
     it('preserves an unrelated oversized JSON integer byte-exact when updating a project', () => {
       const opts = options(tempDir());
       mkdirSync(join(opts.homeDir, '.heddle'), { recursive: true });
