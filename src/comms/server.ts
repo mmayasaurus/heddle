@@ -42,7 +42,10 @@ import type { TargetStateProvider } from './broker.js';
  *                with HEDDLE_IDENTITY_CACHE_DIR for tests. The PID bridge accepts agent labels
  *                only — never operator or child. A session that begins unbound retries this full
  *                chain on sender-requiring tool calls until it binds, then pins that label for its
- *                lifetime. A bridge file whose mtime predates the hosting process's start is ignored
+ *                lifetime. ANY identity bound LATE (the session started unbound, then resolved one
+ *                from env/.fleet-agent/pid-bridge) is capped to agent-message — a late source may be
+ *                model-influenced (a writable .fleet-agent), so no late bind carries a directive.
+ *                A bridge file whose mtime predates the hosting process's start is ignored
  *                (recycled-pid guard; the writer hook refreshes it every turn, so live sessions stay
  *                fresh). A PID-bridge binding is capped to `agent-message` on every send; it is
  *                never trusted to emit a directive. `operator` is REFUSED from the agent sources.
@@ -313,7 +316,11 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
   const lazyIdentity = me === null && !isOperator;
   let identityChangeWarned = false;
   let postPinDivergenceChecked = false;
-  const tierCap = (): 'agent-message' | null => bindingSource === 'pid-bridge' ? 'agent-message' : null;
+  // A LATE binding (the session started with no identity, then gained one via env/.fleet-agent/pid
+  // bridge after the model could act — e.g. by writing .fleet-agent in its cwd) is never trusted to
+  // carry a directive: cap EVERY lazily-bound source to agent-message, not just the pid bridge
+  // (on-PR HIGH, #92). A session bound at construction (lazyIdentity=false) keeps full authority.
+  const tierCap = (): 'agent-message' | null => (me !== null && (bindingSource === 'pid-bridge' || lazyIdentity)) ? 'agent-message' : null;
   const isWorker = env.HEDDLE_WORKER === '1';
   const pushEnabled = env.HEDDLE_COMMS_PUSH === '1';
   const channelLoadedProbe = opts.channelLoadedProbe ?? (() => {
@@ -524,7 +531,7 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
           const staleMs = num(a.stale_ms);
           return text(pauseReadiness(log, inFlightSource, staleMs === undefined ? {} : { staleMs }));
         }
-        case 'comms_whoami': return text({
+        case 'comms_whoami': refreshLazyIdentity(); return text({
           identity: operatorStillValid() ? me : null, revoked: !operatorStillValid(), sessionName, worker: isWorker, operator: isOperator && operatorStillValid(), pushEnabled, pushDelivery, session: me ? log.session(me) : null,
           bindingSource, tierCap: tierCap(),
           rooms: me ? log.roomsFor(me).map((r) => r.name) : [], liveSessions: log.liveSessions(), sendMessageLimits: SENDMESSAGE_LIMITS,
