@@ -195,7 +195,7 @@ function registryContent(raw: any, rawContent: string | undefined, prior: any, p
   return json({ ...raw, projects: prior ? raw.projects.map((candidate: any) => candidate.name === name ? project : candidate) : [...raw.projects, project] }, jsonIndent(rawContent));
 }
 
-export function planInstall(input: InstallOptions): InstallPlan {
+function resolveTarget(input: InstallOptions): { homeDir: string; dir: string } {
   const homeDir = input.homeDir ?? homedir();
   const requestedDir = resolve(input.dir);
   const targetParent = dirname(requestedDir);
@@ -204,9 +204,11 @@ export function planInstall(input: InstallOptions): InstallPlan {
   }
   // The parent exists by the guard above, so this is stable before and after mkdirSync creates the leaf.
   const dir = existsSync(requestedDir) ? canonicalizePath(requestedDir) : join(realpathSync.native(targetParent), basename(requestedDir));
-  const canonicalHome = canonicalizePath(homeDir);
   if (dir === '/') throw new Error('refuses filesystem root as an install target');
-  if (dir === canonicalHome) throw new Error('refuses the home directory as an install target');
+  if (dir === canonicalizePath(homeDir)) throw new Error('refuses the home directory as an install target');
+  return { homeDir, dir };
+}
+function resolveCanonical(input: InstallOptions, homeDir: string): string {
   const canonicalConfig = join(homeDir, '.heddle', 'canonical.json');
   const configCanonical = existsSync(canonicalConfig) ? readJson(canonicalConfig, 'canonical.json')?.canonical : undefined;
   const canonicalSource = valueFor('--canonical', input.canonical) ?? process.env.HEDDLE_CANONICAL ?? configCanonical;
@@ -215,14 +217,19 @@ export function planInstall(input: InstallOptions): InstallPlan {
   assertShellSafeCanonical(canonical);
   const missing = WIRED_HOOKS.filter((hook) => !existsSync(join(canonical, 'hooks', hook)));
   if (missing.length) throw new Error(`canonical ${canonical} is missing required discipline hooks: ${missing.join(', ')}`);
+  return canonical;
+}
+function registryState(homeDir: string): { path: string; content: string | undefined; raw: any; registry: any } {
+  const path = join(homeDir, '.heddle', 'projects.json');
+  const content = existsSync(path) ? readFileSync(path, 'utf8') : undefined;
+  const raw = content === undefined ? { schemaVersion: PROJECTS_SCHEMA_VERSION, projects: [] } : readJson(path, 'projects.json');
+  return { path, content, raw, registry: validateRegistry(raw, path) };
+}
+function registrationDetails(input: InstallOptions, dir: string, registry: any, rawRegistry: any): any {
   const name = valueFor('--name', input.name) ?? basename(dir);
-  const registryPath = join(homeDir, '.heddle', 'projects.json');
-  const rawRegistryContent = existsSync(registryPath) ? readFileSync(registryPath, 'utf8') : undefined;
-  const rawRegistry = rawRegistryContent === undefined ? { schemaVersion: PROJECTS_SCHEMA_VERSION, projects: [] } : readJson(registryPath, 'projects.json');
-  const registry = validateRegistry(rawRegistry, registryPath);
-  if (registry.projects.some((project) => project.workspaceRoots.some((root) => dir !== root && isAncestorOrEqual(dir, root)))) throw new Error(`refuses install target ${dir}: it is an ancestor of a registered workspace root`);
-  const namedPrior = registry.projects.find((project) => project.name === name);
-  const prior = registry.projects.find((project) => project.workspaceRoots.includes(dir)) ?? namedPrior;
+  if (registry.projects.some((project: any) => project.workspaceRoots.some((root: string) => dir !== root && isAncestorOrEqual(dir, root)))) throw new Error(`refuses install target ${dir}: it is an ancestor of a registered workspace root`);
+  const namedPrior = registry.projects.find((project: any) => project.name === name);
+  const prior = registry.projects.find((project: any) => project.workspaceRoots.includes(dir)) ?? namedPrior;
   const rawPrior = prior ? rawRegistry.projects.find((project: any) => project.name === prior.name) : undefined;
   const supplied = (flag: 'team' | 'agents' | 'room' | 'launcher'): string | undefined => valueFor('--' + flag, input[flag]);
   const team = supplied('team'); const agents = supplied('agents'); const room = supplied('room'); const launcher = supplied('launcher');
@@ -233,55 +240,72 @@ export function planInstall(input: InstallOptions): InstallPlan {
     const missingFlags = [['team', team], ['agents', parsedAgents?.length ? agents : undefined], ['room', room], ['launcher', launcher]].filter(([, value]) => !value).map(([flag]) => '--' + flag);
     if (missingFlags.length) throw new Error(`first registration requires ${missingFlags.join(', ')}`);
   }
-  const dryRun = input.dryRun === true;
-  const steps: InstallStep[] = [{ step: 'canonical', path: canonical, action: 'ok', reason: OPTIONAL_HOOKS.filter((hook) => !existsSync(join(canonical, 'hooks', hook))).length ? `optional hooks absent: ${OPTIONAL_HOOKS.filter((hook) => !existsSync(join(canonical, 'hooks', hook))).join(', ')}` : undefined }];
-  const settingsPath = join(dir, '.claude', 'settings.json');
-  const settings = renderedSettings(settingsPath, canonical);
-  const settingsStep = stepFor(settingsPath, 'settings', settings.content, dryRun);
-  if (settings.misplaced.length) settingsStep.reason = `moved ${settings.misplaced.length} misplaced discipline entr${settings.misplaced.length === 1 ? 'y' : 'ies'}: ${settings.misplaced.join(', ')}`;
-  steps.push(settingsStep);
-  for (const file of ['pr-review-sweep.md', 'pr-ownership.md', 'worktree-discipline.md']) {
+  return { name, prior, rawPrior, team, room, launcher, parsedAgents };
+}
+function canonicalStep(canonical: string): InstallStep {
+  const absent = OPTIONAL_HOOKS.filter((hook) => !existsSync(join(canonical, 'hooks', hook)));
+  return { step: 'canonical', path: canonical, action: 'ok', reason: absent.length ? `optional hooks absent: ${absent.join(', ')}` : undefined };
+}
+function renderSettingsStep(dir: string, canonical: string, dryRun: boolean): InstallStep {
+  const path = join(dir, '.claude', 'settings.json');
+  const settings = renderedSettings(path, canonical);
+  const step = stepFor(path, 'settings', settings.content, dryRun);
+  if (settings.misplaced.length) step.reason = `moved ${settings.misplaced.length} misplaced discipline entr${settings.misplaced.length === 1 ? 'y' : 'ies'}: ${settings.misplaced.join(', ')}`;
+  return step;
+}
+function renderRulesSteps(dir: string, canonical: string, dryRun: boolean): InstallStep[] {
+  return ['pr-review-sweep.md', 'pr-ownership.md', 'worktree-discipline.md'].map((file) => {
     const path = join(dir, '.claude', 'rules', file);
-    steps.push(existsSync(path) ? { step: `rule:${file}`, path, action: 'skip', reason: 'exists' } : stepFor(path, `rule:${file}`, rulesContent(canonical, file), dryRun, false));
-  }
-  const mcpPath = join(dir, '.mcp.json');
+    return existsSync(path) ? { step: `rule:${file}`, path, action: 'skip', reason: 'exists' } : stepFor(path, `rule:${file}`, rulesContent(canonical, file), dryRun, false);
+  });
+}
+function renderMcpStep(dir: string, dryRun: boolean): InstallStep {
+  const path = join(dir, '.mcp.json');
   const template = mcpTemplate();
-  if (!template) steps.push({ step: 'mcp', path: mcpPath, action: 'skip', reason: 'no template (heddle/.mcp.json)' });
-  else {
-    const existingMcp = existsSync(mcpPath) ? readJson(mcpPath, '.mcp.json') : {};
-    const mcpServers = { ...(existingMcp.mcpServers ?? {}) };
-    for (const [key, value] of Object.entries(template)) if (!(key in mcpServers)) mcpServers[key] = value;
-    steps.push(stepFor(mcpPath, 'mcp', json({ ...existingMcp, mcpServers }), dryRun));
-  }
-  const ignorePath = join(dir, '.memtraceignore');
-  const ignore = existsSync(ignorePath) ? readFileSync(ignorePath, 'utf8') : '';
-  const missingIgnore = ['.worktrees/', '.memdb*/'].filter((entry) => !ignore.split(/\r?\n/).includes(entry));
+  if (!template) return { step: 'mcp', path, action: 'skip', reason: 'no template (heddle/.mcp.json)' };
+  const existingMcp = existsSync(path) ? readJson(path, '.mcp.json') : {};
+  const mcpServers = { ...existingMcp.mcpServers };
+  for (const [key, value] of Object.entries(template)) if (!(key in mcpServers)) mcpServers[key] = value;
+  return stepFor(path, 'mcp', json({ ...existingMcp, mcpServers }), dryRun);
+}
+function renderIgnoreStep(dir: string, dryRun: boolean): InstallStep {
+  const path = join(dir, '.memtraceignore');
+  const ignore = existsSync(path) ? readFileSync(path, 'utf8') : '';
+  const missing = ['.worktrees/', '.memdb*/'].filter((entry) => !ignore.split(/\r?\n/).includes(entry));
   const newline = ignore.includes('\r\n') ? '\r\n' : '\n';
-  const ignoreContent = missingIgnore.length ? `${ignore}${ignore && !ignore.endsWith('\n') ? newline : ''}${missingIgnore.join(newline)}${newline}` : ignore;
-  steps.push(stepFor(ignorePath, 'memtraceignore', ignoreContent, dryRun));
-  const gatePath = join(dir, '.claude', 'commands', 'heddle-gate.md');
-  if (existsSync(gatePath)) steps.push({ step: 'heddle-gate', path: gatePath, action: 'skip', reason: 'exists' });
-  else steps.push(stepFor(gatePath, 'heddle-gate', readFileSync(installerAsset('.claude', 'commands', 'heddle-gate.md'), 'utf8'), dryRun, false));
-  const projectName = prior?.name ?? name;
-  const project = prior
-    ? {
-      ...rawPrior,
-      workspaceRoots: prior.workspaceRoots.includes(dir) ? rawPrior.workspaceRoots : [...rawPrior.workspaceRoots, dir],
-      agentIds: parsedAgents ?? rawPrior.agentIds,
-      linearTeam: team ?? rawPrior.linearTeam,
-      defaultRoom: room ?? rawPrior.defaultRoom,
-      launcher: launcher ?? rawPrior.launcher,
-    }
-    : { name: projectName, workspaceRoots: [dir], agentIds: parsedAgents!, linearTeam: team!, defaultRoom: room!, launcher: launcher! };
-  const nextRegistry = { ...rawRegistry, projects: prior ? rawRegistry.projects.map((candidate: any) => candidate.name === projectName ? project : candidate) : [...rawRegistry.projects, project] };
-  validateRegistry(nextRegistry, registryPath);
-  steps.push({ ...stepFor(registryPath, 'registry', registryContent(rawRegistry, rawRegistryContent, rawPrior, project, projectName), dryRun), expectedContent: rawRegistryContent ?? null });
-  const enforcePath = join(homeDir, '.heddle', 'memtrace-enforce.json'); const existing = existsSync(enforcePath) ? readJson(enforcePath, 'memtrace-enforce.json') : {};
+  const content = missing.length ? `${ignore}${ignore && !ignore.endsWith('\n') ? newline : ''}${missing.join(newline)}${newline}` : ignore;
+  return stepFor(path, 'memtraceignore', content, dryRun);
+}
+function renderGateStep(dir: string, dryRun: boolean): InstallStep {
+  const path = join(dir, '.claude', 'commands', 'heddle-gate.md');
+  return existsSync(path) ? { step: 'heddle-gate', path, action: 'skip', reason: 'exists' } : stepFor(path, 'heddle-gate', readFileSync(installerAsset('.claude', 'commands', 'heddle-gate.md'), 'utf8'), dryRun, false);
+}
+function registryStep(input: InstallOptions, dir: string, state: any, details: any, dryRun: boolean): InstallStep {
+  const projectName = details.prior?.name ?? details.name;
+  const project = details.prior
+    ? { ...details.rawPrior, workspaceRoots: details.prior.workspaceRoots.includes(dir) ? details.rawPrior.workspaceRoots : [...details.rawPrior.workspaceRoots, dir], agentIds: details.parsedAgents ?? details.rawPrior.agentIds, linearTeam: details.team ?? details.rawPrior.linearTeam, defaultRoom: details.room ?? details.rawPrior.defaultRoom, launcher: details.launcher ?? details.rawPrior.launcher }
+    : { name: projectName, workspaceRoots: [dir], agentIds: details.parsedAgents!, linearTeam: details.team!, defaultRoom: details.room!, launcher: details.launcher! };
+  const nextRegistry = { ...state.raw, projects: details.prior ? state.raw.projects.map((candidate: any) => candidate.name === projectName ? project : candidate) : [...state.raw.projects, project] };
+  validateRegistry(nextRegistry, state.path);
+  return { ...stepFor(state.path, 'registry', registryContent(state.raw, state.content, details.rawPrior, project, projectName), dryRun), expectedContent: state.content ?? null };
+}
+function enforceMarkerStep(input: InstallOptions, dir: string, homeDir: string, dryRun: boolean): InstallStep {
+  const path = join(homeDir, '.heddle', 'memtrace-enforce.json');
+  const existing = existsSync(path) ? readJson(path, 'memtrace-enforce.json') : {};
   const aliases = Object.entries(existing).filter(([key]) => canonicalizePath(key) === dir);
-  const priorEnforceValue = aliases[0]?.[1];
-  const nextEnforcement = Object.fromEntries(Object.entries(existing).filter(([key]) => canonicalizePath(key) !== dir));
-  steps.push(stepFor(enforcePath, 'memtrace-enforce', json({ ...nextEnforcement, [dir]: input.enforceMemtrace === true ? true : (priorEnforceValue ?? false) }), dryRun));
-  return { options: { ...input, dir, canonical, name, homeDir }, steps };
+  const priorValue = aliases[0]?.[1];
+  const next = Object.fromEntries(Object.entries(existing).filter(([key]) => canonicalizePath(key) !== dir));
+  return stepFor(path, 'memtrace-enforce', json({ ...next, [dir]: input.enforceMemtrace === true ? true : (priorValue ?? false) }), dryRun);
+}
+
+export function planInstall(input: InstallOptions): InstallPlan {
+  const { homeDir, dir } = resolveTarget(input);
+  const canonical = resolveCanonical(input, homeDir);
+  const state = registryState(homeDir);
+  const details = registrationDetails(input, dir, state.registry, state.raw);
+  const dryRun = input.dryRun === true;
+  const steps = [canonicalStep(canonical), renderSettingsStep(dir, canonical, dryRun), ...renderRulesSteps(dir, canonical, dryRun), renderMcpStep(dir, dryRun), renderIgnoreStep(dir, dryRun), renderGateStep(dir, dryRun), registryStep(input, dir, state, details, dryRun), enforceMarkerStep(input, dir, homeDir, dryRun)];
+  return { options: { ...input, dir, canonical, name: details.name, homeDir }, steps };
 }
 
 export function applyInstall(plan: InstallPlan, dryRun = false): InstallReport {
