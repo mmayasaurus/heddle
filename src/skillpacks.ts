@@ -74,13 +74,13 @@ export function listPacks(): string[] {
  * Packs EVERY delegated worker gets, no matter what the routing table or the caller lists.
  * `worker-role` is governance, not task fit: the first real pilot dispatch (2026-08-10) had a codex
  * worker inherit the fleet's claim-before-code policy and refuse to work ("which agent am I?");
- * without it a worker may also claim issues / own PRs it must not. Decided 2026-08-15 (Maya via
+ * without it a worker may also claim issues / own PRs it must not. Operator decision, 2026-08-15 (via
  * Agent R): an explicit `skills` list ADDS to policy, it never removes worker-role.
  */
 export const MANDATORY_PACKS = ['worker-role', 'worker-hygiene'] as const;
 
 /**
- * MODEL-FAMILY prompting packs (HED-93, Maya's idea): each provider family responds to a different
+ * MODEL-FAMILY prompting packs (HED-93, operator's idea): each provider family responds to a different
  * instruction STYLE, so routing the same task to a different model should restyle the instructions
  * automatically rather than making every orchestrator remember the differences. Injected by the
  * dispatcher from the target's provider — never named by the caller, so a class that falls back to

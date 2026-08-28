@@ -6,7 +6,7 @@ import { join } from 'node:path';
 /**
  * Worktree confinement (HED-98).
  *
- * Maya's layout puts agent worktrees INSIDE the repo (`<repo>/.worktrees/<agent>`), and a linked
+ * The fleet layout puts agent worktrees INSIDE the repo (`<repo>/.worktrees/<agent>`), and a linked
  * worktree's `.git` is a FILE pointing at the parent. Any worker that resolves "the project root"
  * by walking up therefore lands in the CANONICAL checkout — observed live 2026-08-16: an agy docs
  * worker dispatched with cwd `<repo>/.worktrees/agentv` wrote its edit into `<repo>/docs/COMMS.md`,

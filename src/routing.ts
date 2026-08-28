@@ -5,7 +5,7 @@ import { parse as parseYaml } from 'yaml';
 
 /**
  * Routing table loader — task class → provider/model/effort/skills, with fallbacks and the
- * subscription policy guards. The table is data, not code, so Maya can tune it without a rebuild.
+ * subscription policy guards. The table is data, not code, so the operator can tune it without a rebuild.
  */
 
 export interface RouteTarget {
