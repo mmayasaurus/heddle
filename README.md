@@ -30,6 +30,34 @@ touching an adapter) · `docs/CI.md` (CI, scanners, review-sweep).
 First consumer: the Spinventory rebuild fleet. Heddle itself is project-agnostic — the consumer
 supplies its own routing table, Linear team, and ownership systems.
 
+## Install as a Claude Code plugin
+
+Heddle ships as a Claude Code plugin (`.claude-plugin/`), bundling the `heddle` (dispatch surface)
+and `heddle-comms` (inter-agent messaging) MCP servers so any Claude Code session can drive the fleet.
+
+**Prerequisites:** build the servers first — `npm install && npm run build` (produces `dist/`).
+
+**One-command install** (this repo doubles as its own marketplace):
+
+```shell
+/plugin marketplace add <owner>/heddle   # add heddle's marketplace (replace <owner> with the repo owner)
+/plugin install heddle@heddle            # install the heddle plugin
+```
+
+**Local development / testing** (no install):
+
+```shell
+claude --plugin-dir /path/to/heddle      # load the plugin for one session
+```
+
+Once loaded, the `plugin:heddle:heddle` and `plugin:heddle:heddle-comms` MCP tools are available. The
+plugin resolves every path from `${CLAUDE_PLUGIN_ROOT}`, so it works wherever it is installed — no
+machine-specific paths. Verify a checkout with `claude plugin validate .`.
+
+> This release delivers the MCP servers plus the plugin + marketplace structure. The orchestrator
+> slash commands, the rules-as-data hook engine, and the packaged skill packs land as follow-up
+> slices of the packaging epic (HED-394).
+
 ## The rules that shape everything
 
 1. **Subscriptions only.** Every execution path is a subscription-authenticated CLI: Claude models
