@@ -134,8 +134,12 @@ export function resolveQualityGateForCwd(cwd: string, skills: readonly string[])
   const repo = gitRepositoryFor(cwd);
   if (!repo) return skills.filter((pack) => pack !== 'quality-gate');
 
-  const rootName = basename(repo.topLevel);
-  const parentName = basename(dirname(repo.topLevel));
+  // Identity is the repository's MAIN checkout, never the top level: a real dispatch cwd is a linked
+  // worktree whose top level is named after the worktree (`.worktrees/S-hed389`,
+  // `Rebuild-Project-Root.forms`), so keyed on it every heddle dispatch fell to the drop branch.
+  const root = repo.mainRoot ?? repo.topLevel;
+  const rootName = basename(root);
+  const parentName = basename(dirname(root));
   let gate: string | null = null;
   if (rootName === 'heddle') gate = 'repo-heddle-core';
   else if (rootName === 'heddle-dashboard') gate = 'repo-heddle-dashboard';

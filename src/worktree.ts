@@ -37,23 +37,43 @@ function git(cwd: string, args: string[]): string {
 
 /** Git repository identity for cwd-based policy decisions; null outside a readable Git repository. */
 export interface GitRepository {
+  /** The checkout `cwd` is inside — for a LINKED worktree, the worktree's own path. */
   topLevel: string;
+  /**
+   * The repository's MAIN checkout: equal to topLevel in a normal checkout, the parent for a linked
+   * worktree, null when `git worktree list` is unreadable. This — not topLevel — is the repository's
+   * identity: every real dispatch cwd is a linked worktree (`<repo>/.worktrees/<agent>`, or the
+   * Spinventory fleet's sibling `Rebuild-Project-Root.<feature>`), whose top level is named after
+   * the WORKTREE, not the repo (HED-389 review: keyed on topLevel, heddle dispatches matched nothing).
+   */
+  mainRoot: string | null;
   originUrl: string | null;
 }
 
 /**
- * Resolve a cwd to its Git top level and, when configured, origin URL. Consumers use the top
- * level as the primary identity and the remote only for repository names that are not stable on
- * disk (for example a workspace checkout with a local worktree suffix).
+ * Resolve a cwd to its Git top level, its repository's main checkout and, when configured, its
+ * origin URL. Consumers key repository identity on the main checkout and use the remote only for
+ * names that are not stable on disk (a workspace clone under a different folder name).
+ *
+ * The main checkout is the FIRST entry of `git worktree list --porcelain`, which is always the main
+ * worktree. That is correct for repos created with `--separate-git-dir` (where the common dir is not
+ * `<checkout>/.git`, so deriving the root from `--git-common-dir` is wrong) and avoids
+ * `--path-format`, which needs git >= 2.31 and would otherwise silently disable confinement on
+ * older git.
  */
 export function gitRepositoryFor(cwd: string): GitRepository | null {
   try {
     const topLevel = git(cwd, ['rev-parse', '--show-toplevel']).trim();
     if (!topLevel) return null;
+    let mainRoot: string | null = null;
+    try {
+      const first = git(cwd, ['worktree', 'list', '--porcelain']).split('\n').find((l) => l.startsWith('worktree '));
+      mainRoot = first ? first.slice('worktree '.length).trim() || null : null;
+    } catch { /* unlistable — callers fall back to topLevel, which is right for a normal checkout */ }
     let originUrl: string | null = null;
     try { originUrl = git(cwd, ['config', '--get', 'remote.origin.url']).trim() || null; }
     catch { /* no origin is normal for a local checkout */ }
-    return { topLevel, originUrl };
+    return { topLevel, mainRoot, originUrl };
   } catch {
     return null;
   }
@@ -68,24 +88,15 @@ export interface WorktreeContext {
 
 /**
  * The canonical checkout when `cwd` is inside a LINKED worktree, else null (a normal checkout, or
- * not a repo — nothing to confine against in either case).
- *
- * Uses `git worktree list --porcelain`, whose FIRST entry is always the main worktree. That is
- * correct for repos created with `--separate-git-dir` (where the common dir is not
- * `<checkout>/.git`, so deriving the root from it is wrong) and avoids `--path-format`, which
- * needs git >= 2.31 and would otherwise silently disable confinement on older git.
+ * not a repo — nothing to confine against in either case). The main-worktree resolution itself
+ * lives in gitRepositoryFor (see there for why `git worktree list`, not `--git-common-dir`).
  */
 export function parentCheckoutOf(cwd: string): WorktreeContext | null {
   try {
     const repo = gitRepositoryFor(cwd);
-    const worktreeRoot = repo?.topLevel ?? '';
-    if (!worktreeRoot) return null;
-    const listed = git(cwd, ['worktree', 'list', '--porcelain']);
-    const first = listed.split('\n').find((l) => l.startsWith('worktree '));
-    if (!first) return null;
-    const parentRoot = first.slice('worktree '.length).trim();
-    if (!parentRoot || parentRoot === worktreeRoot) return null; // we ARE the main worktree
-    return { parentRoot, worktreeRoot };
+    // Null when not a repo, when the worktree list is unreadable, or when we ARE the main worktree.
+    if (!repo?.mainRoot || repo.mainRoot === repo.topLevel) return null;
+    return { parentRoot: repo.mainRoot, worktreeRoot: repo.topLevel };
   } catch {
     return null; // not a git dir, or git unavailable — no confinement claim is made
   }
