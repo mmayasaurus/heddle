@@ -3,6 +3,24 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { DispatchOptions, TokenUsage, WorkerAdapter, WorkerResult } from '../types.js';
 
+export const DEFAULT_SECRETS_PATH = join(homedir(), '.heddle', 'secrets.env');
+
+/** Read one key from heddle’s secrets file; adapter credentials never come from process.env. */
+export function readSecretsEnvValue(keyEnv: string, path = DEFAULT_SECRETS_PATH): string | undefined {
+  try {
+    const contents = fs.readFileSync(path, 'utf8');
+    for (const line of contents.split(/\r?\n/)) {
+      const match = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$/);
+      if (match?.[1] === keyEnv && match[2]) {
+        let value = match[2].trim();
+        value = value.replace(/^(['"])([\s\S]*)\1$/, '$2');
+        return value || undefined;
+      }
+    }
+  } catch { /* The caller returns its deliberate non-secret missing-key result. */ }
+  return undefined;
+}
+
 export interface OpenAICompatProvider {
   baseUrl: string;
   keyEnv: string;
@@ -91,20 +109,7 @@ export class OpenAICompatAdapter implements WorkerAdapter {
   }
 
   private loadKey(): string | undefined {
-    try {
-      const contents = fs.readFileSync(join(homedir(), '.heddle', 'secrets.env'), 'utf8');
-      for (const line of contents.split(/\r?\n/)) {
-        const match = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$/);
-        if (match?.[1] === this.config.keyEnv && match[2]) {
-          let value = match[2].trim();
-          value = value.replace(/^(['"])([\s\S]*)\1$/, '$2');
-          return value || undefined;
-        }
-      }
-    } catch {
-      // The caller gets the deliberate, non-secret failure below.
-    }
-    return undefined;
+    return readSecretsEnvValue(this.config.keyEnv);
   }
 
   private keyMissingResult(): WorkerResult {
