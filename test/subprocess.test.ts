@@ -1,10 +1,14 @@
-import { describe, it, expect } from 'vitest';
+import { chmodSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { describe, expect, it } from 'vitest';
 import { run } from '../src/adapters/subprocess.js';
+import { useTempResources } from './helpers.js';
 
 // The shared runner all four adapters (codex/cursor/claude/agy) now depend on (HED-31). These pin
 // the centralized timeout/SIGKILL, spawn-error, settle-once, and UTF-8 behavior directly, rather
 // than only through each adapter's integration tests (gitar #69).
 const NODE = process.execPath; // absolute → independent of the (billing-stripped) worker PATH
+const resources = useTempResources('heddle-subprocess-');
 
 describe('subprocess run() — the shared adapter runner', () => {
   it('captures stdout, stderr, and the exit code on a clean exit', async () => {
@@ -44,5 +48,17 @@ describe('subprocess run() — the shared adapter runner', () => {
     const r = await run(NODE, ['-e', 'process.stdout.write("あ".repeat(50000))'], process.cwd(), 10_000);
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toBe('あ'.repeat(50_000));
+  });
+
+  it('regression: hands the child closed stdin rather than an open pipe', async () => {
+    const shim = join(resources.tempDir(), 'closed-stdin');
+    writeFileSync(shim, '#!/bin/sh\nif read -t 2 line; then echo READ; else echo NOINPUT; fi\n');
+    chmodSync(shim, 0o755);
+    const started = Date.now();
+    const result = await run(shim, [], process.cwd(), 10_000);
+
+    expect(result.stdout).toBe('NOINPUT\n');
+    // an OPEN stdin pipe would wait the shim's full 2s `read -t 2`; slack for a loaded machine
+    expect(Date.now() - started).toBeLessThan(1_500);
   });
 });

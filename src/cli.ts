@@ -16,6 +16,7 @@ import { claudeAccountRows, pickClaudeAccountsBatch, usableClaudeCaps } from './
 import { bindingMeter, claudeFloorsFrom } from './floors.js';
 import { loadLanes } from './lanes.js';
 import { readProviderCaps } from './usage.js';
+import { DOCTOR_PROVIDERS, formatDoctorReport, runDoctor } from './doctor.js';
 
 /**
  * heddle CLI — the surface orchestrators (and later the dashboard) drive.
@@ -61,6 +62,7 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
   heddle packs                   list available skill packs
   heddle projects [--json]       registered projects and their fleets (~/.heddle/projects.json; HED-160)
   heddle whoami [--json]         this process's bound identity (HEDDLE_AGENT / FLEET_AGENT / .fleet-agent) + worker context
+  heddle doctor [--json] [--provider <p>]   verify harnesses/accounts/config; --provider runs only that provider's checks plus global config checks (exit 1 on any fail)
   heddle workers [--stale <hours>] [--json]   dispatches still in flight (--stale: only orphans older than N hours)
   heddle ledger [--issue SPI-n] [--limit N] [--json]
   heddle ledger finish <id> --error "<why>"   close an orphaned in-flight row (ok=0)
@@ -356,6 +358,18 @@ try {
       const id = resolveIdentity(process.cwd());
       out(json, id, () => `agent: ${id.agent ?? '(unbound)'}  source: ${id.source}` +
         (id.worker ? `\nWORKER context: dispatch #${id.worker.dispatchId ?? '?'} parent ${id.worker.parent ?? '?'} — this process may not dispatch (depth-1)` : ''));
+      break;
+    }
+
+    case 'doctor': {
+      const provider = arg('--provider');
+      if (provider && !DOCTOR_PROVIDERS.includes(provider as typeof DOCTOR_PROVIDERS[number])) {
+        console.error(`doctor: unknown --provider "${provider}" (known: ${DOCTOR_PROVIDERS.join(', ')})`);
+        process.exit(2);
+      }
+      const report = await runDoctor({ provider });
+      out(json, report, () => formatDoctorReport(report));
+      process.exitCode = report.exitCode;
       break;
     }
 
