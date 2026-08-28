@@ -1,4 +1,4 @@
-import { execFile as execFileNative } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { loadLanes } from './lanes.js';
 import { PROVIDER_REGISTRY } from './adapters/openai-compat.js';
@@ -22,7 +22,7 @@ export interface DoctorReport {
 }
 export interface DoctorDeps {
   env: NodeJS.ProcessEnv;
-  execFile: (cmd: string, args: string[], opts: { timeoutMs: number }) => Promise<{ stdout: string; stderr: string; code: number | null }>;
+  execFile: (cmd: string, args: string[], opts: { timeoutMs: number }) => Promise<{ stdout: string; stderr: string; code: number | null; timedOut?: boolean }>;
   now: () => Date;
   paths: { routing?: string; lanes?: string; projects?: string; accounts?: string };
 }
@@ -42,17 +42,32 @@ const harnesses: readonly Harness[] = [
   { provider: 'gemini', cli: 'agy', installHint: 'install Antigravity CLI and authenticate interactively', catalog: ['models'] },
 ];
 
-function defaultExecFile(cmd: string, args: string[], opts: { timeoutMs: number }): Promise<{ stdout: string; stderr: string; code: number | null }> {
+function defaultExecFile(cmd: string, args: string[], opts: { timeoutMs: number }): Promise<{ stdout: string; stderr: string; code: number | null; timedOut?: boolean }> {
   return new Promise((resolve, reject) => {
-    execFileNative(cmd, args, { timeout: opts.timeoutMs, windowsHide: true }, (error, stdout, stderr) => {
-      if (error && !(typeof (error as NodeJS.ErrnoException).code === 'number')) return reject(error);
-      resolve({ stdout: String(stdout), stderr: String(stderr), code: error ? Number((error as NodeJS.ErrnoException).code) : 0 });
+    const child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+    let stdout = '';
+    let stderr = '';
+    let timedOut = false;
+    child.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString(); });
+    child.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString(); });
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill('SIGKILL');
+    }, opts.timeoutMs);
+    child.once('error', (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.once('close', (code) => {
+      clearTimeout(timer);
+      resolve({ stdout, stderr, code, ...(timedOut ? { timedOut: true } : {}) });
     });
   });
 }
 
 function result(outcome: CheckOutcome, detail: string, hint?: string): Omit<CheckResult, 'id' | 'kind' | 'provider'> {
-  return hint ? { outcome, detail, hint } : { outcome, detail };
+  const sanitized = detail.trim().replace(/[\r\n]+/g, '; ').replace(/[ \t]+/g, ' ').slice(0, 240);
+  return hint ? { outcome, detail: sanitized, hint } : { outcome, detail: sanitized };
 }
 
 function textError(error: unknown): string {
@@ -63,15 +78,22 @@ function isMissingBinary(error: unknown): boolean {
   return (error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT';
 }
 
-function loggedIn(stdout: string, code: number | null): boolean {
+function loggedIn(stdout: string, stderr: string, code: number | null): boolean | undefined {
   if (code !== 0) return false;
   try {
     const parsed = JSON.parse(stdout) as Record<string, unknown>;
-    for (const key of ['loggedIn', 'isLoggedIn', 'authenticated']) {
+    for (const key of ['loggedIn', 'isAuthenticated', 'authenticated']) {
       if (typeof parsed[key] === 'boolean') return parsed[key];
     }
+    if (parsed.status === 'authenticated') return true;
+    if (parsed.status === 'unauthenticated') return false;
   } catch { /* Some verified status commands use text. */ }
-  return !/not logged in|logged out|unauthenticated/i.test(stdout);
+  // Text-form probes may report on EITHER stream: codex prints `Logged in using ChatGPT` on stderr
+  // with an empty stdout (verified 2026-08-28, codex-cli 0.147.0).
+  const text = `${stdout}\n${stderr}`.trim();
+  if (/^logged in/i.test(text)) return true;
+  if (/not logged in|logged out|unauthenticated/i.test(text)) return false;
+  return undefined;
 }
 
 function catalogModels(stdout: string): Set<string> {
@@ -82,8 +104,23 @@ function catalogModels(stdout: string): Set<string> {
     else if (value && typeof value === 'object') Object.values(value).forEach(walk);
   };
   try { walk(JSON.parse(stdout)); } catch { /* Plain-text catalogs are checked line-by-line below. */ }
-  for (const line of stdout.split(/\r?\n/)) values.add(line.trim());
+  for (const line of stdout.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const candidates = [
+      trimmed.split(' - ', 1)[0],
+      trimmed.split('\t', 1)[0],
+      trimmed.split(/\s+/, 1)[0],
+    ];
+    for (const candidate of candidates) {
+      if (/^[a-z][a-z0-9._-]*$/.test(candidate)) values.add(candidate);
+    }
+  }
   return values;
+}
+
+function timeoutResult(cli: string, timeoutMs: number): Omit<CheckResult, 'id' | 'kind' | 'provider'> {
+  return result('warn', `timed out after ${timeoutMs / 1_000}s — unverified, not proven broken`, `re-run; if it persists see docs/LANDMINES.md (${cli})`);
 }
 
 function targetModels(provider: Provider, routingPath?: string): Array<{ taskClass: string; model: string }> {
@@ -114,6 +151,7 @@ export async function runDoctor(opts: { provider?: string }, partial: Partial<Do
     definitions.push({ id: `binary:${harness.provider}`, kind: 'binary', provider: harness.provider, run: async () => {
       try {
         const probe = await deps.execFile(harness.cli, ['--version'], { timeoutMs: 5_000 });
+        if (probe.timedOut) return timeoutResult(harness.cli, 5_000);
         if (probe.code !== 0) return result('fail', probe.stderr || `${harness.cli} --version exited ${probe.code}`, harness.installHint);
         return result('ok', probe.stdout.trim() || `${harness.cli} installed`);
       } catch (error) {
@@ -124,17 +162,19 @@ export async function runDoctor(opts: { provider?: string }, partial: Partial<Do
     definitions.push({ id: `login:${harness.provider}`, kind: 'login', provider: harness.provider, run: async () => {
       if (binaryMissing.has(harness.provider)) return result('skipped', 'binary missing');
       if (!harness.login) return result('skipped', `no login probe verified for ${harness.cli}`);
-      const probe = await deps.execFile(harness.cli, harness.login, { timeoutMs: 5_000 });
-      return loggedIn(probe.stdout, probe.code)
-        ? result('ok', 'logged in')
-        : result('fail', 'logged out', harness.loginHint);
+      const probe = await deps.execFile(harness.cli, harness.login, { timeoutMs: 15_000 });
+      if (probe.timedOut) return timeoutResult(harness.cli, 15_000);
+      const status = loggedIn(probe.stdout, probe.stderr, probe.code);
+      if (status === undefined) return result('warn', 'unrecognized status output');
+      return status ? result('ok', 'logged in') : result('fail', 'logged out', harness.loginHint);
     } });
     definitions.push({ id: `catalog:${harness.provider}`, kind: 'catalog', provider: harness.provider, run: async () => {
       if (binaryMissing.has(harness.provider)) return result('skipped', 'binary missing');
       if (!harness.catalog) return result('skipped', `no catalog command verified for ${harness.cli}`);
       const targets = targetModels(harness.provider, deps.paths.routing);
       if (targets.length === 0) return result('skipped', `no routed models for ${harness.provider}`);
-      const probe = await deps.execFile(harness.cli, harness.catalog, { timeoutMs: 15_000 });
+      const probe = await deps.execFile(harness.cli, harness.catalog, { timeoutMs: 20_000 });
+      if (probe.timedOut) return timeoutResult(harness.cli, 20_000);
       if (probe.code !== 0) return result('fail', probe.stderr || `${harness.cli} ${harness.catalog.join(' ')} exited ${probe.code}`);
       const models = catalogModels(probe.stdout);
       const absent = targets.filter((target) => !models.has(target.model));
@@ -184,7 +224,7 @@ export async function runDoctor(opts: { provider?: string }, partial: Partial<Do
     try {
       checks.push({ id: definition.id, kind: definition.kind, ...(definition.provider ? { provider: definition.provider } : {}), ...await definition.run() });
     } catch (error) {
-      checks.push({ id: definition.id, kind: definition.kind, ...(definition.provider ? { provider: definition.provider } : {}), outcome: 'fail', detail: textError(error) });
+      checks.push({ id: definition.id, kind: definition.kind, ...(definition.provider ? { provider: definition.provider } : {}), ...result('fail', textError(error)) });
     }
   }
   const summary = checks.reduce((counts, entry) => ({ ...counts, [entry.outcome]: counts[entry.outcome] + 1 }), { ok: 0, warn: 0, fail: 0, skipped: 0 });
