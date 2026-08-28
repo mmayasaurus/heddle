@@ -28,9 +28,24 @@ import { join } from 'node:path';
  * they are build/tool artifacts, and hashing them would make every dispatch O(node_modules)).
  */
 
+/**
+ * Environment variables through which git ignores the working directory: GIT_DIR / GIT_WORK_TREE
+ * / GIT_COMMON_DIR / GIT_INDEX_FILE / GIT_OBJECT_DIRECTORY redirect every command here to whatever
+ * repository they name. An orchestrator process inherits them (a git hook exports GIT_DIR), and
+ * everything in this module reasons about the WORKER'S CWD — its identity, its quality gate, its
+ * confinement — so they are stripped once, for every consumer (HED-389 round-1 review, #1).
+ */
+const GIT_ENV_OVERRIDES = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY'];
+
+function gitEnv(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  for (const name of GIT_ENV_OVERRIDES) delete env[name];
+  return env;
+}
+
 function git(cwd: string, args: string[]): string {
   return execFileSync('git', args, {
-    cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+    cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], env: gitEnv(),
     timeout: 30_000, maxBuffer: 64 * 1024 * 1024,
   });
 }
@@ -40,11 +55,15 @@ export interface GitRepository {
   /** The checkout `cwd` is inside — for a LINKED worktree, the worktree's own path. */
   topLevel: string;
   /**
-   * The repository's MAIN checkout: equal to topLevel in a normal checkout, the parent for a linked
-   * worktree, null when `git worktree list` is unreadable. This — not topLevel — is the repository's
-   * identity: every real dispatch cwd is a linked worktree (`<repo>/.worktrees/<agent>`, or the
-   * Spinventory fleet's sibling `Rebuild-Project-Root.<feature>`), whose top level is named after
-   * the WORKTREE, not the repo (HED-389 review: keyed on topLevel, heddle dispatches matched nothing).
+   * The repository's MAIN checkout — the first `git worktree list --porcelain` entry: equal to
+   * topLevel in a normal checkout; for a linked worktree, the checkout it was added from, wherever
+   * that sits (inside the repo as `<repo>/.worktrees/<agent>`, or beside it as the Spinventory
+   * fleet's sibling `Rebuild-Project-Root.<feature>`). This — not topLevel — is the repository's
+   * identity: a real dispatch cwd is a linked worktree whose top level is named after the
+   * WORKTREE, not the repo (HED-389 review: keyed on topLevel, heddle dispatches matched nothing).
+   * null when the worktree list is unreadable: the identity is then UNKNOWN — consumers make no
+   * claim from it (qualityGateForRepository drops the gate, parentCheckoutOf does not confine) and
+   * never fall back to the worktree folder name.
    */
   mainRoot: string | null;
   originUrl: string | null;
@@ -69,7 +88,7 @@ export function gitRepositoryFor(cwd: string): GitRepository | null {
     try {
       const first = git(cwd, ['worktree', 'list', '--porcelain']).split('\n').find((l) => l.startsWith('worktree '));
       mainRoot = first ? first.slice('worktree '.length).trim() || null : null;
-    } catch { /* unlistable — callers fall back to topLevel, which is right for a normal checkout */ }
+    } catch { /* unlistable — identity unknown; consumers treat null as "no claim", never as topLevel */ }
     let originUrl: string | null = null;
     try { originUrl = git(cwd, ['config', '--get', 'remote.origin.url']).trim() || null; }
     catch { /* no origin is normal for a local checkout */ }

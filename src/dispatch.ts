@@ -20,10 +20,11 @@ import { materializeAgentsMd, readPack, withMandatoryPacks, composePacks, modelF
  * explicit family-codex on a route that falls back to cursor would hand the worker two conflicting
  * instruction styles. The dispatcher's choice wins.
  */
-export function packsFor(provider: string, requested: readonly string[], cwd?: string): string[] {
+export function packsFor(provider: string, requested: readonly string[], cwd: string): string[] {
   const withoutForeignFamilies = requested.filter((p) => !ALL_FAMILY_PACKS.has(p));
-  const mandatory = withMandatoryPacks(withoutForeignFamilies);
-  const base = cwd ? resolveQualityGateForCwd(cwd, mandatory) : mandatory;
+  // cwd is REQUIRED: `quality-gate` is resolved per repository from it (HED-389) — an optional cwd
+  // whose absence kept the app gate was the old unsafe behaviour in disguise (round-1 review #5).
+  const base = resolveQualityGateForCwd(cwd, withMandatoryPacks(withoutForeignFamilies));
   const family = modelFamilyPack(provider);
   return family && !base.includes(family) ? [...base, family] : base;
 }
