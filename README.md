@@ -125,6 +125,13 @@ private, unpublished package, so these are **not** on your `PATH` after `npm ins
 `npm link` (or a global install) to expose them, or invoke the built files directly (`node
 dist/cli.js …`, as the MCP snippet above does).
 
+### Verify harness health
+
+Run `heddle doctor` before onboarding an account or starting a session. It checks the configured
+harness binaries, login state, live model catalogs where supported, routing/config parsing, and
+provider verification freshness; `--provider cursor` narrows harness probes and `--json` returns
+the same typed report. It exits 1 only when a check fails.
+
 Framework-layer config lives under `~/.heddle/` (it spans projects, never a single repo):
 `accounts.json` (Claude accounts), `ledger.db` (dispatch/review ledger), `comms.db` (broker).
 Environment overrides:

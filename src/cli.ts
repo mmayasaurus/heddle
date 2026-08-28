@@ -16,6 +16,7 @@ import { claudeAccountRows, pickClaudeAccountsBatch, usableClaudeCaps } from './
 import { bindingMeter, claudeFloorsFrom } from './floors.js';
 import { loadLanes } from './lanes.js';
 import { readProviderCaps } from './usage.js';
+import { formatDoctorReport, runDoctor } from './doctor.js';
 
 /**
  * heddle CLI — the surface orchestrators (and later the dashboard) drive.
@@ -61,6 +62,7 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
   heddle packs                   list available skill packs
   heddle projects [--json]       registered projects and their fleets (~/.heddle/projects.json; HED-160)
   heddle whoami [--json]         this process's bound identity (HEDDLE_AGENT / FLEET_AGENT / .fleet-agent) + worker context
+  heddle doctor [--json] [--provider <p>]   verify harnesses/accounts/config: binary · login · catalog · config · freshness (exit 1 on any fail)
   heddle workers [--stale <hours>] [--json]   dispatches still in flight (--stale: only orphans older than N hours)
   heddle ledger [--issue SPI-n] [--limit N] [--json]
   heddle ledger finish <id> --error "<why>"   close an orphaned in-flight row (ok=0)
@@ -356,6 +358,13 @@ try {
       const id = resolveIdentity(process.cwd());
       out(json, id, () => `agent: ${id.agent ?? '(unbound)'}  source: ${id.source}` +
         (id.worker ? `\nWORKER context: dispatch #${id.worker.dispatchId ?? '?'} parent ${id.worker.parent ?? '?'} — this process may not dispatch (depth-1)` : ''));
+      break;
+    }
+
+    case 'doctor': {
+      const report = await runDoctor({ provider: arg('--provider') });
+      out(json, report, () => formatDoctorReport(report));
+      process.exit(report.exitCode);
       break;
     }
 
