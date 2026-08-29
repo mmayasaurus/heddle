@@ -21,7 +21,6 @@ export function evaluateRules(rules: Rule[], ctx: EvalContext): RuleOutcome[] {
         if (!Object.prototype.hasOwnProperty.call(toolInput, key) || toolInput[key] == null) return false;
         const regex = rule.inputRegexes.get(key);
         if (!regex) return false;
-        regex.lastIndex = 0;
         // Catastrophic-backtracking ReDoS remains an accepted operator-trust risk: rules are ratified tracked files.
         try { return regex.test(String(toolInput[key])); }
         catch { return false; }

@@ -13,7 +13,7 @@ export const RuleSchema = z.object({
     input: z.record(z.string(), z.string()).optional(),
     cwd: StringOrStrings.optional(),
     agent_role: z.enum(['orchestrator', 'worker', 'any']).default('any'),
-  }).default({}),
+  }).strict().default({}),
   action: z.enum(['nudge', 'inject', 'block']),
   enforce: z.boolean().default(false),
   subagent_aware: z.boolean().default(false),
@@ -21,7 +21,7 @@ export const RuleSchema = z.object({
   fail_open: z.literal(true),
   since: z.string().date().optional(),
   provenance: z.string().optional(),
-}).superRefine((rule, ctx) => {
+}).strict().superRefine((rule, ctx) => {
   // HED-403: Stop events need a doc-verified continuation-safe output contract before rules can author output for them.
   if (rule.event === 'Stop' || rule.event === 'SubagentStop') {
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: StopRuleDeferralMessage, path: ['event'] });
@@ -33,6 +33,12 @@ export const RuleSchema = z.object({
   }
   for (const [key, pattern] of Object.entries(rule.match.input ?? {})) {
     try { new RegExp(pattern); } catch { ctx.addIssue({ code: z.ZodIssueCode.custom, message: `input regex for '${key}' is invalid`, path: ['match', 'input', key] }); }
+  }
+  if (rule.match.cwd !== undefined) {
+    const cwdMatchers = Array.isArray(rule.match.cwd) ? rule.match.cwd : [rule.match.cwd];
+    if (cwdMatchers.some((cwd) => cwd.length === 0 || !cwd.startsWith('/'))) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'cwd matchers must be nonempty absolute paths', path: ['match', 'cwd'] });
+    }
   }
 });
 

@@ -5,7 +5,8 @@ export function renderMatches(event: string, matched: Array<{ rule: Rule; messag
   const blocks = matched.filter(({ rule }) => rule.action === 'block' && rule.enforce);
   const context = matched.filter(({ rule }) => !(rule.action === 'block' && rule.enforce));
   if (blocks.length) {
-    const reason = [blocks[0]!, ...context].map(({ message }) => message).join('\n');
+    if (event !== 'PreToolUse') throw new Error('block render is PreToolUse-only');
+    const reason = [...blocks, ...context].map(({ message }) => message).join('\n');
     return JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: reason } });
   }
   return JSON.stringify({

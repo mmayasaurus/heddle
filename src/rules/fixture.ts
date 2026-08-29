@@ -35,7 +35,7 @@ function evaluateFixtureCase(item: FixtureCase, rulesDir: string, ruleId: string
   const event = item.payload.hook_event_name;
   if (typeof event !== 'string') throw new Error('payload hook_event_name must be a string');
   const env = item.env ?? {};
-  const agentRole = env.HEDDLE_WORKER ? 'worker' : 'orchestrator';
+  const agentRole = String(env.HEDDLE_WORKER) === '1' ? 'worker' : 'orchestrator';
   const agent = String(env.HEDDLE_AGENT ?? env.FLEET_AGENT ?? '');
   const isSubagent = Boolean(item.payload.agent_id) || event === 'SubagentStop';
   const matches = evaluateRules([rule], { event, payload: item.payload, isSubagent, agentRole, agent } as EvalContext)

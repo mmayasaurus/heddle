@@ -178,6 +178,9 @@ async function test(root: string, id: string | undefined): Promise<number> {
 /** Runs the rule lifecycle CLI and returns an exit code instead of throwing. */
 export async function runRuleCli(argv: string[]): Promise<number> {
   try {
+    const rulesIndex = argv.indexOf('--rules');
+    const rulesValue = rulesIndex < 0 ? undefined : argv[rulesIndex + 1];
+    if (rulesIndex >= 0 && (!rulesValue || rulesValue.startsWith('--'))) { usage(); return 2; }
     const [command] = argv;
     const root = resolveRulesRoot(argv);
     if (command === 'list') return await list(root, argv.includes('--json'));

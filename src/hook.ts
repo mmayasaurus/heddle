@@ -32,7 +32,7 @@ async function main(): Promise<string> {
   const rulesDir = arg('--rules') ?? process.env.HEDDLE_RULES_DIR ?? (process.env.CLAUDE_PROJECT_DIR ? `${process.env.CLAUDE_PROJECT_DIR}/rules` : fileURLToPath(new URL('../rules', import.meta.url)));
   const rules = loadRules(rulesDir);
   const isSubagent = Boolean(payload.agent_id) || event === 'SubagentStop';
-  const agentRole = process.env.HEDDLE_WORKER ? 'worker' : 'orchestrator';
+  const agentRole = process.env.HEDDLE_WORKER === '1' ? 'worker' : 'orchestrator';
   const agent = process.env.HEDDLE_AGENT ?? process.env.FLEET_AGENT ?? '';
   const matches = evaluateRules(rules, { event, payload, isSubagent, agentRole, agent }).filter((outcome) => outcome.verdict === 'match')
     .map(({ rule }) => ({ rule, message: `${rule.action === 'block' && !rule.enforce ? '(would block) ' : ''}${renderTemplate(rule.message, payload, agent, rule.id)}` }));

@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { loadRules } from '../../src/rules/load.js';
 import { useTempResources } from '../helpers.js';
-import { ensureBuilt, runCli } from '../helpers/cli.js';
+import { ensureBuilt, PROJECT_ROOT, runCli } from '../helpers/cli.js';
 
 const ruleYaml = (id: string, provenance: string | null = 'HED-403') => `id: ${id}\nevent: PreToolUse\nmatch:\n  tool: Bash\naction: nudge\nenforce: false\nsubagent_aware: false\nmessage: avoid destructive commands\nfail_open: true\n${provenance === null ? '' : `provenance: ${provenance}\n`}`;
 
@@ -74,6 +74,19 @@ describe('heddle rule lifecycle CLI', () => {
     expect(result.stderr).toContain('worker');
     expect(existsSync(join(root, 'proposed', 'sample-rule.yaml'))).toBe(true);
     expect(existsSync(join(root, 'sample-rule.yaml'))).toBe(false);
+  }, 30_000);
+
+  it('rejects a missing --rules value before resolving the default root', async () => {
+    const result = await runCli(['rule', 'ratify', 'sample-rule', '--rules']);
+    expect(result.code).toBe(2);
+    expect(result.stderr).toContain('usage:');
+    expect(existsSync(join(PROJECT_ROOT, 'rules', 'sample-rule.yaml'))).toBe(false);
+  }, 30_000);
+
+  it('rejects an option passed as the --rules value', async () => {
+    const result = await runCli(['rule', 'list', '--rules', '--json']);
+    expect(result.code).toBe(2);
+    expect(result.stderr).toContain('usage:');
   }, 30_000);
 
   it('refuses red fixtures and leaves the proposed rule inert', async () => {
