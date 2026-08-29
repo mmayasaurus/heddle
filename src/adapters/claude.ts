@@ -38,6 +38,21 @@ export const CLAUDE_WORKER_PROTOCOL_VERSION = 1;
 export type ClaudeWorkerModel = 'fable' | 'opus' | 'sonnet' | 'haiku';
 
 /**
+ * Alias -> pinned concrete model id (HED-448). The claude CLI resolves a BARE alias to its newest
+ * model of that family -- '--model opus' silently became claude-opus-5, which this fleet forbids
+ * (fleet rule: claude-opus-4-8 for workers; Fable only for the R/Y tails). Workers must therefore
+ * never pass a bare alias to the CLI: buildArgs() pins every alias here; a value not in this map
+ * (an explicit concrete id from a direct route) passes through verbatim. opts.model stays the alias
+ * everywhere else (ledger rows, routing, tests) -- only the argv boundary translates.
+ */
+export const CLAUDE_MODEL_IDS: Record<ClaudeWorkerModel, string> = {
+  fable: 'claude-fable-5',
+  opus: 'claude-opus-4-8',
+  sonnet: 'claude-sonnet-5',
+  haiku: 'claude-haiku-4-5-20251001',
+};
+
+/**
  * Default headless tool allowlist — the codex-workspace-write analog: read/edit the workspace, run
  * the repo's own scripts and inspect git. This is a guardrail against ACCIDENTAL damage and drift,
  * NOT a security boundary: an edit-capable worker can stage code that runs under `npm run`/`npx`,
@@ -114,7 +129,12 @@ export class ClaudeAdapter implements WorkerAdapter {
   /** The exact argv for one dispatch — pure, so tests can pin the invocation contract. */
   buildArgs(prompt: string, opts: DispatchOptions): string[] {
     const caps = new Set(opts.capabilities ?? []);
-    const args = ['-p', prompt, '--output-format', 'json', '--model', opts.model];
+    // Own-property lookup only: a bracket read on a plain object would resolve prototype keys
+    // (model: 'toString' -> Object.prototype.toString, a FUNCTION in argv) — codeant, PR #107.
+    const modelId = Object.hasOwn(CLAUDE_MODEL_IDS, opts.model)
+      ? CLAUDE_MODEL_IDS[opts.model as ClaudeWorkerModel]
+      : opts.model;
+    const args = ['-p', prompt, '--output-format', 'json', '--model', modelId];
     // classify_effort can emit 'minimal' (codex vocabulary); claude accepts low|medium|high|xhigh|max.
     const effort = opts.effort === 'minimal' ? 'low' : opts.effort;
     if (effort) args.push('--effort', effort);
@@ -154,6 +174,15 @@ export class ClaudeAdapter implements WorkerAdapter {
 
   async dispatch(prompt: string, opts: DispatchOptions): Promise<WorkerResult> {
     const args = this.buildArgs(prompt, opts);
+    // Fleet rule (HED-448): claude-opus-5 is forbidden everywhere. Aliases can no longer reach it
+    // (CLAUDE_MODEL_IDS pins them), so only an EXPLICIT concrete id can — refuse it as a structured
+    // failure before any spawn (ledgered like every other failed dispatch; never a bare throw).
+    const mi = args.indexOf('--model');
+    const modelArg = mi >= 0 ? args[mi + 1] ?? '' : '';
+    if (/opus-5/i.test(modelArg)) {
+      return { ok: false, output: '', exitCode: null,
+        error: `model '${modelArg}' is forbidden (fleet rule; HED-448) — route opus work to claude-opus-4-8` };
+    }
     const started = Date.now();
     const timeoutMs = opts.timeoutMs ?? 600_000;
     const { stdout, stderr, exitCode, timedOut } = await run(this.bin, args, opts.cwd, timeoutMs, opts.env, opts.envUnset);

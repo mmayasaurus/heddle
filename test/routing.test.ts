@@ -92,6 +92,17 @@ describe('routing.v0.yaml — shipped table invariants', () => {
     }
   });
 
+  it('every Claude-routed alias (and the claude catalog) is pinned in CLAUDE_MODEL_IDS', async () => {
+    const { CLAUDE_MODEL_IDS } = await import('../src/adapters/claude.js');
+    const pinned = Object.keys(CLAUDE_MODEL_IDS);
+    for (const m of (table.providers.claude?.models as string[] | undefined) ?? []) {
+      expect(pinned, `claude catalog alias \"${m}\" is not pinned in CLAUDE_MODEL_IDS`).toContain(m);
+    }
+    for (const c of classes) for (const t of targetsOf(c)) if (t.provider === 'claude') {
+      expect(pinned, `class ${c} routes unpinned claude model \"${t.model}\"`).toContain(t.model);
+    }
+  });
+
   it('declares the never_via_cursor policy for the direct-subscription families', () => {
     expect(table.policy.never_via_cursor).toEqual(['claude', 'gpt', 'gemini']);
   });

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ClaudeAdapter, DEFAULT_CLAUDE_ALLOWED_TOOLS, parseClaudeResult } from '../src/adapters/claude.js';
+import { ClaudeAdapter, DEFAULT_CLAUDE_ALLOWED_TOOLS, parseClaudeResult, CLAUDE_MODEL_IDS } from '../src/adapters/claude.js';
 
 function pair(args: string[], flag: string, value: string): string[] {
   return args.slice(args.indexOf(flag), args.indexOf(flag) + 2).filter(Boolean);
@@ -12,7 +12,7 @@ function result(overrides: Record<string, unknown> = {}): string {
 describe('ClaudeAdapter invocation and result contracts', () => {
   it('builds the default headless invocation with the complete safe tool allowlist', () => {
     const args = new ClaudeAdapter().buildArgs('do it', { model: 'haiku', cwd: '/tmp' });
-    expect(args.slice(0, 6)).toEqual(['-p', 'do it', '--output-format', 'json', '--model', 'haiku']);
+    expect(args.slice(0, 6)).toEqual(['-p', 'do it', '--output-format', 'json', '--model', 'claude-haiku-4-5-20251001']);
     expect(pair(args, '--permission-mode', 'acceptEdits')).toEqual(['--permission-mode', 'acceptEdits']);
     expect(args.slice(args.indexOf('--allowedTools') + 1)).toEqual([...DEFAULT_CLAUDE_ALLOWED_TOOLS]);
     expect(args).not.toContain('--dangerously-skip-permissions');
@@ -86,5 +86,38 @@ describe('ClaudeAdapter invocation and result contracts', () => {
   it('finds a result JSON line after noise and serializes non-string result content', () => {
     expect(parseClaudeResult(`warning: x\n${result()}`, 0)).toMatchObject({ ok: true, output: 'OK' });
     expect(parseClaudeResult(result({ result: { a: 1 } }), 0)).toMatchObject({ ok: true, output: JSON.stringify({ a: 1 }) });
+  });
+});
+
+describe('model alias pinning (HED-448)', () => {
+  it('pins every alias to its concrete id -- argv never carries a bare alias or any opus-5', () => {
+    for (const alias of ['fable', 'opus', 'sonnet', 'haiku'] as const) {
+      const EXPECTED: Record<string, string> = { fable: 'claude-fable-5', opus: 'claude-opus-4-8',
+        sonnet: 'claude-sonnet-5', haiku: 'claude-haiku-4-5-20251001' };
+      const args = new ClaudeAdapter().buildArgs('x', { model: alias, cwd: '/tmp' });
+      const i = args.indexOf('--model');
+      expect(args[i + 1]).toBe(EXPECTED[alias]);
+      expect(CLAUDE_MODEL_IDS[alias]).toBe(EXPECTED[alias]);
+      expect(args[i + 1]).not.toBe(alias);
+      expect(args.join(' ')).not.toMatch(/opus-5/);
+    }
+    expect(CLAUDE_MODEL_IDS.opus).toBe('claude-opus-4-8');
+  });
+  it('never resolves prototype keys — a lookalike model string passes through as itself', () => {
+    const args = new ClaudeAdapter().buildArgs('x', { model: 'toString', cwd: '/tmp' });
+    const i = args.indexOf('--model');
+    expect(args[i + 1]).toBe('toString');
+    expect(typeof args[i + 1]).toBe('string');
+  });
+  it('dispatch refuses an explicit opus-5 id with a structured failure, before any spawn', async () => {
+    const r = await new ClaudeAdapter({ bin: '/nonexistent-claude-test-bin' })
+      .dispatch('x', { model: 'claude-opus-5', cwd: '/tmp' });
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/forbidden/);
+    expect(r.error).toMatch(/HED-448/);
+  });
+  it('passes an explicit concrete id through verbatim', () => {
+    const args = new ClaudeAdapter().buildArgs('x', { model: 'claude-haiku-4-5-20251001', cwd: '/tmp' });
+    expect(args).toContain('claude-haiku-4-5-20251001');
   });
 });
