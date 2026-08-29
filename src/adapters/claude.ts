@@ -174,6 +174,15 @@ export class ClaudeAdapter implements WorkerAdapter {
 
   async dispatch(prompt: string, opts: DispatchOptions): Promise<WorkerResult> {
     const args = this.buildArgs(prompt, opts);
+    // Fleet rule (HED-448): claude-opus-5 is forbidden everywhere. Aliases can no longer reach it
+    // (CLAUDE_MODEL_IDS pins them), so only an EXPLICIT concrete id can — refuse it as a structured
+    // failure before any spawn (ledgered like every other failed dispatch; never a bare throw).
+    const mi = args.indexOf('--model');
+    const modelArg = mi >= 0 ? args[mi + 1] ?? '' : '';
+    if (/opus-5/i.test(modelArg)) {
+      return { ok: false, output: '', exitCode: null,
+        error: `model '${modelArg}' is forbidden (fleet rule; HED-448) — route opus work to claude-opus-4-8` };
+    }
     const started = Date.now();
     const timeoutMs = opts.timeoutMs ?? 600_000;
     const { stdout, stderr, exitCode, timedOut } = await run(this.bin, args, opts.cwd, timeoutMs, opts.env, opts.envUnset);

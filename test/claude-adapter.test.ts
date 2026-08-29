@@ -92,9 +92,12 @@ describe('ClaudeAdapter invocation and result contracts', () => {
 describe('model alias pinning (HED-448)', () => {
   it('pins every alias to its concrete id -- argv never carries a bare alias or any opus-5', () => {
     for (const alias of ['fable', 'opus', 'sonnet', 'haiku'] as const) {
+      const EXPECTED: Record<string, string> = { fable: 'claude-fable-5', opus: 'claude-opus-4-8',
+        sonnet: 'claude-sonnet-5', haiku: 'claude-haiku-4-5-20251001' };
       const args = new ClaudeAdapter().buildArgs('x', { model: alias, cwd: '/tmp' });
       const i = args.indexOf('--model');
-      expect(args[i + 1]).toBe(CLAUDE_MODEL_IDS[alias]);
+      expect(args[i + 1]).toBe(EXPECTED[alias]);
+      expect(CLAUDE_MODEL_IDS[alias]).toBe(EXPECTED[alias]);
       expect(args[i + 1]).not.toBe(alias);
       expect(args.join(' ')).not.toMatch(/opus-5/);
     }
@@ -105,6 +108,13 @@ describe('model alias pinning (HED-448)', () => {
     const i = args.indexOf('--model');
     expect(args[i + 1]).toBe('toString');
     expect(typeof args[i + 1]).toBe('string');
+  });
+  it('dispatch refuses an explicit opus-5 id with a structured failure, before any spawn', async () => {
+    const r = await new ClaudeAdapter({ bin: '/nonexistent-claude-test-bin' })
+      .dispatch('x', { model: 'claude-opus-5', cwd: '/tmp' });
+    expect(r.ok).toBe(false);
+    expect(r.error).toMatch(/forbidden/);
+    expect(r.error).toMatch(/HED-448/);
   });
   it('passes an explicit concrete id through verbatim', () => {
     const args = new ClaudeAdapter().buildArgs('x', { model: 'claude-haiku-4-5-20251001', cwd: '/tmp' });
