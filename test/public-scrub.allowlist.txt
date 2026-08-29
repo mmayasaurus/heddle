@@ -1,74 +1,22 @@
-# HED-389 gate map — moves to project-registry config in HED-439
-skills/repo-workspace.md:Spinventory
-# HED-389 gate map — moves to project-registry config in HED-439
-skills/repo-workspace.md:Spinventory
-# HED-389 gate map — moves to project-registry config in HED-439
-skills/repo-workspace.md:Spinventory
-# HED-389 gate map — moves to project-registry config in HED-439
-src/guidance.ts:Spinventory
-# HED-389 gate map — moves to project-registry config in HED-439
-src/skillpacks.ts:Spinventory
-# HED-389 gate map — moves to project-registry config in HED-439
-src/skillpacks.ts:Spinventory-Rebuild-Official
-# HED-389 gate map — moves to project-registry config in HED-439
-src/skillpacks.ts:Spinventory-Rebuild-App
-# HED-389 gate map — moves to project-registry config in HED-439
-src/skillpacks.ts:Spinventory-Rebuild-Workspace
-# HED-389 gate map — moves to project-registry config in HED-439
-src/skillpacks.ts:Spinventory-V2-Official-App-Rebuild
-# HED-389 gate map — moves to project-registry config in HED-439
-src/skillpacks.ts:Spinventory
-# HED-389 gate map — moves to project-registry config in HED-439
-src/skillpacks.ts:Spinventory-Rebuild-Official
-# HED-389 gate map — moves to project-registry config in HED-439
-src/skillpacks.ts:Spinventory
-# HED-389 gate map — moves to project-registry config in HED-439
-src/skillpacks.ts:Spinventory
-# HED-389 gate map — moves to project-registry config in HED-439
-test/repo-aware-gates.test.ts:Spinventory
-# HED-389 gate map — moves to project-registry config in HED-439
-test/repo-aware-gates.test.ts:Spinventory
-# HED-389 gate map — moves to project-registry config in HED-439
-test/repo-aware-gates.test.ts:Spinventory-Rebuild-Official
-# HED-389 gate map — moves to project-registry config in HED-439
-test/repo-aware-gates.test.ts:Spinventory-Rebuild-App
-# HED-389 gate map — moves to project-registry config in HED-439
-test/repo-aware-gates.test.ts:Spinventory-Rebuild-Workspace
-# HED-389 gate map — moves to project-registry config in HED-439
-test/repo-aware-gates.test.ts:mmayasaurus
-# HED-389 gate map — moves to project-registry config in HED-439
-test/repo-aware-gates.test.ts:Spinventory-Rebuild-Workspace
-# HED-389 gate map — moves to project-registry config in HED-439
-test/repo-aware-gates.test.ts:Spinventory
-# HED-389 gate map — moves to project-registry config in HED-439
-test/repo-aware-gates.test.ts:Spinventory-Rebuild-Official
-# HED-389 gate map — moves to project-registry config in HED-439
-test/repo-aware-gates.test.ts:Spinventory-Rebuild-Official
-# HED-389 gate map — moves to project-registry config in HED-439
-test/repo-aware-gates.test.ts:Spinventory-V2-Official-App-Rebuild
-# HED-389 gate map — moves to project-registry config in HED-439
-test/repo-aware-gates.test.ts:Spinventory-V2-Official-App-Rebuild
-# HED-389 gate map — moves to project-registry config in HED-439
-test/repo-aware-gates.test.ts:Spinventory-Rebuild-Workspace
-# HED-389 gate map — moves to project-registry config in HED-439
-test/repo-aware-gates.test.ts:Spinventory-V2-Official-App-Rebuild
-# HED-389 gate map — moves to project-registry config in HED-439
-test/repo-aware-gates.test.ts:Spinventory-Rebuild-Official
-# HED-389 gate map — moves to project-registry config in HED-439
-test/repo-aware-gates.test.ts:Spinventory-Rebuild-App
-# HED-389 gate map — moves to project-registry config in HED-439
-test/repo-aware-gates.test.ts:Spinventory-Rebuild-Workspace
-# HED-389 gate map — moves to project-registry config in HED-439
-test/repo-aware-gates.test.ts:mmayasaurus
-# HED-389 gate map — moves to project-registry config in HED-439
-test/repo-aware-gates.test.ts:mmayasaurus
-# HED-389 gate map — moves to project-registry config in HED-439
-test/repo-aware-gates.test.ts:Spinventory-Rebuild-App
-# HED-389 gate map — moves to project-registry config in HED-439
-test/repo-aware-gates.test.ts:Spinventory-Rebuild-Workspace
-# HED-389 gate map — moves to project-registry config in HED-439
-test/repo-aware-gates.test.ts:Spinventory-Rebuild-Workspace
-# HED-389 gate map — moves to project-registry config in HED-439
-test/repo-aware-gates.test.ts:Spinventory-V2-Official-App-Rebuild
-# HED-389 gate map — the consumer pack text is asserted by test/repo-aware-gates.test.ts; pack + test generalize together in HED-439
-skills/quality-gate.md:Spinventory-Rebuild-Official/Rebuild-Project-Root
+skills/quality-gate.md:2
+src/skillpacks.ts:127
+src/skillpacks.ts:132
+src/skillpacks.ts:138
+src/skillpacks.ts:139
+test/repo-aware-gates.test.ts:20
+test/repo-aware-gates.test.ts:68
+test/repo-aware-gates.test.ts:80
+test/repo-aware-gates.test.ts:94
+test/repo-aware-gates.test.ts:101
+test/repo-aware-gates.test.ts:159
+test/repo-aware-gates.test.ts:177
+test/repo-aware-gates.test.ts:236
+test/repo-aware-gates.test.ts:247
+test/repo-aware-gates.test.ts:251
+test/repo-aware-gates.test.ts:254
+test/repo-aware-gates.test.ts:260
+test/repo-aware-gates.test.ts:265
+test/repo-aware-gates.test.ts:266
+test/repo-aware-gates.test.ts:267
+test/repo-aware-gates.test.ts:268
+test/repo-aware-gates.test.ts:269

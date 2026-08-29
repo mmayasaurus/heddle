@@ -97,7 +97,7 @@ function codeEditingWarning(
       `[${defaults.join(', ')}], or pass an explicit list that includes at least one of them.`
     : tabled.length
     ? `The class default [${tabled.join(', ')}] resolves to NO gate for cwd ${input.cwd}: quality-gate is the ` +
-      `Spinventory app gate and is dropped outside a recognized repository (HED-389). Dispatch from a ` +
+      `consumer app gate and is dropped outside a recognized repository (HED-389). Dispatch from a ` +
       `recognized checkout, or pass an explicit list naming the right repo gate pack (repo-heddle-core, ` +
       `repo-heddle-dashboard, repo-workspace).`
     : `The routing table lists no default packs for ${cls} either — consider quality-gate ` +
