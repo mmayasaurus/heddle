@@ -45,14 +45,14 @@ Studio are the local-runtime class.
 | Muse/Meta | `GET /v1/models` | bookkeeping-only | pay-per-token | no free tier | undocumented |
 | Claude | `claude auth status --json` | vendor-meter | subscription-quota | Pro | `CLAUDE_CONFIG_DIR` |
 | Codex | `codex login status` | vendor-meter | subscription-quota | Free/Go restricted | `CODEX_HOME` |
-| Gemini/Antigravity | `agy -p` | vendor-meter | subscription-quota | Free throttled | one login at a time |
+| Gemini/Antigravity | `agy -p` | bookkeeping-only | subscription-quota | Free throttled | one login at a time |
 | Cursor | `cursor-agent status --format json` | bookkeeping-only | subscription-quota | Hobby | per-run key env |
 | OpenCode | `auth list` / models | bookkeeping-only | undocumented | undocumented | auth store/env |
 | Groq | `GET /openai/v1/models` | vendor-meter | free/prepaid/token | card-less free | org shared limits |
 | Cerebras | `GET /v1/models` | vendor-meter | free/pay-per-token | card-less free | undocumented |
 | Mistral | `GET /v1/models` | bookkeeping-only | free/token/prepaid | Experiment | workspace/free per org |
 | Qwen | 1-token `qwen-turbo` | bookkeeping-only | token/prepaid/free | 1M tokens/model | workspace/region |
-| GitHub Copilot | `gh auth`; `copilot` | vendor-meter | flat/free | 2,000 + 50/mo | existing-accounts-only |
+| GitHub Copilot | `gh auth`; `copilot` | bookkeeping-only | flat/free | 2,000 + 50/mo | existing-accounts-only |
 | Amazon Q Developer (CLI) | `q whoami`; `q doctor` | bookkeeping-only | flat/free | 50 requests/mo | undocumented |
 | Ollama | tags/models/list | none | local-free | no quota | no account |
 | LM Studio | models/`lms ps` | none | local-free | no quota | no account |
@@ -73,10 +73,13 @@ Studio are the local-runtime class.
    and error data. Env-repoint accounts use their provider endpoint, not native CLI login status.
 3. **Storage:** use registry/keychain credential references, never a loose file. Display-once keys
    are captured at input and never redisplayed.
-4. **Usage windows:** vendor-meter means documented key/balance/quota/CLI meter: GLM 5-hour + weekly;
-   OpenRouter daily/weekly/monthly/reset; Kimi tier limits; DeepSeek balance; Claude 5-hour + weekly;
-   Codex shared plan limits; Antigravity 5-hour + weekly; Groq/Cerebras headers; Copilot monthly.
-   Bookkeeping-only records dispatch usage and directs to console; `none` has no vendor meter.
+4. **Usage windows:** vendor-meter means a MACHINE-READABLE documented key/balance/quota endpoint or
+   CLI JSON that the reporter can poll: GLM quota endpoint (5-hour and weekly); OpenRouter key
+   endpoint (daily/weekly/monthly with reset); Kimi and DeepSeek balance; Claude 5-hour and weekly
+   (the usage tap); Codex plan limits (`wham/usage`, unofficial but working); Groq/Cerebras response
+   headers. Antigravity (interactive TUI `/usage` only) and Copilot (browser billing page only) are
+   **bookkeeping-only** until a headless capture path is specified — the reporter records dispatch
+   usage and points at the console; `none` has no vendor meter.
 5. **Expiry/rotation:** 401 is invalid/revoked/expired or re-login; DeepSeek/OpenRouter 402 is
    insufficient/exhausted balance; GLM 429 is expected at quota; NVIDIA 403 is missing scope;
    Cursor 429 is exhaustion; Antigravity is `RESOURCE_EXHAUSTED`. OpenRouter 429 can be upstream.
@@ -214,32 +217,41 @@ per-account limits and multi-account posture undocumented.
 ### Claude
 
 1. Auth: `claude auth login` or `claude setup-token`/`CLAUDE_CODE_OAUTH_TOKEN`. 2. Plans:
-Pro/Max/Team/Enterprise. 3. Isolation: `CLAUDE_CONFIG_DIR`. 4. `ANTHROPIC_API_KEY` silently switches
-to API billing. 5. Probe: `claude auth status --json`. 6. Store: config/keychain. 7. Meter:
-`/usage-credits` and ring. 8. Billing: subscription quota, optional credits. 9. Windows: 5-hour +
-weekly; re-login on failure. 10. Exhaustion: `API Error: Rate limit reached`.
+Pro/Max/Team/Enterprise. 3. Isolation: `CLAUDE_CONFIG_DIR` per account relocates config/sessions
+and, on Linux/Windows, credentials; on macOS credentials live in the Keychain and per-config-dir
+Keychain isolation is UNVERIFIED (LANDMINES) — the wizard uses `claude setup-token` →
+`CLAUDE_CODE_OAUTH_TOKEN` per account there, or gates on a verification test; never `--bare` (forces
+API-key billing). 4. `ANTHROPIC_API_KEY` silently switches to API billing. 5. Probe: `claude auth
+status --json`. 6. Store: config/keychain. 7. Meter: `/usage-credits` and ring. 8. Billing:
+subscription quota, optional credits. 9. Windows: 5-hour + weekly; re-login on failure. 10.
+Exhaustion: `API Error: Rate limit reached`.
 
 - Wizard prompts:
   - “Complete CLI login in isolated CLAUDE_CONFIG_DIR, or use setup token?”
   - “Which subscription account/plan?”
 
 Free-tier value / per-account limits / multi-account posture: Claude Pro is lowest documented
-headless-capable tier; 5-hour/weekly limits; isolate each account by `CLAUDE_CONFIG_DIR`.
+headless-capable tier; 5-hour/weekly limits; isolate each account by `CLAUDE_CONFIG_DIR`
+(Linux/Windows) or a per-account setup token (macOS, until Keychain isolation is verified).
 
 ### Codex
 
 1. Auth: `codex login`, optional `--device-auth`, or headless token. 2. Plans: Free through
-Enterprise. 3. Isolation: `CODEX_HOME` with auth/config. 4. API-key login overrides subscription.
-5. Probe: `codex login status` (stderr). 6. Store: `$CODEX_HOME/auth.json`. 7. Meter: `/status` and
-`/statusline`. 8. Billing: plan quota shared web/desktop/CLI. 9. Tokens refresh actively; logout/login
-rotates. 10. Headless rate-limit string undocumented.
+Enterprise. 3. Isolation: one `CODEX_HOME` per account (auth/config/session history) — and NEVER two
+concurrent workers under the same `CODEX_HOME` (openai/codex#35619: catastrophic rollout-history
+loss): same-account dispatches serialize, or each worker gets its own state directory. 4. API-key
+login overrides subscription. 5. Probe: `codex login status` (stderr). 6. Store:
+`$CODEX_HOME/auth.json`. 7. Meter: `/status` and `/statusline`. 8. Billing: plan quota shared
+web/desktop/CLI. 9. Tokens refresh actively; logout/login rotates. 10. Headless rate-limit string
+undocumented.
 
 - Wizard prompts:
   - “Complete device login in a new isolated CODEX_HOME.”
   - “Subscription auth or API-key login; which plan/account?”
 
 Free-tier value / per-account limits / multi-account posture: ChatGPT Free/Go works with restricted
-limits; exact allowance undocumented; use distinct `CODEX_HOME` per account.
+limits; exact allowance undocumented; use distinct `CODEX_HOME` per account and serialize workers
+that share one.
 
 ### Gemini/Antigravity
 
@@ -259,26 +271,33 @@ about 250/5h and 2,800/week; one-login-at-a-time with no documented per-account 
 
 ### Cursor
 
-1. Auth: `agent login` or dashboard key via `CURSOR_API_KEY`/`--api-key`. 2. Plans:
-Hobby/Pro/Pro+/Ultra/Teams. 3. Isolation: per-run key env. 4. Probe: `cursor-agent status --format json`.
-5. Store: dashboard key/env reference. 6. Meter: Spending dashboard; CLI tokens not dollars.
-7. Teams API offers filtered events. 8. Billing: monthly pool then optional on-demand.
-9. Key lasts until revoked; 429 exhaustion. 10. CLI does not support BYOK provider keys.
+1. Auth: browser login (`agent login`) is the supported path; a dashboard User API Key via
+`CURSOR_API_KEY` (env only — `--api-key` on argv leaks via `ps`) is an account selector whose
+billing-to-plan is UNDOCUMENTED (LANDMINES, SPEC): the wizard must not mint rotation keys until one
+test job is confirmed on the plan dashboard. 2. Plans: Hobby/Pro/Pro+/Ultra/Teams. 3. Isolation:
+per-run key env, only after that billing test passes; browser-login switching is manual and global.
+4. Probe: `cursor-agent status --format json`. 5. Store: dashboard key/env reference. 6. Meter:
+Spending dashboard; CLI tokens not dollars. 7. Teams API offers filtered events. 8. Billing: monthly
+pool then optional on-demand. 9. Key lasts until revoked; 429 exhaustion. 10. CLI does not support
+BYOK provider keys.
 
 - Wizard prompts:
-  - “Browser login or User API Key?”
+  - “Browser login (default), or a User API Key — only after the plan-billing verification step?”
   - “Which plan/billing account; is on-demand enabled?”
 
-Free-tier value / per-account limits / multi-account posture: Hobby works headless with strict limits;
-monthly pool resets per billing cycle; distinct per-run keys support multiple accounts.
+Free-tier value / per-account limits / multi-account posture: Hobby works headless with strict
+limits; monthly pool resets per billing cycle; distinct per-run keys can select accounts once plan
+billing is verified; until then browser login only.
 
 ### OpenCode
 
-1. Harness row, not wizard-default provider. 2. Auth: `opencode auth login`, provider keys/OAuth.
-3. Includes Zen/Go and consumer paths. 4. Shape: JSON auth store/env. 5. Probe: `auth list`/models.
-6. Store: auth JSON/config/project `.env`. 7. Meter: stats/JSON events. 8. Billing: undocumented.
-9. Headless exit/stdin behavior undocumented. 10. Greedy env reads and Anthropic subscription
-wrapping ToS require sandboxing; Claude plugins removed v1.3.0.
+1. Harness row, not wizard-default provider. 2. Auth: `opencode auth login`, provider keys/OAuth. 3.
+Includes Zen/Go and consumer paths. 4. Shape: JSON auth store/env. 5. Probe: `auth list`/models. 6.
+Store: OpenCode’s own auth JSON/config; a project `.env` is an upstream HAZARD (read greedily,
+commit-able), never heddle storage — heddle credentials stay in the registry/keychain with
+per-dispatch injection. 7. Meter: stats/JSON events. 8. Billing: undocumented. 9. Headless
+exit/stdin behavior undocumented. 10. Greedy env reads and Anthropic subscription wrapping ToS
+require sandboxing; Claude plugins removed v1.3.0.
 
 - Wizard prompts:
   - “Which upstream credential should this adapter use?”
@@ -352,12 +371,12 @@ mainly Singapore; keys per workspace; region/data-residency flags apply.
 
 ### GitHub Copilot
 
-1. Auth: OAuth device via `/login`/`gh auth login`, or PAT with Copilot Requests scope.
-2. No OpenAI-compatible endpoint. 3. Env: prefer `COPILOT_GITHUB_TOKEN` over GH/GITHUB tokens.
-4. Probe: `gh auth status`, minimal `copilot "test"`. 5. Store: env/keychain/gh config; plaintext
-fallback risk. 6. Meter: [billing](https://github.com/settings/billing). 7. Free: 2,000 completions
-50 premium/month. 8. Billing: flat/free; exhaustion degrades. 9. OAuth revoked/PAT TTL; 401 login.
-10. Org policy can block; signup pause is operator report, not official documentation.
+1. Auth: OAuth device via `/login`/`gh auth login`, or PAT with Copilot Requests scope. 2. No
+OpenAI-compatible endpoint. 3. Env: prefer `COPILOT_GITHUB_TOKEN` over GH/GITHUB tokens. 4. Probe:
+`gh auth status`, minimal `copilot "test"`. 5. Store: env/keychain/gh config; plaintext fallback
+risk. 6. Meter: [billing](https://github.com/settings/billing). 7. Free: 2,000 completions plus 50
+premium/month. 8. Billing: flat/free; exhaustion degrades. 9. OAuth revoked/PAT TTL; 401 login. 10.
+Org policy can block; signup pause is operator report, not official documentation.
 
 - Wizard prompts:
   - “Use an existing entitled GitHub account; device OAuth or scoped PAT?”
@@ -445,7 +464,8 @@ provider's credential environment.
   Copilot existing-accounts-only; NVIDIA support fallback; Qwen/Mistral console routing;
   Grok/Perplexity consumer-versus-API copy.
 - **HED-401/HED-430:** vendor-meter: GLM quota, OpenRouter key, Kimi/DeepSeek balance, Claude tap,
-  Codex. Perplexity, Meta, Cursor, OpenCode, Mistral, Qwen, Amazon Q are bookkeeping-only.
+  Codex. Perplexity, Meta, Cursor, OpenCode, Mistral, Qwen, Amazon Q, Antigravity (TUI-only) and
+  Copilot (web-only) are bookkeeping-only.
 
 ## Open questions
 
