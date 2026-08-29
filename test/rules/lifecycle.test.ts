@@ -12,7 +12,7 @@ function passingFixture(): string {
   return `${JSON.stringify({ name: 'matching Bash command', payload: { hook_event_name: 'PreToolUse', tool_name: 'Bash' }, expect: { outcome: 'nudge', stdout_includes: 'avoid destructive commands' } })}\n`;
 }
 
-function seedRuleRoot(root: string, id = 'sample-rule', options: { fixture?: 'passing' | 'failing' | 'none'; provenance?: string | null; active?: boolean; proposed?: boolean } = {}): void {
+function seedRuleRoot(root: string, id = 'sample-rule', options: { fixture?: 'passing' | 'failing' | 'empty' | 'none'; provenance?: string | null; active?: boolean; proposed?: boolean } = {}): void {
   const { fixture = 'passing', provenance = 'HED-403', active = false, proposed = false } = options;
   mkdirSync(join(root, 'tests'), { recursive: true });
   if (active) writeFileSync(join(root, `${id}.yaml`), ruleYaml(id, provenance));
@@ -20,7 +20,7 @@ function seedRuleRoot(root: string, id = 'sample-rule', options: { fixture?: 'pa
     mkdirSync(join(root, 'proposed'), { recursive: true });
     writeFileSync(join(root, 'proposed', `${id}.yaml`), ruleYaml(id, provenance));
   }
-  if (fixture !== 'none') writeFileSync(join(root, 'tests', `${id}.jsonl`), fixture === 'passing' ? passingFixture() : `${JSON.stringify({ name: 'red fixture', payload: { hook_event_name: 'PreToolUse', tool_name: 'Bash' }, expect: { outcome: 'none' } })}\n`);
+  if (fixture !== 'none') writeFileSync(join(root, 'tests', `${id}.jsonl`), fixture === 'passing' ? passingFixture() : fixture === 'empty' ? ' \n\n' : `${JSON.stringify({ name: 'red fixture', payload: { hook_event_name: 'PreToolUse', tool_name: 'Bash' }, expect: { outcome: 'none' } })}\n`);
 }
 
 function candidatePath(root: string): string {
@@ -47,6 +47,7 @@ describe('heddle rule lifecycle CLI', () => {
 
   it.each([
     ['has no fixture', { fixture: 'none' as const, provenance: 'HED-403' }],
+    ['has an empty fixture', { fixture: 'empty' as const, provenance: 'HED-403' }],
     ['has missing provenance', { fixture: 'passing' as const, provenance: null }],
   ])('refuses propose when the candidate %s', async (_description, options) => {
     const root = tempDir(); const source = candidatePath(root);
@@ -81,6 +82,24 @@ describe('heddle rule lifecycle CLI', () => {
     expect(result.stderr).toContain('fixture');
     expect(result.stderr).toContain('red fixture');
     expect(existsSync(join(root, 'proposed', 'sample-rule.yaml'))).toBe(true);
+  }, 30_000);
+
+  it('refuses an empty fixture and leaves the proposed rule inert', async () => {
+    const root = tempDir(); seedRuleRoot(root, 'sample-rule', { proposed: true, fixture: 'empty' });
+    const result = await runCli(['rule', 'ratify', 'sample-rule', '--rules', root]);
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain('fixture has no cases');
+    expect(existsSync(join(root, 'proposed', 'sample-rule.yaml'))).toBe(true);
+    expect(existsSync(join(root, 'sample-rule.yaml'))).toBe(false);
+  }, 30_000);
+
+  it('refuses an invalid rule id before it can escape the rules root', async () => {
+    const root = tempDir();
+    const result = await runCli(['rule', 'ratify', '../evil', '--rules', root]);
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain('invalid rule id');
+    expect(existsSync(join(root, '..', 'evil.yaml'))).toBe(false);
+    expect(existsSync(join(root, 'proposed', '..', 'evil.yaml'))).toBe(false);
   }, 30_000);
 
   it('ratifies only after its fixture passes, which makes the rule loadable', async () => {

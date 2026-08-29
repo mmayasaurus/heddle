@@ -6,7 +6,7 @@ export type RuleOutcome = { rule: Rule; verdict: 'match' | 'no-match' | 'skip-ev
 
 function oneOf(value: string, matcher: string | string[]): boolean { return (Array.isArray(matcher) ? matcher : [matcher]).includes(value); }
 function cwdMatches(cwd: string, prefixes: string | string[]): boolean {
-  return (Array.isArray(prefixes) ? prefixes : [prefixes]).some((prefix) => cwd === prefix || cwd.startsWith(`${prefix}/`));
+  return (Array.isArray(prefixes) ? prefixes : [prefixes]).some((prefix) => cwd === prefix || cwd.startsWith(prefix.endsWith('/') ? prefix : `${prefix}/`));
 }
 
 export function evaluateRules(rules: Rule[], ctx: EvalContext): RuleOutcome[] {
@@ -16,11 +16,15 @@ export function evaluateRules(rules: Rule[], ctx: EvalContext): RuleOutcome[] {
     if (rule.match.agent_role !== 'any' && rule.match.agent_role !== ctx.agentRole) return { rule, verdict: 'skip-role' };
     if (rule.match.tool && (!ctx.payload.tool_name || !oneOf(ctx.payload.tool_name, rule.match.tool))) return { rule, verdict: 'no-match' };
     if (rule.match.input) {
-      if (!ctx.payload.tool_input || !Object.entries(rule.match.input).every(([key]) => {
+      const toolInput = ctx.payload.tool_input;
+      if (!toolInput || !Object.entries(rule.match.input).every(([key]) => {
+        if (!(key in toolInput) || toolInput[key] == null) return false;
         const regex = rule.inputRegexes.get(key);
         if (!regex) return false;
         regex.lastIndex = 0;
-        return regex.test(String(ctx.payload.tool_input![key]));
+        // Catastrophic-backtracking ReDoS remains an accepted operator-trust risk: rules are ratified tracked files.
+        try { return regex.test(String(toolInput[key])); }
+        catch { return false; }
       })) return { rule, verdict: 'no-match' };
     }
     if (rule.match.cwd && (typeof ctx.payload.cwd !== 'string' || !cwdMatches(ctx.payload.cwd, rule.match.cwd))) return { rule, verdict: 'no-match' };

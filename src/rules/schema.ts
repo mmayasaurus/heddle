@@ -2,9 +2,11 @@ import { z } from 'zod';
 
 const EventSchema = z.enum(['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'Stop', 'SubagentStop']);
 const StringOrStrings = z.union([z.string(), z.array(z.string()).min(1)]);
+export const RuleIdPattern = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+export const StopRuleDeferralMessage = 'Stop/SubagentStop rules are deferred in v1 pending a doc-verified continuation-safe output contract (HED-403 follow-up)';
 
 export const RuleSchema = z.object({
-  id: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/, 'id must be kebab-case'),
+  id: z.string().regex(RuleIdPattern, 'id must be kebab-case'),
   event: EventSchema,
   match: z.object({
     tool: StringOrStrings.optional(),
@@ -20,6 +22,10 @@ export const RuleSchema = z.object({
   since: z.string().date().optional(),
   provenance: z.string().optional(),
 }).superRefine((rule, ctx) => {
+  // HED-403: Stop events need a doc-verified continuation-safe output contract before rules can author output for them.
+  if (rule.event === 'Stop' || rule.event === 'SubagentStop') {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: StopRuleDeferralMessage, path: ['event'] });
+  }
   // HED-403: v1 only verifies the PreToolUse permissionDecision:"deny" contract. Blocks on all
   // other events (including SessionStart) are DEFERRED until their exact Claude Code stdout contract is verified.
   if (rule.action === 'block' && rule.event !== 'PreToolUse') {

@@ -48,7 +48,7 @@ function caseResult(line: string, rulesDir: string, ruleId: string): FixtureResu
 }
 
 export function runFixtureFile(rulesDir: string, ruleId: string, fixturePath: string): FixtureResult[] {
-  try { return readFileSync(fixturePath, 'utf8').split(/\r?\n/).filter(Boolean).map((line) => caseResult(line, rulesDir, ruleId)); }
+  try { return readFileSync(fixturePath, 'utf8').split(/\r?\n/).filter((line) => line.trim().length > 0).map((line) => caseResult(line, rulesDir, ruleId)); }
   catch (err) { return [{ name: '<fixture file>', pass: false, message: err instanceof Error ? err.message : String(err), stdout: '{}', stderr: '' }]; }
 }
 

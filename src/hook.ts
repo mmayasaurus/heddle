@@ -23,12 +23,14 @@ async function main(): Promise<string> {
   const payload: HookPayload = JSON.parse(raw);
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('hook payload must be an object');
   const event = payload.hook_event_name;
-  if (typeof event !== 'string' || !['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'Stop', 'SubagentStop'].includes(event)) throw new Error('unknown hook_event_name');
+  if (typeof event !== 'string') throw new Error('payload hook_event_name must be a string');
+  if (!['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'Stop', 'SubagentStop'].includes(event)) {
+    process.stderr.write(`heddle-hook: unknown event '${event}' — no rules evaluated\n`);
+    return '{}';
+  }
   const argvEvent = arg('--event'); if (argvEvent && argvEvent !== event) process.stderr.write(`heddle-hook: --event '${argvEvent}' ignored; payload event '${event}' wins\n`);
   const rulesDir = arg('--rules') ?? process.env.HEDDLE_RULES_DIR ?? (process.env.CLAUDE_PROJECT_DIR ? `${process.env.CLAUDE_PROJECT_DIR}/rules` : fileURLToPath(new URL('../rules', import.meta.url)));
   const rules = loadRules(rulesDir);
-  if (payload.cwd !== undefined && typeof payload.cwd !== 'string') throw new Error('payload cwd must be a string');
-  if (rules.some((rule) => rule.match.tool) && event === 'PreToolUse' && typeof payload.tool_name !== 'string') throw new Error('payload tool_name must be a string');
   const isSubagent = Boolean(payload.agent_id) || event === 'SubagentStop';
   const agentRole = process.env.HEDDLE_WORKER ? 'worker' : 'orchestrator';
   const agent = process.env.HEDDLE_AGENT ?? process.env.FLEET_AGENT ?? '';

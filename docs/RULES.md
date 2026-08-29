@@ -7,7 +7,7 @@ The `heddle-hook` command evaluates YAML rules as data for Claude Code hook even
 | Field | Meaning |
 | --- | --- |
 | `id` | Required kebab-case identifier. It must equal the YAML filename stem. |
-| `event` | `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`, or `SubagentStop`. |
+| `event` | `SessionStart`, `UserPromptSubmit`, `PreToolUse`, or `PostToolUse`. `Stop` and `SubagentStop` payloads exist but rule authoring for them is deferred in v1. |
 | `match` | Optional matchers; an empty object matches every payload for the event. |
 | `action` | `nudge`, `inject`, or `block`. |
 | `enforce` | Defaults to `false`. Only an enforced block can deny a tool action. |
@@ -26,6 +26,8 @@ The `heddle-hook` command evaluates YAML rules as data for Claude Code hook even
 Context rules render the production hook shape: `hookSpecificOutput.hookEventName`, `additionalContext`, and a `systemMessage` naming matching rule IDs. Context messages join with newlines. A non-enforced `block` is context only, prefixed `(would block) `.
 
 An `action: block` rule is permitted only for `PreToolUse` in v1, and only `enforce: true` renders `permissionDecision: "deny"`. It never emits an allow decision. Other events are deferred pending a doc-verified stdout contract; this includes `SessionStart`, which cannot block.
+
+`Stop` and `SubagentStop` rules are deferred in v1 pending a doc-verified, continuation-safe output contract. A payload for either event remains valid and simply renders `{}` because no rule can target it. Rules may be authored only for `SessionStart`, `UserPromptSubmit`, `PreToolUse`, and `PostToolUse`.
 
 ## Proposed rules stay inert
 

@@ -3,7 +3,7 @@ import { basename, extname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { discoverFixtures, runFixtureFile, type FixtureResult } from './fixture.js';
-import { parseRule } from './schema.js';
+import { parseRule, RuleIdPattern } from './schema.js';
 
 type RuleRow = {
   id: string;
@@ -41,6 +41,13 @@ function yamlFiles(dir: string): string[] {
 }
 
 function today(): string { return new Date().toISOString().slice(0, 10); }
+
+function validRuleId(id: string): boolean { return RuleIdPattern.test(id); }
+
+function rejectInvalidRuleId(id: string): number {
+  process.stderr.write(`heddle rule: refusing: invalid rule id '${id}' (must be kebab-case)\n`);
+  return 1;
+}
 
 function ageDays(since: string | undefined): number | '' {
   if (!since) return '';
@@ -94,6 +101,7 @@ async function list(root: string, json: boolean): Promise<number> {
 async function propose(root: string, source: string | undefined): Promise<number> {
   if (!source || source.startsWith('--')) { usage(); return 2; }
   const id = basename(source, extname(source));
+  if (!validRuleId(id)) return rejectInvalidRuleId(id);
   let contents: string;
   try { contents = readFileSync(source, 'utf8'); }
   catch (err) { process.stderr.write(`heddle rule: refusing propose: cannot read '${source}': ${err instanceof Error ? err.message : String(err)}\n`); return 1; }
@@ -102,7 +110,13 @@ async function propose(root: string, source: string | undefined): Promise<number
   catch (err) { process.stderr.write(`heddle rule: refusing propose: invalid '${source}': ${err instanceof Error ? err.message : String(err)}\n`); return 1; }
   if (!parsed.ok) { process.stderr.write(`heddle rule: refusing propose: invalid '${source}': ${parsed.error}\n`); return 1; }
   if (!parsed.rule.provenance?.trim()) { process.stderr.write('heddle rule: refusing propose: provenance is required\n'); return 1; }
-  if (!existsSync(join(root, 'tests', `${id}.jsonl`))) { process.stderr.write(`heddle rule: refusing propose: missing fixture '${join(root, 'tests', `${id}.jsonl`)}'\n`); return 1; }
+  const fixturePath = join(root, 'tests', `${id}.jsonl`);
+  if (!existsSync(fixturePath)) { process.stderr.write(`heddle rule: refusing propose: missing fixture '${fixturePath}'\n`); return 1; }
+  try {
+    if (readFileSync(fixturePath, 'utf8').split(/\r?\n/).filter((line) => line.trim().length > 0).length === 0) {
+      process.stderr.write(`heddle rule: refusing propose: fixture has no cases '${fixturePath}'\n`); return 1;
+    }
+  } catch (err) { process.stderr.write(`heddle rule: refusing propose: cannot read fixture '${fixturePath}': ${err instanceof Error ? err.message : String(err)}\n`); return 1; }
   const active = join(root, `${id}.yaml`); const proposed = join(root, 'proposed', `${id}.yaml`);
   if (existsSync(active) || existsSync(proposed)) { process.stderr.write(`heddle rule: refusing propose: rule '${id}' already exists\n`); return 1; }
   mkdirSync(join(root, 'proposed'), { recursive: true });
@@ -113,11 +127,16 @@ async function propose(root: string, source: string | undefined): Promise<number
 
 async function ratify(root: string, id: string | undefined): Promise<number> {
   if (!id || id.startsWith('--')) { usage(); return 2; }
+  if (!validRuleId(id)) return rejectInvalidRuleId(id);
   if (process.env.HEDDLE_WORKER) { process.stderr.write('heddle rule: refusing ratify: workers cannot ratify rules\n'); return 1; }
   const proposedDir = join(root, 'proposed'); const proposed = join(proposedDir, `${id}.yaml`); const active = join(root, `${id}.yaml`);
   if (!existsSync(proposed)) { process.stderr.write(`heddle rule: refusing ratify: proposed rule '${id}' does not exist\n`); return 1; }
   if (existsSync(active)) { process.stderr.write(`heddle rule: refusing ratify: active rule '${id}' already exists\n`); return 1; }
   const results = runFixtureFile(proposedDir, id, join(root, 'tests', `${id}.jsonl`));
+  if (results.length === 0) {
+    process.stderr.write(`heddle rule: refusing ratify: fixture has no cases for '${id}'\n`);
+    return 1;
+  }
   if (!results.every((result) => result.pass)) {
     process.stderr.write(`heddle rule: refusing ratify: fixture failures for '${id}': ${results.filter((result) => !result.pass).map((result) => `${result.name}: ${result.message}`).join('; ')}\n`);
     return 1;
@@ -132,6 +151,7 @@ async function ratify(root: string, id: string | undefined): Promise<number> {
 }
 
 async function test(root: string, id: string | undefined): Promise<number> {
+  if (id && !validRuleId(id)) return rejectInvalidRuleId(id);
   const fixtures = id ? [{ ruleId: id, fixturePath: join(root, 'tests', `${id}.jsonl`) }] : discoverFixtures(root, join(root, 'tests'));
   if (!fixtures.length) { process.stdout.write('(no fixtures)\n'); return 0; }
   let passed = true;
