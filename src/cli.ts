@@ -11,12 +11,14 @@ import { listPacks, withMandatoryPacks } from './skillpacks.js';
 import { classifyEffort, assessResult } from './classify.js';
 import { resolveIdentity } from './identity.js';
 import { loadProjectRegistry, DEFAULT_PROJECTS_PATH } from './projects.js';
+import { applyInstall, planInstall, redactReport } from './init-project.js';
 import { pickClaudeAccount, readClaudeAccounts } from './capaware.js';
 import { claudeAccountRows, pickClaudeAccountsBatch, usableClaudeCaps } from './account-pick.js';
 import { bindingMeter, claudeFloorsFrom } from './floors.js';
 import { loadLanes } from './lanes.js';
 import { readProviderCaps } from './usage.js';
 import { DOCTOR_PROVIDERS, formatDoctorReport, runDoctor } from './doctor.js';
+import { readOperatorMode, writeOperatorMode, isOperatorMode, OPERATOR_MODES } from './operator-mode.js';
 
 /**
  * heddle CLI — the surface orchestrators (and later the dashboard) drive.
@@ -61,6 +63,10 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
   heddle classes [--json]        task classes: route, why, default skill packs, edits-code
   heddle packs                   list available skill packs
   heddle projects [--json]       registered projects and their fleets (~/.heddle/projects.json; HED-160)
+  heddle mode [desktop|mobile|away] [--note "<t>"] [--json]   operator mode (HED-336): no arg prints
+                                 the current mode; a mode word sets it (~/.heddle/operator-mode.json —
+                                 the pocket console and desktop app write the same file)
+  heddle init-project <dir> [--canonical <path>] [--name <n>] [--team <KEY>] [--agents A,B,…] [--room <#room>] [--launcher <script>] [--enforce-memtrace] [--dry-run] [--json] [--show-content]
   heddle whoami [--json]         this process's bound identity (HEDDLE_AGENT / FLEET_AGENT / .fleet-agent) + worker context
   heddle doctor [--json] [--provider <p>]   verify harnesses/accounts/config; --provider runs only that provider's checks plus global config checks (exit 1 on any fail)
   heddle workers [--stale <hours>] [--json]   dispatches still in flight (--stale: only orphans older than N hours)
@@ -101,10 +107,13 @@ const json = has('--json');
  * Orphan hygiene at CLI start (HED-90): close provably-dead in-flight rows so every read below sees
  * an honest ledger. Skipped for `ledger sweep` (its --dry-run must observe, not mutate) AND for
  * `ledger finish` (the operator's manual close of a real orphan must win, with THEIR reason — the
- * auto-sweep pre-empting it would discard the diagnostic and fail the command). Best-effort — a
- * hygiene failure must never break the command the operator actually ran.
+ * auto-sweep pre-empting it would discard the diagnostic and fail the command), AND for `mode` — a
+ * pure operator-mode read/write touches only ~/.heddle/operator-mode.json and has no business
+ * opening, creating, or mutating the ledger (codeant HED-336): a read-only `heddle mode` on the
+ * per-turn / pocket-console path must not incur ledger startup, migration, or SQLite locking.
+ * Best-effort — a hygiene failure must never break the command the operator actually ran.
  */
-if (!(cmd === 'ledger' && (process.argv[3] === 'sweep' || process.argv[3] === 'finish'))) {
+if (cmd !== 'mode' && !(cmd === 'ledger' && (process.argv[3] === 'sweep' || process.argv[3] === 'finish'))) {
   try {
     const { closed } = new Ledger().sweepOrphans();
     if (closed > 0) console.error(`heddle: closed ${closed} orphaned in-flight dispatch row${closed === 1 ? '' : 's'} (heddle ledger --json shows outcome='orphaned')`);
@@ -575,6 +584,50 @@ try {
         : existsSync(DEFAULT_PROJECTS_PATH)
           ? `(${DEFAULT_PROJECTS_PATH} is present but registers no projects)`
           : `(no projects registered — ${DEFAULT_PROJECTS_PATH} is absent; consumers fall back to cwd inference. See docs/PROJECTS.md to populate it.)`);
+      break;
+    }
+
+    case 'mode': {
+      const requested = process.argv[3];
+      // No mode word (absent, or the next token is a flag like --json) → report the current mode.
+      if (!requested || requested.startsWith('-')) {
+        const state = readOperatorMode();
+        out(json, state, () => state.since === null
+          ? `${state.mode}  (default — no operator-mode.json)`
+          : `${state.mode}  since ${state.since}` + (state.note ? `  — ${state.note}` : ''));
+        break;
+      }
+      if (!isOperatorMode(requested)) {
+        console.error(`usage: heddle mode [${OPERATOR_MODES.join('|')}] [--note "<text>"] [--json]  (got: ${requested})`);
+        process.exit(2);
+      }
+      let note: string | null = null;
+      if (has('--note')) {
+        const value = arg('--note');
+        // A bare `--note` (no value) or a flag-valued `--note --json` must fail with usage, not
+        // silently persist the flag text — or null — as the note (codex/cursor HED-336).
+        if (value === undefined || value.startsWith('-')) {
+          console.error(`usage: heddle mode [${OPERATOR_MODES.join('|')}] [--note "<text>"] [--json]  (--note needs a value)`);
+          process.exit(2);
+        }
+        note = value;
+      }
+      const state = writeOperatorMode(requested, note);
+      out(json, state, () => `operator mode → ${state.mode}` +
+        (state.note ? `  (${state.note})` : '') + `  [${state.since}]`);
+      break;
+    }
+
+    case 'init-project': {
+      const dir = process.argv[3];
+      if (!dir || dir.startsWith('--')) {
+        console.error('usage: heddle init-project <dir> [--canonical <path>] [--name <n>] [--team <KEY>] [--agents A,B,…] [--room <#room>] [--launcher <script>] [--enforce-memtrace] [--dry-run] [--json] [--show-content]');
+        process.exit(2);
+      }
+      const plan = planInstall({ dir, canonical: arg('--canonical'), name: arg('--name'), team: arg('--team'), agents: arg('--agents'), room: arg('--room'), launcher: arg('--launcher'), enforceMemtrace: has('--enforce-memtrace'), dryRun: has('--dry-run'), showContent: has('--show-content') });
+      const report = applyInstall(plan, has('--dry-run'));
+      const output = redactReport(report, has('--show-content'), plan.options.homeDir);
+      out(json, output, () => [...report.steps.map((step) => `${step.action} ${step.step}: ${step.path}${step.reason ? ` (${step.reason})` : ''}`), ...report.humanSteps.map((step) => `- ${step}`)].join('\n'));
       break;
     }
 

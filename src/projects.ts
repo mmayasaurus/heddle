@@ -131,22 +131,7 @@ function checkNoDuplicateAgents(projects: Project[], path: string): void {
  * problem, since every consumer parses this file and a version drift — or a hand-edit slip — must be
  * caught, not silently mishandled.
  */
-export function loadProjectRegistry(path: string = DEFAULT_PROJECTS_PATH): ProjectRegistry {
-  // Absence is FAIL-SOFT (empty registry); a PRESENT-but-unreadable file must not fall through to
-  // that same path — it needs its own loud error, distinct from "absent" and from "not valid JSON".
-  if (!existsSync(path)) return { schemaVersion: PROJECTS_SCHEMA_VERSION, projects: [] };
-  let contents: string;
-  try {
-    contents = readFileSync(path, 'utf8');
-  } catch (err) {
-    throw new Error(`projects.json at ${path} exists but could not be read: ${(err as Error).message}`);
-  }
-  let raw: any;
-  try {
-    raw = JSON.parse(contents);
-  } catch (err) {
-    throw new Error(`projects.json at ${path} is not valid JSON: ${(err as Error).message}`);
-  }
+export function validateRegistry(raw: any, path: string): ProjectRegistry {
   if (!raw || typeof raw !== 'object') {
     throw new Error(`projects.json at ${path} must be a JSON object (got ${JSON.stringify(raw)})`);
   }
@@ -166,13 +151,32 @@ export function loadProjectRegistry(path: string = DEFAULT_PROJECTS_PATH): Proje
   };
 }
 
+export function loadProjectRegistry(path: string = DEFAULT_PROJECTS_PATH): ProjectRegistry {
+  // Absence is FAIL-SOFT (empty registry); a PRESENT-but-unreadable file must not fall through to
+  // that same path — it needs its own loud error, distinct from "absent" and from "not valid JSON".
+  if (!existsSync(path)) return { schemaVersion: PROJECTS_SCHEMA_VERSION, projects: [] };
+  let contents: string;
+  try {
+    contents = readFileSync(path, 'utf8');
+  } catch (err) {
+    throw new Error(`projects.json at ${path} exists but could not be read: ${(err as Error).message}`);
+  }
+  let raw: any;
+  try {
+    raw = JSON.parse(contents);
+  } catch (err) {
+    throw new Error(`projects.json at ${path} is not valid JSON: ${(err as Error).message}`);
+  }
+  return validateRegistry(raw, path);
+}
+
 /**
  * True when `target` equals `root` or sits under it on a path SEGMENT boundary (`/a/foo` must not
  * match `/a/foobar`). Compared case-insensitively (deliberate tradeoff: on a case-sensitive Linux FS
  * this could over-match two roots differing only by case — an acceptable, negligible risk for a
  * project registry, versus the real macOS/Windows cwd-casing miss it prevents).
  */
-function isAncestorOrEqual(root: string, target: string): boolean {
+export function isAncestorOrEqual(root: string, target: string): boolean {
   const rootLower = root.toLowerCase();
   const targetLower = target.toLowerCase();
   if (rootLower === targetLower) return true;

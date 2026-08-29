@@ -36,6 +36,29 @@ export const DOCTOR_PROVIDERS = [
   ...Object.keys(PROVIDER_REGISTRY),
 ] as const;
 
+/** Injected path → HEDDLE_* env (blank = unset, like the loaders) → the loader's default. */
+function resolveDoctorPaths(deps: DoctorDeps): {
+  routingPath: string; lanesPath: string; accountsPath: string; projectsPath: string;
+} {
+  return {
+    routingPath:
+      deps.paths.routing ?? (deps.env.HEDDLE_ROUTING || undefined) ?? defaultRoutingPath(),
+    lanesPath: deps.paths.lanes ?? (deps.env.HEDDLE_LANES || undefined) ?? defaultLanesPath(),
+    accountsPath:
+      deps.paths.accounts ?? (deps.env.HEDDLE_ACCOUNTS || undefined) ?? DEFAULT_ACCOUNTS_PATH,
+    projectsPath: deps.paths.projects ?? DEFAULT_PROJECTS_PATH,
+  };
+}
+
+/** lanes.yaml is parsed ONCE per run; an unreadable file becomes one config failure, not N. */
+function loadLanesResult(lanesPath: string): LanesLoad {
+  try {
+    return { ok: true, value: loadLanes(lanesPath) };
+  } catch (error) {
+    return { ok: false, error: errorText(error) };
+  }
+}
+
 function buildContext(
   opts: { provider?: string },
   partial: Partial<DoctorDeps>,
@@ -55,19 +78,8 @@ function buildContext(
     now: partial.now ?? (() => new Date()),
     paths: partial.paths ?? {},
   };
-  const routingPath =
-    deps.paths.routing ?? (deps.env.HEDDLE_ROUTING || undefined) ?? defaultRoutingPath();
-  const lanesPath = deps.paths.lanes ?? (deps.env.HEDDLE_LANES || undefined) ?? defaultLanesPath();
-  const accountsPath =
-    deps.paths.accounts ?? (deps.env.HEDDLE_ACCOUNTS || undefined) ?? DEFAULT_ACCOUNTS_PATH;
-  const projectsPath = deps.paths.projects ?? DEFAULT_PROJECTS_PATH;
-  const lanes: LanesLoad = (() => {
-    try {
-      return { ok: true, value: loadLanes(lanesPath) };
-    } catch (error) {
-      return { ok: false, error: errorText(error) };
-    }
-  })();
+  const { routingPath, lanesPath, accountsPath, projectsPath } = resolveDoctorPaths(deps);
+  const lanes = loadLanesResult(lanesPath);
   const ctx: DoctorContext = {
     deps,
     budgets: {

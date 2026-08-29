@@ -56,6 +56,8 @@ export interface VerifyContext {
   log: CommsLog;
   /** Dispatch ledger for cross-checking heddle-dispatched children. Absent ⇒ ledger-anchored children fail closed. */
   ledger?: LineageSource | null;
+  /** A PID-bridge-bound session is never trusted to issue a privileged message. */
+  tierCap?: 'agent-message' | null;
 }
 
 export interface LineageResult {
@@ -74,14 +76,14 @@ export type LineageCode =
   | 'target-unknown' | 'not-dispatching-orchestrator'
   | 'ledger-unavailable' | 'ledger-row-missing' | 'ledger-orchestrator-mismatch';
 
-export type TierCode = LineageCode | 'verified-origin' | 'not-operator-origin' | 'requested-agent-message';
+export type TierCode = LineageCode | 'verified-origin' | 'not-operator-origin' | 'requested-agent-message' | 'binding-source-cap';
 
 /** The closed vocabulary a header may carry. Anything else is omitted, never munged into the frame. */
 export const TIER_CODES: ReadonlySet<string> = new Set<TierCode>([
   'verified-ledger', 'verified-registry', 'invalid-sender', 'invalid-target', 'target-not-child',
   'sender-is-child', 'sender-not-agent', 'target-unknown', 'not-dispatching-orchestrator',
   'ledger-unavailable', 'ledger-row-missing', 'ledger-orchestrator-mismatch',
-  'verified-origin', 'not-operator-origin', 'requested-agent-message',
+  'verified-origin', 'not-operator-origin', 'requested-agent-message', 'binding-source-cap',
 ]);
 
 export interface TierRequest {
@@ -173,6 +175,14 @@ export function decideTier(req: TierRequest, ctx: VerifyContext): TierDecision {
   if (requested === 'agent-message') {
     return seal({ ...base, tier: 'agent-message', verified: false, evidence: null,
       code: 'requested-agent-message', reason: 'sender requested agent-message', dispatchId: null });
+  }
+
+  if (ctx.tierCap === 'agent-message') {
+    return seal({
+      ...base, downgradedFrom: requested === 'operator' || requested === 'orchestrator-directive' ? requested : null,
+      tier: 'agent-message', verified: false, evidence: null, code: 'binding-source-cap',
+      reason: 'PID bridge identity binding caps sends at agent-message', dispatchId: null,
+    });
   }
 
   // Operator: verified by origin — the address itself is the credential (bound by the operator surface).
@@ -303,10 +313,10 @@ export interface Enveloped {
  */
 export function postEnveloped(
   log: CommsLog, ledger: LineageSource | null | undefined,
-  msg: NewMessage & { requestedTier?: Tier | null }, opts: RenderOptions = {},
+  msg: NewMessage & { requestedTier?: Tier | null }, opts: RenderOptions & { tierCap?: 'agent-message' | null } = {},
 ): Enveloped {
   const { requestedTier, ...rest } = msg;
-  const decision = decideTier({ from: msg.from, to: msg.to, requestedTier }, { log, ledger });
+  const decision = decideTier({ from: msg.from, to: msg.to, requestedTier }, { log, ledger, tierCap: opts.tierCap });
   const record = log.append({ ...rest, meta: { ...(rest.meta ?? {}), envelopeVersion: ENVELOPE_FORMAT_VERSION } }, decision);
   return { record, envelope: renderEnvelope(record, opts), decision };
 }

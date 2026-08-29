@@ -111,7 +111,8 @@ node dist/smoke.js codex  "Reply with exactly: OK"   # requires codex login
 Register the MCP server with your MCP client (Claude Code, etc.) — point it at the built entry:
 
 ```jsonc
-// .mcp.json (in your consumer project, or your Claude config) — no .mcp.json ships in this repo
+// .mcp.json (in your consumer project, or your Claude config). This repo ships its own
+// .mcp.json for heddle-comms sessions opened here; this is the separate generic MCP entry.
 {
   "mcpServers": {
     "heddle": { "command": "node", "args": ["/abs/path/to/heddle/dist/mcp-server.js"] }
