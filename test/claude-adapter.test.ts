@@ -100,6 +100,12 @@ describe('model alias pinning (HED-448)', () => {
     }
     expect(CLAUDE_MODEL_IDS.opus).toBe('claude-opus-4-8');
   });
+  it('never resolves prototype keys — a lookalike model string passes through as itself', () => {
+    const args = new ClaudeAdapter().buildArgs('x', { model: 'toString', cwd: '/tmp' });
+    const i = args.indexOf('--model');
+    expect(args[i + 1]).toBe('toString');
+    expect(typeof args[i + 1]).toBe('string');
+  });
   it('passes an explicit concrete id through verbatim', () => {
     const args = new ClaudeAdapter().buildArgs('x', { model: 'claude-haiku-4-5-20251001', cwd: '/tmp' });
     expect(args).toContain('claude-haiku-4-5-20251001');

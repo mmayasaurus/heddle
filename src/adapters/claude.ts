@@ -129,7 +129,12 @@ export class ClaudeAdapter implements WorkerAdapter {
   /** The exact argv for one dispatch — pure, so tests can pin the invocation contract. */
   buildArgs(prompt: string, opts: DispatchOptions): string[] {
     const caps = new Set(opts.capabilities ?? []);
-    const args = ['-p', prompt, '--output-format', 'json', '--model', CLAUDE_MODEL_IDS[opts.model as ClaudeWorkerModel] ?? opts.model];
+    // Own-property lookup only: a bracket read on a plain object would resolve prototype keys
+    // (model: 'toString' -> Object.prototype.toString, a FUNCTION in argv) — codeant, PR #107.
+    const modelId = Object.hasOwn(CLAUDE_MODEL_IDS, opts.model)
+      ? CLAUDE_MODEL_IDS[opts.model as ClaudeWorkerModel]
+      : opts.model;
+    const args = ['-p', prompt, '--output-format', 'json', '--model', modelId];
     // classify_effort can emit 'minimal' (codex vocabulary); claude accepts low|medium|high|xhigh|max.
     const effort = opts.effort === 'minimal' ? 'low' : opts.effort;
     if (effort) args.push('--effort', effort);
