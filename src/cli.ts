@@ -19,6 +19,7 @@ import { loadLanes } from './lanes.js';
 import { readProviderCaps } from './usage.js';
 import { readOperatorMode, writeOperatorMode, isOperatorMode, OPERATOR_MODES } from './operator-mode.js';
 import { runPrOwn } from './pr-own.js';
+import { runPrSweep } from './pr-sweep.js';
 
 /**
  * heddle CLI — the surface orchestrators (and later the dashboard) drive.
@@ -78,6 +79,7 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
   heddle usage [--since <iso>] [--json]    per-provider totals
   heddle account pick [--for <letter[,letter...]>] [--json] [--explain]   healthiest addressable Claude account for a fleet relaunch
   heddle pr own <whoami|claim|check|release|mine> [<pr#>] [--json]       coordinate ownership of a GitHub PR
+  heddle pr sweep <pr#> [--json]       sweep all GitHub PR review channels and report mechanical gates
   heddle reviews [--limit N] [--json]      adversarial-review scoreboard (author→reviewer pairs) + recent reviews
   heddle review-outcome <dispatch-id> --total N --accepted M [--notes "…"]   record how many findings you accepted
 `;
@@ -330,12 +332,20 @@ try {
         process.exitCode = ownership.code;
         break;
       }
-      if (verb === 'sweep' || verb === 'watch') {
+      if (verb === 'sweep') {
+        const sweep = runPrSweep(process.argv[4] ?? '', process.cwd());
+        if (sweep.error) console.error(sweep.error);
+        if (sweep.text) out(json, sweep.data, () => sweep.text);
+        else if (json) out(true, sweep.data, () => '');
+        process.exitCode = sweep.exitCode;
+        break;
+      }
+      if (verb === 'watch') {
         console.error('not yet implemented — HED-426 follow-up slice');
         process.exitCode = 2;
         break;
       }
-      console.error('usage: heddle pr own <whoami|claim|check|release|mine> [<pr#>] [--json]');
+      console.error('usage: heddle pr own <whoami|claim|check|release|mine> [<pr#>] [--json]\n       heddle pr sweep <pr#> [--json]');
       process.exitCode = 2;
       break;
     }
