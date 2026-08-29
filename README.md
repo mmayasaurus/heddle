@@ -64,6 +64,7 @@ supplies its own routing table, Linear team, and ownership systems.
 ```
 routing/routing.v0.yaml  routing table: task-class → provider/model/effort/skills (+why, edits_code)
 src/dispatch.ts          the dispatcher: task class → routed worker → recorded outcome (+refusals)
+src/dispatcher/          the dispatcher's modules: types · packs · adapters · refusals · override-gate · monoculture · plan · run (src/dispatch.ts keeps dispatch() + re-exports)
 src/routing.ts           routing-table loader + resolveRoute
 src/capaware.ts          cap-aware routing (HED-67) + Claude account switching (HED-68) + Fable budget (HED-76)
 src/ledger.ts            SQLite dispatch/review ledger (node:sqlite; ~/.heddle/ledger.db)
@@ -126,6 +127,17 @@ private, unpublished package, so these are **not** on your `PATH` after `npm ins
 `npm link` (or a global install) to expose them, or invoke the built files directly (`node
 dist/cli.js …`, as the MCP snippet above does).
 
+### Verify harness health
+
+Run `heddle doctor` before onboarding an account or starting a session. It checks the configured
+harness binaries, login state, live model catalogs where supported, routing/config parsing, and
+provider verification freshness; `--provider` runs only that provider's checks plus global config
+checks (including valid API providers such as `groq`), and `--json` returns
+the same typed report. Cursor catalog omissions fail; an `agy` catalog omission warns because a new
+Gemini model can work before its catalog lists it (see `docs/MODELS.md`). It exits 1 only when a check
+fails; exit 0 means no failures (including timed-out, unverified probes, which warn), and exit 2 is a
+usage error.
+
 Framework-layer config lives under `~/.heddle/` (it spans projects, never a single repo):
 `accounts.json` (Claude accounts), `ledger.db` (dispatch/review ledger), `comms.db` (broker).
 Environment overrides:
@@ -134,6 +146,7 @@ Environment overrides:
 |-----|------|
 | `HEDDLE_AGENT` | this session's orchestrator identity (e.g. `U`); also honors `FLEET_AGENT` or a `.fleet-agent` file |
 | `HEDDLE_ROUTING` | routing-table path (default `routing/routing.v0.yaml`) |
+| `HEDDLE_LANES` | lanes configuration path (default `routing/lanes.yaml`) |
 | `HEDDLE_ACCOUNTS` | Claude accounts registry path (default `~/.heddle/accounts.json`) — cap-aware routing reads it |
 | `HEDDLE_PACKS` | extra skill-pack search dirs, `path.delimiter`-separated (`:` on POSIX, `;` on Windows); built-ins always last |
 | `HEDDLE_COMMS_DB` | comms broker db (default `~/.heddle/comms.db`) |

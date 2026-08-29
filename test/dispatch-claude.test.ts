@@ -74,7 +74,7 @@ describe('dispatch — headless Claude workers', () => {
     const adapter = { ...fake.adapter, dispatch: async (prompt: string, opts: Parameters<typeof fake.adapter.dispatch>[1]) => { expect(opts.mcpConfigPath).toBeDefined(); expect(existsSync(opts.mcpConfigPath!)).toBe(true); mcpDuringCall = JSON.parse(readFileSync(opts.mcpConfigPath!, 'utf8')); return fake.adapter.dispatch(prompt, opts); } };
     const outcome = await dispatch({ taskClass: 'deep-implementation', prompt: 'x', cwd: tempDir(), identity: unbound, accounts, caps: { claude: claudeCaps([{ id: 'acct1', used: 1 }, { id: 'acct2', used: 2 }]) } }, tempLedger(), () => adapter);
     expect(mcpDuringCall).toEqual({ mcpServers: { memtrace: { command: 'memtrace', args: ['mcp'] } } }); expect(existsSync(fake.calls[0].opts.mcpConfigPath!)).toBe(false);
-    expect(fake.calls[0].opts.systemPromptAppend).toContain('### code-discovery'); expect(fake.calls[0].opts.systemPromptAppend).toContain('### quality-gate'); expect(outcome.ok).toBe(true);
+    expect(fake.calls[0].opts.systemPromptAppend).toContain('### code-discovery'); expect(fake.calls[0].opts.systemPromptAppend).not.toContain('### quality-gate'); expect(outcome.ok).toBe(true);
   });
 
   it('passes enforceable Claude browse capabilities through, and net routes to the enforcing codex fallback (capability-fit)', async () => {

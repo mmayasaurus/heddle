@@ -82,6 +82,7 @@ flags churn monthly.
 
 ## Gemini
 
+- `agy models` (the catalog) blocks forever on an inherited open stdin — spawn it with stdin ignored (`stdio: ['ignore', …]`); ~1–3s then (verified 2026-08-28, agy 1.1.22; `heddle doctor` does this).
 - `google-gemini/gemini-cli` cannot authenticate personal Google accounts (free/AI Pro/Ultra) since
   ~2026-06-18 — **live-verified dead** on 2026-08-01. Never route Gemini via Cursor
   (subscription-boundary rule).
