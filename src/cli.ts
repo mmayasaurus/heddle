@@ -18,6 +18,7 @@ import { bindingMeter, claudeFloorsFrom } from './floors.js';
 import { loadLanes } from './lanes.js';
 import { readProviderCaps } from './usage.js';
 import { readOperatorMode, writeOperatorMode, isOperatorMode, OPERATOR_MODES } from './operator-mode.js';
+import { bootstrapComms } from './comms/bootstrap.js';
 
 /**
  * heddle CLI — the surface orchestrators (and later the dashboard) drive.
@@ -62,6 +63,7 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
   heddle classes [--json]        task classes: route, why, default skill packs, edits-code
   heddle packs                   list available skill packs
   heddle projects [--json]       registered projects and their fleets (~/.heddle/projects.json; HED-160)
+  heddle comms init [--json]     initialize the comms database, operator token, and registered project rooms
   heddle mode [desktop|mobile|away] [--note "<t>"] [--json]   operator mode (HED-336): no arg prints
                                  the current mode; a mode word sets it (~/.heddle/operator-mode.json —
                                  the pocket console and desktop app write the same file)
@@ -554,6 +556,21 @@ try {
         : existsSync(DEFAULT_PROJECTS_PATH)
           ? `(${DEFAULT_PROJECTS_PATH} is present but registers no projects)`
           : `(no projects registered — ${DEFAULT_PROJECTS_PATH} is absent; consumers fall back to cwd inference. See docs/PROJECTS.md to populate it.)`);
+      break;
+    }
+
+    case 'comms': {
+      if (process.argv[3] !== 'init') {
+        console.error('usage: heddle comms init [--json]');
+        process.exit(2);
+      }
+      const result = bootstrapComms();
+      out(json, result, () => [
+        `comms database: ${result.commsDb.path} (${result.commsDb.existed ? 'existing' : 'created'})`,
+        `operator token: ${result.operatorToken.path} (${result.operatorToken.action})`,
+        ...result.rooms.map((room) => `room ${room.name}: ${room.created ? 'created' : 'kept'}`),
+        ...result.skippedProjectRooms.map((room) => `skipped ${room.name}: ${room.reason}`),
+      ].join('\n'));
       break;
     }
 
