@@ -33,6 +33,11 @@ const PRINT_TIMEOUT_MARGIN_MS = 60_000;
 const GEMINI_SUFFIX = /-(?:low|medium|high)$/;
 const GEMINI_LEVELS = new Set(['low', 'medium', 'high']);
 
+/** The dispatch budget as a safe finite positive number — NaN/Infinity/<=0 fall back to default. */
+function normalizedBudget(value?: number): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : DEFAULT_TIMEOUT_MS;
+}
+
 function printTimeout(budgetMs: number): string {
   // Keep agy's own print-mode deadline inside our subprocess deadline. The default becomes 9m,
   // avoiding agy's 5m default while retaining a minute for result parsing and process cleanup.
@@ -106,7 +111,11 @@ export class AgyAdapter implements WorkerAdapter {
   buildArgs(prompt: string, opts: DispatchOptions): string[] {
     const model = this.resolveModel(opts.model, opts.effort);
     const args = ['-p', prompt, '--output-format', 'stream-json', '--model', model];
-    args.push('--print-timeout', printTimeout(opts.timeoutMs ?? DEFAULT_TIMEOUT_MS));
+    // A caller that sets its own --print-timeout via extraFlags wins; emitting ours too would
+    // hand agy duplicate conflicting flags (codeant, PR #102).
+    if (!(opts.extraFlags ?? []).includes('--print-timeout')) {
+      args.push('--print-timeout', printTimeout(normalizedBudget(opts.timeoutMs)));
+    }
     const lvl = opts.effort?.toLowerCase();
     if (lvl && GEMINI_LEVELS.has(lvl) && !GEMINI_SUFFIX.test(model)) args.push('--effort', lvl);
     if (this.skipPermissions) args.push('--dangerously-skip-permissions');
@@ -125,7 +134,7 @@ export class AgyAdapter implements WorkerAdapter {
 
     const args = this.buildArgs(prompt, opts);
 
-    const budget = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    const budget = normalizedBudget(opts.timeoutMs);
     const started = Date.now();
     let { stdout, stderr, exitCode, timedOut } = await run(this.bin, args, opts.cwd, budget, opts.env);
 
@@ -137,7 +146,10 @@ export class AgyAdapter implements WorkerAdapter {
       // Cap the retry: a hung agy emits nothing, so a short probe is enough to confirm, and this
       // keeps a double-hang from burning two full budgets (2×10min at the default).
       const retryBudget = Math.min(budget, RETRY_PROBE_MS);
-      ({ stdout, stderr, exitCode, timedOut } = await run(this.bin, args, opts.cwd, retryBudget, opts.env));
+      // Rebuild the argv for the probe: its --print-timeout must fit the PROBE's budget, not the
+      // original one (amazon-q, PR #102) — a hung agy still emits nothing either way.
+      const retryArgs = this.buildArgs(prompt, { ...opts, timeoutMs: retryBudget });
+      ({ stdout, stderr, exitCode, timedOut } = await run(this.bin, retryArgs, opts.cwd, retryBudget, opts.env));
       if (timedOut && stdout.trim().length === 0) {
         return {
           ok: false, output: '', exitCode, durationMs: Date.now() - started,
