@@ -93,7 +93,7 @@ describe('routing.v0.yaml — shipped table invariants', () => {
   });
 
   it('every Claude-routed alias (and the claude catalog) is pinned in CLAUDE_MODEL_IDS', async () => {
-    const { CLAUDE_MODEL_IDS } = await import('../src/adapters/claude');
+    const { CLAUDE_MODEL_IDS } = await import('../src/adapters/claude.js');
     const pinned = Object.keys(CLAUDE_MODEL_IDS);
     for (const m of (table.providers.claude?.models as string[] | undefined) ?? []) {
       expect(pinned, `claude catalog alias \"${m}\" is not pinned in CLAUDE_MODEL_IDS`).toContain(m);
