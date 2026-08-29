@@ -20,6 +20,7 @@ import { readProviderCaps } from './usage.js';
 import { readOperatorMode, writeOperatorMode, isOperatorMode, OPERATOR_MODES } from './operator-mode.js';
 import { runPrOwn } from './pr-own.js';
 import { runPrSweep } from './pr-sweep.js';
+import { runPrWatch } from './pr-watch.js';
 
 /**
  * heddle CLI — the surface orchestrators (and later the dashboard) drive.
@@ -80,6 +81,7 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
   heddle account pick [--for <letter[,letter...]>] [--json] [--explain]   healthiest addressable Claude account for a fleet relaunch
   heddle pr own <whoami|claim|check|release|mine> [<pr#>] [--json]       coordinate ownership of a GitHub PR
   heddle pr sweep <pr#> [--json]       sweep all GitHub PR review channels and report mechanical gates
+  heddle pr watch <pr#> [--repo <owner/repo>] [--seed] [--reset] [--json]  one read-only PR review/CI poll pass
   heddle reviews [--limit N] [--json]      adversarial-review scoreboard (author→reviewer pairs) + recent reviews
   heddle review-outcome <dispatch-id> --total N --accepted M [--notes "…"]   record how many findings you accepted
 `;
@@ -341,11 +343,34 @@ try {
         break;
       }
       if (verb === 'watch') {
-        console.error('not yet implemented — HED-426 follow-up slice');
-        process.exitCode = 2;
+        const watchArgs = process.argv.slice(5);
+        let repo: string | undefined;
+        let invalid = false;
+        for (let i = 0; i < watchArgs.length; i++) {
+          const value = watchArgs[i];
+          if (value === '--repo') {
+            const candidate = watchArgs[++i];
+            if (!candidate || candidate.startsWith('--')) invalid = true;
+            else repo = candidate;
+          } else if (!['--seed', '--reset', '--json'].includes(value)) invalid = true;
+        }
+        if (invalid) {
+          console.error('usage: heddle pr watch <pr#> [--repo <owner/repo>] [--seed] [--reset] [--json]');
+          process.exitCode = 2;
+          break;
+        }
+        const watch = runPrWatch(process.argv[4] ?? '', {
+          ...(repo ? { repo } : {}),
+          seed: has('--seed'),
+          reset: has('--reset'),
+        }, process.cwd());
+        if (watch.error) console.error(watch.error);
+        if (watch.lines.length) out(json, watch.data, () => watch.lines.join('\n'));
+        else if (json) out(true, watch.data, () => '');
+        process.exitCode = watch.code;
         break;
       }
-      console.error('usage: heddle pr own <whoami|claim|check|release|mine> [<pr#>] [--json]\n       heddle pr sweep <pr#> [--json]');
+      console.error('usage: heddle pr own <whoami|claim|check|release|mine> [<pr#>] [--json]\n       heddle pr sweep <pr#> [--json]\n       heddle pr watch <pr#> [--repo <owner/repo>] [--seed] [--reset] [--json]');
       process.exitCode = 2;
       break;
     }
