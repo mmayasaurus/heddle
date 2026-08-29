@@ -17,8 +17,8 @@ export function evaluateRules(rules: Rule[], ctx: EvalContext): RuleOutcome[] {
     if (rule.match.tool && (!ctx.payload.tool_name || !oneOf(ctx.payload.tool_name, rule.match.tool))) return { rule, verdict: 'no-match' };
     if (rule.match.input) {
       const toolInput = ctx.payload.tool_input;
-      if (!toolInput || !Object.entries(rule.match.input).every(([key]) => {
-        if (!(key in toolInput) || toolInput[key] == null) return false;
+      if (!toolInput || typeof toolInput !== 'object' || Array.isArray(toolInput) || !Object.entries(rule.match.input).every(([key]) => {
+        if (!Object.prototype.hasOwnProperty.call(toolInput, key) || toolInput[key] == null) return false;
         const regex = rule.inputRegexes.get(key);
         if (!regex) return false;
         regex.lastIndex = 0;

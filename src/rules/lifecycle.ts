@@ -1,7 +1,7 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
 import { basename, extname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
+import { parse as parseYaml, parseDocument } from 'yaml';
 import { discoverFixtures, runFixtureFile, type FixtureResult } from './fixture.js';
 import { parseRule, RuleIdPattern } from './schema.js';
 
@@ -113,7 +113,7 @@ async function propose(root: string, source: string | undefined): Promise<number
   const fixturePath = join(root, 'tests', `${id}.jsonl`);
   if (!existsSync(fixturePath)) { process.stderr.write(`heddle rule: refusing propose: missing fixture '${fixturePath}'\n`); return 1; }
   try {
-    if (readFileSync(fixturePath, 'utf8').split(/\r?\n/).filter((line) => line.trim().length > 0).length === 0) {
+    if (readFileSync(fixturePath, 'utf8').split(/\r?\n/).map((line) => line.trim()).filter((line) => line && !line.startsWith('#')).length === 0) {
       process.stderr.write(`heddle rule: refusing propose: fixture has no cases '${fixturePath}'\n`); return 1;
     }
   } catch (err) { process.stderr.write(`heddle rule: refusing propose: cannot read fixture '${fixturePath}': ${err instanceof Error ? err.message : String(err)}\n`); return 1; }
@@ -141,10 +141,12 @@ async function ratify(root: string, id: string | undefined): Promise<number> {
     process.stderr.write(`heddle rule: refusing ratify: fixture failures for '${id}': ${results.filter((result) => !result.pass).map((result) => `${result.name}: ${result.message}`).join('; ')}\n`);
     return 1;
   }
-  const raw = parseYaml(readFileSync(proposed, 'utf8'));
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) { process.stderr.write(`heddle rule: refusing ratify: invalid proposed rule '${id}'\n`); return 1; }
-  if (!('since' in raw) || !raw.since) raw.since = today();
-  writeFileSync(proposed, stringifyYaml(raw));
+  if (lstatSync(proposed).isSymbolicLink()) { process.stderr.write(`heddle rule: refusing ratify: proposed rule '${id}' must be a regular file\n`); return 1; }
+  const doc = parseDocument(readFileSync(proposed, 'utf8'));
+  if (!doc.has('since') || !doc.get('since')) {
+    doc.set('since', today());
+    writeFileSync(proposed, doc.toString());
+  }
   renameSync(proposed, active);
   process.stdout.write(`heddle rule: ratified '${id}'\n`);
   return 0;
@@ -162,7 +164,13 @@ async function test(root: string, id: string | undefined): Promise<number> {
       passed = false;
       continue;
     }
-    if (!printFixtureResults(fixture.ruleId, runFixtureFile(found.rulesDir, fixture.ruleId, fixture.fixturePath))) passed = false;
+    const results = runFixtureFile(found.rulesDir, fixture.ruleId, fixture.fixturePath);
+    if (results.length === 0) {
+      process.stdout.write(`${fixture.ruleId}: <fixture>: FAILED — fixture has no cases\n`);
+      passed = false;
+      continue;
+    }
+    if (!printFixtureResults(fixture.ruleId, results)) passed = false;
   }
   return passed ? 0 : 1;
 }

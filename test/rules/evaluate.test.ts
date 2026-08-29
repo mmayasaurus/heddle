@@ -20,6 +20,18 @@ describe('rule evaluation', () => {
     expect(verdict(literalUndefined, missingCommand)).toBe('no-match');
     expect(verdict(anyCommand, ctx({ payload: { tool_name: 'Bash', tool_input: { command: 'anything' } } }))).toBe('match');
   });
+  it('treats non-object tool input as a no-match', () => {
+    const inputRule = rule({ match: { input: { command: '.*' } } });
+    expect(verdict(inputRule, ctx({ payload: { tool_name: 'Bash', tool_input: 1 as unknown as Record<string, unknown> } }))).toBe('no-match');
+  });
+  it('does not match inherited tool input keys', () => {
+    const inputRule = rule({ match: { input: { toString: '.*' } } });
+    expect(verdict(inputRule, ctx({ payload: { tool_name: 'Bash', tool_input: { command: 'echo hi' } } }))).toBe('no-match');
+  });
+  it('tests present falsy tool input values', () => {
+    expect(verdict(rule({ match: { input: { command: '^$' } } }), ctx({ payload: { tool_name: 'Bash', tool_input: { command: '' } } }))).toBe('match');
+    expect(verdict(rule({ match: { input: { command: '^0$' } } }), ctx({ payload: { tool_name: 'Bash', tool_input: { command: 0 } } }))).toBe('match');
+  });
   it('makes cwd prefixes path-segment aware', () => { const r = rule({ match: { cwd: '/a/b' } }); expect(verdict(r)).toBe('match'); expect(verdict(r, ctx({ payload: { cwd: '/a/bc' } }))).toBe('no-match'); });
   it('matches every absolute cwd when the prefix is root', () => expect(verdict(rule({ match: { cwd: '/' } }), ctx({ payload: { cwd: '/Users/x' } }))).toBe('match'));
   it('requires every supplied matcher to match', () => expect(verdict(rule({ match: { tool: 'Bash', cwd: '/nope' } }))).toBe('no-match'));
