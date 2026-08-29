@@ -28,6 +28,7 @@
     "heddle-mcp": "dist/mcp-server.js",
     "heddle-comms": "dist/comms/channel-server.js",
     "heddle-hook-dispatch-guidance": "dist/hook-dispatch-guidance.js",
+    "heddle-hook": "dist/hook.js",
     "heddle-rotator": "dist/rotate/rotator-bin.js"
   }
 }
