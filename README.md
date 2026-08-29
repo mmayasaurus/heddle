@@ -35,28 +35,27 @@ supplies its own routing table, Linear team, and ownership systems.
 Heddle ships as a Claude Code plugin (`.claude-plugin/`), bundling the `heddle` (dispatch surface)
 and `heddle-comms` (inter-agent messaging) MCP servers so any Claude Code session can drive the fleet.
 
-**Prerequisites:** build the servers first — `npm install && npm run build` (produces `dist/`).
-
-**One-command install** (this repo doubles as its own marketplace):
+**From a built checkout** (works today):
 
 ```shell
-/plugin marketplace add <owner>/heddle   # add heddle's marketplace (replace <owner> with the repo owner)
-/plugin install heddle@heddle            # install the heddle plugin
-```
-
-**Local development / testing** (no install):
-
-```shell
-claude --plugin-dir /path/to/heddle      # load the plugin for one session
+git clone <owner>/heddle && cd heddle
+npm install && npm run build           # produce dist/ (the two MCP servers)
+claude --plugin-dir "$(pwd)"           # load the plugin for a session
 ```
 
 Once loaded, the `plugin:heddle:heddle` and `plugin:heddle:heddle-comms` MCP tools are available. The
-plugin resolves every path from `${CLAUDE_PLUGIN_ROOT}`, so it works wherever it is installed — no
-machine-specific paths. Verify a checkout with `claude plugin validate .`.
+plugin resolves every path from `${CLAUDE_PLUGIN_ROOT}`, so it works from wherever the checkout lives
+— no machine-specific paths. Verify a checkout with `claude plugin validate .`.
 
-> This release delivers the MCP servers plus the plugin + marketplace structure. The orchestrator
-> slash commands, the rules-as-data hook engine, and the packaged skill packs land as follow-up
-> slices of the packaging epic (HED-394).
+**One-command marketplace install** — `/plugin marketplace add <owner>/heddle` then
+`/plugin install heddle@heddle` — is wired (`.claude-plugin/marketplace.json`, `source: "./"`) but
+needs the MCP servers **bundled into committed artifacts** first: `dist/` is gitignored, so a
+marketplace-cloned copy has no built servers to run. That server-bundling is the next packaging slice;
+until it lands, use the built-checkout flow above.
+
+> This slice delivers the MCP servers + the plugin/marketplace structure. Still to come as follow-up
+> slices of the packaging epic (HED-394): the server-bundling for marketplace install, the orchestrator
+> slash commands, the rules-as-data hook engine, and the packaged skill packs.
 
 ## The rules that shape everything
 
