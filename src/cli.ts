@@ -18,6 +18,7 @@ import { bindingMeter, claudeFloorsFrom } from './floors.js';
 import { loadLanes } from './lanes.js';
 import { readProviderCaps } from './usage.js';
 import { readOperatorMode, writeOperatorMode, isOperatorMode, OPERATOR_MODES } from './operator-mode.js';
+import { runPrOwn } from './pr-own.js';
 
 /**
  * heddle CLI — the surface orchestrators (and later the dashboard) drive.
@@ -76,6 +77,7 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
   heddle ledger report-in-session <id> (--ok | --failed) [--error "<why>"] [--input-tokens N] [--cached-input-tokens N] [--output-tokens N] [--reasoning-tokens N] [--duration-ms N] [--json]  administrative path: may report any orchestrator's handoff
   heddle usage [--since <iso>] [--json]    per-provider totals
   heddle account pick [--for <letter[,letter...]>] [--json] [--explain]   healthiest addressable Claude account for a fleet relaunch
+  heddle pr own <whoami|claim|check|release|mine> [<pr#>] [--json]       coordinate ownership of a GitHub PR
   heddle reviews [--limit N] [--json]      adversarial-review scoreboard (author→reviewer pairs) + recent reviews
   heddle review-outcome <dispatch-id> --total N --accepted M [--notes "…"]   record how many findings you accepted
 `;
@@ -315,6 +317,26 @@ try {
         }).join('\n');
         return `${selected}\n${details}`;
       });
+      break;
+    }
+
+    case 'pr': {
+      const verb = process.argv[3];
+      if (verb === 'own') {
+        const ownership = runPrOwn(process.argv[4], process.argv[5], process.cwd());
+        if (ownership.error) console.error(ownership.error);
+        if (ownership.text) out(json, ownership.data, () => ownership.text);
+        else if (json) out(true, ownership.data, () => '');
+        process.exitCode = ownership.code;
+        break;
+      }
+      if (verb === 'sweep' || verb === 'watch') {
+        console.error('not yet implemented — HED-426 follow-up slice');
+        process.exitCode = 2;
+        break;
+      }
+      console.error('usage: heddle pr own <whoami|claim|check|release|mine> [<pr#>] [--json]');
+      process.exitCode = 2;
       break;
     }
 
