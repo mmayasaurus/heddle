@@ -568,6 +568,7 @@ try {
       out(json, result, () => [
         `comms database: ${result.commsDb.path} (${result.commsDb.existed ? 'existing' : 'created'})`,
         `operator token: ${result.operatorToken.path} (${result.operatorToken.action})`,
+        ...(result.registryError ? [`projects.json: ${result.registryError} (project rooms skipped)`] : []),
         ...result.rooms.map((room) => `room ${room.name}: ${room.created ? 'created' : 'kept'}`),
         ...result.skippedProjectRooms.map((room) => `skipped ${room.name}: ${room.reason}`),
       ].join('\n'));

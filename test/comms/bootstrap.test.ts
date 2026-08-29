@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync, existsSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -36,6 +36,7 @@ describe('bootstrapComms', () => {
 
   it('creates the database, operator token, and default fleet room', () => {
     const result = bootstrapComms(options());
+    const token = readFileSync(tokenPath, 'utf8').trim();
 
     expect(existsSync(dbPath)).toBe(true);
     expect(statSync(tokenPath).mode & 0o777).toBe(0o600);
@@ -47,6 +48,9 @@ describe('bootstrapComms', () => {
       log.close();
     }
     expect(result.operatorToken.action).toBe('created');
+    expect(result.registryError).toBeNull();
+    expect(JSON.stringify(result)).not.toContain(token);
+    expect(Object.keys(result.operatorToken).sort()).toEqual(['action', 'path']);
   });
 
   it('keeps the token byte-for-byte unchanged and permissions hardened on a rerun', () => {
@@ -59,6 +63,22 @@ describe('bootstrapComms', () => {
     expect(readFileSync(tokenPath)).toEqual(before);
     expect(statSync(tokenPath).mode & 0o777).toBe(0o600);
     expect(statSync(heddleDir).mode & 0o777).toBe(0o700);
+  });
+
+  it('does not re-mode an existing heddle directory while still provisioning comms', () => {
+    mkdirSync(heddleDir, { recursive: true });
+    chmodSync(heddleDir, 0o755);
+
+    bootstrapComms(options());
+
+    expect(statSync(heddleDir).mode & 0o777).toBe(0o755);
+    expect(existsSync(tokenPath)).toBe(true);
+    const log = new CommsLog(dbPath);
+    try {
+      expect(log.room('#fleet')).not.toBeNull();
+    } finally {
+      log.close();
+    }
   });
 
   it('creates valid registered project rooms and reports invalid room addresses', () => {
@@ -84,9 +104,35 @@ describe('bootstrapComms', () => {
     expect(second.rooms).toContainEqual({ name: '#myproj', created: false });
   });
 
+  it('provisions core comms when projects.json is corrupt and reports the skipped registry', () => {
+    writeFileSync(projectsPath, '{not valid json');
+
+    const result = bootstrapComms(options());
+
+    expect(result.registryError).toMatch(/projects\.json.*not valid JSON/);
+    expect(existsSync(dbPath)).toBe(true);
+    expect(existsSync(tokenPath)).toBe(true);
+    expect(result.rooms).toEqual([{ name: '#fleet', created: true }]);
+    expect(result.skippedProjectRooms).toEqual([]);
+    const log = new CommsLog(dbPath);
+    try {
+      expect(log.room('#fleet')).not.toBeNull();
+    } finally {
+      log.close();
+    }
+  });
+
   it('exchanges a message through the channel-server wrapper against the bootstrapped database', async () => {
     // The packaged entry deliberately has no injectable operator-token path, so test its exact
     // createCommsServer wrapper here to keep the live operator trust root out of the test process.
+    // Broker.checkRoom rejects missing rooms, while the server only ensures #fleet, so #myproj
+    // proves bootstrap created the project room before either server starts.
+    writeFileSync(projectsPath, JSON.stringify({
+      schemaVersion: PROJECTS_SCHEMA_VERSION,
+      projects: [
+        { name: 'exchange', workspaceRoots: [dir], agentIds: ['K'], linearTeam: 'HED', defaultRoom: '#myproj', launcher: 'start-exchange' },
+      ],
+    }));
     bootstrapComms(options());
     const token = readFileSync(tokenPath, 'utf8').trim();
 
@@ -112,9 +158,9 @@ describe('bootstrapComms', () => {
 
     const operator = await connect({ HEDDLE_COMMS_ROLE: 'operator', HEDDLE_COMMS_OPERATOR_TOKEN: token });
     const agent = await connect({ HEDDLE_AGENT: 'K' });
-    await call(operator, 'post_message', { to: '#fleet', body: 'bootstrap exchange' });
+    await call(operator, 'post_message', { to: '#myproj', body: 'bootstrap exchange' });
 
-    const messages = await call(agent, 'read_transcript', { room: '#fleet' }) as { body: string }[];
+    const messages = await call(agent, 'read_transcript', { room: '#myproj' }) as { body: string }[];
     expect(messages.map((message) => message.body)).toContain('bootstrap exchange');
   });
 });

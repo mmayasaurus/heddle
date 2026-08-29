@@ -16,6 +16,7 @@ export interface CommsBootstrapResult {
   operatorToken: { path: string; action: 'created' | 'rotated' | 'kept' };
   rooms: { name: string; created: boolean }[];
   skippedProjectRooms: { name: string; reason: string }[];
+  registryError: string | null;
 }
 
 /** Ensure the durable comms prerequisites without rotating the operator trust root. */
@@ -40,7 +41,15 @@ export function bootstrapComms(opts: CommsBootstrapOptions = {}): CommsBootstrap
     log.ensureDefaultRooms();
     rooms.push({ name: DEFAULT_ROOM, created: !fleetExisted });
 
-    for (const project of loadProjectRegistry(projectsPath).projects) {
+    let registryError: string | null = null;
+    let projects: ReturnType<typeof loadProjectRegistry>['projects'] = [];
+    try {
+      projects = loadProjectRegistry(projectsPath).projects;
+    } catch (err) {
+      registryError = (err as Error).message;
+    }
+
+    for (const project of projects) {
       if (parseAddress(project.defaultRoom)?.kind !== 'room') {
         skippedProjectRooms.push({ name: project.defaultRoom, reason: 'defaultRoom is not a valid room address' });
         continue;
@@ -55,6 +64,7 @@ export function bootstrapComms(opts: CommsBootstrapOptions = {}): CommsBootstrap
       operatorToken,
       rooms,
       skippedProjectRooms,
+      registryError,
     };
   } finally {
     log.close();
