@@ -31,4 +31,23 @@ An `action: block` rule is permitted only for `PreToolUse` in v1, and only `enfo
 
 The loader reads only direct `*.yaml` files in its rules directory and deliberately does not recurse. In particular, `rules/proposed/` is ignored: an un-ratified proposed rule can never be evaluated.
 
-## Lifecycle (heddle rule …) — TODO PR2
+## Lifecycle (`heddle rule …`)
+
+Rules begin as proposed files. `heddle rule propose <path-to-yaml> --rules <root>` validates the rule,
+requires non-empty `provenance`, and requires a sibling fixture at `<root>/tests/<id>.jsonl`. It then writes
+the rule to `<root>/proposed/<id>.yaml`; it never overwrites an existing active or proposed rule and does not
+set `since`.
+
+`heddle rule ratify <id> --rules <root>` is the operator promotion path from proposed to active. It refuses
+when `HEDDLE_WORKER` is set, when the proposal is absent, when an active rule already has the id, or when any
+fixture case fails. A successful ratification adds today's `since` value if needed and moves the file to
+`<root>/<id>.yaml`. Since the loader reads only direct files, this move is the point at which the engine can
+evaluate the rule; proposed rules are never evaluated before it.
+
+`heddle rule list [--json]` displays active and proposed rules, including their state, provenance, and active
+age. `heddle rule test [id]` runs the fixture for one active or proposed rule, or every discovered fixture when
+no id is supplied.
+
+Git and PR discipline remain the real trust boundary: rules are tracked files and review controls who may
+change them. The worker refusal and passing-fixture gate in `ratify` are defense in depth, not a replacement
+for that review.

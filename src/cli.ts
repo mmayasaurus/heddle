@@ -17,6 +17,7 @@ import { claudeAccountRows, pickClaudeAccountsBatch, usableClaudeCaps } from './
 import { bindingMeter, claudeFloorsFrom } from './floors.js';
 import { loadLanes } from './lanes.js';
 import { readProviderCaps } from './usage.js';
+import { runRuleCli } from './rules/lifecycle.js';
 
 /**
  * heddle CLI — the surface orchestrators (and later the dashboard) drive.
@@ -72,6 +73,7 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
   heddle ledger report-in-session <id> (--ok | --failed) [--error "<why>"] [--input-tokens N] [--cached-input-tokens N] [--output-tokens N] [--reasoning-tokens N] [--duration-ms N] [--json]  administrative path: may report any orchestrator's handoff
   heddle usage [--since <iso>] [--json]    per-provider totals
   heddle account pick [--for <letter[,letter...]>] [--json] [--explain]   healthiest addressable Claude account for a fleet relaunch
+  heddle rule <list|propose|ratify|test> [--rules <dir>]   manage proposed and active hook rules
   heddle reviews [--limit N] [--json]      adversarial-review scoreboard (author→reviewer pairs) + recent reviews
   heddle review-outcome <dispatch-id> --total N --accepted M [--notes "…"]   record how many findings you accepted
 `;
@@ -534,6 +536,11 @@ try {
           `${r.runs} runs, in=${r.input_tokens} out=${r.output_tokens}`).join('\n');
         return `${workers}\n\nclassifiers (not worker dispatches):\n${clsLines}`;
       });
+      break;
+    }
+
+    case 'rule': {
+      process.exitCode = await runRuleCli(process.argv.slice(3));
       break;
     }
 
