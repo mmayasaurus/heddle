@@ -3,7 +3,7 @@ import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 
 /**
- * Operator mode (HED-336) — the single host-side signal for HOW the fleet should work for Maya right
+ * Operator mode (HED-336) — the single host-side signal for HOW the fleet should work for the operator right
  * now: `desktop` (today's behavior), `mobile` (she's on the pocket console — phone-sized messages,
  * decisions via structured option cards, prompt hygiene), or `away` (only urgent interrupts).
  *

@@ -69,7 +69,7 @@ export interface GitRepository {
   /**
    * The repository's MAIN checkout — the first `git worktree list --porcelain` entry: equal to
    * topLevel in a normal checkout; for a linked worktree, the checkout it was added from, wherever
-   * that sits (inside the repo as `<repo>/.worktrees/<agent>`, or beside it as the Spinventory
+   * that sits (inside the repo as `<repo>/.worktrees/<agent>`, or beside it as a consumer
    * fleet's sibling `Rebuild-Project-Root.<feature>`). This — not topLevel — is the repository's
    * identity: a real dispatch cwd is a linked worktree whose top level is named after the
    * WORKTREE, not the repo (HED-389 review: keyed on topLevel, heddle dispatches matched nothing).
