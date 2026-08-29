@@ -111,9 +111,12 @@ const json = has('--json');
  * pure operator-mode read/write touches only ~/.heddle/operator-mode.json and has no business
  * opening, creating, or mutating the ledger (codeant HED-336): a read-only `heddle mode` on the
  * per-turn / pocket-console path must not incur ledger startup, migration, or SQLite locking.
+ * Skipped too for `comms` (codeant HED-409): `heddle comms init` provisions the comms broker
+ * (comms.db, operator token, rooms) and likewise has no business opening or mutating the dispatch
+ * ledger — a fresh-machine setup step must not incur ledger startup, migration, or SQLite locking.
  * Best-effort — a hygiene failure must never break the command the operator actually ran.
  */
-if (cmd !== 'mode' && !(cmd === 'ledger' && (process.argv[3] === 'sweep' || process.argv[3] === 'finish'))) {
+if (cmd !== 'mode' && cmd !== 'comms' && !(cmd === 'ledger' && (process.argv[3] === 'sweep' || process.argv[3] === 'finish'))) {
   try {
     const { closed } = new Ledger().sweepOrphans();
     if (closed > 0) console.error(`heddle: closed ${closed} orphaned in-flight dispatch row${closed === 1 ? '' : 's'} (heddle ledger --json shows outcome='orphaned')`);

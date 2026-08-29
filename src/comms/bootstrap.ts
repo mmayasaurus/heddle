@@ -54,9 +54,16 @@ export function bootstrapComms(opts: CommsBootstrapOptions = {}): CommsBootstrap
         skippedProjectRooms.push({ name: project.defaultRoom, reason: 'defaultRoom is not a valid room address' });
         continue;
       }
-      const roomExisted = log.room(project.defaultRoom) !== null;
+      const existing = log.room(project.defaultRoom);
+      if (existing && !existing.open) {
+        // A pre-existing CLOSED room is not reopened here: createRoom is ON CONFLICT DO NOTHING and
+        // reopening is broker governance (createRoom's own contract). Report it rather than silently
+        // claim a usable room — non-member agents cannot post to a closed room.
+        skippedProjectRooms.push({ name: project.defaultRoom, reason: 'room already exists but is closed; left as-is (reopening is broker governance)' });
+        continue;
+      }
       log.createRoom({ name: project.defaultRoom, by: 'operator', open: true });
-      rooms.push({ name: project.defaultRoom, created: !roomExisted });
+      rooms.push({ name: project.defaultRoom, created: existing === null });
     }
 
     return {

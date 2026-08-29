@@ -104,6 +104,27 @@ describe('bootstrapComms', () => {
     expect(second.rooms).toContainEqual({ name: '#myproj', created: false });
   });
 
+  it('reports a pre-existing closed project room instead of silently keeping it', () => {
+    // Seed the db with #myproj already CLOSED, before any project registers it.
+    const seed = new CommsLog(dbPath);
+    try {
+      seed.createRoom({ name: '#myproj', by: 'operator', open: false });
+    } finally {
+      seed.close();
+    }
+    writeFileSync(projectsPath, JSON.stringify({
+      schemaVersion: PROJECTS_SCHEMA_VERSION,
+      projects: [
+        { name: 'closed', workspaceRoots: [dir], agentIds: ['K'], linearTeam: 'HED', defaultRoom: '#myproj', launcher: 'start-closed' },
+      ],
+    }));
+
+    const result = bootstrapComms(options());
+
+    expect(result.skippedProjectRooms).toContainEqual({ name: '#myproj', reason: 'room already exists but is closed; left as-is (reopening is broker governance)' });
+    expect(result.rooms.map((room) => room.name)).not.toContain('#myproj');
+  });
+
   it('provisions core comms when projects.json is corrupt and reports the skipped registry', () => {
     writeFileSync(projectsPath, '{not valid json');
 
