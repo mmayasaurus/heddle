@@ -22,6 +22,8 @@ import { run } from './subprocess.js';
  *    models; direct-subscription families never route through a middleman.
  */
 
+/** Every invocation also carries --print-timeout derived from the dispatch budget (HED-423):
+ *  agy's print-mode default is 5m0s, which killed any review longer than five minutes. */
 /** Retry probe ceiling for the #573 hang check — a hung agy emits nothing, so this is ample. */
 const RETRY_PROBE_MS = 120_000;
 const DEFAULT_TIMEOUT_MS = 600_000;

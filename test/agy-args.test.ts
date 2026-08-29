@@ -10,6 +10,26 @@ describe('AgyAdapter.buildArgs — invocation contract', () => {
     ]);
   });
 
+  it('formats a non-minute-aligned budget in seconds (the s branch)', () => {
+    expect(new AgyAdapter().buildArgs('do it', {
+      model: 'gemini-3.6-flash-low', cwd: '/tmp', timeoutMs: 300_000,
+    })).toEqual([
+      '-p', 'do it', '--output-format', 'stream-json', '--model', 'gemini-3.6-flash-low',
+      '--print-timeout', '270s',
+      '--dangerously-skip-permissions',
+    ]);
+  });
+
+  it('formats a sub-second remainder in milliseconds and never emits zero (the ms branch)', () => {
+    expect(new AgyAdapter().buildArgs('do it', {
+      model: 'gemini-3.6-flash-low', cwd: '/tmp', timeoutMs: 1_000,
+    })).toEqual([
+      '-p', 'do it', '--output-format', 'stream-json', '--model', 'gemini-3.6-flash-low',
+      '--print-timeout', '900ms',
+      '--dangerously-skip-permissions',
+    ]);
+  });
+
   it('derives the print timeout from a custom dispatch budget', () => {
     expect(new AgyAdapter().buildArgs('do it', {
       model: 'gemini-3.6-flash-low', cwd: '/tmp', timeoutMs: 720_000,
