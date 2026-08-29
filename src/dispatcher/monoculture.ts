@@ -6,9 +6,7 @@ import type { Ledger } from '../ledger.js';
 // precisely to spread that load, and a human reading a wall of "codex, codex, codex" direct rows has
 // no signal an alternative was available. Warn only — never blocks, never writes the ledger.
 const MONOCULTURE_WINDOW_MS = 8 * 60 * 60 * 1000;
-
 const MONOCULTURE_FLOOR = 5;
-
 const MONOCULTURE_SHARE_THRESHOLD = 0.6;
 
 export interface MonocultureNote {

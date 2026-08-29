@@ -64,6 +64,7 @@ supplies its own routing table, Linear team, and ownership systems.
 ```
 routing/routing.v0.yaml  routing table: task-class → provider/model/effort/skills (+why, edits_code)
 src/dispatch.ts          the dispatcher: task class → routed worker → recorded outcome (+refusals)
+src/dispatcher/          the dispatcher's modules: types · packs · adapters · refusals · override-gate · monoculture · plan · run (src/dispatch.ts keeps dispatch() + re-exports)
 src/routing.ts           routing-table loader + resolveRoute
 src/capaware.ts          cap-aware routing (HED-67) + Claude account switching (HED-68) + Fable budget (HED-76)
 src/ledger.ts            SQLite dispatch/review ledger (node:sqlite; ~/.heddle/ledger.db)
