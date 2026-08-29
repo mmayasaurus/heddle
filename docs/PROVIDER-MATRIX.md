@@ -469,37 +469,23 @@ provider's credential environment.
 
 ## Open questions
 
-### OpenRouter
-
-- Full-account credits require Management Key; ordinary keys report only per-key stats.
-
-### Grok/xAI
-
-- Document `GET /v1/models` behavior for valid key with $0 balance; Management API is alternate probe.
-
-### Muse/Meta
-
-- Operator decision: paid proprietary Muse API or free Llama via third-party hosts.
-
-### Gemini/Antigravity
-
-- One-login-at-a-time is documented; no documented native per-account switch. Capture exact
+- **OpenRouter**
+  - Full-account credits require Management Key; ordinary keys report only per-key stats.
+- **Grok/xAI**
+  - Document `GET /v1/models` behavior for valid key with $0 balance; Management API is alternate probe.
+- **Muse/Meta**
+  - Operator decision: paid proprietary Muse API or free Llama via third-party hosts.
+- **Gemini/Antigravity**
+  - One-login-at-a-time is documented; no documented native per-account switch. Capture exact
   `agy -p --output-format stream-json` quota error.
 
-### Cursor
-
-- Capture exact `cursor-agent -p --output-format json` quota error.
-
-### OpenCode
-
-- Headless exit codes/stdin are undocumented; adapter requires isolation and Anthropic-ToS review.
-
-### Qwen
-
-- Confirm free-quota regional availability beyond the mainly Singapore documented path.
-
-### Amazon Q Developer
-
-- Headless non-interactive login and per-account switching are undocumented.
-- The relationship between the `q` CLI and Kiro CLI (rename vs. sibling) is unverified; verify
+- **Cursor**
+  - Capture exact `cursor-agent -p --output-format json` quota error.
+- **OpenCode**
+  - Headless exit codes/stdin are undocumented; adapter requires isolation and Anthropic-ToS review.
+- **Qwen**
+  - Confirm free-quota regional availability beyond the mainly Singapore documented path.
+- **Amazon Q Developer**
+  - Headless non-interactive login and per-account switching are undocumented.
+  - The relationship between the `q` CLI and Kiro CLI (rename vs. sibling) is unverified; verify
   before the wizard names a binary.
