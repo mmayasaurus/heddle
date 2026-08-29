@@ -27,7 +27,7 @@ suite is behavioral vitest (`npm test`). See `docs/ARCHITECTURE.md` and, first, 
 `heddle-dashboard` product) · `docs/LANDMINES.md` (live-verified per-CLI contracts — read before
 touching an adapter) · `docs/CI.md` (CI, scanners, review-sweep).
 
-First consumer: the Spinventory rebuild fleet. Heddle itself is project-agnostic — the consumer
+First consumer: a private multi-agent app-rebuild fleet. Heddle itself is project-agnostic — the consumer
 supplies its own routing table, Linear team, and ownership systems.
 
 ## The rules that shape everything

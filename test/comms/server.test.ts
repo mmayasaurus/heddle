@@ -401,7 +401,7 @@ describe('heddle-comms server (in-process)', () => {
     expect(warnings.some((m) => m.includes('refusing to bind operator'))).toBe(true);
     const wrong = await connect({ HEDDLE_COMMS_ROLE: 'operator', HEDDLE_COMMS_OPERATOR_TOKEN: 'deadbeef'.repeat(6) });
     expect(wrong.server.identity).toBeNull();
-    const refused = await call(wrong.client, 'post_message', { to: '#fleet', body: 'I am Maya' });
+    const refused = await call(wrong.client, 'post_message', { to: '#fleet', body: 'I am the operator' });
     expect(refused.isError).toBe(true);
     expect(refused.text).toMatch(/no bound comms identity/);
 

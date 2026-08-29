@@ -61,7 +61,7 @@ server.tool(
     model: z.string().optional().describe('Explicit route: model id for provider (e.g. cursor-grok-4.6-high).'),
     override_reason: z.string().optional().describe('REQUIRED when you pass provider+model WITHOUT a task_class: say what about THIS task needs this exact model that its routing class does not give you (a bench, a probe, a specific-capability call). Recorded on the ledger row so routing can be tuned from evidence. Must be a real justification — a bare cliché or the route\'s own name is rejected ("proven", "faster", "gpt-5.6-terra" do not pass); a specific sentence does.'),
     cwd: z.string().optional().describe('Working directory for the worker (default: server cwd).'),
-    issue: z.string().optional().describe('Linear issue this sub-task serves, e.g. SPI-712.'),
+    issue: z.string().optional().describe('Linear issue this sub-task serves, e.g. ABC-123.'),
     agent: z.string().optional().describe("Dispatching orchestrator's fleet identity, e.g. K — used only when this heddle process has no bound identity (HEDDLE_AGENT/FLEET_AGENT/.fleet-agent); a bound identity always wins and the result says which."),
     skills: z.array(z.string()).optional().describe(
       'Skill packs to load (see list_skill_packs). Omit to get the task class\'s default packs ' +
@@ -297,7 +297,7 @@ server.tool(
   'Recent dispatch history from the ledger (decision + outcome + usage), newest first. ' +
     'Filter by issue to see all sub-tasks for one Linear issue.',
   {
-    issue: z.string().optional().describe('Filter to one Linear issue, e.g. SPI-712.'),
+    issue: z.string().optional().describe('Filter to one Linear issue, e.g. ABC-123.'),
     limit: z.number().optional().describe('Max rows (default 20).'),
   },
   async (a) => text(ledger().recent(a.limit ?? 20, a.issue)),

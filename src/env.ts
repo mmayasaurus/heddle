@@ -5,7 +5,7 @@
  * subscription, and in headless mode there is no prompt (Anthropic's docs are explicit:
  * "In non-interactive mode (-p), the key is always used when present"; OpenAI's: "When you sign
  * in with an API key, Codex uses standard API pricing instead of included ChatGPT plan credits").
- * A stray export in a shell rc, a .env, or an inherited CI variable would therefore bill Maya
+ * A stray export in a shell rc, a .env, or an inherited CI variable would therefore bill the operator
  * per-token with no visible signal. Workers get these stripped, always.
  */
 const BILLING_SWITCH_VARS = [
@@ -69,7 +69,7 @@ const INHERITED_CREDENTIAL_VARS = ['CLAUDE_CODE_OAUTH_TOKEN'] as const;
  * BILLING_SWITCH_VARS above stays for CODEX_API_KEY (a bare `CODEX_` prefix would also catch the
  * CODEX_HOME account selector) and to name the switch in the override-refusal message. Account selectors
  * are re-applied as overrides AFTER this strip, so an inherited stale selector is replaced by heddle's
- * chosen one, never leaked. (Maya firsthand approval 2026-08-19.)
+ * chosen one, never leaked. (Operator firsthand approval 2026-08-19.)
  */
 const VENDOR_CREDENTIAL_PREFIXES = [
   'ANTHROPIC_', 'OPENAI_', 'GEMINI_', 'GOOGLE_', 'GCLOUD_', 'VERTEXAI_', 'VERTEX_',
@@ -77,7 +77,7 @@ const VENDOR_CREDENTIAL_PREFIXES = [
 ] as const;
 
 /**
- * The ONLY env vars an override may set (HED-30 ALLOWLIST — Maya firsthand 2026-08-19). The old
+ * The ONLY env vars an override may set (HED-30 ALLOWLIST — operator firsthand approval 2026-08-19). The old
  * denylist let any UNLISTED override pass silently, so a new vendor billing-switch (or a typo) slipped
  * through; an allowlist is secure-by-default. The legitimate overrides heddle sets are exactly the
  * account selectors and the worker stamps. Stamp names mirror `identity.WORKER_ENV` — hardcoded here to
