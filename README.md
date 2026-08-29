@@ -48,13 +48,16 @@ plugin resolves every path from `${CLAUDE_PLUGIN_ROOT}`, so it works from wherev
 — no machine-specific paths. Verify a checkout with `claude plugin validate .`.
 
 **One-command marketplace install** — `/plugin marketplace add <owner>/heddle` then
-`/plugin install heddle@heddle` — is wired (`.claude-plugin/marketplace.json`, `source: "./"`) but
-needs the MCP servers **bundled into committed artifacts** first: `dist/` is gitignored, so a
-marketplace-cloned copy has no built servers to run. That server-bundling is the next packaging slice;
-until it lands, use the built-checkout flow above.
+`/plugin install heddle@heddle` — resolves against the same-repo marketplace
+(`.claude-plugin/marketplace.json`, `source: "./"`), but is **not usable from this source tree**:
+build output is kept out of source (`dist/` is gitignored), so a bare clone has no runnable servers.
+The install-ready build is a follow-up slice — a standalone CLI-only distribution **regenerated from
+this source** and scrubbed for public readiness, shipping a self-contained plugin (built `dist/` plus
+the lockfile, so `npm ci` supplies the servers' dependencies with **no user build step**). Until that
+lands, use the built-checkout flow above.
 
 > This slice delivers the MCP servers + the plugin/marketplace structure. Still to come as follow-up
-> slices of the packaging epic (HED-394): the server-bundling for marketplace install, the orchestrator
+> slices of the packaging epic (HED-394): the release-generated distribution build, the orchestrator
 > slash commands, the rules-as-data hook engine, and the packaged skill packs.
 
 ## The rules that shape everything
