@@ -30,6 +30,36 @@ touching an adapter) · `docs/CI.md` (CI, scanners, review-sweep).
 First consumer: the Spinventory rebuild fleet. Heddle itself is project-agnostic — the consumer
 supplies its own routing table, Linear team, and ownership systems.
 
+## Install as a Claude Code plugin
+
+Heddle ships as a Claude Code plugin (`.claude-plugin/`), bundling the `heddle` (dispatch surface)
+and `heddle-comms` (inter-agent messaging) MCP servers so any Claude Code session can drive the fleet.
+
+**From a built checkout** (works today):
+
+```shell
+git clone <owner>/heddle && cd heddle
+npm install && npm run build           # produce dist/ (the two MCP servers)
+claude --plugin-dir "$(pwd)"           # load the plugin for a session
+```
+
+Once loaded, the `plugin:heddle:heddle` and `plugin:heddle:heddle-comms` MCP tools are available. The
+plugin resolves every path from `${CLAUDE_PLUGIN_ROOT}`, so it works from wherever the checkout lives
+— no machine-specific paths. Verify a checkout with `claude plugin validate .`.
+
+**One-command marketplace install** — `/plugin marketplace add <owner>/heddle` then
+`/plugin install heddle@heddle` — resolves against the same-repo marketplace
+(`.claude-plugin/marketplace.json`, `source: "./"`), but is **not usable from this source tree**:
+build output is kept out of source (`dist/` is gitignored), so a bare clone has no runnable servers.
+The install-ready build is a follow-up slice — a standalone CLI-only distribution **regenerated from
+this source** and scrubbed for public readiness, shipping a self-contained plugin (built `dist/` plus
+the lockfile, so `npm ci` supplies the servers' dependencies with **no user build step**). Until that
+lands, use the built-checkout flow above.
+
+> This slice delivers the MCP servers + the plugin/marketplace structure. Still to come as follow-up
+> slices of the packaging epic (HED-394): the release-generated distribution build, the orchestrator
+> slash commands, the rules-as-data hook engine, and the packaged skill packs.
+
 ## The rules that shape everything
 
 1. **Subscriptions only.** Every execution path is a subscription-authenticated CLI: Claude models
