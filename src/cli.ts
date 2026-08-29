@@ -17,6 +17,7 @@ import { claudeAccountRows, pickClaudeAccountsBatch, usableClaudeCaps } from './
 import { bindingMeter, claudeFloorsFrom } from './floors.js';
 import { loadLanes } from './lanes.js';
 import { readProviderCaps } from './usage.js';
+import { DOCTOR_PROVIDERS, formatDoctorReport, runDoctor } from './doctor.js';
 import { readOperatorMode, writeOperatorMode, isOperatorMode, OPERATOR_MODES } from './operator-mode.js';
 
 /**
@@ -67,6 +68,7 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
                                  the pocket console and desktop app write the same file)
   heddle init-project <dir> [--canonical <path>] [--name <n>] [--team <KEY>] [--agents A,B,…] [--room <#room>] [--launcher <script>] [--enforce-memtrace] [--dry-run] [--json] [--show-content]
   heddle whoami [--json]         this process's bound identity (HEDDLE_AGENT / FLEET_AGENT / .fleet-agent) + worker context
+  heddle doctor [--json] [--provider <p>]   verify harnesses/accounts/config; --provider runs only that provider's checks plus global config checks (exit 1 on any fail)
   heddle workers [--stale <hours>] [--json]   dispatches still in flight (--stale: only orphans older than N hours)
   heddle ledger [--issue SPI-n] [--limit N] [--json]
   heddle ledger finish <id> --error "<why>"   close an orphaned in-flight row (ok=0)
@@ -365,6 +367,34 @@ try {
       const id = resolveIdentity(process.cwd());
       out(json, id, () => `agent: ${id.agent ?? '(unbound)'}  source: ${id.source}` +
         (id.worker ? `\nWORKER context: dispatch #${id.worker.dispatchId ?? '?'} parent ${id.worker.parent ?? '?'} — this process may not dispatch (depth-1)` : ''));
+      break;
+    }
+
+    case 'doctor': {
+      const provider = arg('--provider');
+      const usageError = (message: string): void => {
+        if (json) {
+          process.stdout.write(
+            `${JSON.stringify({ ok: false, error: message, known: DOCTOR_PROVIDERS })}\n`,
+            () => process.exit(2),
+          );
+        } else {
+          console.error(message);
+          process.exit(2);
+        }
+      };
+      if (process.argv.includes('--provider') && (!provider || provider.startsWith('--'))) {
+        usageError(`doctor: --provider needs a provider name (known: ${DOCTOR_PROVIDERS.join(', ')})`);
+        break;
+      }
+      if (provider && !DOCTOR_PROVIDERS.includes(provider as typeof DOCTOR_PROVIDERS[number])) {
+        usageError(`doctor: unknown --provider "${provider}" (known: ${DOCTOR_PROVIDERS.join(', ')})`);
+        break;
+      }
+      const report = await runDoctor({ provider });
+      const text = json ? JSON.stringify(report, null, 2) : formatDoctorReport(report);
+      // Exit only after stdout drains so timed-out probes cannot keep the command alive after its report.
+      process.stdout.write(text + '\n', () => process.exit(report.exitCode));
       break;
     }
 
