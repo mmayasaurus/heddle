@@ -1,5 +1,5 @@
 import { isCodeEditingClass, resolveRoute, type Route, type RoutingTable } from './routing.js';
-import { MANDATORY_PACKS, withMandatoryPacks } from './skillpacks.js';
+import { MANDATORY_PACKS, resolveQualityGateForCwd, withMandatoryPacks } from './skillpacks.js';
 
 /**
  * Dispatch-time guidance — the pure logic behind the `dispatch_worker` PreToolUse hook
@@ -31,6 +31,8 @@ export interface DispatchGuidanceInput {
   model?: string;
   skills?: string[];
   opt_in?: boolean;
+  /** The dispatch cwd: with it, the quality gate is resolved per repository exactly as the dispatch will (HED-389). */
+  cwd?: string;
 }
 
 export type GuidanceCode = 'code-editing-class-without-skills' | 'opt-in-required' | 'subagent-dispatch';
@@ -48,8 +50,18 @@ export interface GuidanceWarning {
  */
 export function taskFitPacks(table: RoutingTable, input: DispatchGuidanceInput): string[] {
   const route = input.task_class ? resolveRoute(table, input.task_class) : undefined;
-  const effective = withMandatoryPacks(input.skills ?? route?.skills ?? []);
-  return effective.filter((p) => !(MANDATORY_PACKS as readonly string[]).includes(p));
+  return fitPacks(input.skills ?? route?.skills ?? [], input.cwd);
+}
+
+/**
+ * Task-fit packs of a list: mandatory packs removed and — when the cwd is known — the quality gate
+ * resolved per repository, so the guidance judges the list the worker will actually receive, not
+ * the routing default (an unknown repository drops the app gate; codex P2 on PR #95).
+ */
+function fitPacks(skills: readonly string[], cwd: string | undefined): string[] {
+  const effective = withMandatoryPacks(skills);
+  const resolved = cwd ? resolveQualityGateForCwd(cwd, effective) : effective;
+  return resolved.filter((p) => !(MANDATORY_PACKS as readonly string[]).includes(p));
 }
 
 export function dispatchGuidance(table: RoutingTable, input: DispatchGuidanceInput): GuidanceWarning[] {
@@ -72,7 +84,8 @@ function codeEditingWarning(
   table: RoutingTable, input: DispatchGuidanceInput, route: Route, cls: string, optInMissing: boolean,
 ): GuidanceWarning | null {
   const defaults = withMandatoryPacks(route.skills ?? []);
-  const recommended = defaults.filter((p) => !(MANDATORY_PACKS as readonly string[]).includes(p));
+  const tabled = defaults.filter((p) => !(MANDATORY_PACKS as readonly string[]).includes(p));
+  const recommended = fitPacks(route.skills ?? [], input.cwd); // the defaults as THIS cwd resolves them
   const carried = taskFitPacks(table, input);
   const missingFit = recommended.length ? !recommended.some((p) => carried.includes(p)) : carried.length === 0;
   if (!missingFit) return null;
@@ -82,6 +95,11 @@ function codeEditingWarning(
   const adviceText = recommended.length
     ? `Recommended for ${cls}: ${recommended.join(', ')} — omit \`skills\` to get the class default ` +
       `[${defaults.join(', ')}], or pass an explicit list that includes at least one of them.`
+    : tabled.length
+    ? `The class default [${tabled.join(', ')}] resolves to NO gate for cwd ${input.cwd}: quality-gate is the ` +
+      `Spinventory app gate and is dropped outside a recognized repository (HED-389). Dispatch from a ` +
+      `recognized checkout, or pass an explicit list naming the right repo gate pack (repo-heddle-core, ` +
+      `repo-heddle-dashboard, repo-workspace).`
     : `The routing table lists no default packs for ${cls} either — consider quality-gate ` +
       `(verification) and code-discovery (graph-first navigation), or add defaults to routing.v0.yaml.`;
   return {
@@ -131,7 +149,9 @@ export function hookResponse(payload: unknown, table: RoutingTable): string | nu
   // Matched by settings.json (`mcp__heddle__dispatch_worker`), but be defensive: any other tool → silent.
   if (!/(^|__)dispatch_worker$/.test(toolName)) return null;
   const input = (p.tool_input && typeof p.tool_input === 'object' ? p.tool_input : {}) as DispatchGuidanceInput;
-  const warnings = dispatchGuidance(table, input);
+  // dispatch_worker defaults an omitted cwd to the server's cwd — the same directory this hook runs
+  // in — so the guidance judges the gate the dispatch will actually resolve (round-3 review #2).
+  const warnings = dispatchGuidance(table, { ...input, cwd: input.cwd ?? process.cwd() });
   // Depth-1 (HED-2) for in-session Claude subagents: the hook payload carries `agent_id` only when
   // the call comes from inside a subagent. The server cannot see that (it is the orchestrator's own
   // MCP process), so this stays a nudge — subprocess workers are refused server-side.

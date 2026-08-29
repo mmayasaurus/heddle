@@ -140,6 +140,7 @@ server.tool(
     account_pin: z.string().optional(),
     author_provider: z.string().optional(),
     override_reason: z.string().optional().describe('Same rule as dispatch_worker: a bare provider+model with no task_class is reported as WOULD REFUSE unless you say why it bypasses the routing table.'),
+    cwd: z.string().optional().describe('Working directory the dispatch would use (default: server cwd) — the quality gate is resolved per repository from it (HED-389), so pass the cwd you will pass to dispatch_worker.'),
   },
   async (a) => {
     try {
@@ -147,7 +148,7 @@ server.tool(
       if (a.codex_home) env.CODEX_HOME = a.codex_home;
       const plan = planDispatch({
         taskClass: a.task_class, provider: a.provider, model: a.model, prompt: '(dry run)',
-        cwd: process.cwd(), optIn: a.opt_in, overrideReason: a.override_reason, env: Object.keys(env).length ? env : undefined, identity: IDENTITY,
+        cwd: a.cwd ?? process.cwd(), optIn: a.opt_in, overrideReason: a.override_reason, env: Object.keys(env).length ? env : undefined, identity: IDENTITY,
         inSession: a.in_session, accountPin: a.account_pin, authorProvider: a.author_provider,
       });
       return text(summarizePlan(plan));
