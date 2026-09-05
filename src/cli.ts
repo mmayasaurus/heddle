@@ -19,6 +19,7 @@ import { loadLanes } from './lanes.js';
 import { readProviderCaps } from './usage.js';
 import { DOCTOR_PROVIDERS, formatDoctorReport, runDoctor } from './doctor.js';
 import { readOperatorMode, writeOperatorMode, isOperatorMode, OPERATOR_MODES } from './operator-mode.js';
+import { bootstrapComms } from './comms/bootstrap.js';
 
 /**
  * heddle CLI — the surface orchestrators (and later the dashboard) drive.
@@ -63,6 +64,7 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
   heddle classes [--json]        task classes: route, why, default skill packs, edits-code
   heddle packs                   list available skill packs
   heddle projects [--json]       registered projects and their fleets (~/.heddle/projects.json; HED-160)
+  heddle comms init [--json]     initialize the comms database, operator token, and registered project rooms
   heddle mode [desktop|mobile|away] [--note "<t>"] [--json]   operator mode (HED-336): no arg prints
                                  the current mode; a mode word sets it (~/.heddle/operator-mode.json —
                                  the pocket console and desktop app write the same file)
@@ -111,9 +113,12 @@ const json = has('--json');
  * pure operator-mode read/write touches only ~/.heddle/operator-mode.json and has no business
  * opening, creating, or mutating the ledger (codeant HED-336): a read-only `heddle mode` on the
  * per-turn / pocket-console path must not incur ledger startup, migration, or SQLite locking.
+ * Skipped too for `comms` (codeant HED-409): `heddle comms init` provisions the comms broker
+ * (comms.db, operator token, rooms) and likewise has no business opening or mutating the dispatch
+ * ledger — a fresh-machine setup step must not incur ledger startup, migration, or SQLite locking.
  * Best-effort — a hygiene failure must never break the command the operator actually ran.
  */
-if (cmd !== 'mode' && !(cmd === 'ledger' && (process.argv[3] === 'sweep' || process.argv[3] === 'finish'))) {
+if (cmd !== 'mode' && cmd !== 'comms' && !(cmd === 'ledger' && (process.argv[3] === 'sweep' || process.argv[3] === 'finish'))) {
   try {
     const { closed } = new Ledger().sweepOrphans();
     if (closed > 0) console.error(`heddle: closed ${closed} orphaned in-flight dispatch row${closed === 1 ? '' : 's'} (heddle ledger --json shows outcome='orphaned')`);
@@ -584,6 +589,22 @@ try {
         : existsSync(DEFAULT_PROJECTS_PATH)
           ? `(${DEFAULT_PROJECTS_PATH} is present but registers no projects)`
           : `(no projects registered — ${DEFAULT_PROJECTS_PATH} is absent; consumers fall back to cwd inference. See docs/PROJECTS.md to populate it.)`);
+      break;
+    }
+
+    case 'comms': {
+      if (process.argv[3] !== 'init') {
+        console.error('usage: heddle comms init [--json]');
+        process.exit(2);
+      }
+      const result = bootstrapComms();
+      out(json, result, () => [
+        `comms database: ${result.commsDb.path} (${result.commsDb.existed ? 'existing' : 'created'})`,
+        `operator token: ${result.operatorToken.path} (${result.operatorToken.action})`,
+        ...(result.registryError ? [`projects.json: ${result.registryError} (project rooms skipped)`] : []),
+        ...result.rooms.map((room) => `room ${room.name}: ${room.created ? 'created' : 'kept'}`),
+        ...result.skippedProjectRooms.map((room) => `skipped ${room.name}: ${room.reason}`),
+      ].join('\n'));
       break;
     }
 
