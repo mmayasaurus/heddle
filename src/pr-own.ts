@@ -32,15 +32,19 @@ function pathHash(path: string): string {
   return createHash('sha256').update(resolve(path)).digest('hex').slice(0, 8);
 }
 
+function sanitizeOwnerId(owner: string): string {
+  return owner.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '');
+}
+
 /**
  * Worktrees already have a filesystem-unique lane name. Every other checkout uses its immutable
  * filesystem path: branch names are mutable and collide across repositories.
  */
 export function deriveOwnerId({ topLevel, branch, override }: OwnerIdInput): string {
-  if (override?.trim()) return override.trim();
   const normalized = resolve(topLevel);
+  if (override?.trim()) return sanitizeOwnerId(override.trim()) || pathHash(normalized);
   const match = normalized.match(/(?:^|\/)\.worktrees\/([^/]+)(?:\/|$)/);
-  if (match?.[1]) return match[1];
+  if (match?.[1]) return sanitizeOwnerId(match[1]) || pathHash(normalized);
   return pathHash(normalized);
 }
 
@@ -51,7 +55,10 @@ export function markerBody(owner: string, since: string, heartbeat: string): str
 
 export function parseMarker(body: string): PrOwnerMarker | null {
   if (!body.startsWith(MARK_PREFIX)) return null;
-  const fields = Object.fromEntries([...body.matchAll(/\b(owner|since|heartbeat)=([^\s]+)/g)].map(([, key, value]) => [key, value]));
+  const fields: Partial<PrOwnerMarker> = {};
+  for (const [, key, value] of body.matchAll(/\b(owner|since|heartbeat)=([^\s]+)/g)) {
+    if (fields[key as keyof PrOwnerMarker] === undefined) fields[key as keyof PrOwnerMarker] = value;
+  }
   if (!fields.owner || !fields.since || !fields.heartbeat) return null;
   return { owner: fields.owner, since: fields.since, heartbeat: fields.heartbeat };
 }
@@ -98,9 +105,14 @@ export function resolveRepoNwo(cwd: string, gh: GhRunner, git: GitRunner = defau
 
 export function ownerIdForCwd(cwd: string, override = process.env.HEDDLE_PR_OWNER): string {
   const topLevel = gitText(cwd, ['rev-parse', '--show-toplevel']);
-  if (!topLevel) return override?.trim() || pathHash(cwd);
+  if (!topLevel) return override?.trim() ? sanitizeOwnerId(override.trim()) || pathHash(cwd) : pathHash(cwd);
   const branch = gitText(cwd, ['branch', '--show-current']) || null;
   return deriveOwnerId({ topLevel, branch, override });
+}
+
+function ghRepoNwo(gh: GhRunner): string | null {
+  try { return (JSON.parse(gh(['repo', 'view', '--json', 'nameWithOwner'])) as { nameWithOwner?: string }).nameWithOwner?.trim() || null; }
+  catch { return null; }
 }
 
 interface Comment { body: string; url?: string; }
@@ -159,7 +171,7 @@ export function runPrOwn(command: string | undefined, pr: string | undefined, cw
         try {
           if (marker.owner === 'released') gh(['pr', 'comment', pr!, '--body', `♻️ Adopting PR #${pr} — released by its prior owner, now owned by '${me}'.`]);
           else if (marker.owner !== me) gh(['pr', 'comment', pr!, '--body', `♻️ Reclaiming PR #${pr} — prior owner '${marker.owner}' heartbeat was ${age}h stale (>= ${staleHours()}h). Now owned by '${me}'.`]);
-          const nameWithOwner = resolveRepoNwo(cwd, gh);
+          const nameWithOwner = ghRepoNwo(gh);
           if (id && nameWithOwner) {
             gh(['api', `repos/${nameWithOwner}/issues/comments/${id}`, '-X', 'PATCH', '-f', `body=${markerBody(me, since, now)}`]);
             ensureLabel(gh); addLabel(gh, pr!);

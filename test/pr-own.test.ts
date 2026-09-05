@@ -29,11 +29,22 @@ describe('PR ownership helpers', () => {
     expect(deriveOwnerId({ topLevel: '/repos/heddle', branch: 'main', override: 'operator-1' })).toBe('operator-1');
   });
 
+  it('sanitizes override and worktree owner ids into marker-safe tokens', () => {
+    expect(deriveOwnerId({ topLevel: '/repos/heddle', branch: 'main', override: 'agent T-->' })).toBe('agent-T');
+    expect(deriveOwnerId({ topLevel: '/repos/heddle/.worktrees/agent T-->', branch: 'feature' })).toBe('agent-T');
+  });
+
   it('formats and parses a PR-OWNER marker', () => {
     const marker = markerBody('T-docs', '2026-08-28T12:00:00Z', '2026-08-28T13:00:00Z');
     expect(marker).toContain('<!-- PR-OWNER owner=T-docs since=2026-08-28T12:00:00Z heartbeat=2026-08-28T13:00:00Z -->');
     expect(parseMarker(marker)).toEqual({
       owner: 'T-docs', since: '2026-08-28T12:00:00Z', heartbeat: '2026-08-28T13:00:00Z',
+    });
+  });
+
+  it('parses the first occurrence of duplicate marker fields', () => {
+    expect(parseMarker('<!-- PR-OWNER owner=first owner=last since=first-since since=last-since heartbeat=first-heartbeat heartbeat=last-heartbeat -->')).toEqual({
+      owner: 'first', since: 'first-since', heartbeat: 'first-heartbeat',
     });
   });
 
@@ -89,17 +100,57 @@ describe('runPrOwn', () => {
     expect(run('claim', '7', ownGh([{ body: fresh }])).code).toBe(3);
   });
 
-  it('claims an unowned PR and falls back to a new marker when repo view fails', () => {
-    expect(run('claim', '7', ownGh()).code).toBe(0);
+  it('claims an unowned PR by posting a PR-OWNER marker and falls back to a new marker when repo view fails', () => {
+    const calls: string[][] = [];
+    const gh: GhRunner = (args) => {
+      calls.push(args);
+      return ownGh()(args);
+    };
+    expect(run('claim', '7', gh).code).toBe(0);
+    expect(calls).toContainEqual(expect.arrayContaining(['pr', 'comment', '7', '--body']));
+    expect(calls.find((args) => args[0] === 'pr' && args[1] === 'comment')?.at(-1)).toContain('<!-- PR-OWNER owner=');
     expect(run('claim', '7', ownGh([{ body: markerBody(owner, '2026-08-28T12:00:00Z', new Date().toISOString()), url: 'https://api.github.com/repos/a/issues/comments/1' }], true)).code).toBe(0);
   });
 
-  it('releases and lists its owned PRs', () => {
+  it('releases and lists only its owned PRs', () => {
     expect(run('release', '7', ownGh()).code).toBe(0);
-    expect(run('mine', undefined, ownGh()).code).toBe(0);
+    const mineGh: GhRunner = (args) => {
+      const command = args.join(' ');
+      if (command === 'pr list --label claimed --state open --limit 100 --json number') return JSON.stringify([{ number: 7 }, { number: 8 }]);
+      if (command === 'pr view 7 --json comments') return JSON.stringify({ comments: [{ body: markerBody(owner, '2026-08-28T12:00:00Z', new Date().toISOString()) }] });
+      if (command === 'pr view 8 --json comments') return JSON.stringify({ comments: [{ body: markerBody('other-owner', '2026-08-28T12:00:00Z', new Date().toISOString()) }] });
+      throw new Error(`unexpected gh call: ${command}`);
+    };
+    const result = run('mine', undefined, mineGh);
+    expect(result.code).toBe(0);
+    expect(result.data.prs).toEqual([expect.stringContaining('#7')]);
   });
 
   it('rejects a PR URL for every mutating or checking command', () => {
-    for (const command of ['claim', 'check', 'release']) expect(run(command, 'https://github.com/acme/widgets/pull/7', ownGh()).code).toBe(0);
+    for (const command of ['claim', 'check', 'release']) {
+      const result = run(command, 'https://github.com/acme/widgets/pull/7', ownGh());
+      expect(result.code).toBe(0);
+      expect(result.data.ok).toBe(false);
+    }
+  });
+
+  it('round-trips a sanitized override through claim and check', () => {
+    const prior = process.env.HEDDLE_PR_OWNER;
+    process.env.HEDDLE_PR_OWNER = 'agent T-->';
+    const comments: Array<{ body: string }> = [];
+    const gh: GhRunner = (args) => {
+      const command = args.join(' ');
+      if (command === 'pr view 7 --json comments') return JSON.stringify({ comments });
+      if (command.startsWith('label create ') || command.includes(' --add-label ')) return '';
+      if (command.startsWith('pr comment ')) { comments.push({ body: args.at(-1) ?? '' }); return ''; }
+      throw new Error(`unexpected gh call: ${command}`);
+    };
+    try {
+      expect(runPrOwn('claim', '7', '/repo', gh).code).toBe(0);
+      expect(comments[0].body).toContain('owner=agent-T');
+      expect(comments[0].body).not.toContain('owner=agent T');
+      expect(comments[0].body).not.toContain('owner=agent-T-->');
+      expect(runPrOwn('check', '7', '/repo', gh).data.verdict).toBe('YOURS');
+    } finally { if (prior === undefined) delete process.env.HEDDLE_PR_OWNER; else process.env.HEDDLE_PR_OWNER = prior; }
   });
 });

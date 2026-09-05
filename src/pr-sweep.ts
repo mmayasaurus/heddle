@@ -123,11 +123,12 @@ export function runPrSweep(pr: string, cwd: string, gh: GhRunner = defaultGhRunn
     const nwo = resolveRepoNwo(cwd, gh);
     if (!nwo) return fail('not inside a gh-connected repo', pr);
     const metadata = parse<{ number?: number; title?: string; state?: string; merged?: boolean; head?: { sha?: string }; mergeable?: boolean | null; mergeable_state?: string }>(gh(['api', `repos/${nwo}/pulls/${pr}`]));
+    // Every `--slurp` gh call in this function requires a modern gh release; it collects paginated REST pages into one JSON array.
     const commits = arrayJson<{ commit?: { committer?: { date?: string }; author?: { date?: string } } }>(gh(['api', `repos/${nwo}/pulls/${pr}/commits?per_page=100`, '--paginate', '--slurp']));
     const commentsRaw = arrayJson<ApiComment>(gh(['api', `repos/${nwo}/issues/${pr}/comments?per_page=100`, '--paginate', '--slurp']));
     const reviewsRaw = arrayJson<ApiReview>(gh(['api', `repos/${nwo}/pulls/${pr}/reviews?per_page=100`, '--paginate', '--slurp']));
     const [owner, repo] = nwo.split('/', 2);
-    const threadsPayload = parse<{ data?: { repository?: { pullRequest?: { reviewThreads?: { totalCount?: number; nodes?: Array<{ isResolved?: boolean; isOutdated?: boolean; path?: string; comments?: { nodes?: Array<{ author?: { login?: string }; body?: string }> } }> } } } } }>(gh(['api', 'graphql', '-f', 'query=query($owner:String!,$repo:String!,$pr:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$pr){reviewThreads(first:100){totalCount nodes{isResolved isOutdated path comments(first:1){nodes{author{login} body}}}}}}}', '-F', `owner=${owner}`, '-F', `repo=${repo}`, '-F', `pr=${pr}`]));
+    const threadsPayload = parse<{ data?: { repository?: { pullRequest?: { reviewThreads?: { totalCount?: number; nodes?: Array<{ isResolved?: boolean; isOutdated?: boolean; path?: string; comments?: { nodes?: Array<{ author?: { login?: string }; body?: string }> } }> } } } } }>(gh(['api', 'graphql', '-f', 'query=query($owner:String!,$repo:String!,$pr:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$pr){reviewThreads(first:100){totalCount nodes{isResolved isOutdated path comments(first:1){nodes{author{login} body}}}}}}}', '-f', `owner=${owner}`, '-f', `repo=${repo}`, '-F', `pr=${pr}`]));
 
     let codeScanning: PrSweepData['codeScanning'];
     try {
@@ -180,7 +181,7 @@ export function runPrSweep(pr: string, cwd: string, gh: GhRunner = defaultGhRunn
 }
 
 function render(data: PrSweepData, failures: string[]): string {
-  // Ownership reporting and marker flags are intentionally omitted from this generic CLI port.
+  // Ownership reporting, marker flags, and pr-sweep.sh's visible-but-collapsed cap-notice demotion are intentionally omitted from this generic CLI port.
   const lines = [`══ PR #${data.pr.number} — ${data.pr.title}  [${data.pr.state}]`, `   HEAD ${data.pr.headSha.slice(0, 12)}   last commit ${data.pr.lastCommit || '?'}`, '', `── (a) Issue comments: ${data.comments.length}`];
   for (const comment of data.comments) lines.push(`   • ${comment.author}  ${comment.createdAt}${comment.afterLastPush ? '  ⏰ AFTER last push' : ''}`, `     ${excerpt(comment.body)}`);
   lines.push('', `── (b) Reviews: ${data.reviews.length}`);

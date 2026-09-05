@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { resolveRepoNwo, type GhRunner } from './pr-own.js';
+import { type GhRunner } from './pr-own.js';
 
 export type { GhRunner } from './pr-own.js';
 
@@ -53,6 +53,10 @@ function stateDirectory(options: PrWatchOptions): string {
 }
 function parse<T>(raw: string): T { return JSON.parse(raw) as T; }
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error); }
+function ghRepoNwo(gh: GhRunner): string | null {
+  try { return parse<{ nameWithOwner?: string }>(gh(['repo', 'view', '--json', 'nameWithOwner'])).nameWithOwner?.trim() || null; }
+  catch { return null; }
+}
 function usage(pr: string): PrWatchResult {
   return { code: 2, lines: [], data: { pr: Number(pr) || 0, repo: '', sha: '?', emitted: [], seeded: false }, error: `pr-watch: PR must be numeric, got '${pr}'` };
 }
@@ -62,7 +66,8 @@ export function runPrWatch(pr: string, options: PrWatchOptions, cwd: string, gh:
 
   let repo = options.repo?.trim() ?? '';
   if (!repo) {
-    repo = resolveRepoNwo(cwd, gh) ?? '';
+    // Match pr-watch.sh: gh's default-repository resolution may intentionally differ from origin.
+    repo = ghRepoNwo(gh) ?? '';
   }
   if (!repo || !repo.includes('/')) {
     return { code: 2, lines: [], data: { pr: Number(pr), repo: '', sha: '?', emitted: [], seeded: Boolean(options.seed) }, error: 'pr-watch: no repo (pass --repo owner/repo or run inside a repo)' };

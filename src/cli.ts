@@ -112,7 +112,8 @@ const json = has('--json');
  * Orphan hygiene at CLI start (HED-90): close provably-dead in-flight rows so every read below sees
  * an honest ledger. Skipped for `ledger sweep` (its --dry-run must observe, not mutate) AND for
  * `ledger finish` (the operator's manual close of a real orphan must win, with THEIR reason — the
- * auto-sweep pre-empting it would discard the diagnostic and fail the command), AND for `mode` — a
+ * auto-sweep pre-empting it would discard the diagnostic and fail the command), AND for `pr` — its
+ * sweep/watch/check routes are read-only observers and must not create unrelated ledger mutations — and `mode` — a
  * pure operator-mode read/write touches only ~/.heddle/operator-mode.json and has no business
  * opening, creating, or mutating the ledger (codeant HED-336): a read-only `heddle mode` on the
  * per-turn / pocket-console path must not incur ledger startup, migration, or SQLite locking.

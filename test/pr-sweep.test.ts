@@ -94,6 +94,10 @@ describe('PR sweep', () => {
     expect(isCodeScanningUnavailable(new Error(error))).toBe(true);
   });
 
+  it('recognizes the real gh execFileSync Advanced Security error shape', () => {
+    expect(isCodeScanningUnavailable(new Error('Command failed: gh api …\ngh: Advanced Security must be enabled for this repository to use code scanning. (HTTP 403)'))).toBe(true);
+  });
+
   it.each(['no analysis found', 'resource not accessible', 'Secret scanning is not enabled for this repository.', 'rate limit exceeded'])('does not treat %s as unavailable', (error) => {
     expect(isCodeScanningUnavailable(new Error(error))).toBe(false);
   });
@@ -106,7 +110,15 @@ describe('PR sweep', () => {
 
   it('passes by silence for a not-enabled code-scanning error without retrying', () => {
     const gh = ghFor();
-    const result = runPrSweep('7', '/repo', (args) => args.join(' ').includes('code-scanning/alerts') ? (() => { throw new Error('Advanced Security must be enabled for this repository to use code scanning.'); })() : gh(args));
+    let calls = 0;
+    const result = runPrSweep('7', '/repo', (args) => {
+      if (args.join(' ').includes('code-scanning/alerts')) {
+        calls += 1;
+        throw new Error('Advanced Security must be enabled for this repository to use code scanning.');
+      }
+      return gh(args);
+    });
+    expect(calls).toBe(1);
     expect(result.exitCode).toBe(0);
     expect(result.data.codeScanning.status).toBe('unavailable');
   });
@@ -131,6 +143,34 @@ describe('PR sweep', () => {
     });
     expect(calls).toBe(2);
     expect(result.data.codeScanning.status).toBe('unavailable');
+    expect(result.exitCode).toBe(0);
+  });
+
+  it('fails closed when both code-scanning attempts return a transient error', () => {
+    const gh = ghFor();
+    let calls = 0;
+    const result = runPrSweep('7', '/repo', (args) => {
+      if (args.join(' ').includes('code-scanning/alerts')) {
+        calls += 1;
+        throw new Error('502 Bad Gateway');
+      }
+      return gh(args);
+    });
+    expect(calls).toBe(2);
+    expect(result.data.codeScanning.status).toBe('error');
+    expect(result.exitCode).toBe(2);
+  });
+
+  it('passes GraphQL owner and repo with string flags', () => {
+    const gh = ghFor();
+    const result = runPrSweep('7', '/repo', (args) => {
+      if (args[0] === 'api' && args[1] === 'graphql') {
+        expect(args).toContain('-f');
+        expect(args).toContain('owner=acme');
+        expect(args).toContain('repo=widgets');
+      }
+      return gh(args);
+    });
     expect(result.exitCode).toBe(0);
   });
 

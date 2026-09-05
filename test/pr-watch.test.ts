@@ -55,6 +55,19 @@ describe('PR watch', () => {
     expect(hasSeenKey(state, 'thread:T_1')).toBe(true);
   });
 
+  it('uses gh default-repository resolution when --repo is omitted', () => {
+    const calls: string[][] = [];
+    const base = ghFor();
+    const gh: GhRunner = (args) => {
+      calls.push(args);
+      if (args.join(' ') === 'repo view --json nameWithOwner') return JSON.stringify({ nameWithOwner: 'acme/widgets' });
+      return base(args);
+    };
+    const result = runPrWatch('7', { stateDir: stateDir() }, '/repo', gh);
+    expect(result.data.repo).toBe('acme/widgets');
+    expect(calls).toContainEqual(['repo', 'view', '--json', 'nameWithOwner']);
+  });
+
   it('deduplicates identical items on a second poll pass', () => {
     const dir = stateDir();
     const gh = ghFor({ threads: [thread], reviews: [review] });
