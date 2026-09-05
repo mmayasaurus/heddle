@@ -16,9 +16,9 @@ Studio are the local-runtime class.
 | Kimi | API key | YES | API key | undocumented console surface |
 | DeepSeek | API key | YES | single string | undocumented |
 | Grok/xAI | API key | YES | `xai-…` | console.x.ai |
-| NVIDIA Build | API key | YES | `nvapi-…` | Build dashboard |
+| NVIDIA Build **(BLOCKED)** | API key | YES | `nvapi-…` | Build dashboard |
 | Perplexity | API key | YES | alphanumeric | undocumented console surface |
-| Muse/Meta | API key | YES | `LLM|{id}|{secret}` | dev.meta.ai |
+| Muse/Meta **(BLOCKED)** | API key | YES | `LLM|{id}|{secret}` | dev.meta.ai |
 | Claude | CLI OAuth/setup token | no | OAuth/setup token | `claude auth login`/`setup-token` |
 | Codex | CLI OAuth/API key | no | OAuth/API key | `codex login` |
 | Gemini/Antigravity | browser OAuth | no | keyring token | `agy login` |
@@ -40,9 +40,9 @@ Studio are the local-runtime class.
 | Kimi | `GET /v1/users/me/balance` | vendor-meter | pay-per-token/prepaid | $1 recharge | undocumented |
 | DeepSeek | `GET /models` or balance | vendor-meter | prepaid/pay-per-token | undocumented | undocumented |
 | Grok/xAI | `GET /v1/models` | vendor-meter | prepaid/pay-per-token | no free API credits | undocumented |
-| NVIDIA Build | `GET /v1/models` | none | free-tier/enterprise | 1,000 credits | undocumented |
+| NVIDIA Build **(BLOCKED)** | `GET /v1/models` | none | free-tier/enterprise | 1,000 credits | undocumented |
 | Perplexity | cheap chat completion | bookkeeping-only | prepaid-credit | no free credits | undocumented |
-| Muse/Meta | `GET /v1/models` | bookkeeping-only | pay-per-token | no free tier | undocumented |
+| Muse/Meta **(BLOCKED)** | `GET /v1/models` | bookkeeping-only | pay-per-token | no free tier | undocumented |
 | Claude | `claude auth status --json` | vendor-meter | subscription-quota | Pro | `CLAUDE_CONFIG_DIR` |
 | Codex | `codex login status` | vendor-meter | subscription-quota | Free/Go restricted | `CODEX_HOME` |
 | Gemini/Antigravity | `agy -p` | bookkeeping-only | subscription-quota | Free throttled | one login at a time |
@@ -56,6 +56,9 @@ Studio are the local-runtime class.
 | Amazon Q Developer (CLI) | `q whoami`; `q doctor` | bookkeeping-only | flat/free | 50 requests/mo | undocumented |
 | Ollama | tags/models/list | none | local-free | no quota | no account |
 | LM Studio | models/`lms ps` | none | local-free | no quota | no account |
+
+NVIDIA Build and Muse/Meta are **BLOCKED as wizard defaults** — the status line at the top of each
+section carries the reason; HED-400 renders the honest "coming" copy from it.
 
 ## Cross-cutting rules
 
@@ -171,6 +174,10 @@ multi-account posture undocumented.
 
 ### NVIDIA Build
 
+**Status: BLOCKED as a wizard default** — account creation currently fails for many users (SMS
+verification failures at signup; the documented fallback is the support address below). The wizard
+lists NVIDIA Build as "coming" and offers it only behind an "I already have a working key" path.
+
 1. Auth: `nvapi-…` key, optional TTL/scope. 2. API: `https://integrate.api.nvidia.com/v1`.
 3. Env: `NVIDIA_API_KEY`; low bleed. 4. Probe: `GET /v1/models`. 5. Store: display-once, keychain.
 6. Meter: no documented usage API. 7. Billing: free hard-stop or enterprise/self-host NIM.
@@ -200,6 +207,10 @@ Free-tier value / per-account limits / multi-account posture: no free credits; s
 multi-account posture undocumented.
 
 ### Muse/Meta
+
+**Status: BLOCKED as a wizard default** — paid-only (card required, no free tier, silent-overage
+risk) and the operator decision "paid proprietary Muse API vs free Llama via third-party hosts" is
+still open (see Open questions). The wizard lists Muse as "coming" until that decision lands.
 
 1. Muse API is Meta's proprietary family at [dev.meta.ai](https://dev.meta.ai). 2. API:
 `https://api.meta.ai/v1`; old Llama API retired. 3. Shape/env: display-once `LLM|{id}|{secret}` and
@@ -458,6 +469,10 @@ provider's credential environment.
 ## Flags for other tickets
 
 - **HED-395:** billing classes and environment allow-by-class, including env-repoint and `local-free`.
+- **HED-395/HED-396 acceptance obligation:** cross-cutting rule 1 (env-repoint isolation) carries a
+  behavioural test, owned by the HED-395/396 implementers: a worker environment built for provider A
+  never contains provider B's credentials or base-URL overrides (assert on the actual spawned env),
+  unless the matrix row says shared-by-design.
 - **HED-396:** registry fields: `credentialRef`, `baseUrl`, `region`, `trainsOnInputs`,
   `oneLoginAtATime`, fences.
 - **HED-400:** Amazon Q two-surface copy (the GitHub App reviewer is not a provider login);
