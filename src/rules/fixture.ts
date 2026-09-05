@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { evaluateRules, type EvalContext, type HookPayload } from './evaluate.js';
 import { renderMatches } from './render.js';
-import { parseRule } from './schema.js';
+import { parseRule, type Rule } from './schema.js';
 
 export interface FixtureResult { name: string; pass: boolean; message: string; stdout: string; stderr: string }
 type Expected = { outcome: 'none' | 'nudge' | 'inject' | 'block'; stdout_includes?: string; stderr_includes?: string; permissionDecision?: 'deny' };
@@ -29,9 +29,18 @@ function loadFixtureRule(rulesDir: string, ruleId: string) {
   return parsed.rule;
 }
 
-function evaluateFixtureCase(item: FixtureCase, rulesDir: string, ruleId: string): Pick<FixtureResult, 'pass' | 'message' | 'stdout' | 'stderr'> {
-  if (!item.payload || typeof item.payload !== 'object' || Array.isArray(item.payload)) throw new Error('payload must be an object');
-  const rule = loadFixtureRule(rulesDir, ruleId);
+function scoreCase(stdout: string, output: RenderedOutput, rule: Rule, expect: Expected): Pick<FixtureResult, 'pass' | 'message' | 'stderr'> {
+  const permissionDecision = output.hookSpecificOutput?.permissionDecision;
+  const actual = stdout === '{}' ? 'none' : permissionDecision === 'deny' ? 'block' : permissionDecision ? `unexpected:${permissionDecision}` : rule.action === 'block' ? 'nudge' : rule.action;
+  const stderr = '';
+  const pass = actual === expect.outcome
+    && (!expect.stdout_includes || stdout.includes(expect.stdout_includes))
+    && (!expect.stderr_includes || stderr.includes(expect.stderr_includes))
+    && (!expect.permissionDecision || permissionDecision === expect.permissionDecision);
+  return { pass, message: pass ? 'passed' : `expected ${expect.outcome}, got ${actual}`, stderr };
+}
+
+function renderFixtureCase(item: FixtureCase, rule: Rule): string {
   const event = item.payload.hook_event_name;
   if (typeof event !== 'string') throw new Error('payload hook_event_name must be a string');
   const env = item.env ?? {};
@@ -41,18 +50,17 @@ function evaluateFixtureCase(item: FixtureCase, rulesDir: string, ruleId: string
   const matches = evaluateRules([rule], { event, payload: item.payload, isSubagent, agentRole, agent } as EvalContext)
     .filter((outcome) => outcome.verdict === 'match')
     .map(({ rule: matchedRule }) => ({ rule: matchedRule, message: `${matchedRule.action === 'block' && !matchedRule.enforce ? '(would block) ' : ''}${template(matchedRule.message, item.payload, agent, matchedRule.id)}` }));
-  const stdout = renderMatches(event, matches);
+  return renderMatches(event, matches);
+}
+
+function evaluateFixtureCase(item: FixtureCase, rulesDir: string, ruleId: string): Pick<FixtureResult, 'pass' | 'message' | 'stdout' | 'stderr'> {
+  if (!item.payload || typeof item.payload !== 'object' || Array.isArray(item.payload)) throw new Error('payload must be an object');
+  const rule = loadFixtureRule(rulesDir, ruleId);
+  const stdout = renderFixtureCase(item, rule);
   let output: RenderedOutput;
   try { output = JSON.parse(stdout) as RenderedOutput; }
   catch (err) { throw new FixtureRenderError(err instanceof Error ? err.message : String(err), stdout); }
-  const permissionDecision = output.hookSpecificOutput?.permissionDecision;
-  const actual = stdout === '{}' ? 'none' : permissionDecision === 'deny' ? 'block' : permissionDecision ? `unexpected:${permissionDecision}` : rule.action;
-  const stderr = '';
-  const pass = actual === item.expect.outcome
-    && (!item.expect.stdout_includes || stdout.includes(item.expect.stdout_includes))
-    && (!item.expect.stderr_includes || stderr.includes(item.expect.stderr_includes))
-    && (!item.expect.permissionDecision || permissionDecision === item.expect.permissionDecision);
-  return { pass, message: pass ? 'passed' : `expected ${item.expect.outcome}, got ${actual}`, stdout, stderr };
+  return { ...scoreCase(stdout, output, rule, item.expect), stdout };
 }
 
 function caseResult(line: string, rulesDir: string, ruleId: string): FixtureResult {

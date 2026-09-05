@@ -31,6 +31,19 @@ describe('rule fixtures', () => {
     expect(runFixtureFile(d, 'fixture-rule', f)).toEqual([expect.objectContaining({ name: 'unexpected allow', pass: false, message: 'expected nudge, got unexpected:allow' })]);
     spy.mockRestore();
   });
+  it('requires an actual deny for a block fixture outcome', () => {
+    const d = tempDir();
+    const blockRule = yaml.replace('action: nudge', 'action: block');
+    writeFileSync(join(d, 'fixture-rule.yaml'), blockRule);
+    const f = join(d, 'block.jsonl');
+    writeFileSync(f, `${JSON.stringify({ name: 'non-enforced block', payload: { hook_event_name: 'PreToolUse', tool_name: 'Bash' }, expect: { outcome: 'block' } })}\n${JSON.stringify({ name: 'enforced block', payload: { hook_event_name: 'PreToolUse', tool_name: 'Bash' }, expect: { outcome: 'block' } })}\n`);
+    writeFileSync(join(d, 'fixture-rule.yaml'), blockRule);
+    const nonEnforced = runFixtureFile(d, 'fixture-rule', f)[0];
+    writeFileSync(join(d, 'fixture-rule.yaml'), blockRule.replace('enforce: false', 'enforce: true'));
+    const enforced = runFixtureFile(d, 'fixture-rule', f)[1];
+    expect(nonEnforced).toMatchObject({ name: 'non-enforced block', pass: false, message: 'expected block, got nudge' });
+    expect(enforced).toMatchObject({ name: 'enforced block', pass: true });
+  });
   it('discovers JSONL fixtures by rule id', () => {
     const d = tempDir(); const fixtures = join(d, 'fixtures');
     mkdirSync(fixtures); writeFileSync(join(d, 'fixture-rule.yaml'), yaml); writeFileSync(join(fixtures, 'fixture-rule.jsonl'), ''); writeFileSync(join(fixtures, 'missing.jsonl'), '');

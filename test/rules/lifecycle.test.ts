@@ -76,6 +76,14 @@ describe('heddle rule lifecycle CLI', () => {
     expect(existsSync(join(root, 'sample-rule.yaml'))).toBe(false);
   }, 30_000);
 
+  it('allows ratification when HEDDLE_WORKER=0', async () => {
+    const root = tempDir(); seedRuleRoot(root, 'sample-rule', { proposed: true });
+    const result = await runCli(['rule', 'ratify', 'sample-rule', '--rules', root], { env: { HEDDLE_WORKER: '0' } });
+    expect(result).toMatchObject({ code: 0, stderr: '' });
+    expect(existsSync(join(root, 'proposed', 'sample-rule.yaml'))).toBe(false);
+    expect(existsSync(join(root, 'sample-rule.yaml'))).toBe(true);
+  }, 30_000);
+
   it('rejects a missing --rules value before resolving the default root', async () => {
     const result = await runCli(['rule', 'ratify', 'sample-rule', '--rules']);
     expect(result.code).toBe(2);

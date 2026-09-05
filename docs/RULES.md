@@ -41,7 +41,7 @@ the rule to `<root>/proposed/<id>.yaml`; it never overwrites an existing active 
 set `since`.
 
 `heddle rule ratify <id> --rules <root>` is the operator promotion path from proposed to active. It refuses
-when `HEDDLE_WORKER` is set, when the proposal is absent, when an active rule already has the id, or when any
+when `HEDDLE_WORKER === '1'`, when the proposal is absent, when an active rule already has the id, or when any
 fixture case fails. A successful ratification adds today's `since` value if needed and moves the file to
 `<root>/<id>.yaml`. Since the loader reads only direct files, this move is the point at which the engine can
 evaluate the rule; proposed rules are never evaluated before it.

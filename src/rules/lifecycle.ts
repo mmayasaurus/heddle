@@ -128,7 +128,7 @@ async function propose(root: string, source: string | undefined): Promise<number
 async function ratify(root: string, id: string | undefined): Promise<number> {
   if (!id || id.startsWith('--')) { usage(); return 2; }
   if (!validRuleId(id)) return rejectInvalidRuleId(id);
-  if (process.env.HEDDLE_WORKER) { process.stderr.write('heddle rule: refusing ratify: workers cannot ratify rules\n'); return 1; }
+  if (process.env.HEDDLE_WORKER === '1') { process.stderr.write('heddle rule: refusing ratify: workers cannot ratify rules\n'); return 1; }
   const proposedDir = join(root, 'proposed'); const proposed = join(proposedDir, `${id}.yaml`); const active = join(root, `${id}.yaml`);
   if (!existsSync(proposed)) { process.stderr.write(`heddle rule: refusing ratify: proposed rule '${id}' does not exist\n`); return 1; }
   if (existsSync(active)) { process.stderr.write(`heddle rule: refusing ratify: active rule '${id}' already exists\n`); return 1; }
