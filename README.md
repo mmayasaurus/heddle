@@ -38,14 +38,20 @@ and `heddle-comms` (inter-agent messaging) MCP servers so any Claude Code sessio
 **From a built checkout** (works today):
 
 ```shell
-git clone <owner>/heddle && cd heddle
+git clone https://github.com/OWNER/heddle.git && cd heddle   # OWNER = the repo owner
 npm install && npm run build           # produce dist/ (the two MCP servers)
-claude --plugin-dir "$(pwd)"           # load the plugin for a session
+PLUGIN_DIR="$(pwd)"                     # remember the plugin's location, then…
+cd /path/to/your/project               # …launch from YOUR project — NOT the heddle checkout
+claude --plugin-dir "$PLUGIN_DIR"      # so dispatched workers target your project, not heddle's source
 ```
 
 Once loaded, the `plugin:heddle:heddle` and `plugin:heddle:heddle-comms` MCP tools are available. The
 plugin resolves every path from `${CLAUDE_PLUGIN_ROOT}`, so it works from wherever the checkout lives
 — no machine-specific paths. Verify a checkout with `claude plugin validate .`.
+
+The `heddle-comms` tools need a per-session agent identity (`HEDDLE_AGENT`); without one, comms
+operations fail with `no bound comms identity`. Establishing accounts and identity is the onboarding
+wizard's job (a follow-up slice) — until then, set `HEDDLE_AGENT=<name>` in the session yourself.
 
 **One-command marketplace install** — `/plugin marketplace add <owner>/heddle` then
 `/plugin install heddle@heddle` — resolves against the same-repo marketplace

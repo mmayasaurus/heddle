@@ -6,7 +6,7 @@
     {
       "name": "heddle",
       "source": "./",
-      "description": "Cross-provider agent orchestration: routing, skill packs, inter-agent comms (the heddle + heddle-comms MCP servers), and orchestrator slash commands.",
+      "description": "Cross-provider agent orchestration: the heddle (dispatch + routing) and heddle-comms (inter-agent messaging) MCP servers.",
       "license": "MIT",
       "keywords": ["orchestration", "mcp", "claude-code", "agents", "subscription-cli"]
     }

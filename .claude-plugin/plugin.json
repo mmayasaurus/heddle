@@ -1,7 +1,7 @@
 {
   "name": "heddle",
   "version": "0.1.0",
-  "description": "Cross-provider agent orchestration for subscription coding CLIs — routing, skill packs, inter-agent comms, and a visibility dashboard.",
+  "description": "Cross-provider agent orchestration for subscription coding CLIs — the heddle (dispatch + routing) and heddle-comms (inter-agent messaging) MCP servers.",
   "author": { "name": "heddle" },
   "license": "MIT",
   "keywords": ["orchestration", "mcp", "claude-code", "agents", "subscription-cli"],
