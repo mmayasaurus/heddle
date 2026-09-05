@@ -42,6 +42,9 @@ describe('PR ownership helpers', () => {
     const git = (args: string[]) => args.join(' ') === 'config --get remote.origin.gh-resolved' ? 'acme/resolved' : '';
     expect(resolveRepoNwo('/repo', gh, git)).toBe('acme/resolved');
     expect(resolveRepoNwo('/repo', gh, () => '')).toBe('gh/fallback');
+    const urlGit = (url: string) => (args: string[]) => args.join(' ') === 'config --get remote.origin.url' ? url : '';
+    expect(resolveRepoNwo('/repo', gh, urlGit('https://github.com/acme/widgets.git'))).toBe('acme/widgets');
+    expect(resolveRepoNwo('/repo', gh, urlGit('git@github.com:acme/widgets.git'))).toBe('acme/widgets');
   });
 });
 

@@ -137,7 +137,11 @@ export function runPrSweep(pr: string, cwd: string, gh: GhRunner = defaultGhRunn
       else try {
         Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2_000);
         codeScanning = classifyCodeScanningBody(gh(['api', `repos/${nwo}/code-scanning/alerts?pr=${pr}&state=open&per_page=100`]));
-      } catch (secondError) { codeScanning = { status: 'error', alerts: [], error: apiError(secondError) }; }
+      } catch (secondError) {
+        codeScanning = isCodeScanningUnavailable(secondError)
+          ? { status: 'unavailable', alerts: [], error: apiError(secondError) }
+          : { status: 'error', alerts: [], error: apiError(secondError) };
+      }
     }
 
     const headSha = metadata.head?.sha ?? '';
