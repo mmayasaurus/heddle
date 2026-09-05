@@ -39,7 +39,7 @@ function mandateBytes(cwd: string, rel: string, raw: Buffer): Buffer {
 }
 
 /**
- * Adversarial review support (HED-3, Maya: "super important"): a DIFFERENT model family reviews a
+ * Adversarial review support (HED-3, operator decision: "super important"): a DIFFERENT model family reviews a
  * diff/worktree read-only and find-only; the author fixes; the ledger scores each author→reviewer
  * provider pair by accepted-finding rate.
  *

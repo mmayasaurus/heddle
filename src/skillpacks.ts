@@ -75,13 +75,13 @@ export function listPacks(): string[] {
  * Packs EVERY delegated worker gets, no matter what the routing table or the caller lists.
  * `worker-role` is governance, not task fit: the first real pilot dispatch (2026-08-10) had a codex
  * worker inherit the fleet's claim-before-code policy and refuse to work ("which agent am I?");
- * without it a worker may also claim issues / own PRs it must not. Decided 2026-08-15 (Maya via
+ * without it a worker may also claim issues / own PRs it must not. Operator decision, 2026-08-15 (via
  * Agent R): an explicit `skills` list ADDS to policy, it never removes worker-role.
  */
 export const MANDATORY_PACKS = ['worker-role', 'worker-hygiene'] as const;
 
 /**
- * MODEL-FAMILY prompting packs (HED-93, Maya's idea): each provider family responds to a different
+ * MODEL-FAMILY prompting packs (HED-93, operator's idea): each provider family responds to a different
  * instruction STYLE, so routing the same task to a different model should restyle the instructions
  * automatically rather than making every orchestrator remember the differences. Injected by the
  * dispatcher from the target's provider — never named by the caller, so a class that falls back to
@@ -123,7 +123,7 @@ export function withMandatoryPacks(skills: readonly string[] | undefined): strin
   return out;
 }
 
-/** The Spinventory app checkout, by layout: `<parent>/<dir>` — the only place `quality-gate` belongs. */
+/** The consumer app checkout, by layout: `<parent>/<dir>` — the only place `quality-gate` belongs. */
 const APP_CHECKOUT = { dir: 'Rebuild-Project-Root', parent: 'Spinventory-Rebuild-Official' } as const;
 /** Main-checkout folder name → that repository's gate pack (exact names only). */
 const GATE_BY_FOLDER_NAME: ReadonlyMap<string, string> = new Map([
@@ -151,7 +151,7 @@ export function originRepoName(url: string | null): string | null {
 
 /**
  * The gate pack for a repository, or null when the repository is UNKNOWN — the caller then DROPS
- * `quality-gate` rather than guess. `quality-gate` is the Spinventory APP gate (`npm run gate`,
+ * `quality-gate` rather than guess. `quality-gate` is the consumer APP gate (`npm run gate`,
  * expo-router, `cd` into the app checkout); handing it to a worker anywhere else is the fleet-scope
  * violation HED-389 exists to stop, so an unknown identity gets no gate at all.
  *
@@ -159,7 +159,7 @@ export function originRepoName(url: string | null): string | null {
  *   1. unknown — not a repository, or its main checkout is unlistable → null (never the worktree
  *      folder name, which for a real dispatch cwd is the WORKTREE's name, not the repo's);
  *   2. the app checkout by LAYOUT (main checkout `Rebuild-Project-Root` under a
- *      `Spinventory-Rebuild-Official` parent) → `quality-gate`, checked first so no later rule can
+ *      expected consumer-app parent) → `quality-gate`, checked first so no later rule can
  *      strip the app gate from the app, whatever its `origin` says;
  *   3. the main checkout's exact folder name, corroborated by `origin` when one is configured: a
  *      known folder whose origin names a DIFFERENT or unrecognized repository is ambiguous → null
@@ -188,7 +188,7 @@ function canonicalDir(dir: string): string {
  * True when the quality-gate pack readPack would serve is heddle's OWN — the built-in directory (by
  * canonical path, so a HEDDLE_PACKS entry with a trailing slash, a relative form or a symlink still
  * counts) or a byte-identical copy of it (HEDDLE_PACKS pointing at another heddle checkout's
- * skills/). Only that pack is the Spinventory app gate to be resolved per repository; a consumer's
+ * skills/). Only that pack is the consumer app gate to be resolved per repository; a consumer's
  * own quality-gate pack is theirs to keep. Unreadable → treated as built-in, so app text can never
  * survive by accident (round-3 review #1).
  */
@@ -212,7 +212,7 @@ export function resolveQualityGateForCwd(cwd: string, skills: readonly string[])
   if (!skills.includes('quality-gate')) return [...skills];
   // A CONSUMER pack named quality-gate (HEDDLE_PACKS shadowing the built-in) is that project's own
   // gate, chosen by its configuration and read by readPack ahead of the built-in — keep it. Only
-  // heddle's built-in quality-gate, the Spinventory APP gate, is repository-resolved (codex P2, #95).
+  // heddle's built-in quality-gate, the consumer APP gate, is repository-resolved (codex P2, #95).
   if (!servesBuiltinQualityGate()) return [...skills];
   const gate = qualityGateForRepository(gitRepositoryFor(cwd));
   if (gate === 'quality-gate') return [...skills];

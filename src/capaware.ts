@@ -18,7 +18,7 @@ import { bindingWindow, DISPATCH_SIGNAL_MAX_AGE_S, type CapsByProvider, type Pro
  *  - route-away: if the PRIMARY provider's binding window (5h, else 7d) is >= route_away_at_pct and
  *    the class declares a fallback whose own window is under the threshold, run the fallback and say
  *    why (`route_reason`). Both over → run the primary anyway (soft cap) and say so.
- *  - Cursor pools (W's model, Maya-corrected): `included-total` gates the Cursor-Models routes
+ *  - Cursor pools (W's model, operator-corrected): `included-total` gates the Cursor-Models routes
  *    (cursor-grok-*, composer-*, auto) — soft route-away; `included-api` gates NAMED third-party
  *    models (kimi-k3, …) — at >= 100% (or noteCode cursor.includedApiExhausted) they bill on-demand,
  *    so heddle REFUSES them (never on-demand $); `usage-based` limit reached
@@ -517,7 +517,7 @@ export interface AccountPick {
 }
 
 /**
- * Fable budget (HED-76, Maya 2026-08-16: 58% of the weekly cap burned on day 1 while other
+ * Fable budget (HED-76, operator decision, 2026-08-16: 58% of the weekly cap burned on day 1 while other
  * subscriptions idled): Fable is soft-capped at 50% of an account's WEEKLY allowance, and W's
  * estimator (HED-75) publishes `fableWeeklyEstimatePct` per Claude account row. At/over this
  * threshold the router routes a fable-model dispatch to the class fallback (fable-soft-cap) and

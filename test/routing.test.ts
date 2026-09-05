@@ -9,7 +9,7 @@ import { ENFORCEABLE } from '../src/capabilities.js';
 import { normalizeProvider } from '../src/review.js';
 
 /**
- * Behavioral checks on the SHIPPED routing table (routing/routing.v0.yaml) — the file Maya tunes by
+ * Behavioral checks on the SHIPPED routing table (routing/routing.v0.yaml) — the file the operator tunes by
  * hand. These catch the mistakes a YAML edit can introduce silently: a class pointing at a model
  * its provider doesn't list, a fallback into an excluded provider, or a Cursor route that would
  * spend a direct-subscription family through the middleman (policy `never_via_cursor`).

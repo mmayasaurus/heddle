@@ -87,7 +87,7 @@ export function hermeticGit(cwd: string, ...args: string[]): void {
 /**
  * A `git init` repository at `root`. The returned cwd is `root/<relativeCwd>` — a plain subdirectory,
  * or (linkedWorktree) a REAL linked worktree created with `git worktree add`, which may sit outside
- * `root` (`../Rebuild-Project-Root.<feature>` is how the Spinventory fleet lays its worktrees out).
+ * `root` (`../Rebuild-Project-Root.<feature>` is how a consumer fleet lays its worktrees out).
  * Linked worktrees matter: `git rev-parse --show-toplevel` there is the WORKTREE path, which is the
  * identity bug HED-389's tests exist to catch — a subdirectory of the repo cannot see it.
  */

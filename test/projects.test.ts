@@ -5,7 +5,7 @@ import { loadProjectRegistry, projectForAgent, projectForCwd } from '../src/proj
 import type { ProjectRegistry } from '../src/projects.js';
 import { useTempResources } from './helpers.js';
 
-const SPINVENTORY_AGENTS = [
+const ACME_AGENTS = [
   'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q',
   '1', '2', '3', '4', '5', '6',
 ];
@@ -14,16 +14,16 @@ const validRegistry = {
   schemaVersion: 1,
   projects: [
     {
-      name: 'Spinventory',
-      workspaceRoots: ['/Users/maya/dev/Spinventory-Rebuild-App'],
-      agentIds: SPINVENTORY_AGENTS,
-      linearTeam: 'SPI',
-      defaultRoom: '#spinventory',
-      launcher: 'resume-sessions-spi.sh',
+      name: 'Acme',
+      workspaceRoots: ['/home/user/dev/acme-app'],
+      agentIds: ACME_AGENTS,
+      linearTeam: 'ACM',
+      defaultRoom: '#acme',
+      launcher: 'resume-sessions-acme.sh',
     },
     {
       name: 'heddle',
-      workspaceRoots: ['/Users/maya/dev/heddle', '/Users/maya/dev/heddle-dashboard'],
+      workspaceRoots: ['/home/user/dev/heddle', '/home/user/dev/heddle-dashboard'],
       agentIds: ['R', 'S', 'T', 'U', 'V', 'W'],
       linearTeam: 'HED',
       defaultRoom: '#heddle',
@@ -236,7 +236,7 @@ describe('projectForAgent', () => {
   const reg: ProjectRegistry = {
     schemaVersion: 1,
     projects: [
-      { name: 'Spinventory', workspaceRoots: ['/x'], agentIds: ['A', 'B'], linearTeam: 'SPI', defaultRoom: '#spinventory', launcher: 'spi.sh' },
+      { name: 'Acme', workspaceRoots: ['/x'], agentIds: ['A', 'B'], linearTeam: 'ACM', defaultRoom: '#acme', launcher: 'acme.sh' },
       { name: 'heddle', workspaceRoots: ['/y'], agentIds: ['R', 'S'], linearTeam: 'HED', defaultRoom: '#heddle', launcher: 'hed.sh' },
     ],
   };
@@ -247,7 +247,7 @@ describe('projectForAgent', () => {
 
   it('matches letters case-insensitively', () => {
     expect(projectForAgent(reg, 'r')?.name).toBe('heddle');
-    expect(projectForAgent(reg, 'a')?.name).toBe('Spinventory');
+    expect(projectForAgent(reg, 'a')?.name).toBe('Acme');
   });
 
   it('returns null when no project has the agent id', () => {

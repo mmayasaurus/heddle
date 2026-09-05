@@ -1,5 +1,4 @@
-Before reporting any code change complete, run the gate from the inner repo
-(`Spinventory-Rebuild-Official/Rebuild-Project-Root`, or your worktree):
+Before reporting any code change complete, run the gate from the consumer app's canonical checkout (the registered app layout, or your worktree):
 
 ```
 npm run gate        # lint + typecheck (both tsconfigs) + vitest — matches CI

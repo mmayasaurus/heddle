@@ -3,7 +3,7 @@ import { run } from './subprocess.js';
 import type { DispatchOptions, WorkerAdapter, WorkerResult, TokenUsage } from '../types.js';
 
 /**
- * Claude Code adapter — `claude -p --output-format json` (HED-78, Maya's "build the auto account
+ * Claude Code adapter — `claude -p --output-format json` (HED-78, operator's request to "build the auto account
  * switching", 2026-08-15).
  *
  * Two ways heddle can run Claude work:

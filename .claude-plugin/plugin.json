@@ -1,0 +1,18 @@
+{
+  "name": "heddle",
+  "version": "0.1.0",
+  "description": "Cross-provider agent orchestration for subscription coding CLIs — the heddle (dispatch + routing) and heddle-comms (inter-agent messaging) MCP servers.",
+  "author": { "name": "heddle" },
+  "license": "MIT",
+  "keywords": ["orchestration", "mcp", "claude-code", "agents", "subscription-cli"],
+  "mcpServers": {
+    "heddle": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/dist/mcp-server.js"]
+    },
+    "heddle-comms": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/dist/comms/channel-server.js"]
+    }
+  }
+}

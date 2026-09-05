@@ -5,12 +5,11 @@ import { isAbsolute, join, resolve, sep } from 'node:path';
 /**
  * Project↔fleet registry (HED-160) — binds a project (a named set of workspace roots) to its
  * dedicated fleet: agent ids, Linear team, default chat room, and session launcher. This is the
- * single source of truth for "which agents belong to which project" (Maya: "I want to open the
- * Spinventory project inside heddle — the dashboard shows Agents A through Q, chatrooms with just
- * Spinventory agents").
+ * single source of truth for "which agents belong to which project". The operator wants to open a
+ * project inside heddle and see only that project's agents and rooms.
  *
  * Lives at the FRAMEWORK layer (`~/.heddle/projects.json`), never inside a project repo, because it
- * spans tenants — today Spinventory and heddle itself, more later. Same layer as
+ * spans tenants — today a consumer project and heddle itself, more later. Same layer as
  * `~/.heddle/accounts.json` (src/capaware.ts). See docs/PROJECTS.md for the full schema and the
  * registry-as-truth / cwd-inference-as-fallback consumer contract.
  *
@@ -124,7 +123,7 @@ function checkNoDuplicateAgents(projects: Project[], path: string): void {
  * FAIL-SOFT on absence: a project not yet registered is a normal state, not an error, so a missing
  * file returns an empty registry and lets consumers fall back to cwd inference.
  *
- * LOUD on corruption: this is config Maya edits by hand, not generated output — same philosophy as
+ * LOUD on corruption: this is config the operator edits by hand, not generated output — same philosophy as
  * routing.ts's listField. An unreadable-but-present file, unparseable JSON, a missing/mismatched
  * schemaVersion, a project missing a required field, an empty/blank array element, a non-absolute
  * workspaceRoot, or an agent id claimed by more than one project all throw a clear Error naming the
