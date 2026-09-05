@@ -58,6 +58,10 @@ export interface AccountCaps {
   noteCodes: string[];
   limitReached: boolean;
   stale: boolean;
+  /** Whether this account can continue into paid overage; null means the payload and registry are silent. */
+  overageEnabled?: boolean | null;
+  /** Provider-reported paid-overage spend; null when the provider does not expose it. */
+  overageSpend?: number | null;
   /** Claude only (W's HED-75 estimator): estimated share of the WEEKLY cap consumed by FABLE, in
    *  percentage points (soft cap 50). null/absent until >=3 attributed samples / other providers —
    *  optional so fixtures and the raw tap (which has no attribution) need not carry it. */
@@ -119,6 +123,24 @@ function strList(v: unknown): string[] {
   return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
 }
 
+/** Operator-declared overage posture by provider/account. Invalid or absent values remain unknown. */
+function declaredOverage(accountsPath: string): Map<string, Map<string, boolean>> {
+  const out = new Map<string, Map<string, boolean>>();
+  const raw = readJson(accountsPath) as Record<string, unknown> | null;
+  if (!raw) return out;
+  for (const [provider, entries] of Object.entries(raw)) {
+    if (!Array.isArray(entries)) continue;
+    const declared = new Map<string, boolean>();
+    for (const entry of entries) {
+      if (!entry || typeof entry !== 'object') continue;
+      const account = entry as Record<string, unknown>;
+      if (typeof account.id === 'string' && typeof account.overageEnabled === 'boolean') declared.set(account.id, account.overageEnabled);
+    }
+    if (declared.size) out.set(provider, declared);
+  }
+  return out;
+}
+
 function unknownCaps(provider: string): ProviderCaps {
   return {
     provider, source: 'none', stale: true, capturedAt: null, fiveHour: UNKNOWN, sevenDay: UNKNOWN,
@@ -173,6 +195,13 @@ export function readLimitsMirror(usageDir: string, nowS: number): CapsByProvider
           noteCodes: strList(a.noteCodes),
           limitReached: a.limitReached === true,
           stale: a.stale === true,
+          overageEnabled: typeof (a.detail as Record<string, unknown> | undefined)?.onDemand === 'object'
+            && typeof ((a.detail as Record<string, unknown>).onDemand as Record<string, unknown>).enabled === 'boolean'
+            ? ((a.detail as Record<string, unknown>).onDemand as Record<string, unknown>).enabled as boolean
+            : null,
+          overageSpend: typeof (a.detail as Record<string, unknown> | undefined)?.onDemand === 'object'
+            ? num(((a.detail as Record<string, unknown>).onDemand as Record<string, unknown>).used)
+            : null,
           fableWeeklyEstimatePct: num(a.fableWeeklyEstimatePct),
           fableWeeklySamples: num(a.fableWeeklySamples),
         }))
@@ -266,8 +295,9 @@ export function readClaudeTap(usageDir: string, nowS: number): ProviderCaps | nu
  * Everything the router needs, for every provider it might route to. Never throws; a provider with
  * no usable snapshot comes back `source: 'none', stale: true` (= unknown).
  */
-export function readProviderCaps(opts: { usageDir?: string; nowS?: number } = {}): CapsByProvider {
+export function readProviderCaps(opts: { usageDir?: string; accountsPath?: string; nowS?: number } = {}): CapsByProvider {
   const usageDir = opts.usageDir ?? process.env.HEDDLE_USAGE_DIR ?? DEFAULT_USAGE_DIR;
+  const accountsPath = opts.accountsPath ?? process.env.HEDDLE_ACCOUNTS ?? join(homedir(), '.heddle', 'accounts.json');
   const nowS = opts.nowS ?? Math.floor(Date.now() / 1000);
   const out: CapsByProvider = {};
   const mirror = readLimitsMirror(usageDir, nowS);
@@ -309,6 +339,20 @@ export function readProviderCaps(opts: { usageDir?: string; nowS?: number } = {}
       const dispatch = signals.get(a.id);
       return dispatch ? { ...a, dispatch } : a;
     }) };
+  }
+  // Only Cursor currently exposes an authoritative overage flag/spend in its payload. For every
+  // other provider (and Cursor rows missing that payload), use the operator's per-account posture.
+  const declarations = declaredOverage(accountsPath);
+  for (const [provider, caps] of Object.entries(out)) {
+    const declared = declarations.get(provider);
+    out[provider] = {
+      ...caps,
+      accounts: caps.accounts.map((account) => ({
+        ...account,
+        overageEnabled: account.overageEnabled ?? declared?.get(account.id) ?? null,
+        overageSpend: account.overageSpend ?? null,
+      })),
+    };
   }
   return out;
 }

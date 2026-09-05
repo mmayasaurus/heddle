@@ -18,8 +18,24 @@ describe('usage cap readers', () => {
     expect(caps.codex.fiveHour.usedPercentage).toBeNull(); expect(caps.codex.sevenDay.usedPercentage).toBe(5);
     expect(caps.codex.accounts).toHaveLength(2);
     expect(caps.cursor.windows['included-api'].usedPercentage).toBeCloseTo(86.688);
-    expect(caps.cursor.accounts[0]).toMatchObject({ id: 'cursor-ide', noteCodes: expect.arrayContaining(['cursor.includedApiExhausted']) });
+    expect(caps.cursor.accounts[0]).toMatchObject({ id: 'cursor-ide', noteCodes: expect.arrayContaining(['cursor.includedApiExhausted']), overageEnabled: true, overageSpend: 0 });
     expect(caps.gemini.fiveHour.usedPercentage).toBeCloseTo(3.93);
+  });
+
+  it('applies the declared Claude overage posture from a temp account registry and leaves absent declarations unknown', () => {
+    const dir = tempDir(); const nowS = writtenAt + 10;
+    const accountsPath = join(dir, 'accounts.json');
+    writeFileSync(accountsPath, JSON.stringify({ claude: [
+      { id: 'declared', configDir: null, overageEnabled: false },
+      { id: 'unknown', configDir: '/tmp/.claude-unknown' },
+    ] }));
+    const tap = (used: number) => ({ rate_limits: { five_hour: { used_percentage: used, resets_at: nowS + 3600 } }, capturedAt: nowS - 30 });
+    writeFileSync(join(dir, 'claude.json'), JSON.stringify(tap(12)));
+    writeFileSync(join(dir, 'claude-declared.json'), JSON.stringify(tap(100)));
+    writeFileSync(join(dir, 'claude-unknown.json'), JSON.stringify(tap(100)));
+    const caps = readProviderCaps({ usageDir: dir, accountsPath, nowS }).claude.accounts;
+    expect(caps.find((account) => account.id === 'declared')).toMatchObject({ overageEnabled: false, overageSpend: null });
+    expect(caps.find((account) => account.id === 'unknown')).toMatchObject({ overageEnabled: null, overageSpend: null });
   });
 
   it('treats old, corrupt, missing, and malformed mirrors as unknown', () => {

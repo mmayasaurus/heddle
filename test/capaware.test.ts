@@ -108,6 +108,35 @@ describe('cap-aware routing', () => {
   });
 });
 
+describe('regression PR#HED-443 — Claude overage safeguards', () => {
+  const account = (overageEnabled?: boolean) => ({ id: 'acct1', configDir: null, overageEnabled });
+  const capped = (used: number): ProviderCaps => ({
+    ...fresh('claude', used),
+    accounts: [{ id: 'acct1', fiveHour: { usedPercentage: used, resetsAt: null }, sevenDay: { usedPercentage: null, resetsAt: null }, windows: {}, noteCodes: [], limitReached: false, stale: false, overageEnabled: null, overageSpend: null }],
+  });
+
+  it('raises a real-money alert at 100% when overage is enabled or unknown, but not when explicitly off', () => {
+    const enabled = adviseClaudeAccount(capped(100), [account(true)], {});
+    expect(enabled.overageAlert).toEqual({ accountId: 'acct1', spend: null, used: 100 });
+    expect(enabled.line).toContain('⛔ REAL MONEY — OVERAGE BILLING ACTIVE on acct1');
+
+    const disabled = adviseClaudeAccount(capped(100), [account(false)], {});
+    expect(disabled.overageAlert).toBeNull();
+    expect(disabled.line).not.toContain('⛔ REAL MONEY');
+
+    const unknown = adviseClaudeAccount(capped(100), [account()], {});
+    expect(unknown.overageAlert).toEqual({ accountId: 'acct1', spend: null, used: 100 });
+    expect(unknown.line).toContain('⛔ REAL MONEY');
+  });
+
+  it('keeps the normal warning path below the overage threshold', () => {
+    const advice = adviseClaudeAccount(capped(97), [account(true)], {});
+    expect(advice.overageAlert).toBeNull();
+    expect(advice.line).not.toContain('⛔ REAL MONEY');
+    expect(advice.line).toContain('97% used');
+  });
+});
+
 // HED-106 / HED-264 — the tier-ladder expansion walk INSIDE decideRoute. Gated on opts.ladder, so the
 // suite above (no ladder) proves the byte-stable paths are untouched; these exercise the walk with a
 // hermetic lanes/lane_defaults fixture (independent of the live routing values).

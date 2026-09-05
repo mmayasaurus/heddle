@@ -35,6 +35,8 @@ export interface CapAwarePolicy {
   routeAwayAtPct: number;
 }
 export const DEFAULT_CAP_AWARE_POLICY: CapAwarePolicy = { enabled: true, routeAwayAtPct: 90 };
+/** At the provider's published cap, enabled/unknown overage must be treated as paid until confirmed off. */
+export const OVERAGE_RED_PCT = 100;
 
 export function capAwarePolicy(table: RoutingTable): CapAwarePolicy {
   const node = (table.policy as any)?.cap_aware_routing ?? {};
@@ -408,6 +410,8 @@ export interface ClaudeAccount {
    * and a pin to it is refused. Absent = assumed logged in (registries predating the field).
    */
   loggedIn?: boolean;
+  /** Operator-declared extra-usage posture. Absent means unknown, which is conservative at the cap. */
+  overageEnabled?: boolean;
 }
 
 /** `~/.heddle/accounts.json` → `claude[]`. Missing/corrupt → []. Never throws. */
@@ -424,6 +428,7 @@ export function readClaudeAccounts(path: string = process.env.HEDDLE_ACCOUNTS ??
         email: typeof a.email === 'string' ? a.email : undefined,
         note: typeof a.note === 'string' ? a.note : undefined,
         loggedIn: a.loggedIn === false ? false : undefined,
+        ...(typeof a.overageEnabled === 'boolean' ? { overageEnabled: a.overageEnabled } : {}),
       }));
   } catch {
     return [];
@@ -444,6 +449,8 @@ export interface AccountAdvice {
   current: { id: string; usedPct: number | null } | null;
   /** Per-account view for the trace / UI. */
   known: { id: string; usedPct: number | null; stale: boolean }[];
+  /** Paid-overage risk at the five-hour cap; null only when no account is at the red threshold or it is confirmed off. */
+  overageAlert: { accountId: string; spend: number | null; used: number } | null;
   /** One line for an in-session refusal instruction / `heddle route`. */
   line: string;
 }
@@ -459,6 +466,15 @@ export function adviseClaudeAccount(caps: ProviderCaps | undefined, accounts: Cl
   const best = bestRow ? { id: bestRow.id, usedPct: bestRow.usedPct, configDir: accounts.find((a) => a.id === bestRow.id)?.configDir ?? null } : null;
   const cur = currentClaudeAccount(accounts, env);
   const current = cur ? { id: cur.id, usedPct: known.find((r) => r.id === cur.id)?.usedPct ?? null } : null;
+  const redRows = rows
+    .filter((row): row is { id: string; usedPct: number; stale: boolean } => row.usedPct !== null && row.usedPct >= OVERAGE_RED_PCT && !row.stale)
+    .map((row) => ({ row, account: accounts.find((account) => account.id === row.id), caps: caps?.accounts.find((account) => account.id === row.id) }));
+  // Prefer the account that owns this session; otherwise surface the first capped registered account.
+  const red = redRows.find((candidate) => candidate.row.id === cur?.id) ?? redRows[0];
+  const overageEnabled = red?.caps?.overageEnabled ?? red?.account?.overageEnabled ?? null;
+  const overageAlert = red && overageEnabled !== false
+    ? { accountId: red.row.id, spend: red.caps?.overageSpend ?? null, used: red.row.usedPct }
+    : null;
   const line = best && current && best.id === current.id
     ? `Claude accounts: this session is already on the account with the most 5h headroom (${best.id}, ${best.usedPct.toFixed(0)}% used).`
     : best
@@ -474,7 +490,9 @@ export function adviseClaudeAccount(caps: ProviderCaps | undefined, accounts: Cl
   const fableLine = fable === null ? line
     : `${line} Fable-weekly: ${fable.id} lowest at ${fmtPct(fable.pct)}%` +
       (fable.pct >= FABLE_SOFT_CAP_ADVISE_PCT ? ` — at/over the ${FABLE_SOFT_CAP_ADVISE_PCT}% act threshold (weekly cap ${FABLE_WEEKLY_CAP_PCT}); prefer Opus for delegated work or rotate accounts.` : '.');
-  return { best, current, known, line: fableLine };
+  const overageLine = overageAlert === null ? fableLine
+    : `${fableLine} ⛔ REAL MONEY — OVERAGE BILLING ACTIVE on ${overageAlert.accountId} (spend ${overageAlert.spend ?? 'unknown'}) — MINIMIZE TURNS: every token is billed; finish the in-flight step, then hold for rotation.`;
+  return { best, current, known, overageAlert, line: overageLine };
 }
 
 /**
