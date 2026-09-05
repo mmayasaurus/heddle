@@ -54,7 +54,7 @@ export interface NewMessage {
   mentions?: string[] | null;
   /** Message id this one answers. Must be an existing message (checked at append time). */
   replyTo?: number | null;
-  /** Issue this conversation serves (e.g. "SPI-712", "HED-4"). */
+  /** Issue this conversation serves (e.g. "ABC-123", "HED-4"). */
   issue?: string | null;
   /**
    * Opaque conversation id chosen by the sender (e.g. "HED-4/review-2") so concurrent

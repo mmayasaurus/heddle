@@ -4,7 +4,7 @@
  * the CLI ONLY where that CLI can actually enforce it. A grant a provider cannot enforce is REFUSED
  * (ledgered) rather than silently ignored — never pretend a worker is fenced when it is not.
  *
- * Tokens (decided 2026-08-15, Maya via Agent R — `exec-playbook` renamed to `exec-privileged`):
+ * Tokens (operator decision, 2026-08-15, via Agent R — `exec-playbook` renamed to `exec-privileged`):
  *   net             outbound network from inside the worker's sandbox
  *   browse          live web retrieval (search/fetch) by the worker's own tools
  *   exec-privileged run outside the worker sandbox (codex `--sandbox danger-full-access`) — anything

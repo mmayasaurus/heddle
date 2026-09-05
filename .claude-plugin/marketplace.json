@@ -1,0 +1,14 @@
+{
+  "name": "heddle",
+  "owner": { "name": "heddle" },
+  "description": "The heddle plugin marketplace — cross-provider agent orchestration for subscription coding CLIs.",
+  "plugins": [
+    {
+      "name": "heddle",
+      "source": "./",
+      "description": "Cross-provider agent orchestration: the heddle (dispatch + routing) and heddle-comms (inter-agent messaging) MCP servers.",
+      "license": "MIT",
+      "keywords": ["orchestration", "mcp", "claude-code", "agents", "subscription-cli"]
+    }
+  ]
+}

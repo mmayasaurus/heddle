@@ -23,7 +23,7 @@ import { acquireLock, releaseLock, LOCK_REQUIRED_MODES } from './lock.js';
  *
  * TRUST SURFACE: --once / --run hold the operator token and can pause + relaunch the whole fleet
  * unattended. The bin therefore REFUSES to do anything active unless bound as the operator
- * (HEDDLE_COMMS_ROLE=operator + HEDDLE_COMMS_OPERATOR_TOKEN). This is Maya's deliberate automation,
+ * (HEDDLE_COMMS_ROLE=operator + HEDDLE_COMMS_OPERATOR_TOKEN). This is the operator's deliberate automation,
  * but the binding is enforced here, not assumed.
  *
  * HED-157: --once / --run also take a single-instance pidfile lock (~/.heddle/rotator.lock, see

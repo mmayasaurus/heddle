@@ -28,7 +28,7 @@ export interface DispatchRecord {
   model: string;
   /** Skill packs materialized for this worker, comma-joined. */
   skills: string | null;
-  /** Linear issue this sub-task serves, e.g. "SPI-712". */
+  /** Linear issue this sub-task serves, e.g. "ABC-123". */
   issue: string | null;
   /** PR number once known. */
   pr: number | null;
@@ -516,7 +516,7 @@ export class Ledger {
   }
 
   /**
-   * Record a completed CLASSIFIER run (HED-25, Maya-decided 2026-08-17: ledger rows marked
+   * Record a completed CLASSIFIER run (HED-25, operator-ratified 2026-08-17: ledger rows marked
    * `execution_mode='classification'`, not a separate table or a bare counter).
    *
    * `classifyEffort` / `assessResult` spend real Codex tokens on every auto-effort and every

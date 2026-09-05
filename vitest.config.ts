@@ -1,7 +1,7 @@
 import { defineConfig } from 'vitest/config';
 
 /**
- * heddle test runner — vitest, matching Spinventory's choice so fleet agents write tests the same
+ * heddle test runner — vitest, matching the first consumer project's choice so fleet agents write tests the same
  * way in both repos. Tests live under `test/` (never in `src/`, which is what `tsc` builds into
  * `dist/`) and import sources directly from `../src/*.js` — vite resolves the NodeNext `.js`
  * specifiers to the `.ts` files, so nothing needs a build step first.

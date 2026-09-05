@@ -1,11 +1,11 @@
-# Heddle routing table — v0 DRAFT (pilot scope; Maya-directed policy 2026-08-01)
+# Heddle routing table — v0 DRAFT (pilot scope; operator-directed policy 2026-08-01)
 # task-class → provider/model/effort/skills, with fallbacks.
 # Orchestrators consult this at dispatch time; every decision is logged to the broker ledger.
 
 version: 0
 
 policy:
-  subscriptions_only: true            # subscriptions + operator-prepaid finite credit pools (auto-recharge OFF, bounded spend — never open-ended per-token billing). Credit-pool exception ratified by Maya 2026-08-20: Cerebras ($19), OpenRouter (existing balance + :free lane); receipts HED-247/HED-238 + _vault free-ai-providers doc.
+  subscriptions_only: true            # subscriptions + operator-prepaid finite credit pools (auto-recharge OFF, bounded spend — never open-ended per-token billing). Credit-pool exception operator-ratified 2026-08-20: Cerebras ($19), OpenRouter (existing balance + :free lane); receipts HED-247/HED-238 + _vault free-ai-providers doc.
   never_via_cursor: [claude, gpt, gemini]  # direct subscriptions cover these families
   metered_pool_guard:
     cursor_other_models:
@@ -86,7 +86,7 @@ providers:
     auth: cursor-subscription         # Max plan
     # ⚠️ TWO POOLS, and they are NOT interchangeable:
     #   "Cursor Models"  = Grok 4.5 + Composer 2.5 — generous plan allowance. PREFER THESE.
-    #   "Other Models"   = Kimi/GPT/Claude/Gemini — metered dollar pool, AND the same pool Maya's
+    #   "Other Models"   = Kimi/GPT/Claude/Gemini — metered dollar pool, AND the same pool the operator's
     #                      Cursor PR-review usage draws on. Spending it here starves PR review.
     # Therefore: default Cursor work to Grok/Composer; Kimi is opt-in for genuinely hard tasks only.
     prefer_pool: cursor-models
@@ -188,7 +188,7 @@ task_classes:
     model: gpt-5.6-terra
     mcp: [memtrace]
     fallback: {provider: claude, model: sonnet}
-    why: well-scoped feature with a clear spec — Terra (Codex) is the default coding workhorse; Sonnet is the Claude-family fallback. Do not spend Opus here. (Primary flipped Claude→Codex 2026-08-17, HED-148, per Maya's move-load-off-Claude directive; effort left at the codex default that authored well here as the prior fallback.)
+    why: well-scoped feature with a clear spec — Terra (Codex) is the default coding workhorse; Sonnet is the Claude-family fallback. Do not spend Opus here. (Primary flipped Claude→Codex 2026-08-17, HED-148, per the operator's move-load-off-Claude directive; effort left at the codex default that authored well here as the prior fallback.)
     skills: [worker-role, code-discovery, quality-gate]
     edits_code: true
   second-opinion:           # independent diagnosis/review of a diff or plan (diversity valuable)
@@ -203,10 +203,10 @@ task_classes:
     model: kimi-k3-high
     requires_explicit_opt_in: true
     note: burns "Other Models" dollars shared with Cursor PR review — ask before using
-    why: opt-in only — Kimi is ~74s even on a trivial prompt and bills the metered "Other Models" pool that Cursor PR review draws on; ask Maya first
+    why: opt-in only — Kimi is ~74s even on a trivial prompt and bills the metered "Other Models" pool that Cursor PR review draws on; ask the operator first
     skills: [worker-role]
     edits_code: false
-  escalate-judgment:        # genuinely hard bounded problems — Fable as an OOP worker (Maya 2026-08-16)
+  escalate-judgment:        # genuinely hard bounded problems — Fable as an OOP worker (operator decision, 2026-08-16)
     provider: claude
     model: fable
     min_tier: T2            # HED-106: never descend below judgment; opt-in class, already gated
@@ -219,7 +219,7 @@ task_classes:
     provider: codex
     model: gpt-5.6-luna
     effort: low             # cheap + fast for low-reasoning mechanical work
-    mcp: [memtrace]         # memtrace-first discipline for every code-editing class (Maya, 2026-08-15)
+    mcp: [memtrace]         # memtrace-first discipline for every code-editing class (operator decision, 2026-08-15)
     fallback: {provider: cursor, model: composer-2.5-fast}
     why: renames, sweeps, codemods, boilerplate, test scaffolds — Luna at low effort is cheap volume; the -fast fallback bills ~2x on Cursor
     skills: [worker-role, quality-gate]
@@ -227,7 +227,7 @@ task_classes:
   scaffold:                 # fast structural code drafts — Cursor's coding-tuned model
     provider: cursor
     model: composer-2.5
-    mcp: [memtrace]         # memtrace-first discipline for every code-editing class (Maya, 2026-08-15)
+    mcp: [memtrace]         # memtrace-first discipline for every code-editing class (operator decision, 2026-08-15)
     fallback: {provider: codex, model: gpt-5.6-luna}
     why: fast structural drafts (files, stubs, wiring) — Composer is Cursor-native, cache-warm, ~1.8s on a trivial prompt; coding-tuned, not a reasoner. Fallback stays codex/luna (NOT a Cursor sibling) — it is the CAPABILITY-FIT escape hatch, since only codex enforces net/exec capabilities, so scaffold work needing one falls to codex (test/dispatch-caps.test.ts). The generous Cursor-Models pool rarely needs cap-overflow anyway. (HED-79 retune 2026-08-18 considered a grok-medium fallback for overflow and REJECTED it — it would have removed the capability path.)
     skills: [worker-role, quality-gate]
@@ -254,7 +254,7 @@ task_classes:
     why: cheap second draft, and the cheap REVIEW variant for SMALL diffs — same Grok family as second-opinion at lower effort (grok-medium); prefer this over second-opinion when the diff is small (HED-79 retune 2026-08-18)
     skills: [worker-role]
     edits_code: false
-  adversarial-review:       # HED-3 (Maya: "super important") — a DIFFERENT model family reviews a diff/
+  adversarial-review:       # HED-3 (operator decision: "super important") — a DIFFERENT model family reviews a diff/
     provider: cursor        #   worktree read-only, find-only; the author fixes; the ledger scores each
     model: cursor-grok-4.6-high   # author→reviewer provider pair by accepted-finding rate.
     fallback: {provider: codex, model: gpt-5.6-sol}   # HED-249: MUST be mcp-attachable (see mcp: below). Codex is memtrace-capable AND a different family from cursor + claude authors, so review diversity holds. NOT gemini: agy has no worker-MCP path, so a gemini fallback HARD-FAILED the whole dispatch on a transient cursor blip — cursor was a SPOF (ledger 254).

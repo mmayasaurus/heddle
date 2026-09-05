@@ -6,7 +6,7 @@ import { join } from 'node:path';
 /**
  * Worktree confinement (HED-98).
  *
- * Maya's layout puts agent worktrees INSIDE the repo (`<repo>/.worktrees/<agent>`), and a linked
+ * The fleet layout puts agent worktrees INSIDE the repo (`<repo>/.worktrees/<agent>`), and a linked
  * worktree's `.git` is a FILE pointing at the parent. Any worker that resolves "the project root"
  * by walking up therefore lands in the CANONICAL checkout — observed live 2026-08-16: an agy docs
  * worker dispatched with cwd `<repo>/.worktrees/agentv` wrote its edit into `<repo>/docs/COMMS.md`,
@@ -69,7 +69,7 @@ export interface GitRepository {
   /**
    * The repository's MAIN checkout — the first `git worktree list --porcelain` entry: equal to
    * topLevel in a normal checkout; for a linked worktree, the checkout it was added from, wherever
-   * that sits (inside the repo as `<repo>/.worktrees/<agent>`, or beside it as the Spinventory
+   * that sits (inside the repo as `<repo>/.worktrees/<agent>`, or beside it as a consumer
    * fleet's sibling `Rebuild-Project-Root.<feature>`). This — not topLevel — is the repository's
    * identity: a real dispatch cwd is a linked worktree whose top level is named after the
    * WORKTREE, not the repo (HED-389 review: keyed on topLevel, heddle dispatches matched nothing).

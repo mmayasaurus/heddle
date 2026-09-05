@@ -27,8 +27,44 @@ suite is behavioral vitest (`npm test`). See `docs/ARCHITECTURE.md` and, first, 
 `heddle-dashboard` product) · `docs/LANDMINES.md` (live-verified per-CLI contracts — read before
 touching an adapter) · `docs/CI.md` (CI, scanners, review-sweep).
 
-First consumer: the Spinventory rebuild fleet. Heddle itself is project-agnostic — the consumer
+First consumer: a private multi-agent app-rebuild fleet. Heddle itself is project-agnostic — the consumer
 supplies its own routing table, Linear team, and ownership systems.
+
+## Install as a Claude Code plugin
+
+Heddle ships as a Claude Code plugin (`.claude-plugin/`), bundling the `heddle` (dispatch surface)
+and `heddle-comms` (inter-agent messaging) MCP servers so any Claude Code session can drive the fleet.
+
+**From a built checkout** (works today):
+
+```shell
+git clone https://github.com/OWNER/heddle.git && cd heddle   # OWNER = the repo owner
+npm install && npm run build           # produce dist/ (the two MCP servers)
+PLUGIN_DIR="$(pwd)"                     # remember the plugin's location, then…
+cd /path/to/your/project               # …launch from YOUR project — NOT the heddle checkout
+claude --plugin-dir "$PLUGIN_DIR"      # so dispatched workers target your project, not heddle's source
+```
+
+Once loaded, the `plugin:heddle:heddle` and `plugin:heddle:heddle-comms` MCP tools are available. The
+plugin resolves every path from `${CLAUDE_PLUGIN_ROOT}`, so it works from wherever the checkout lives
+— no machine-specific paths. Verify a checkout with `claude plugin validate .`.
+
+The `heddle-comms` tools need a per-session agent identity (`HEDDLE_AGENT`); without one, comms
+operations fail with `no bound comms identity`. Establishing accounts and identity is the onboarding
+wizard's job (a follow-up slice) — until then, set `HEDDLE_AGENT=<name>` in the session yourself.
+
+**One-command marketplace install** — `/plugin marketplace add <owner>/heddle` then
+`/plugin install heddle@heddle` — resolves against the same-repo marketplace
+(`.claude-plugin/marketplace.json`, `source: "./"`), but is **not usable from this source tree**:
+build output is kept out of source (`dist/` is gitignored), so a bare clone has no runnable servers.
+The install-ready build is a follow-up slice — a standalone CLI-only distribution **regenerated from
+this source** and scrubbed for public readiness, shipping a self-contained plugin (built `dist/` plus
+the lockfile, so `npm ci` supplies the servers' dependencies with **no user build step**). Until that
+lands, use the built-checkout flow above.
+
+> This slice delivers the MCP servers + the plugin/marketplace structure. Still to come as follow-up
+> slices of the packaging epic (HED-394): the release-generated distribution build, the orchestrator
+> slash commands, the rules-as-data hook engine, and the packaged skill packs.
 
 ## The rules that shape everything
 
@@ -64,6 +100,7 @@ supplies its own routing table, Linear team, and ownership systems.
 ```
 routing/routing.v0.yaml  routing table: task-class → provider/model/effort/skills (+why, edits_code)
 src/dispatch.ts          the dispatcher: task class → routed worker → recorded outcome (+refusals)
+src/dispatcher/          the dispatcher's modules: types · packs · adapters · refusals · override-gate · monoculture · plan · run (src/dispatch.ts keeps dispatch() + re-exports)
 src/routing.ts           routing-table loader + resolveRoute
 src/capaware.ts          cap-aware routing (HED-67) + Claude account switching (HED-68) + Fable budget (HED-76)
 src/ledger.ts            SQLite dispatch/review ledger (node:sqlite; ~/.heddle/ledger.db)
@@ -126,6 +163,17 @@ private, unpublished package, so these are **not** on your `PATH` after `npm ins
 `npm link` (or a global install) to expose them, or invoke the built files directly (`node
 dist/cli.js …`, as the MCP snippet above does).
 
+### Verify harness health
+
+Run `heddle doctor` before onboarding an account or starting a session. It checks the configured
+harness binaries, login state, live model catalogs where supported, routing/config parsing, and
+provider verification freshness; `--provider` runs only that provider's checks plus global config
+checks (including valid API providers such as `groq`), and `--json` returns
+the same typed report. Cursor catalog omissions fail; an `agy` catalog omission warns because a new
+Gemini model can work before its catalog lists it (see `docs/MODELS.md`). It exits 1 only when a check
+fails; exit 0 means no failures (including timed-out, unverified probes, which warn), and exit 2 is a
+usage error.
+
 Framework-layer config lives under `~/.heddle/` (it spans projects, never a single repo):
 `accounts.json` (Claude accounts), `ledger.db` (dispatch/review ledger), `comms.db` (broker).
 Environment overrides:
@@ -134,6 +182,7 @@ Environment overrides:
 |-----|------|
 | `HEDDLE_AGENT` | this session's orchestrator identity (e.g. `U`); also honors `FLEET_AGENT` or a `.fleet-agent` file |
 | `HEDDLE_ROUTING` | routing-table path (default `routing/routing.v0.yaml`) |
+| `HEDDLE_LANES` | lanes configuration path (default `routing/lanes.yaml`) |
 | `HEDDLE_ACCOUNTS` | Claude accounts registry path (default `~/.heddle/accounts.json`) — cap-aware routing reads it |
 | `HEDDLE_PACKS` | extra skill-pack search dirs, `path.delimiter`-separated (`:` on POSIX, `;` on Windows); built-ins always last |
 | `HEDDLE_COMMS_DB` | comms broker db (default `~/.heddle/comms.db`) |
