@@ -1,14 +1,19 @@
 import { readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 
 const allowlistPath = new URL('./public-scrub.allowlist.txt', import.meta.url);
 
+// This scanner is a regression guard against accidental identity leaks.
+// Deliberate encodings are out of scope.
+// Reviewers remain responsible for detecting them.
 const tenantPattern = new RegExp('spin' + 'ventory', 'i');
 const placeholderPattern = new RegExp('\\b' + 'S' + 'PI-n\\b', 'i');
 const issuePattern = new RegExp('\\b' + 'S' + 'PI-' + '\\d+', 'i');
-const teamPattern = new RegExp('\\b' + 'S' + 'PI\\b', 'i');
+const teamPattern = new RegExp('\\b' + 'S' + 'PI' + '(?:[-_][A-Za-z0-9]+)?\\b', 'i');
 const personalNamePattern = new RegExp('\\b' + 'ma' + 'ya\\b', 'i');
+const localUsernamePattern = new RegExp('\\b' + 'ma' + 'ya' + 'tobi\\b', 'i');
 const companyPattern = new RegExp('vg' + 'fg', 'i');
 const homePathPattern = new RegExp('/Users/' + 'ma' + 'ya' + '(?:tobi)?\\b', 'i');
 const ownerPattern = new RegExp('mmaya' + 'saurus', 'i');
@@ -19,6 +24,7 @@ const forbiddenPatterns = [
   issuePattern,
   teamPattern,
   personalNamePattern,
+  localUsernamePattern,
   companyPattern,
   homePathPattern,
   ownerPattern,
@@ -46,6 +52,9 @@ describe('regression PR#99 — public scrub rejects placeholder issue keys and e
     const mixedTenant = 'Vg' + 'Fg';
     const mayan = 'Ma' + 'yan';
     const localUsername = 'ma' + 'ya' + 'tobi';
+    const underscoredIssue = 'S' + 'PI_712';
+    const underscoredTeam = 'S' + 'PI_TEAM';
+    const namedIssue = 'S' + 'PI-foo';
     const spider = 'spider';
     const spin = 'SPIN';
     const otherIssue = 'ACM-123';
@@ -64,7 +73,10 @@ describe('regression PR#99 — public scrub rejects placeholder issue keys and e
     expect(matchesForbidden(uppercaseTenant)).toBe(true);
     expect(matchesForbidden(mixedTenant)).toBe(true);
     expect(matchesForbidden(mayan)).toBe(false);
-    expect(matchesForbidden(localUsername)).toBe(false);
+    expect(matchesForbidden(localUsername)).toBe(true);
+    expect(matchesForbidden(underscoredIssue)).toBe(true);
+    expect(matchesForbidden(underscoredTeam)).toBe(true);
+    expect(matchesForbidden(namedIssue)).toBe(true);
     expect(matchesForbidden(spider)).toBe(false);
     expect(matchesForbidden(spin)).toBe(false);
     expect(matchesForbidden(otherIssue)).toBe(false);
@@ -78,16 +90,46 @@ describe('regression PR#99 — public scrub rejects placeholder issue keys and e
     expect(() => parseAllowlist('src/cli.ts: ')).toThrow('line 1');
     expect(() => parseAllowlist('src/cli.ts:abc')).toThrow('line 1');
     expect(() => parseAllowlist('src/cli.ts')).toThrow('line 1');
+    expect(() => parseAllowlist('src/cli.ts:1:not-a-digest')).toThrow('line 1');
   });
 
   it('reports stale allowlist entries and exempts only their exact line', () => {
     const flagged = 'S' + 'PI';
     const files = [{ path: 'src/example.ts', contents: `${flagged}\nclean` }];
 
-    expect(scanFiles(files, parseAllowlist('src/example.ts:1'))).toEqual({ offendingLines: [], staleEntries: [] });
-    expect(scanFiles(files, parseAllowlist('src/example.ts:2'))).toEqual({
-      offendingLines: ['src/example.ts:1: ' + flagged],
+    expect(scanFiles(files, parseAllowlist('src/example.ts:1:60c5158ae188'))).toEqual({ offendingLines: [], staleEntries: [] });
+    expect(scanFiles(files, parseAllowlist('src/example.ts:2:60c5158ae188'))).toEqual({
+      offendingLines: ['src/example.ts:1:60c5158ae188: ' + flagged],
       staleEntries: ['src/example.ts:2'],
+    });
+  });
+
+  it('does not let an exemption cover a newly inserted forbidden line', () => {
+    const flagged = 'S' + 'PI';
+    const files = [{ path: 'src/example.ts', contents: `${flagged}\n${flagged}` }];
+
+    expect(scanFiles(files, parseAllowlist('src/example.ts:1:60c5158ae188'))).toEqual({
+      offendingLines: [`src/example.ts:2:60c5158ae188: ${flagged}`],
+      staleEntries: [],
+    });
+  });
+
+  it('reports a changed allowlisted line as stale', () => {
+    const flagged = 'S' + 'PI';
+    const files = [{ path: 'src/example.ts', contents: `${flagged}_712` }];
+
+    expect(scanFiles(files, parseAllowlist('src/example.ts:1:60c5158ae188'))).toEqual({
+      offendingLines: [`src/example.ts:1:211703648620: ${flagged}_712`],
+      staleEntries: ['stale allowlist entry src/example.ts:1 (line changed)'],
+    });
+  });
+
+  it('scans the allowlist and its comments', () => {
+    expect(shippedFiles()).toContain('test/public-scrub.allowlist.txt');
+    const tenantComment = '# ' + 'spin' + 'ventory';
+    expect(scanFiles([{ path: 'test/public-scrub.allowlist.txt', contents: tenantComment }], [])).toEqual({
+      offendingLines: [`test/public-scrub.allowlist.txt:1:${digest(tenantComment)}: ${tenantComment}`],
+      staleEntries: [],
     });
   });
 });
@@ -101,22 +143,25 @@ function shippedFiles(): string[] {
   return output.split('\n').filter(Boolean);
 }
 
-function parseAllowlist(contents: string): Array<{ path: string; lineNumber: number }> {
+function digest(line: string): string {
+  return createHash('sha256').update(line).digest('hex').slice(0, 12);
+}
+
+function parseAllowlist(contents: string): Array<{ path: string; lineNumber: number; digest: string }> {
   return contents
     .split('\n')
     .map((line, index) => ({ line, lineNumber: index + 1 }))
     .filter(({ line }) => line && !line.startsWith('#'))
     .map(({ line, lineNumber }) => {
-      const separator = line.indexOf(':');
-      const lineText = line.slice(separator + 1);
-      if (separator < 1 || !/^\d+$/.test(lineText) || Number(lineText) < 1) {
+      const match = /^(.*):([1-9]\d*):([a-f0-9]{12})$/.exec(line);
+      if (!match || !match[1]) {
         throw new Error(`Invalid public scrub allowlist entry at line ${lineNumber}: ${line}`);
       }
-      return { path: line.slice(0, separator), lineNumber: Number(lineText) };
+      return { path: match[1], lineNumber: Number(match[2]), digest: match[3] };
     });
 }
 
-function allowlist(): Array<{ path: string; lineNumber: number }> {
+function allowlist(): Array<{ path: string; lineNumber: number; digest: string }> {
   return parseAllowlist(readFileSync(allowlistPath, 'utf8'));
 }
 
@@ -124,7 +169,7 @@ function matchesForbidden(line: string): boolean {
   return forbiddenPatterns.some((pattern) => pattern.test(line));
 }
 
-function scanFiles(files: Array<{ path: string; contents: string }>, allowed: Array<{ path: string; lineNumber: number }>) {
+function scanFiles(files: Array<{ path: string; contents: string }>, allowed: Array<{ path: string; lineNumber: number; digest: string }>) {
   const flaggedEntries = new Set<string>();
   const offendingLines: string[] = [];
 
@@ -132,10 +177,12 @@ function scanFiles(files: Array<{ path: string; contents: string }>, allowed: Ar
     contents.split('\n').forEach((line, index) => {
       if (!matchesForbidden(line)) return;
       const entry = `${path}:${index + 1}`;
-      if (allowed.some((allowedEntry) => allowedEntry.path === path && allowedEntry.lineNumber === index + 1)) {
-        flaggedEntries.add(entry);
+      const lineDigest = digest(line);
+      const allowedEntry = allowed.find((candidate) => candidate.path === path && candidate.lineNumber === index + 1);
+      if (allowedEntry?.digest === lineDigest) {
+        flaggedEntries.add(`${entry}:${lineDigest}`);
       } else {
-        offendingLines.push(`${entry}: ${line}`);
+        offendingLines.push(`${entry}:${lineDigest}: ${line}`);
       }
     });
   }
@@ -143,8 +190,12 @@ function scanFiles(files: Array<{ path: string; contents: string }>, allowed: Ar
   return {
     offendingLines,
     staleEntries: allowed
-      .map(({ path, lineNumber }) => `${path}:${lineNumber}`)
-      .filter((entry) => !flaggedEntries.has(entry)),
+      .map(({ path, lineNumber, digest: entryDigest }) => ({ entry: `${path}:${lineNumber}:${entryDigest}`, path, lineNumber }))
+      .filter(({ entry }) => !flaggedEntries.has(entry))
+      .map(({ entry, path, lineNumber }) => {
+        const line = files.find((file) => file.path === path)?.contents.split('\n')[lineNumber - 1];
+        return line !== undefined && matchesForbidden(line) ? `stale allowlist entry ${path}:${lineNumber} (line changed)` : `${path}:${lineNumber}`;
+      }),
   };
 }
 

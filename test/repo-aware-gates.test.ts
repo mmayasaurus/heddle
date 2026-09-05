@@ -17,7 +17,7 @@ import { fakeAdapter, IDENTITIES, initRepoFixture, useTempResources } from './he
  * These fixtures therefore build real `git worktree add` worktrees: a subdirectory of a plain
  * `git init` repo resolves to the repo root and hides exactly that bug (the first draft's did).
  */
-const APP_TEXT = ['Spinventory-Rebuild-Official/Rebuild-Project-Root', 'npm run gate', 'expo-router'];
+const APP_TEXT = ["consumer app's canonical checkout", 'npm run gate', 'expo-router'];
 const NO_GATE = ['worker-role', 'worker-hygiene', 'family-codex'];
 
 const initRepo = initRepoFixture;
