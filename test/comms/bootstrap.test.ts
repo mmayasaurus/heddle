@@ -53,6 +53,22 @@ describe('bootstrapComms', () => {
     expect(Object.keys(result.operatorToken).sort()).toEqual(['action', 'path']);
   });
 
+  it('honors HEDDLE_COMMS_DB when no explicit db path is given (matches the broker)', () => {
+    const envDb = join(heddleDir, 'env-comms.db');
+    const prev = process.env.HEDDLE_COMMS_DB;
+    process.env.HEDDLE_COMMS_DB = envDb;
+    try {
+      // No commsDbPath in opts → must fall back to HEDDLE_COMMS_DB (as createCommsServer does),
+      // NOT DEFAULT_COMMS_PATH, so setup provisions exactly the db the broker will open.
+      const result = bootstrapComms({ operatorTokenPath: tokenPath, projectsPath });
+      expect(result.commsDb.path).toBe(envDb);
+      expect(existsSync(envDb)).toBe(true);
+    } finally {
+      if (prev === undefined) delete process.env.HEDDLE_COMMS_DB;
+      else process.env.HEDDLE_COMMS_DB = prev;
+    }
+  });
+
   it('keeps the token byte-for-byte unchanged and permissions hardened on a rerun', () => {
     bootstrapComms(options());
     const before = readFileSync(tokenPath);

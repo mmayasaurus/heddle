@@ -21,7 +21,10 @@ export interface CommsBootstrapResult {
 
 /** Ensure the durable comms prerequisites without rotating the operator trust root. */
 export function bootstrapComms(opts: CommsBootstrapOptions = {}): CommsBootstrapResult {
-  const commsDbPath = opts.commsDbPath ?? DEFAULT_COMMS_PATH;
+  // Resolve the db the SAME way createCommsServer does (server.ts: env.HEDDLE_COMMS_DB ||
+  // DEFAULT_COMMS_PATH) so `heddle comms init` provisions exactly the file the broker will open —
+  // an explicit opts path (tests) still wins. `||` matches the server: an empty env value falls back.
+  const commsDbPath = opts.commsDbPath ?? (process.env.HEDDLE_COMMS_DB || DEFAULT_COMMS_PATH);
   const operatorTokenPath = opts.operatorTokenPath ?? OPERATOR_TOKEN_PATH;
   const projectsPath = opts.projectsPath ?? DEFAULT_PROJECTS_PATH;
   // Provision the comms dir owner-only, but only when THIS call creates it: mkdir-recursive never
