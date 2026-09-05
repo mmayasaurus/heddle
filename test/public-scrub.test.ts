@@ -28,7 +28,7 @@ const credentialPatterns = [
   new RegExp('github_' + 'pat_'),
 ];
 
-const forbiddenPatterns = [
+const identityPatterns = [
   tenantPattern,
   placeholderPattern,
   issuePattern,
@@ -38,7 +38,6 @@ const forbiddenPatterns = [
   companyPattern,
   homePathPattern,
   ownerPattern,
-  ...credentialPatterns,
 ];
 
 describe('regression PR#99 — public scrub rejects placeholder issue keys and exact-line exemptions', () => {
@@ -142,6 +141,13 @@ describe('regression PR#99 — public scrub rejects placeholder issue keys and e
     expect(scanned.offendingLines.join('\n')).not.toContain(projKey);
   });
 
+  it('flags a shipped path whose NAME carries a forbidden identifier', () => {
+    const badPath = 'test/' + 'spin' + 'ventory' + '-fixture.txt';
+    const scanned = scanFiles([{ path: badPath, contents: 'clean contents' }], []);
+    expect(scanned.offendingLines).toEqual([`${badPath}: [path name carries a forbidden identifier]`]);
+    expect(scanFiles([{ path: 'test/acme-fixture.txt', contents: 'clean contents' }], []).offendingLines).toEqual([]);
+  });
+
   it('scans the allowlist and its comments', () => {
     expect(shippedFiles()).toContain('test/public-scrub.allowlist.txt');
     const tenantComment = '# ' + 'spin' + 'ventory';
@@ -160,6 +166,8 @@ function shippedFiles(): string[] {
 
   return output.split('\n').filter(Boolean);
 }
+
+const forbiddenPatterns = [...identityPatterns, ...credentialPatterns];
 
 function digest(line: string): string {
   return createHash('sha256').update(line).digest('hex').slice(0, 12);
@@ -192,6 +200,11 @@ function scanFiles(files: Array<{ path: string; contents: string }>, allowed: Ar
   const offendingLines: string[] = [];
 
   for (const { path, contents } of files) {
+    // Path names are public too: a tracked `test/<tenant>-fixture.txt` must fail even with clean
+    // contents. Identity patterns only — credential shapes make no sense in a path.
+    if (identityPatterns.some((pattern) => pattern.test(path))) {
+      offendingLines.push(`${path}: [path name carries a forbidden identifier]`);
+    }
     contents.split('\n').forEach((line, index) => {
       if (!matchesForbidden(line)) return;
       const entry = `${path}:${index + 1}`;
