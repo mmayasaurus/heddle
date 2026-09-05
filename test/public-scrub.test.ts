@@ -18,6 +18,16 @@ const companyPattern = new RegExp('vg' + 'fg', 'i');
 const homePathPattern = new RegExp('/Users/' + 'ma' + 'ya' + '(?:tobi)?\\b', 'i');
 const ownerPattern = new RegExp('mmaya' + 'saurus', 'i');
 
+const credentialPatterns = [
+  new RegExp('\\bsk-' + '[A-Za-z0-9][A-Za-z0-9-]{9,}'),
+  new RegExp('g' + 'sk_'),
+  new RegExp('c' + 'sk-'),
+  new RegExp('lin_' + 'api_'),
+  new RegExp('lin_' + 'oauth_'),
+  new RegExp('gh' + 'p_'),
+  new RegExp('github_' + 'pat_'),
+];
+
 const forbiddenPatterns = [
   tenantPattern,
   placeholderPattern,
@@ -28,13 +38,7 @@ const forbiddenPatterns = [
   companyPattern,
   homePathPattern,
   ownerPattern,
-  new RegExp('\\bsk-' + '[A-Za-z0-9]{8,}'),
-  new RegExp('g' + 'sk_'),
-  new RegExp('c' + 'sk-'),
-  new RegExp('lin_' + 'api_'),
-  new RegExp('lin_' + 'oauth_'),
-  new RegExp('gh' + 'p_'),
-  new RegExp('github_' + 'pat_'),
+  ...credentialPatterns,
 ];
 
 describe('regression PR#99 — public scrub rejects placeholder issue keys and exact-line exemptions', () => {
@@ -124,6 +128,20 @@ describe('regression PR#99 — public scrub rejects placeholder issue keys and e
     });
   });
 
+  it('catches segmented credential shapes and never echoes them', () => {
+    const projKey = 'sk-' + 'proj-' + 'abc123def456';
+    const antKey = 'sk-' + 'ant-' + 'api03xyz789aa';
+    expect(matchesForbidden(projKey)).toBe(true);
+    expect(matchesForbidden(antKey)).toBe(true);
+    expect(matchesForbidden('sk-fix')).toBe(false);
+    expect(matchesForbidden('an sk-and-so aside')).toBe(false);
+    const scanned = scanFiles([{ path: 'src/example.ts', contents: projKey }], []);
+    expect(scanned.offendingLines).toEqual([
+      `src/example.ts:1:${digest(projKey)}: [credential-shaped content redacted]`,
+    ]);
+    expect(scanned.offendingLines.join('\n')).not.toContain(projKey);
+  });
+
   it('scans the allowlist and its comments', () => {
     expect(shippedFiles()).toContain('test/public-scrub.allowlist.txt');
     const tenantComment = '# ' + 'spin' + 'ventory';
@@ -182,7 +200,12 @@ function scanFiles(files: Array<{ path: string; contents: string }>, allowed: Ar
       if (allowedEntry?.digest === lineDigest) {
         flaggedEntries.add(`${entry}:${lineDigest}`);
       } else {
-        offendingLines.push(`${entry}:${lineDigest}: ${line}`);
+        // A credential-shaped hit is never echoed: the failure would copy a live secret into public
+        // CI logs. The path:line:digest entry stays pasteable (digest is over the real line).
+        const shown = credentialPatterns.some((pattern) => pattern.test(line))
+          ? '[credential-shaped content redacted]'
+          : line;
+        offendingLines.push(`${entry}:${lineDigest}: ${shown}`);
       }
     });
   }
