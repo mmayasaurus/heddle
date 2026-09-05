@@ -45,6 +45,7 @@ describe('skill packs — user pack directory', () => {
     const userPacks = join(home, '.heddle', 'packs');
     const envPacks = join(tempDir(), 'env-packs');
     const savedHome = process.env.HOME;
+    const savedProfile = process.env.USERPROFILE;
     const savedPacks = process.env.HEDDLE_PACKS;
     mkdirSync(userPacks, { recursive: true });
     mkdirSync(envPacks, { recursive: true });
@@ -52,15 +53,19 @@ describe('skill packs — user pack directory', () => {
     writeFileSync(join(userPacks, 'quality-gate.md'), 'user quality gate');
     try {
       process.env.HOME = home;
+      process.env.USERPROFILE = home; // Windows homedir() reads USERPROFILE, not HOME
       delete process.env.HEDDLE_PACKS;
       expect(packDirFor('user-only')).toBe(userPacks);
       expect(readPack('quality-gate')).toBe('user quality gate');
       writeFileSync(join(envPacks, 'user-only.md'), 'env pack');
       process.env.HEDDLE_PACKS = envPacks;
+      mkdirSync(join(userPacks, 'dir-shaped.md'));
+      expect(packDirFor('dir-shaped')).not.toBe(userPacks); // a DIRECTORY named <pack>.md is not a pack
       expect(packDirs()).toEqual([envPacks, userPacks, expect.any(String)]);
       expect(readPack('user-only')).toBe('env pack');
     } finally {
       if (savedHome === undefined) delete process.env.HOME; else process.env.HOME = savedHome;
+      if (savedProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = savedProfile;
       if (savedPacks === undefined) delete process.env.HEDDLE_PACKS; else process.env.HEDDLE_PACKS = savedPacks;
     }
   });

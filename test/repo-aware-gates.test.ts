@@ -333,12 +333,14 @@ describe('registry-backed gate maps', () => {
     stderr.mockRestore();
   });
 
-  it('preserves gates byte-for-byte while re-registering and never returns a registry pack on a miss', () => {
+  it('preserves gates structurally while re-registering and never returns a registry pack on a miss', () => {
     const gates = '"gates":{"byFolderName":{"acme":"repo-workspace"}}';
     const source = `{"schemaVersion":1,"projects":[{"name":"toy","workspaceRoots":["/x"],"agentIds":["A"],"linearTeam":"X","defaultRoom":"#x","launcher":"x",${gates}}]}`;
     const next = { name: 'toy', workspaceRoots: ['/x'], agentIds: ['A'], linearTeam: 'Y', defaultRoom: '#x', launcher: 'x', gates: { byFolderName: { acme: 'repo-workspace' } } };
-    expect(replaceProjectInRawRegistry(source, 'toy', next)).toContain(gates);
-    expect(registryContent({ schemaVersion: 1, projects: [next] }, source, next, next, 'toy')).toContain(gates);
+    // Structural, not byte-for-byte: registryStep spreads rawPrior into the rebuilt project, and a
+    // raw-text splice was rejected (it can match a "gates": sequence inside a string — PR #112).
+    expect(JSON.parse(replaceProjectInRawRegistry(source, 'toy', next)).projects[0].gates).toEqual(next.gates);
+    expect(JSON.parse(registryContent({ schemaVersion: 1, projects: [next] }, source, next, next, 'toy')).projects[0].gates).toEqual(next.gates);
     for (const repo of [null, { topLevel: '/x/unknown', mainRoot: '/x/unknown', originUrl: null }, { topLevel: '/x/acme', mainRoot: null, originUrl: null }]) {
       expect(qualityGateForRepository(repo, { app: new Map(), byFolderName: new Map(), byOriginName: new Map() })).toBeNull();
     }

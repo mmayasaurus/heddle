@@ -1,4 +1,4 @@
-import { readFileSync, existsSync, writeFileSync, unlinkSync, readdirSync, realpathSync } from 'node:fs';
+import { readFileSync, existsSync, writeFileSync, unlinkSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { basename, delimiter, dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
@@ -53,7 +53,12 @@ export function packDirs(): string[] {
 
 /** First directory on the search path that holds this pack, or null. */
 export function packDirFor(name: string): string | null {
-  return packDirs().find((d) => existsSync(join(d, `${name}.md`))) ?? null;
+  return packDirs().find((d) => isPackFile(join(d, `${name}.md`))) ?? null;
+}
+
+/** A pack must be a regular FILE — a directory named `<pack>.md` is not a pack (codeant, PR #112). */
+function isPackFile(path: string): boolean {
+  try { return statSync(path).isFile(); } catch { return false; }
 }
 
 /** Back-compat: the directory a bare pack lookup starts from. Prefer packDirs(). */

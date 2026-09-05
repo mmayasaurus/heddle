@@ -195,15 +195,9 @@ export function replaceProjectInRawRegistry(source: string | undefined, name: st
   const lineStart = source.lastIndexOf('\n', range.start - 1) + 1;
   const prefix = source.slice(lineStart, range.start).match(/^[ \t]*/)?.[0] ?? '';
   let replacement = JSON.stringify(project, null, jsonIndent(source)).replace(/\n/g, `\n${prefix}`);
-  const original = source.slice(range.start, range.end);
-  const gateStart = original.match(/"gates"\s*:\s*/)?.index;
-  const replacementStart = replacement.match(/"gates"\s*:\s*/)?.index;
-  if (gateStart !== undefined && replacementStart !== undefined) {
-    const valueStart = gateStart + (original.slice(gateStart).match(/"gates"\s*:\s*/)?.[0].length ?? 0);
-    const replacementValueStart = replacementStart + (replacement.slice(replacementStart).match(/"gates"\s*:\s*/)?.[0].length ?? 0);
-    const rawGates = original.slice(gateStart, endOfJsonValue(original, valueStart));
-    replacement = replacement.slice(0, replacementStart) + rawGates + replacement.slice(endOfJsonValue(replacement, replacementValueStart));
-  }
+  // `gates` needs no raw-text splicing: registryStep spreads rawPrior into the rebuilt project, so
+  // the field survives STRUCTURALLY through serialization (a regex splice over raw JSON can match a
+  // "gates": sequence inside a string value — codeant on PR #112).
   return source.slice(0, range.start) + replacement + source.slice(range.end);
 }
 export function registryContent(raw: any, rawContent: string | undefined, prior: any, project: any, name: string): string {

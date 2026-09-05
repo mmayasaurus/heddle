@@ -1,6 +1,7 @@
 Before reporting any code change complete, run the quality gate declared by this repository's operator pack.
 The registry resolves that pack from `gates.app`, `gates.byFolderName`, or `gates.byOriginName`; this
-built-in file is only the generic fallback when no repository-specific gate applies.
+built-in file is served only when the registry names it or a dispatch requests it explicitly — an
+unrecognized repository gets NO gate at all (HED-389: dropped, never guessed).
 
 Rules:
 - Never report a change complete without the project's gate passing. A bug fix REQUIRES a regression test named for it:
