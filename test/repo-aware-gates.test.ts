@@ -7,17 +7,17 @@ import { parentCheckoutOf } from '../src/worktree.js';
 import { fakeAdapter, IDENTITIES, initRepoFixture, useTempResources } from './helpers.js';
 
 /**
- * HED-389: `quality-gate` is the Spinventory APP gate (`npm run gate`, expo-router, `cd` into
+ * HED-389: `quality-gate` is the consumer APP gate (`npm run gate`, expo-router, `cd` into
  * Rebuild-Project-Root) and the default pack of every editing class, so a heddle worker used to be
  * handed app-checkout instructions. The gate is now resolved per REPOSITORY from the dispatch cwd.
  *
  * A real dispatch cwd is a LINKED worktree — `<repo>/.worktrees/<agent>` on the heddle side, the
- * sibling `Rebuild-Project-Root.<feature>` on the Spinventory side — where `git rev-parse
+ * sibling `Rebuild-Project-Root.<feature>` on the consumer-project side — where `git rev-parse
  * --show-toplevel` is the WORKTREE path, so repository identity must come from the MAIN checkout.
  * These fixtures therefore build real `git worktree add` worktrees: a subdirectory of a plain
  * `git init` repo resolves to the repo root and hides exactly that bug (the first draft's did).
  */
-const APP_TEXT = ['Spinventory-Rebuild-Official/Rebuild-Project-Root', 'npm run gate', 'expo-router'];
+const APP_TEXT = ["consumer app's canonical checkout", 'npm run gate', 'expo-router'];
 const NO_GATE = ['worker-role', 'worker-hygiene', 'family-codex'];
 
 const initRepo = initRepoFixture;
@@ -77,27 +77,27 @@ describe('dispatch — repo-aware quality gates (HED-389)', () => {
   });
 
   it('recognizes a differently-named clone by the EXACT origin repository name — never a substring', async () => {
-    const byOrigin = await editingDispatch(initRepo(join(tempDir(), 'local-workspace-name'), 'worker', { remote: 'git@github.com:maya/Spinventory-Rebuild-Workspace.git' }));
+    const byOrigin = await editingDispatch(initRepo(join(tempDir(), 'local-workspace-name'), 'worker', { remote: 'git@github.com:example-org/Spinventory-Rebuild-Workspace.git' }));
     expect(byOrigin.agents).toContain('### repo-workspace');
     expect(byOrigin.agents).not.toContain('### quality-gate');
     for (const text of APP_TEXT) expect(byOrigin.agents).not.toContain(text);
     expect(byOrigin.ledgerSkills).toBe('worker-role,worker-hygiene,repo-workspace,family-codex');
 
     // A renamed dashboard clone, in a linked worktree, identified by origin (round-1 review #7)…
-    const renamed = await editingDispatch(initRepo(join(tempDir(), 'heddle-dashboard-old'), '.worktrees/W-hed120', { remote: 'https://github.com/mmayasaurus/heddle-dashboard.git', linkedWorktree: true }));
+    const renamed = await editingDispatch(initRepo(join(tempDir(), 'heddle-dashboard-old'), '.worktrees/W-hed120', { remote: 'https://github.com/example-org/heddle-dashboard.git', linkedWorktree: true }));
     expect(renamed.skills).toEqual(['worker-role', 'worker-hygiene', 'repo-heddle-dashboard', 'family-codex']);
     // …but without an origin a renamed clone is unknown: no gate, by design.
     const unnamed = await editingDispatch(initRepo(join(tempDir(), 'heddle-dashboard-old'), '.worktrees/W-hed120', { linkedWorktree: true }));
     expect(unnamed.skills).toEqual(NO_GATE);
 
     // An origin that merely CONTAINS a known name is not that repository (round-1 review #3).
-    const fork = await editingDispatch(initRepo(join(tempDir(), 'local-workspace-name'), 'worker', { remote: 'git@github.com:maya/Spinventory-Rebuild-Workspace-fork.git' }));
+    const fork = await editingDispatch(initRepo(join(tempDir(), 'local-workspace-name'), 'worker', { remote: 'git@github.com:example-org/Spinventory-Rebuild-Workspace-fork.git' }));
     expect(fork.skills).toEqual(NO_GATE);
     expect(fork.agents).not.toContain('### repo-');
   });
 
   it('keeps the app gate for the app repository — including its sibling-style linked worktrees', async () => {
-    // The Spinventory fleet's layout: worktrees are SIBLINGS of the main checkout, not inside it.
+    // The consumer project's layout: worktrees are SIBLINGS of the main checkout, not inside it.
     const root = join(tempDir(), 'Spinventory-Rebuild-Official', 'Rebuild-Project-Root');
     const { agents, skills, ledgerSkills } = await editingDispatch(initRepo(root, '../Rebuild-Project-Root.forms', { linkedWorktree: true }));
 
@@ -174,7 +174,7 @@ describe('dispatch — repo-aware quality gates (HED-389)', () => {
       delete process.env.GIT_DIR; delete process.env.GIT_WORK_TREE;
       process.env.GIT_CONFIG_COUNT = '1';
       process.env.GIT_CONFIG_KEY_0 = 'remote.origin.url';
-      process.env.GIT_CONFIG_VALUE_0 = 'git@github.com:maya/Spinventory-V2-Official-App-Rebuild.git';
+      process.env.GIT_CONFIG_VALUE_0 = 'git@github.com:example-org/Spinventory-V2-Official-App-Rebuild.git';
       const injected = await editingDispatch(initRepo(join(base, 'unknown-repo'), 'worker'));
       expect(injected.skills).toEqual(NO_GATE);
       for (const text of APP_TEXT) expect(injected.agents).not.toContain(text);
@@ -248,24 +248,24 @@ describe('qualityGateForRepository — identity rules (pure)', () => {
   });
 
   it('the app checkout keeps its gate whatever origin says; elsewhere folder and origin must agree (round-1 review #3)', () => {
-    expect(qualityGateForRepository({ topLevel: app, mainRoot: app, originUrl: 'git@github.com:maya/Spinventory-Rebuild-Workspace.git' })).toBe('quality-gate');
-    expect(qualityGateForRepository({ topLevel: '/x/heddle', mainRoot: '/x/heddle', originUrl: 'https://github.com/mmayasaurus/heddle-dashboard.git' })).toBeNull();
-    expect(qualityGateForRepository({ topLevel: '/x/heddle', mainRoot: '/x/heddle', originUrl: 'https://github.com/mmayasaurus/heddle.git' })).toBe('repo-heddle-core');
+    expect(qualityGateForRepository({ topLevel: app, mainRoot: app, originUrl: 'git@github.com:example-org/Spinventory-Rebuild-Workspace.git' })).toBe('quality-gate');
+    expect(qualityGateForRepository({ topLevel: '/x/heddle', mainRoot: '/x/heddle', originUrl: 'https://github.com/example-org/heddle-dashboard.git' })).toBeNull();
+    expect(qualityGateForRepository({ topLevel: '/x/heddle', mainRoot: '/x/heddle', originUrl: 'https://github.com/example-org/heddle.git' })).toBe('repo-heddle-core');
     expect(qualityGateForRepository({ topLevel: '/x/Spinventory-Rebuild-App-2', mainRoot: '/x/Spinventory-Rebuild-App-2', originUrl: null })).toBeNull(); // prefix is not identity
     // A known folder whose origin is PRESENT but unrecognized is not that repository (codex P2, #95).
     expect(qualityGateForRepository({ topLevel: '/x/heddle', mainRoot: '/x/heddle', originUrl: 'git@github.com:someone/other-project.git' })).toBeNull();
   });
 
   it('matches origin by exact repository name, in every common URL form', () => {
-    expect(originRepoName('https://github.com/mmayasaurus/Spinventory-Rebuild-Workspace.git')).toBe('Spinventory-Rebuild-Workspace');
-    expect(originRepoName('git@github.com:maya/heddle')).toBe('heddle');
-    expect(originRepoName('ssh://git@github.com/maya/heddle-dashboard.git/')).toBe('heddle-dashboard');
+    expect(originRepoName('https://github.com/example-org/Spinventory-Rebuild-Workspace.git')).toBe('Spinventory-Rebuild-Workspace');
+    expect(originRepoName('git@github.com:example-org/heddle')).toBe('heddle');
+    expect(originRepoName('ssh://git@github.com/example-org/heddle-dashboard.git/')).toBe('heddle-dashboard');
     expect(originRepoName(null)).toBeNull();
     // A `/` inside a query or fragment is not a path segment (round-2 review #3).
     expect(originRepoName('https://example.invalid/unrelated.git?redirect=/Spinventory-V2-Official-App-Rebuild.git')).toBe('unrelated');
-    expect(originRepoName('https://github.com/maya/heddle.git#/Spinventory-Rebuild-Workspace')).toBe('heddle');
+    expect(originRepoName('https://github.com/example-org/heddle.git#/Spinventory-Rebuild-Workspace')).toBe('heddle');
     expect(qualityGateForRepository({ topLevel: '/x/clone', mainRoot: '/x/clone', originUrl: 'https://example.invalid/unrelated.git?redirect=/Spinventory-V2-Official-App-Rebuild.git' })).toBeNull();
-    expect(qualityGateForRepository({ topLevel: '/x/clone', mainRoot: '/x/clone', originUrl: 'git@github.com:maya/Spinventory-Rebuild-Workspace-fork.git' })).toBeNull();
-    expect(qualityGateForRepository({ topLevel: '/x/clone', mainRoot: '/x/clone', originUrl: 'git@github.com:maya/Spinventory-V2-Official-App-Rebuild.git' })).toBe('quality-gate');
+    expect(qualityGateForRepository({ topLevel: '/x/clone', mainRoot: '/x/clone', originUrl: 'git@github.com:example-org/Spinventory-Rebuild-Workspace-fork.git' })).toBeNull();
+    expect(qualityGateForRepository({ topLevel: '/x/clone', mainRoot: '/x/clone', originUrl: 'git@github.com:example-org/Spinventory-V2-Official-App-Rebuild.git' })).toBe('quality-gate');
   });
 });

@@ -33,7 +33,7 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
       --model <m>          the model id for --provider (e.g. cursor-grok-4.5-high)
       --task <text>        the sub-task prompt (or pipe via stdin)
       --cwd <path>         working directory for the worker (default: cwd)
-      --issue <SPI-n>      Linear issue this sub-task serves
+      --issue <ABC-123>    Linear issue this sub-task serves
       --agent <X>          dispatching orchestrator's fleet identity
       --skills a,b         replace the task class's default skill packs (worker-role stays)
       --mcp a,b            attach code-discovery MCP servers (e.g. memtrace)
@@ -70,7 +70,7 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
   heddle whoami [--json]         this process's bound identity (HEDDLE_AGENT / FLEET_AGENT / .fleet-agent) + worker context
   heddle doctor [--json] [--provider <p>]   verify harnesses/accounts/config; --provider runs only that provider's checks plus global config checks (exit 1 on any fail)
   heddle workers [--stale <hours>] [--json]   dispatches still in flight (--stale: only orphans older than N hours)
-  heddle ledger [--issue SPI-n] [--limit N] [--json]
+  heddle ledger [--issue ABC-123] [--limit N] [--json]
   heddle ledger finish <id> --error "<why>"   close an orphaned in-flight row (ok=0)
   heddle ledger show <id> [--json]             show one dispatch and its recorded worker output
   heddle ledger sweep [--dry-run] [--max-age-h N] [--json]   close orphans: age > N hours (default 24)

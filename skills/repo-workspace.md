@@ -1,6 +1,6 @@
-# Spinventory Workspace Repo Skill Pack
+# Consumer Project Workspace Repo Skill Pack
 
-Instructions for working inside the Spinventory workspace repository. This repository has no
+Instructions for working inside the consumer project workspace repository. This repository has no
 single unified npm gate or CI command.
 
 ## Verification
@@ -13,4 +13,4 @@ single unified npm gate or CI command.
 
 ## Checkout Boundary
 - Work only in the workspace repository and the cwd supplied by the dispatcher.
-- Never `cd` to, inspect, or run verification from any Spinventory app checkout.
+- Never `cd` to, inspect, or run verification from any consumer app checkout.
