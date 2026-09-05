@@ -21,5 +21,4 @@ Rules:
   `.git` inside cwd — and disables the network BY DEFAULT (the `net` capability re-enables it). A test
   failing only under the worker MAY be hitting one of those rather than a real bug — but it also may
   not; NAME it with its command so the orchestrator can tell which, don't assume. See docs/LANDMINES.md.)
-- Tests never live under `app/` (expo-router bundles `*.test` as a route and web-export goes red).
-  Put them in `components/` or the repo's test directories.
+- Test placement rules are the project's own — the operator pack states them.
