@@ -1,8 +1,10 @@
 import { readFileSync, existsSync, writeFileSync, unlinkSync, readdirSync, realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { basename, delimiter, dirname, join, resolve } from 'node:path';
+import { homedir } from 'node:os';
 import { withFileLock } from './matlock.js';
 import { gitRepositoryFor, type GitRepository } from './worktree.js';
+import { DEFAULT_PROJECTS_PATH, loadProjectRegistry, type Project } from './projects.js';
 
 /**
  * Skill-pack materializer.
@@ -46,7 +48,7 @@ export function packDirs(): string[] {
   // drive-letter path (C:\project\.heddle\packs) into two invalid directories (PR #34, 5 reviewers).
   const consumer = (process.env.HEDDLE_PACKS ?? '')
     .split(delimiter).map((d) => d.trim()).filter(Boolean);
-  return [...consumer, builtinPacksDir()];
+  return [...consumer, join(homedir(), '.heddle', 'packs'), builtinPacksDir()];
 }
 
 /** First directory on the search path that holds this pack, or null. */
@@ -123,21 +125,96 @@ export function withMandatoryPacks(skills: readonly string[] | undefined): strin
   return out;
 }
 
-/** The consumer app checkout, by layout: `<parent>/<dir>` — the only place `quality-gate` belongs. */
-const APP_CHECKOUT = { dir: 'Rebuild-Project-Root', parent: 'Spinventory-Rebuild-Official' } as const;
-/** Main-checkout folder name → that repository's gate pack (exact names only). */
-const GATE_BY_FOLDER_NAME: ReadonlyMap<string, string> = new Map([
+/** Heddle's own repositories remain built-in; every consumer identity comes from projects.json. */
+const BUILTIN_GATE_BY_FOLDER_NAME: ReadonlyMap<string, string> = new Map([
   ['heddle', 'repo-heddle-core'],
   ['heddle-dashboard', 'repo-heddle-dashboard'],
-  ['Spinventory-Rebuild-App', 'repo-workspace'],
 ]);
-/** `origin` repository name (the GitHub name) → gate pack; covers a renamed or relocated clone. */
-const GATE_BY_ORIGIN_NAME: ReadonlyMap<string, string> = new Map([
+const BUILTIN_GATE_BY_ORIGIN_NAME: ReadonlyMap<string, string> = new Map([
   ['heddle', 'repo-heddle-core'],
   ['heddle-dashboard', 'repo-heddle-dashboard'],
-  ['Spinventory-Rebuild-Workspace', 'repo-workspace'],
-  ['Spinventory-V2-Official-App-Rebuild', 'quality-gate'],
 ]);
+
+export interface GateMaps {
+  app: ReadonlyMap<string, { dir: string; parent: string; pack: string }>;
+  byFolderName: ReadonlyMap<string, string>;
+  byOriginName: ReadonlyMap<string, string>;
+}
+
+const appKey = (parent: string, dir: string) => `${parent}\0${dir}`;
+const warning = (message: string) => process.stderr.write(`heddle: ${message}\n`);
+
+function addGate(map: Map<string, string>, key: string, pack: string, project: Project, owners: Map<string, string>, path: string): void {
+  const owner = owners.get(key);
+  if (owner && owner !== project.name && map.get(key) !== pack) {
+    warning(`projects.json gates ${path} key ${JSON.stringify(key)} appears in both "${owner}" and "${project.name}"; using "${owner}"`);
+    return;
+  }
+  if (!owner) owners.set(key, project.name);
+  map.set(key, pack);
+}
+
+function stringMap(value: unknown, project: Project, path: string, add: (key: string, pack: string) => void): void {
+  if (value === undefined) return;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    warning(`projects.json project "${project.name}".gates.${path} must be an object; ignoring gates.${path}`);
+    return;
+  }
+  for (const [key, pack] of Object.entries(value)) {
+    if (typeof pack !== 'string' || !pack) {
+      warning(`projects.json project "${project.name}".gates.${path}.${key} must be a non-empty string; ignoring it`);
+      continue;
+    }
+    if (!packDirFor(pack)) {
+      warning(`projects.json project "${project.name}".gates.${path}.${key} names unknown pack "${pack}"`);
+      continue;
+    }
+    add(key, pack);
+  }
+}
+
+/** Loads built-ins plus the optional registry data. Any registry failure leaves only built-ins. */
+export function loadGateMaps(path = process.env.HEDDLE_PROJECTS?.trim() || DEFAULT_PROJECTS_PATH): GateMaps {
+  const folders = new Map(BUILTIN_GATE_BY_FOLDER_NAME);
+  const origins = new Map(BUILTIN_GATE_BY_ORIGIN_NAME);
+  const apps = new Map<string, { dir: string; parent: string; pack: string }>();
+  const folderOwners = new Map<string, string>();
+  const originOwners = new Map<string, string>();
+  const appOwners = new Map<string, string>();
+  try {
+    for (const project of loadProjectRegistry(path).projects) {
+      const gates = project.gates;
+      if (gates === undefined) continue;
+      if (!gates || typeof gates !== 'object' || Array.isArray(gates)) {
+        warning(`projects.json project "${project.name}".gates must be an object; ignoring gates`);
+        continue;
+      }
+      const app = gates.app;
+      if (app !== undefined) {
+        if (!app || typeof app !== 'object' || typeof app.dir !== 'string' || !app.dir ||
+          typeof app.parent !== 'string' || !app.parent || typeof app.pack !== 'string' || !app.pack) {
+          warning(`projects.json project "${project.name}".gates.app must contain non-empty dir, parent, and pack strings; ignoring gates.app`);
+        } else if (!packDirFor(app.pack)) {
+          warning(`projects.json project "${project.name}".gates.app names unknown pack "${app.pack}"`);
+        } else {
+          const key = appKey(app.parent, app.dir);
+          const owner = appOwners.get(key);
+          if (owner && owner !== project.name && apps.get(key)?.pack !== app.pack) {
+            warning(`projects.json gates app key ${JSON.stringify(key)} appears in both "${owner}" and "${project.name}"; using "${owner}"`);
+          } else {
+            if (!owner) appOwners.set(key, project.name);
+            apps.set(key, app);
+          }
+        }
+      }
+      stringMap(gates.byFolderName, project, 'byFolderName', (key, pack) => addGate(folders, key, pack, project, folderOwners, 'byFolderName'));
+      stringMap(gates.byOriginName, project, 'byOriginName', (key, pack) => addGate(origins, key, pack, project, originOwners, 'byOriginName'));
+    }
+  } catch (err) {
+    warning(`could not load project gates from ${path}; using built-ins only (${(err as Error).message})`);
+  }
+  return { app: apps, byFolderName: folders, byOriginName: origins };
+}
 
 /** The repository name in a remote URL (`…/owner/name.git`, `git@host:owner/name`), else null. */
 export function originRepoName(url: string | null): string | null {
@@ -168,13 +245,14 @@ export function originRepoName(url: string | null): string | null {
  * Substring and prefix matches are deliberately absent: an origin that merely CONTAINS a known name,
  * or a folder that starts with one, is not that repository.
  */
-export function qualityGateForRepository(repo: GitRepository | null): string | null {
+export function qualityGateForRepository(repo: GitRepository | null, maps: GateMaps = loadGateMaps()): string | null {
   if (!repo?.mainRoot) return null;
   const rootName = basename(repo.mainRoot);
-  if (rootName === APP_CHECKOUT.dir && basename(dirname(repo.mainRoot)) === APP_CHECKOUT.parent) return 'quality-gate';
-  const byFolder = GATE_BY_FOLDER_NAME.get(rootName) ?? null;
+  const app = maps.app.get(appKey(basename(dirname(repo.mainRoot)), rootName));
+  if (app) return app.pack;
+  const byFolder = maps.byFolderName.get(rootName) ?? null;
   const origin = originRepoName(repo.originUrl);
-  const byOrigin = origin ? GATE_BY_ORIGIN_NAME.get(origin) ?? null : null;
+  const byOrigin = origin ? maps.byOriginName.get(origin) ?? null : null;
   if (byFolder && origin && byOrigin !== byFolder) return null; // origin present but not corroborating — no claim
   return byFolder ?? byOrigin;
 }
@@ -214,8 +292,7 @@ export function resolveQualityGateForCwd(cwd: string, skills: readonly string[])
   // gate, chosen by its configuration and read by readPack ahead of the built-in — keep it. Only
   // heddle's built-in quality-gate, the consumer APP gate, is repository-resolved (codex P2, #95).
   if (!servesBuiltinQualityGate()) return [...skills];
-  const gate = qualityGateForRepository(gitRepositoryFor(cwd));
-  if (gate === 'quality-gate') return [...skills];
+  const gate = qualityGateForRepository(gitRepositoryFor(cwd), loadGateMaps());
   const swapped = skills.flatMap((pack) => pack === 'quality-gate' ? (gate ? [gate] : []) : [pack]);
   return swapped.filter((pack, i) => swapped.indexOf(pack) === i); // a caller may already name the repo gate
 }

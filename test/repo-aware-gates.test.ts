@@ -1,8 +1,10 @@
 import { copyFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { dispatch, planDispatch } from '../src/dispatch.js';
-import { builtinPacksDir, originRepoName, qualityGateForRepository } from '../src/skillpacks.js';
+import { builtinPacksDir, loadGateMaps, originRepoName, qualityGateForRepository, type GateMaps } from '../src/skillpacks.js';
+import { projectForAgent, projectForCwd } from '../src/projects.js';
+import { registryContent, replaceProjectInRawRegistry } from '../src/init-project.js';
 import { parentCheckoutOf } from '../src/worktree.js';
 import { fakeAdapter, IDENTITIES, initRepoFixture, useTempResources } from './helpers.js';
 
@@ -17,13 +19,43 @@ import { fakeAdapter, IDENTITIES, initRepoFixture, useTempResources } from './he
  * These fixtures therefore build real `git worktree add` worktrees: a subdirectory of a plain
  * `git init` repo resolves to the repo root and hides exactly that bug (the first draft's did).
  */
-const APP_TEXT = ["consumer app's canonical checkout", 'npm run gate', 'expo-router'];
+const APP_TEXT = ['CONSUMER-GATE-MARKER: acme app gate'];
 const NO_GATE = ['worker-role', 'worker-hygiene', 'family-codex'];
+const REGISTRY_MAPS: GateMaps = {
+  app: new Map([['Acme-App-Official\0App-Root', { parent: 'Acme-App-Official', dir: 'App-Root', pack: 'acme-app-gate' }]]),
+  byFolderName: new Map([['heddle', 'repo-heddle-core'], ['heddle-dashboard', 'repo-heddle-dashboard'], ['acme-workspace', 'repo-workspace']]),
+  byOriginName: new Map([['heddle', 'repo-heddle-core'], ['heddle-dashboard', 'repo-heddle-dashboard'], ['acme-workspace-origin', 'repo-workspace'], ['Acme-App-Rebuild', 'acme-app-gate']]),
+};
 
 const initRepo = initRepoFixture;
 
 describe('dispatch — repo-aware quality gates (HED-389)', () => {
   const { tempDir, tempLedger } = useTempResources('heddle-repo-aware-gate-');
+  const savedProjects = process.env.HEDDLE_PROJECTS;
+  const savedPacks = process.env.HEDDLE_PACKS;
+
+  beforeEach(() => {
+    const root = tempDir();
+    const packs = join(root, 'packs');
+    const registry = join(root, 'projects.json');
+    mkdirSync(packs, { recursive: true });
+    writeFileSync(join(packs, 'acme-app-gate.md'), `# Acme app gate\n${APP_TEXT[0]}\n`);
+    writeFileSync(registry, JSON.stringify({ schemaVersion: 1, projects: [{
+      name: 'Acme', workspaceRoots: [root], agentIds: ['A'], linearTeam: 'ACM', defaultRoom: '#acme', launcher: 'acme.sh',
+      gates: {
+        app: { parent: 'Acme-App-Official', dir: 'App-Root', pack: 'acme-app-gate' },
+        byFolderName: { 'acme-workspace': 'repo-workspace' },
+        byOriginName: { 'acme-workspace-origin': 'repo-workspace', 'Acme-App-Rebuild': 'acme-app-gate' },
+      },
+    }] }));
+    process.env.HEDDLE_PROJECTS = registry;
+    process.env.HEDDLE_PACKS = packs;
+  });
+
+  afterEach(() => {
+    if (savedProjects === undefined) delete process.env.HEDDLE_PROJECTS; else process.env.HEDDLE_PROJECTS = savedProjects;
+    if (savedPacks === undefined) delete process.env.HEDDLE_PACKS; else process.env.HEDDLE_PACKS = savedPacks;
+  });
 
   /**
    * Dispatch the DEFAULT editing class (bulk-mechanical: `[worker-role, quality-gate]` in
@@ -65,7 +97,7 @@ describe('dispatch — repo-aware quality gates (HED-389)', () => {
   });
 
   it('hands a workspace worker in a linked worktree the workspace gate (no origin needed)', async () => {
-    const cwd = initRepo(join(tempDir(), 'Spinventory-Rebuild-App'), '.worktrees/S-hed311', { linkedWorktree: true });
+    const cwd = initRepo(join(tempDir(), 'acme-workspace'), '.worktrees/S-hed311', { linkedWorktree: true });
     const { agents, skills, ledgerSkills } = await editingDispatch(cwd);
 
     expect(agents).toContain('### repo-workspace');
@@ -77,7 +109,7 @@ describe('dispatch — repo-aware quality gates (HED-389)', () => {
   });
 
   it('recognizes a differently-named clone by the EXACT origin repository name — never a substring', async () => {
-    const byOrigin = await editingDispatch(initRepo(join(tempDir(), 'local-workspace-name'), 'worker', { remote: 'git@github.com:example-org/Spinventory-Rebuild-Workspace.git' }));
+    const byOrigin = await editingDispatch(initRepo(join(tempDir(), 'local-workspace-name'), 'worker', { remote: 'git@github.com:example-org/acme-workspace-origin.git' }));
     expect(byOrigin.agents).toContain('### repo-workspace');
     expect(byOrigin.agents).not.toContain('### quality-gate');
     for (const text of APP_TEXT) expect(byOrigin.agents).not.toContain(text);
@@ -91,25 +123,25 @@ describe('dispatch — repo-aware quality gates (HED-389)', () => {
     expect(unnamed.skills).toEqual(NO_GATE);
 
     // An origin that merely CONTAINS a known name is not that repository (round-1 review #3).
-    const fork = await editingDispatch(initRepo(join(tempDir(), 'local-workspace-name'), 'worker', { remote: 'git@github.com:example-org/Spinventory-Rebuild-Workspace-fork.git' }));
+    const fork = await editingDispatch(initRepo(join(tempDir(), 'local-workspace-name'), 'worker', { remote: 'git@github.com:example-org/acme-workspace-origin-fork.git' }));
     expect(fork.skills).toEqual(NO_GATE);
     expect(fork.agents).not.toContain('### repo-');
   });
 
   it('keeps the app gate for the app repository — including its sibling-style linked worktrees', async () => {
     // The consumer project's layout: worktrees are SIBLINGS of the main checkout, not inside it.
-    const root = join(tempDir(), 'Spinventory-Rebuild-Official', 'Rebuild-Project-Root');
-    const { agents, skills, ledgerSkills } = await editingDispatch(initRepo(root, '../Rebuild-Project-Root.forms', { linkedWorktree: true }));
+    const root = join(tempDir(), 'Acme-App-Official', 'App-Root');
+    const { agents, skills, ledgerSkills } = await editingDispatch(initRepo(root, '../App-Root.forms', { linkedWorktree: true }));
 
-    expect(agents).toContain('### quality-gate');
+    expect(agents).toContain('### acme-app-gate');
     expect(agents).not.toContain('### repo-');
     for (const text of APP_TEXT) expect(agents).toContain(text);
-    expect(skills).toEqual(['worker-role', 'worker-hygiene', 'quality-gate', 'family-codex']);
-    expect(ledgerSkills).toBe('worker-role,worker-hygiene,quality-gate,family-codex');
+    expect(skills).toEqual(['worker-role', 'worker-hygiene', 'acme-app-gate', 'family-codex']);
+    expect(ledgerSkills).toBe('worker-role,worker-hygiene,acme-app-gate,family-codex');
 
     // Negative control — the same layout under the wrong parent is NOT the app checkout: the app
     // gate is dropped, which is what proves the case above is the layout rule and not a no-op.
-    const other = await editingDispatch(initRepo(join(tempDir(), 'Other-Org', 'Rebuild-Project-Root'), '../Rebuild-Project-Root.forms', { linkedWorktree: true }));
+    const other = await editingDispatch(initRepo(join(tempDir(), 'Other-Org', 'App-Root'), '../App-Root.forms', { linkedWorktree: true }));
     expect(other.skills).toEqual(NO_GATE);
     for (const text of APP_TEXT) expect(other.agents).not.toContain(text);
   });
@@ -156,7 +188,7 @@ describe('dispatch — repo-aware quality gates (HED-389)', () => {
 
   it('follows the cwd, never GIT_DIR / GIT_WORK_TREE in the environment (round-1 review #1)', async () => {
     const base = tempDir();
-    const appRoot = join(base, 'Spinventory-Rebuild-Official', 'Rebuild-Project-Root');
+    const appRoot = join(base, 'Acme-App-Official', 'App-Root');
     initRepo(appRoot, 'worker');
     const heddleCwd = initRepo(join(base, 'heddle'), '.worktrees/S-hed389', { linkedWorktree: true });
     // A git hook exports GIT_DIR; an orchestrator launched from one would inherit it. Point the env
@@ -174,7 +206,7 @@ describe('dispatch — repo-aware quality gates (HED-389)', () => {
       delete process.env.GIT_DIR; delete process.env.GIT_WORK_TREE;
       process.env.GIT_CONFIG_COUNT = '1';
       process.env.GIT_CONFIG_KEY_0 = 'remote.origin.url';
-      process.env.GIT_CONFIG_VALUE_0 = 'git@github.com:example-org/Spinventory-V2-Official-App-Rebuild.git';
+      process.env.GIT_CONFIG_VALUE_0 = 'git@github.com:example-org/Acme-App-Rebuild.git';
       const injected = await editingDispatch(initRepo(join(base, 'unknown-repo'), 'worker'));
       expect(injected.skills).toEqual(NO_GATE);
       for (const text of APP_TEXT) expect(injected.agents).not.toContain(text);
@@ -233,39 +265,82 @@ describe('dispatch — repo-aware quality gates (HED-389)', () => {
 });
 
 describe('qualityGateForRepository — identity rules (pure)', () => {
-  const app = '/x/Spinventory-Rebuild-Official/Rebuild-Project-Root';
+  const app = '/x/Acme-App-Official/App-Root';
 
   it('drops when the main checkout is unknowable, never keying on the worktree folder (round-1 review #2)', () => {
-    expect(qualityGateForRepository(null)).toBeNull();
-    expect(qualityGateForRepository({ topLevel: '/x/heddle', mainRoot: null, originUrl: null })).toBeNull();
-    expect(qualityGateForRepository({ topLevel: app, mainRoot: null, originUrl: null })).toBeNull();
+    expect(qualityGateForRepository(null, REGISTRY_MAPS)).toBeNull();
+    expect(qualityGateForRepository({ topLevel: '/x/heddle', mainRoot: null, originUrl: null }, REGISTRY_MAPS)).toBeNull();
+    expect(qualityGateForRepository({ topLevel: app, mainRoot: null, originUrl: null }, REGISTRY_MAPS)).toBeNull();
   });
 
   it('keys on the main checkout, not the worktree top level', () => {
-    expect(qualityGateForRepository({ topLevel: '/x/heddle/.worktrees/S-hed389', mainRoot: '/x/heddle', originUrl: null })).toBe('repo-heddle-core');
-    expect(qualityGateForRepository({ topLevel: `${app}.forms`, mainRoot: app, originUrl: null })).toBe('quality-gate');
-    expect(qualityGateForRepository({ topLevel: '/x/Spinventory-Rebuild-App.hed191', mainRoot: '/x/Spinventory-Rebuild-App', originUrl: null })).toBe('repo-workspace');
+    expect(qualityGateForRepository({ topLevel: '/x/heddle/.worktrees/S-hed389', mainRoot: '/x/heddle', originUrl: null }, REGISTRY_MAPS)).toBe('repo-heddle-core');
+    expect(qualityGateForRepository({ topLevel: `${app}.forms`, mainRoot: app, originUrl: null }, REGISTRY_MAPS)).toBe('acme-app-gate');
+    expect(qualityGateForRepository({ topLevel: '/x/acme-workspace.hed191', mainRoot: '/x/acme-workspace', originUrl: null }, REGISTRY_MAPS)).toBe('repo-workspace');
   });
 
   it('the app checkout keeps its gate whatever origin says; elsewhere folder and origin must agree (round-1 review #3)', () => {
-    expect(qualityGateForRepository({ topLevel: app, mainRoot: app, originUrl: 'git@github.com:example-org/Spinventory-Rebuild-Workspace.git' })).toBe('quality-gate');
-    expect(qualityGateForRepository({ topLevel: '/x/heddle', mainRoot: '/x/heddle', originUrl: 'https://github.com/example-org/heddle-dashboard.git' })).toBeNull();
-    expect(qualityGateForRepository({ topLevel: '/x/heddle', mainRoot: '/x/heddle', originUrl: 'https://github.com/example-org/heddle.git' })).toBe('repo-heddle-core');
-    expect(qualityGateForRepository({ topLevel: '/x/Spinventory-Rebuild-App-2', mainRoot: '/x/Spinventory-Rebuild-App-2', originUrl: null })).toBeNull(); // prefix is not identity
-    // A known folder whose origin is PRESENT but unrecognized is not that repository (codex P2, #95).
-    expect(qualityGateForRepository({ topLevel: '/x/heddle', mainRoot: '/x/heddle', originUrl: 'git@github.com:someone/other-project.git' })).toBeNull();
+    expect(qualityGateForRepository({ topLevel: app, mainRoot: app, originUrl: 'git@github.com:example-org/acme-workspace-origin.git' }, REGISTRY_MAPS)).toBe('acme-app-gate');
+    expect(qualityGateForRepository({ topLevel: '/x/heddle', mainRoot: '/x/heddle', originUrl: 'https://github.com/example-org/heddle-dashboard.git' }, REGISTRY_MAPS)).toBeNull();
+    expect(qualityGateForRepository({ topLevel: '/x/heddle', mainRoot: '/x/heddle', originUrl: 'https://github.com/example-org/heddle.git' }, REGISTRY_MAPS)).toBe('repo-heddle-core');
+    expect(qualityGateForRepository({ topLevel: '/x/acme-workspace-2', mainRoot: '/x/acme-workspace-2', originUrl: null }, REGISTRY_MAPS)).toBeNull(); // prefix is not identity
+    expect(qualityGateForRepository({ topLevel: '/x/heddle', mainRoot: '/x/heddle', originUrl: 'git@github.com:someone/other-project.git' }, REGISTRY_MAPS)).toBeNull();
   });
 
   it('matches origin by exact repository name, in every common URL form', () => {
-    expect(originRepoName('https://github.com/example-org/Spinventory-Rebuild-Workspace.git')).toBe('Spinventory-Rebuild-Workspace');
+    expect(originRepoName('https://github.com/example-org/acme-workspace-origin.git')).toBe('acme-workspace-origin');
     expect(originRepoName('git@github.com:example-org/heddle')).toBe('heddle');
     expect(originRepoName('ssh://git@github.com/example-org/heddle-dashboard.git/')).toBe('heddle-dashboard');
     expect(originRepoName(null)).toBeNull();
     // A `/` inside a query or fragment is not a path segment (round-2 review #3).
-    expect(originRepoName('https://example.invalid/unrelated.git?redirect=/Spinventory-V2-Official-App-Rebuild.git')).toBe('unrelated');
-    expect(originRepoName('https://github.com/example-org/heddle.git#/Spinventory-Rebuild-Workspace')).toBe('heddle');
-    expect(qualityGateForRepository({ topLevel: '/x/clone', mainRoot: '/x/clone', originUrl: 'https://example.invalid/unrelated.git?redirect=/Spinventory-V2-Official-App-Rebuild.git' })).toBeNull();
-    expect(qualityGateForRepository({ topLevel: '/x/clone', mainRoot: '/x/clone', originUrl: 'git@github.com:example-org/Spinventory-Rebuild-Workspace-fork.git' })).toBeNull();
-    expect(qualityGateForRepository({ topLevel: '/x/clone', mainRoot: '/x/clone', originUrl: 'git@github.com:example-org/Spinventory-V2-Official-App-Rebuild.git' })).toBe('quality-gate');
+    expect(originRepoName('https://example.invalid/unrelated.git?redirect=/Acme-App-Rebuild.git')).toBe('unrelated');
+    expect(originRepoName('https://github.com/example-org/heddle.git#/acme-workspace-origin')).toBe('heddle');
+    expect(qualityGateForRepository({ topLevel: '/x/clone', mainRoot: '/x/clone', originUrl: 'https://example.invalid/unrelated.git?redirect=/Acme-App-Rebuild.git' }, REGISTRY_MAPS)).toBeNull();
+    expect(qualityGateForRepository({ topLevel: '/x/clone', mainRoot: '/x/clone', originUrl: 'git@github.com:example-org/acme-workspace-origin-fork.git' }, REGISTRY_MAPS)).toBeNull();
+    expect(qualityGateForRepository({ topLevel: '/x/clone', mainRoot: '/x/clone', originUrl: 'git@github.com:example-org/Acme-App-Rebuild.git' }, REGISTRY_MAPS)).toBe('acme-app-gate');
+  });
+});
+
+describe('registry-backed gate maps', () => {
+  const { tempDir } = useTempResources('heddle-gate-registry-');
+  const project = (name: string, gates?: any) => ({
+    name, workspaceRoots: ['/tmp/acme'], agentIds: [name], linearTeam: 'ACM', defaultRoom: '#acme', launcher: 'acme.sh', gates,
+  });
+
+  it('keeps built-ins on no registry or invalid JSON and warns once for the invalid file', () => {
+    const missing = join(tempDir(), 'missing.json');
+    expect(qualityGateForRepository({ topLevel: '/x/heddle', mainRoot: '/x/heddle', originUrl: null }, loadGateMaps(missing))).toBe('repo-heddle-core');
+    expect(qualityGateForRepository({ topLevel: '/x/acme-workspace', mainRoot: '/x/acme-workspace', originUrl: null }, loadGateMaps(missing))).toBeNull();
+    const invalid = join(tempDir(), 'invalid.json'); writeFileSync(invalid, '{');
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    expect(qualityGateForRepository({ topLevel: '/x/heddle', mainRoot: '/x/heddle', originUrl: null }, loadGateMaps(invalid))).toBe('repo-heddle-core');
+    expect(stderr).toHaveBeenCalledTimes(1); expect(String(stderr.mock.calls[0][0])).toContain(invalid); stderr.mockRestore();
+  });
+
+  it('uses first duplicate keys, registry overrides, and degrades malformed gates without breaking projects', () => {
+    const path = join(tempDir(), 'projects.json');
+    writeFileSync(path, JSON.stringify({ schemaVersion: 1, projects: [
+      project('first', { byFolderName: { heddle: 'repo-workspace' } }),
+      project('second', { byFolderName: { heddle: 'quality-gate' } }),
+      project('bad', { byFolderName: { bad: 1 } }),
+    ] }));
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const maps = loadGateMaps(path);
+    expect(qualityGateForRepository({ topLevel: '/x/heddle', mainRoot: '/x/heddle', originUrl: null }, maps)).toBe('repo-workspace');
+    expect(stderr).toHaveBeenCalledTimes(2);
+    expect(projectForAgent({ schemaVersion: 1, projects: [project('bad', { byFolderName: { bad: 1 } })] }, 'bad')?.name).toBe('bad');
+    expect(projectForCwd({ schemaVersion: 1, projects: [project('bad', { byFolderName: { bad: 1 } })] }, '/tmp/acme/x')?.name).toBe('bad');
+    stderr.mockRestore();
+  });
+
+  it('preserves gates byte-for-byte while re-registering and never returns a registry pack on a miss', () => {
+    const gates = '"gates":{"byFolderName":{"acme":"repo-workspace"}}';
+    const source = `{"schemaVersion":1,"projects":[{"name":"toy","workspaceRoots":["/x"],"agentIds":["A"],"linearTeam":"X","defaultRoom":"#x","launcher":"x",${gates}}]}`;
+    const next = { name: 'toy', workspaceRoots: ['/x'], agentIds: ['A'], linearTeam: 'Y', defaultRoom: '#x', launcher: 'x', gates: { byFolderName: { acme: 'repo-workspace' } } };
+    expect(replaceProjectInRawRegistry(source, 'toy', next)).toContain(gates);
+    expect(registryContent({ schemaVersion: 1, projects: [next] }, source, next, next, 'toy')).toContain(gates);
+    for (const repo of [null, { topLevel: '/x/unknown', mainRoot: '/x/unknown', originUrl: null }, { topLevel: '/x/acme', mainRoot: null, originUrl: null }]) {
+      expect(qualityGateForRepository(repo, { app: new Map(), byFolderName: new Map(), byOriginName: new Map() })).toBeNull();
+    }
   });
 });

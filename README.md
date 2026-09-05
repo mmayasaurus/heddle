@@ -127,7 +127,8 @@ private, unpublished package, so these are **not** on your `PATH` after `npm ins
 dist/cli.js …`, as the MCP snippet above does).
 
 Framework-layer config lives under `~/.heddle/` (it spans projects, never a single repo):
-`accounts.json` (Claude accounts), `ledger.db` (dispatch/review ledger), `comms.db` (broker).
+`accounts.json` (Claude accounts), `ledger.db` (dispatch/review ledger), `comms.db` (broker), and
+`packs/` (operator skill packs, searched after `HEDDLE_PACKS` and before built-ins).
 Environment overrides:
 
 | var | what |
@@ -135,7 +136,7 @@ Environment overrides:
 | `HEDDLE_AGENT` | this session's orchestrator identity (e.g. `U`); also honors `FLEET_AGENT` or a `.fleet-agent` file |
 | `HEDDLE_ROUTING` | routing-table path (default `routing/routing.v0.yaml`) |
 | `HEDDLE_ACCOUNTS` | Claude accounts registry path (default `~/.heddle/accounts.json`) — cap-aware routing reads it |
-| `HEDDLE_PACKS` | extra skill-pack search dirs, `path.delimiter`-separated (`:` on POSIX, `;` on Windows); built-ins always last |
+| `HEDDLE_PACKS` | extra skill-pack search dirs, `path.delimiter`-separated (`:` on POSIX, `;` on Windows); then `~/.heddle/packs`, then built-ins |
 | `HEDDLE_COMMS_DB` | comms broker db (default `~/.heddle/comms.db`) |
 | `HEDDLE_LEDGER_DB` | dispatch/review ledger db (default `~/.heddle/ledger.db`) — comms server + rotator read it for lineage |
 

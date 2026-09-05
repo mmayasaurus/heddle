@@ -20,6 +20,9 @@ registry into the roster, chatroom, or launcher is separate follow-up work, not 
 the repos it describes. Same layer as `~/.heddle/accounts.json` (`src/capaware.ts`, the Claude
 account registry) and the ledger (`~/.heddle/ledger.db`).
 
+Operator gate packs may live in `~/.heddle/packs`; it is searched after `HEDDLE_PACKS` and before
+heddle's built-in packs.
+
 ## Schema
 
 ```json
