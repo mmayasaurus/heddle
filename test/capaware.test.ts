@@ -61,7 +61,7 @@ describe('cap-aware routing', () => {
 
   it('uses Cursor included-total for native models and identifies native model names', () => {
     const away = decision('second-opinion', { ...cursorCaps({ total: 95, api: 100 }), ...caps({ gemini: 4 }) });
-    expect(away).toMatchObject({ target: { provider: 'glm', model: 'glm-5.3' }, routedAwayForCap: true }); expect(decision('second-opinion', cursorCaps({ total: 20, api: 100 })).routeReason).toBe('cap:ok cursor included-total 20%');
+    expect(away).toMatchObject({ target: { provider: 'gemini', model: 'gemini-3.1-pro-high' }, routedAwayForCap: true }); expect(decision('second-opinion', cursorCaps({ total: 20, api: 100 })).routeReason).toBe('cap:ok cursor included-total 20%');
     expect(['cursor-grok-4.6-high', 'composer-2.5-fast', 'auto'].map(isCursorNativeModel)).toEqual([true, true, true]); expect(['kimi-k3-high', 'gpt-5.6-luna'].map(isCursorNativeModel)).toEqual([false, false]);
   });
 
