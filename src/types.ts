@@ -71,6 +71,6 @@ export interface WorkerResult {
 
 export interface WorkerAdapter {
   readonly name: string;
-  readonly provider: 'codex' | 'cursor' | 'claude' | 'gemini' | 'groq' | 'cerebras' | 'openrouter';
+  readonly provider: 'codex' | 'cursor' | 'claude' | 'gemini' | 'groq' | 'cerebras' | 'openrouter' | 'glm';
   dispatch(prompt: string, opts: DispatchOptions): Promise<WorkerResult>;
 }

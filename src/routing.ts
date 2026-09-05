@@ -45,7 +45,7 @@ export interface Route extends RouteTarget {
   /** HED-3: run assess_result on the worker's output and attach the assessment. */
   autoAssess: boolean;
   /** HED-3: ordered alternatives when the caller's `author_provider` matches the route (a reviewer must differ). */
-  reviewerPool?: { provider: string; model: string }[];
+  reviewerPool?: Array<{ provider: string; model: string; mcp?: string[] }>;
   /** HED-106 tier bounds for the expansion walk (auto-join tiers only). `minTier` = the cheapest tier
    *  the class tolerates when its own routes are dead (default T1); `maxTier` = the class author's
    *  pre-declared ceiling (default: the declared route's own tier — no silent ascent, "no new
@@ -241,7 +241,7 @@ export function resolveRoute(table: RoutingTable, taskClass: string): Route {
     autoAssess: node.auto_assess === true,
     reviewerPool: Array.isArray(node.reviewer_pool)
       ? (node.reviewer_pool as any[]).filter((e) => e && typeof e.provider === 'string' && typeof e.model === 'string')
-          .map((e) => ({ provider: e.provider as string, model: e.model as string }))
+          .map((e) => ({ provider: e.provider as string, model: e.model as string, mcp: listField(e, 'mcp', `task_classes.${taskClass}.reviewer_pool`) }))
       : undefined,
     minTier,
     maxTier,

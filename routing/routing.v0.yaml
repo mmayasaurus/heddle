@@ -82,6 +82,16 @@ providers:
     max_tokens_default: 32768
     quality_tier: dynamic-quality-allowlist
     last_verified: 2026-08-20
+  glm:
+    auth: zai-coding-plan-subscription
+    execution: headless
+    base_url: https://api.z.ai/api/coding/paas/v4  # NEVER the general /api/paas/v4 endpoint
+    key_env: ZAI_API_KEY
+    models: [glm-5.3, glm-5.3-flash]
+    max_tokens_default: 32768
+    quality_tier: workhorse
+    last_verified: 2026-09-05
+    notes: subscription class; 5-hour + weekly credit pools
   cursor:
     auth: cursor-subscription         # Max plan
     # ⚠️ TWO POOLS, and they are NOT interchangeable:
@@ -194,7 +204,7 @@ task_classes:
   second-opinion:           # independent diagnosis/review of a diff or plan (diversity valuable)
     provider: cursor
     model: cursor-grok-4.6-high   # Cursor-Models pool — does NOT touch the PR-review dollar pool
-    fallback: {provider: gemini, model: gemini-3.1-pro-high}
+    fallback: {provider: glm, model: glm-5.3}
     why: independent diagnosis/review of a diff or plan — diversity of model FAMILY is the point; Grok sits on the generous Cursor-Models pool. Give it a SELF-CONTAINED brief (no memtrace); expect 5-8 min (grok ran ~374-520s in the 2026-08-18 ledger), so pick it deliberately — for a SMALL diff use quick-alt-take (grok-medium) instead.
     skills: [worker-role]
     edits_code: false
@@ -236,7 +246,7 @@ task_classes:
     provider: claude
     model: haiku
     min_tier: T0            # HED-106: menial reading — the ladder may descend to the read-only T0 lanes
-    fallback: {provider: codex, model: gpt-5.6-luna}
+    fallback: {provider: glm, model: glm-5.3}
     why: doc reading, log triage, summarization — Haiku is the cheap Claude; never spend Sonnet/Opus reading logs
     skills: [worker-role]
     edits_code: false
@@ -251,6 +261,7 @@ task_classes:
   quick-alt-take:           # cheap fast alternative draft to compare against primary
     provider: cursor
     model: cursor-grok-4.6-medium
+    fallback: {provider: glm, model: glm-5.3}
     why: cheap second draft, and the cheap REVIEW variant for SMALL diffs — same Grok family as second-opinion at lower effort (grok-medium); prefer this over second-opinion when the diff is small (HED-79 retune 2026-08-18)
     skills: [worker-role]
     edits_code: false
@@ -263,6 +274,7 @@ task_classes:
       - {provider: cursor, model: cursor-grok-4.6-high}
       - {provider: codex, model: gpt-5.6-sol}
       - {provider: claude, model: opus}
+      - {provider: glm, model: glm-5.3, mcp: []} # HTTP reviewer: no MCP attachment path
     why: pre-PR adversarial review by another model family, read-only + find-only, with a test-quality lens (a toggle test is not a behavior test); the author fixes, the ledger scores reviewer pairs
     skills: [worker-role, adversarial-review]
     edits_code: false

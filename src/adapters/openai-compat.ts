@@ -35,7 +35,7 @@ export interface OpenAICompatProvider {
 }
 
 /** Configuration-only provider registry. OpenRouter model ids are selected dynamically by the caller. */
-export const PROVIDER_REGISTRY: Record<'groq' | 'cerebras' | 'openrouter', OpenAICompatProvider> = {
+export const PROVIDER_REGISTRY: Record<'groq' | 'cerebras' | 'openrouter' | 'glm', OpenAICompatProvider> = {
   groq: {
     baseUrl: 'https://api.groq.com/openai/v1', keyEnv: 'GROQ_API_KEY',
     models: { workhorse: 'openai/gpt-oss-120b', 'openai/gpt-oss-120b': 'openai/gpt-oss-120b', 'gpt-oss-20b': 'gpt-oss-20b', 'qwen3.6-27b': 'qwen3.6-27b' }, tokenParam: 'max_completion_tokens',
@@ -50,6 +50,12 @@ export const PROVIDER_REGISTRY: Record<'groq' | 'cerebras' | 'openrouter', OpenA
     baseUrl: 'https://openrouter.ai/api/v1', keyEnv: 'OPENROUTER_API_KEY', models: {}, tokenParam: 'max_completion_tokens',
     maxTokensDefault: 32768, qualityTier: 'dynamic-quality-allowlist', lastVerified: '2026-08-20',
   },
+  glm: {
+    // Z.ai Coding Plan keys are valid only here — NEVER use the general /api/paas/v4 endpoint.
+    baseUrl: 'https://api.z.ai/api/coding/paas/v4', keyEnv: 'ZAI_API_KEY',
+    models: { 'glm-5.3': 'glm-5.3', 'glm-5.3-flash': 'glm-5.3-flash', workhorse: 'glm-5.3' }, tokenParam: 'max_completion_tokens',
+    maxTokensDefault: 32768, qualityTier: 'workhorse', lastVerified: '2026-09-05',
+  },
 };
 
 interface ChatResponse {
@@ -60,10 +66,10 @@ interface ChatResponse {
 /** Generic HTTP worker for OpenAI Chat Completions-compatible providers. */
 export class OpenAICompatAdapter implements WorkerAdapter {
   readonly name: string;
-  readonly provider: 'groq' | 'cerebras' | 'openrouter';
+  readonly provider: 'groq' | 'cerebras' | 'openrouter' | 'glm';
   private readonly config: OpenAICompatProvider;
 
-  constructor(provider: 'groq' | 'cerebras' | 'openrouter') {
+  constructor(provider: 'groq' | 'cerebras' | 'openrouter' | 'glm') {
     this.name = provider;
     this.provider = provider;
     this.config = PROVIDER_REGISTRY[provider];

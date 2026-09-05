@@ -77,19 +77,15 @@ describe('dispatch — headless Claude workers', () => {
     expect(fake.calls[0].opts.systemPromptAppend).toContain('### code-discovery'); expect(fake.calls[0].opts.systemPromptAppend).not.toContain('### quality-gate'); expect(outcome.ok).toBe(true);
   });
 
-  it('passes enforceable Claude browse capabilities through, and net routes to the enforcing codex fallback (capability-fit)', async () => {
+  it('passes enforceable Claude browse capabilities through and refuses net when the GLM fallback cannot enforce it', async () => {
     const fake = fakeAdapter(undefined, { readAgents: false }); const ledger = tempLedger();
     const granted = await dispatch({ taskClass: 'research-summarize', prompt: 'x', cwd: tempDir(), identity: unbound, capabilities: ['browse'], accounts, caps: { claude: claudeCaps([{ id: 'acct1', used: 1 }]) } }, ledger, () => fake.adapter);
     expect(fake.calls[0].opts.capabilities).toEqual(['browse']); expect(ledger.recent(1)[0].capabilities).toBe('browse');
-    // claude cannot enforce `net` (no sandbox), but research-summarize's declared codex fallback can —
-    // capability-fit routing runs it there instead of a terminal refusal.
+    // GLM is intentionally an HTTP read-only fallback with no sandbox/network enforcement knob.
     const fit = await dispatch({ taskClass: 'research-summarize', prompt: 'x', cwd: tempDir(), identity: unbound, capabilities: ['net'], accounts, caps: { claude: claudeCaps([{ id: 'acct1', used: 1 }]) } }, ledger, () => fake.adapter);
-    expect(fit.ok).toBe(true);
-    expect(fit.refusal).toBeUndefined();
-    expect(fake.calls).toHaveLength(2);
-    expect(fake.calls[1].opts.model).toBe('gpt-5.6-luna');
-    expect(fake.calls[1].opts.capabilities).toEqual(['net']);
-    expect(ledger.recent(1)[0]).toMatchObject({ model: 'gpt-5.6-luna', capabilities: 'net', fell_back_from: 'claude/haiku (capability-unenforceable)' });
+    expect(fit.ok).toBe(false);
+    expect(fit.refusal).toMatchObject({ code: 'capability-denied' });
+    expect(fake.calls).toHaveLength(1);
   });
 
   it('stamps Claude worker environments with the worker marker and ledger dispatch id', async () => {
@@ -211,7 +207,7 @@ describe('regression PR#250 — Claude dispatches require an addressable registe
   // safety property still holds (we never run claude on a dead account; we run CODEX), but the old
   // 26%-failure refusal becomes a live route. The refusal is PRESERVED where there is no live lane:
   // a claude runtime-FALLBACK with no account, a pinned dead account, and a claude-only class (below).
-  it('walks a billing/logged-out claude PRIMARY to its declared codex fallback instead of refusing (HED-264)', async () => {
+  it('walks a billing/logged-out claude PRIMARY to its declared GLM fallback instead of refusing (HED-264)', async () => {
     const fake = fakeAdapter(undefined, { readAgents: false }); const ledger = tempLedger();
     const outcome = await dispatch({
       taskClass: 'research-summarize', prompt: 'x', cwd: tempDir(), identity: unbound, accounts: registry,
@@ -219,13 +215,13 @@ describe('regression PR#250 — Claude dispatches require an addressable registe
     }, ledger, () => fake.adapter);
 
     expect(outcome.ok).toBe(true); expect(outcome.refusal).toBeUndefined();
-    expect(fake.calls).toHaveLength(1); expect(fake.calls[0].opts.model).toBe('gpt-5.6-luna');
+    expect(fake.calls).toHaveLength(1); expect(fake.calls[0].opts.model).toBe('glm-5.3');
     expect(outcome.routeReason).toContain('cap:expand'); expect(outcome.routeReason).toContain('claude/haiku dead(no-account)');
-    expect(outcome.routeReason).toContain('codex/gpt-5.6-luna');
-    expect(ledger.recent(1)[0]).toMatchObject({ provider: 'codex', model: 'gpt-5.6-luna', ok: 1 });
+    expect(outcome.routeReason).toContain('glm/glm-5.3');
+    expect(ledger.recent(1)[0]).toMatchObject({ provider: 'glm', model: 'glm-5.3', ok: 1 });
   });
 
-  it('walks a fully logged-out claude PRIMARY to its declared codex fallback (HED-264)', async () => {
+  it('walks a fully logged-out claude PRIMARY to its declared GLM fallback (HED-264)', async () => {
     const fake = fakeAdapter(undefined, { readAgents: false }); const ledger = tempLedger();
     const outcome = await dispatch({
       taskClass: 'research-summarize', prompt: 'x', cwd: tempDir(), identity: unbound,
@@ -233,8 +229,8 @@ describe('regression PR#250 — Claude dispatches require an addressable registe
     }, ledger, () => fake.adapter);
 
     expect(outcome.ok).toBe(true); expect(outcome.refusal).toBeUndefined();
-    expect(fake.calls).toHaveLength(1); expect(fake.calls[0].opts.model).toBe('gpt-5.6-luna');
-    expect(ledger.recent(1)[0]).toMatchObject({ provider: 'codex', model: 'gpt-5.6-luna', ok: 1 });
+    expect(fake.calls).toHaveLength(1); expect(fake.calls[0].opts.model).toBe('glm-5.3');
+    expect(ledger.recent(1)[0]).toMatchObject({ provider: 'glm', model: 'glm-5.3', ok: 1 });
   });
 
   it('runs when a registered Claude account remains addressable', async () => {
@@ -269,14 +265,14 @@ describe('regression PR#250 — Claude dispatches require an addressable registe
     expect(nonClaude.ok).toBe(true); expect(codex.calls).toHaveLength(1);
   });
 
-  it('dry-run summary shows the HED-264 walk to the codex fallback (dispatch/plan parity, HED-250)', () => {
+  it('dry-run summary shows the HED-264 walk to the GLM fallback (dispatch/plan parity, HED-250)', () => {
     const plan = planDispatch({
       taskClass: 'research-summarize', prompt: 'x', cwd: tempDir(), identity: unbound,
       accounts: registry.map((account) => ({ ...account, loggedIn: false })), caps: { claude: claudeCaps([]) },
     });
 
     const summary = summarizePlan(plan);
-    expect(summary).toMatchObject({ would_run: 'codex/gpt-5.6-luna', routed_away_for_cap: true, refusal: null });
+    expect(summary).toMatchObject({ would_run: 'glm/glm-5.3', routed_away_for_cap: true, refusal: null });
     expect(String(summary.route_reason)).toContain('cap:expand');
   });
 

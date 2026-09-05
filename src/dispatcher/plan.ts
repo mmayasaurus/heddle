@@ -160,7 +160,7 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
             // attach THAT list (else pickReviewer selects it and validateWorkerMcp then hard-fails).
             // Skip → next capable reviewer, or refuse if none — never run a reviewer without discovery.
             // Validates the actual list, so `['serena']` on cursor is caught, not just gemini+memtrace.
-            const effMcp = req.mcp ?? route.mcp ?? [];
+            const effMcp = req.mcp ?? route.reviewerPool?.find((entry) => normalizeProvider(entry.provider) === provider && entry.model === model)?.mcp ?? route.mcp ?? [];
             if (effMcp.length > 0 && !mcpAttachable(provider, effMcp)) return 'cannot attach the class mcp';
             if (Array.isArray(cfg.models) && cfg.models.length && !cfg.models.includes(model)) return 'model not in provider list';
             return null;
@@ -168,7 +168,7 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
         : null;
       if (pick) {
         reviewerPick = pick;
-        target = { ...route, provider: pick.provider, model: pick.model };
+        target = { ...route, provider: pick.provider, model: pick.model, mcp: pick.mcp ?? route.mcp };
         // a fallback identical to the pick would just re-run the same reviewer — drop it
         if (fallback && fallback.provider === pick.provider && fallback.model === pick.model) fallback = undefined;
       }

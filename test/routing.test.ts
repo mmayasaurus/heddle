@@ -42,7 +42,7 @@ describe('routing.v0.yaml — shipped table invariants', () => {
     const targets: Array<{ label: string; provider: string; mcp?: string[]; capabilities?: string[] }> = [
       { label: 'primary', provider: r.provider, mcp: r.mcp, capabilities: r.capabilities },
       ...(r.fallback ? [{ label: 'fallback', provider: r.fallback.provider, mcp: r.fallback.mcp, capabilities: r.fallback.capabilities }] : []),
-      ...(r.reviewerPool ?? []).map((e, i) => ({ label: `reviewer_pool[${i}]`, provider: e.provider, mcp: r.mcp, capabilities: r.capabilities })),
+      ...(r.reviewerPool ?? []).map((e, i) => ({ label: `reviewer_pool[${i}]`, provider: e.provider, mcp: e.mcp ?? r.mcp, capabilities: r.capabilities })),
     ];
     for (const t of targets) {
       // Normalize (trim + lowercase) exactly as dispatch does before attach, so a cased YAML entry
@@ -141,6 +141,17 @@ describe('resolveRoute / directRoute — policy fences', () => {
 
   it('adversarial-review defaults to memtrace so a reviewer gets code discovery (HED-205)', () => {
     expect(resolveRoute(table, 'adversarial-review').mcp).toEqual(['memtrace']);
+  });
+
+  it('uses GLM only as a read-only alternative, never an implementation or scaffold provider', () => {
+    for (const taskClass of ['second-opinion', 'quick-alt-take', 'research-summarize']) {
+      expect(resolveRoute(table, taskClass).fallback).toMatchObject({ provider: 'glm', model: 'glm-5.3' });
+    }
+    expect(resolveRoute(table, 'adversarial-review').reviewerPool).toContainEqual({ provider: 'glm', model: 'glm-5.3', mcp: [] });
+    for (const taskClass of ['implementation', 'scaffold']) {
+      const route = resolveRoute(table, taskClass);
+      expect([route, route.fallback].filter(Boolean).map((target) => target!.provider)).not.toContain('glm');
+    }
   });
 
   it('rejects an unknown class and lists every known class in the message', () => {

@@ -25,6 +25,12 @@ describe('OpenAICompatAdapter', () => {
     expect(JSON.parse(alias.body).model).toBe('openai/gpt-oss-120b');
     const openrouter = new OpenAICompatAdapter('openrouter').buildRequest('hello', { ...opts, model: 'dynamic/provider-model' }, 'router-key');
     expect(JSON.parse(openrouter.body).model).toBe('dynamic/provider-model');
+    const glm = new OpenAICompatAdapter('glm').buildRequest('hello', { ...opts, model: 'workhorse' }, 'glm-key');
+    expect(glm).toEqual({
+      url: 'https://api.z.ai/api/coding/paas/v4/chat/completions',
+      headers: { Authorization: 'Bearer glm-key', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'glm-5.3', messages: [{ role: 'user', content: 'hello' }], max_completion_tokens: 32768 }),
+    });
   });
 
   it('maps a chat completion to WorkerResult', async () => {
