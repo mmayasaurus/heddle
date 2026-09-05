@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import type { GhRunner } from './pr-own.js';
+import { resolveRepoNwo, type GhRunner } from './pr-own.js';
 
 export type { GhRunner } from './pr-own.js';
 
@@ -13,7 +13,7 @@ export interface DispositionedReview {
 }
 
 export interface PrSweepData {
-  pr: { number: number; title: string; state: string; headSha: string };
+  pr: { number: number; title: string; state: string; headSha: string; lastCommit: string };
   comments: Array<{ author: string; createdAt: string; body: string; afterLastPush: boolean }>;
   reviews: DispositionedReview[];
   undispositionedReviewBodies: DispositionedReview[];
@@ -62,11 +62,23 @@ function paginatedField<T>(value: string, field: string): T[] {
     return Array.isArray(found) ? found as T[] : [];
   });
 }
-function isCodeScanningUnavailable(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-  return /code scanning.*(not enabled|disabled)|advanced security.*not enabled|must enable.*code scanning/i.test(message);
+export function isCodeScanningUnavailable(error: unknown): boolean {
+  const text = (error instanceof Error ? error.message : String(error)).toLowerCase().replace(/\s+/g, ' ').trim();
+  const gate1 = text.includes('code scanning') || text.includes('code security') || text.includes('advanced security');
+  const gate2 = ['not enabled', 'must be enabled', 'not been enabled', 'is disabled', 'has been disabled', 'disabled by policy'].some((phrase) => text.includes(phrase));
+  return gate1 && gate2;
 }
 function apiError(error: unknown): string { return error instanceof Error ? error.message : String(error); }
+function classifyCodeScanningBody(raw: string): PrSweepData['codeScanning'] {
+  try {
+    const parsed = parse<unknown>(raw);
+    return Array.isArray(parsed)
+      ? { status: 'ok', alerts: parsed }
+      : { status: 'error', alerts: [], error: 'code-scanning API returned a malformed non-array body' };
+  } catch (error) {
+    return { status: 'error', alerts: [], error: apiError(error) };
+  }
+}
 
 export function dispositionReceipts(comments: Array<{ body?: string }>): Set<string> {
   const receipts = new Set<string>();
@@ -98,7 +110,7 @@ export function computePrSweepVerdict(input: {
 
 function fail(error: string, pr: string): PrSweepResult {
   const data: PrSweepData = {
-    pr: { number: Number(pr) || 0, title: '', state: '', headSha: '' }, comments: [], reviews: [], undispositionedReviewBodies: [],
+    pr: { number: Number(pr) || 0, title: '', state: '', headSha: '', lastCommit: '' }, comments: [], reviews: [], undispositionedReviewBodies: [],
     threads: { total: 0, unresolved: [], overflow: false }, codeScanning: { status: 'error', alerts: [], error }, checks: { total: 0, nonGreen: [] },
     lateItems: [], mergeState: { mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN' }, clean: false, exitCode: 3,
   };
@@ -108,30 +120,24 @@ function fail(error: string, pr: string): PrSweepResult {
 export function runPrSweep(pr: string, cwd: string, gh: GhRunner = defaultGhRunner(cwd)): PrSweepResult {
   if (!/^\d+$/.test(pr)) return fail(`PR must be numeric, got '${pr}'`, pr);
   try {
-    const nwo = parse<{ nameWithOwner?: string }>(gh(['repo', 'view', '--json', 'nameWithOwner'])).nameWithOwner;
+    const nwo = resolveRepoNwo(cwd, gh);
     if (!nwo) return fail('not inside a gh-connected repo', pr);
-    const metadata = parse<{ number?: number; title?: string; state?: string; head?: { sha?: string }; mergeable?: boolean | null; mergeable_state?: string }>(gh(['api', `repos/${nwo}/pulls/${pr}`]));
+    const metadata = parse<{ number?: number; title?: string; state?: string; merged?: boolean; head?: { sha?: string }; mergeable?: boolean | null; mergeable_state?: string }>(gh(['api', `repos/${nwo}/pulls/${pr}`]));
     const commits = arrayJson<{ commit?: { committer?: { date?: string }; author?: { date?: string } } }>(gh(['api', `repos/${nwo}/pulls/${pr}/commits?per_page=100`, '--paginate', '--slurp']));
     const commentsRaw = arrayJson<ApiComment>(gh(['api', `repos/${nwo}/issues/${pr}/comments?per_page=100`, '--paginate', '--slurp']));
     const reviewsRaw = arrayJson<ApiReview>(gh(['api', `repos/${nwo}/pulls/${pr}/reviews?per_page=100`, '--paginate', '--slurp']));
     const [owner, repo] = nwo.split('/', 2);
     const threadsPayload = parse<{ data?: { repository?: { pullRequest?: { reviewThreads?: { totalCount?: number; nodes?: Array<{ isResolved?: boolean; isOutdated?: boolean; path?: string; comments?: { nodes?: Array<{ author?: { login?: string }; body?: string }> } }> } } } } }>(gh(['api', 'graphql', '-f', 'query=query($owner:String!,$repo:String!,$pr:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$pr){reviewThreads(first:100){totalCount nodes{isResolved isOutdated path comments(first:1){nodes{author{login} body}}}}}}}', '-F', `owner=${owner}`, '-F', `repo=${repo}`, '-F', `pr=${pr}`]));
 
-    let alerts: unknown[] = [];
-    let codeScanning: PrSweepData['codeScanning'] = { status: 'ok', alerts };
+    let codeScanning: PrSweepData['codeScanning'];
     try {
-      alerts = arrayJson<unknown>(gh(['api', `repos/${nwo}/code-scanning/alerts?pr=${pr}&state=open&per_page=100`]));
-      codeScanning = { status: 'ok', alerts };
+      codeScanning = classifyCodeScanningBody(gh(['api', `repos/${nwo}/code-scanning/alerts?pr=${pr}&state=open&per_page=100`]));
     } catch (firstError) {
-      try {
-        alerts = arrayJson<unknown>(gh(['api', `repos/${nwo}/code-scanning/alerts?pr=${pr}&state=open&per_page=100`]));
-        codeScanning = { status: 'ok', alerts };
-      } catch (secondError) {
-        const error = apiError(secondError);
-        codeScanning = isCodeScanningUnavailable(secondError) || isCodeScanningUnavailable(firstError)
-          ? { status: 'unavailable', alerts: [], error }
-          : { status: 'error', alerts: [], error };
-      }
+      if (isCodeScanningUnavailable(firstError)) codeScanning = { status: 'unavailable', alerts: [], error: apiError(firstError) };
+      else try {
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2_000);
+        codeScanning = classifyCodeScanningBody(gh(['api', `repos/${nwo}/code-scanning/alerts?pr=${pr}&state=open&per_page=100`]));
+      } catch (secondError) { codeScanning = { status: 'error', alerts: [], error: apiError(secondError) }; }
     }
 
     const headSha = metadata.head?.sha ?? '';
@@ -162,13 +168,16 @@ export function runPrSweep(pr: string, cwd: string, gh: GhRunner = defaultGhRunn
     const lateItems = [...comments.filter((comment) => comment.afterLastPush).map((comment) => `comment by ${comment.author}`), ...reviews.filter((review) => review.afterLastPush).map((review) => `review by ${review.author}`)];
     const mergeState = { mergeable: metadata.mergeable === true ? 'MERGEABLE' : metadata.mergeable === false ? 'CONFLICTING' : 'UNKNOWN', mergeStateStatus: (metadata.mergeable_state ?? 'unknown').toUpperCase() };
     const verdict = computePrSweepVerdict({ unresolvedThreadCount: unresolved.length, threadOverflow: total > nodes.length, openAlertCount: codeScanning.alerts.length, codeScanningError: codeScanning.status === 'error' });
-    const data: PrSweepData = { pr: { number: metadata.number ?? Number(pr), title: metadata.title ?? '', state: (metadata.state ?? '').toUpperCase(), headSha }, comments, reviews, undispositionedReviewBodies, threads: { total, unresolved, overflow: total > nodes.length }, codeScanning, checks: { total: checkRuns.length + statuses.length, nonGreen }, lateItems, mergeState, clean: verdict.clean, exitCode: verdict.exitCode };
+    const lastCommit = commits.map((commit) => commit.commit?.committer?.date ?? commit.commit?.author?.date ?? '').filter(Boolean).at(-1) ?? '';
+    const state = metadata.merged ? 'MERGED' : (metadata.state ?? '').toUpperCase();
+    const data: PrSweepData = { pr: { number: metadata.number ?? Number(pr), title: metadata.title ?? '', state, headSha, lastCommit }, comments, reviews, undispositionedReviewBodies, threads: { total, unresolved, overflow: total > nodes.length }, codeScanning, checks: { total: checkRuns.length + statuses.length, nonGreen }, lateItems, mergeState, clean: verdict.clean, exitCode: verdict.exitCode };
     return { text: render(data, verdict.failures), data, exitCode: verdict.exitCode };
   } catch (error) { return fail(`failed to fetch PR #${pr}: ${apiError(error)}`, pr); }
 }
 
 function render(data: PrSweepData, failures: string[]): string {
-  const lines = [`══ PR #${data.pr.number} — ${data.pr.title}  [${data.pr.state}]`, `   HEAD ${data.pr.headSha.slice(0, 12)}`, '', `── (a) Issue comments: ${data.comments.length}`];
+  // Ownership reporting and marker flags are intentionally omitted from this generic CLI port.
+  const lines = [`══ PR #${data.pr.number} — ${data.pr.title}  [${data.pr.state}]`, `   HEAD ${data.pr.headSha.slice(0, 12)}   last commit ${data.pr.lastCommit || '?'}`, '', `── (a) Issue comments: ${data.comments.length}`];
   for (const comment of data.comments) lines.push(`   • ${comment.author}  ${comment.createdAt}${comment.afterLastPush ? '  ⏰ AFTER last push' : ''}`, `     ${excerpt(comment.body)}`);
   lines.push('', `── (b) Reviews: ${data.reviews.length}`);
   for (const review of data.reviews) lines.push(`   • ${review.author}  ${review.state}  ${review.submittedAt}  ${[review.afterLastPush ? '⏰ AFTER last push' : '', review.dispositioned ? '✓ dispositioned (receipt on record)' : review.body ? '📝 NON-EMPTY BODY — read it' : ''].filter(Boolean).join(' ')}`, ...(review.body ? [`     ${excerpt(review.body)}`] : []));

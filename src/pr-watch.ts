@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import type { GhRunner } from './pr-own.js';
+import { resolveRepoNwo, type GhRunner } from './pr-own.js';
 
 export type { GhRunner } from './pr-own.js';
 
@@ -10,7 +10,7 @@ export interface PrWatchOptions {
   repo?: string;
   seed?: boolean;
   reset?: boolean;
-  /** Injectable for tests; defaults to PR_WATCH_STATE_DIR or ~/.heddle/pr-watch. */
+  /** Injectable for tests; defaults to HEDDLE_PR_WATCH_STATE_DIR or ~/.heddle/pr-watch. */
   stateDir?: string;
   gateCheck?: string;
 }
@@ -49,7 +49,7 @@ export function hasSeenKey(contents: string, key: string): boolean {
 
 function stateDirectory(options: PrWatchOptions): string {
   // This pack is repo-agnostic: it must not inherit Spinventory's ~/.claude state location.
-  return options.stateDir ?? process.env.PR_WATCH_STATE_DIR ?? join(homedir(), '.heddle', 'pr-watch');
+  return options.stateDir ?? process.env.HEDDLE_PR_WATCH_STATE_DIR ?? process.env.PR_WATCH_STATE_DIR ?? join(homedir(), '.heddle', 'pr-watch');
 }
 function parse<T>(raw: string): T { return JSON.parse(raw) as T; }
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error); }
@@ -62,8 +62,7 @@ export function runPrWatch(pr: string, options: PrWatchOptions, cwd: string, gh:
 
   let repo = options.repo?.trim() ?? '';
   if (!repo) {
-    try { repo = parse<{ nameWithOwner?: string }>(gh(['repo', 'view', '--json', 'nameWithOwner'])).nameWithOwner?.trim() ?? ''; }
-    catch { repo = ''; }
+    repo = resolveRepoNwo(cwd, gh) ?? '';
   }
   if (!repo || !repo.includes('/')) {
     return { code: 2, lines: [], data: { pr: Number(pr), repo: '', sha: '?', emitted: [], seeded: Boolean(options.seed) }, error: 'pr-watch: no repo (pass --repo owner/repo or run inside a repo)' };
@@ -71,19 +70,24 @@ export function runPrWatch(pr: string, options: PrWatchOptions, cwd: string, gh:
 
   const dir = stateDirectory(options);
   const stateFile = formatWatchStateFile(dir, repo, pr);
+  let stateError: string | undefined;
   try {
     mkdirSync(dir, { recursive: true });
     if (options.reset || !existsSync(stateFile)) writeFileSync(stateFile, '');
-  } catch (error) {
-    return { code: 1, lines: [], data: { pr: Number(pr), repo, sha: '?', emitted: [], seeded: Boolean(options.seed), stateFile }, error: `pr-watch: state file error: ${message(error)}` };
-  }
-
-  let seen = readFileSync(stateFile, 'utf8');
+  } catch (error) { stateError = message(error); }
+  let seen = '';
+  if (!stateError) try { seen = readFileSync(stateFile, 'utf8'); } catch (error) { stateError = message(error); }
   const lines: string[] = [];
+  if (stateError) lines.push(`[watch-error] state read/append failed (${stateError}) — continuing without durable dedup`);
   const emit = (key: string, display: string): void => {
-    if (hasSeenKey(seen, key)) return;
-    appendFileSync(stateFile, `${key}\n`);
-    seen += `${key}\n`;
+    if (!stateError && hasSeenKey(seen, key)) return;
+    if (!stateError) try {
+      appendFileSync(stateFile, `${key}\n`);
+      seen += `${key}\n`;
+    } catch (error) {
+      stateError = message(error);
+      lines.push(`[watch-error] state read/append failed (${stateError}) — continuing without durable dedup`);
+    }
     if (!options.seed) lines.push(display);
   };
 

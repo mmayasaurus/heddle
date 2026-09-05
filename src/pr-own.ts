@@ -26,22 +26,22 @@ export interface PrOwnResult {
 }
 
 export type GhRunner = (args: string[]) => string;
+export type GitRunner = (args: string[]) => string;
 
 function pathHash(path: string): string {
   return createHash('sha256').update(resolve(path)).digest('hex').slice(0, 8);
 }
 
 /**
- * Worktrees already have a filesystem-unique lane name. A bare checkout needs its branch name;
- * main additionally carries a path suffix because main is the known cross-repository collision.
+ * Worktrees already have a filesystem-unique lane name. Every other checkout uses its immutable
+ * filesystem path: branch names are mutable and collide across repositories.
  */
 export function deriveOwnerId({ topLevel, branch, override }: OwnerIdInput): string {
   if (override?.trim()) return override.trim();
   const normalized = resolve(topLevel);
   const match = normalized.match(/(?:^|\/)\.worktrees\/([^/]+)(?:\/|$)/);
   if (match?.[1]) return match[1];
-  if (!branch) return pathHash(normalized);
-  return branch === 'main' ? `main-${pathHash(normalized)}` : branch;
+  return pathHash(normalized);
 }
 
 export function markerBody(owner: string, since: string, heartbeat: string): string {
@@ -58,7 +58,8 @@ export function parseMarker(body: string): PrOwnerMarker | null {
 
 function nowIso(): string { return new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'); }
 function staleHours(): number {
-  const parsed = Number(process.env.HEDDLE_PR_OWN_STALE_HOURS ?? '4');
+  const raw = process.env.HEDDLE_PR_OWN_STALE_HOURS?.trim();
+  const parsed = Number(raw || '4');
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : 4;
 }
 function ageHours(heartbeat: string): number {
@@ -78,6 +79,21 @@ export function defaultGhRunner(cwd: string): GhRunner {
 
 function gitText(cwd: string, args: string[]): string | null {
   try { return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch { return null; }
+}
+
+export function defaultGitRunner(cwd: string): GitRunner {
+  return (args) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+}
+
+/** Resolve the git remote first so GraphQL is only a fallback. */
+export function resolveRepoNwo(cwd: string, gh: GhRunner, git: GitRunner = defaultGitRunner(cwd)): string | null {
+  const read = (args: string[]): string => { try { return git(args).trim(); } catch { return ''; } };
+  const resolved = read(['config', '--get', 'remote.origin.gh-resolved']);
+  if (resolved.includes('/')) return resolved;
+  const remote = read(['config', '--get', 'remote.origin.url']).replace(/\.git$/, '').replace(/^.*github\.com[/:]/, '');
+  if (remote.includes('/')) return remote;
+  try { return (JSON.parse(gh(['repo', 'view', '--json', 'nameWithOwner'])) as { nameWithOwner?: string }).nameWithOwner?.trim() || null; }
+  catch { return null; }
 }
 
 export function ownerIdForCwd(cwd: string, override = process.env.HEDDLE_PR_OWNER): string {
@@ -114,6 +130,7 @@ export function runPrOwn(command: string | undefined, pr: string | undefined, cw
     return failOpen('usage: heddle pr own {whoami|claim <pr#>|check <pr#>|release <pr#>|mine}');
   }
   if (command !== 'mine' && !pr) return failOpen(`usage: heddle pr own ${command} <pr#>`);
+  if (command !== 'mine' && !/^\d+$/.test(pr!)) return failOpen(`usage: heddle pr own ${command} <pr#>`);
 
   try {
     if (command === 'check') {
@@ -138,17 +155,17 @@ export function runPrOwn(command: string | undefined, pr: string | undefined, cw
           return { ...result(3, '', { verdict: 'REFUSED', pr: Number(pr), owner: marker.owner, ageHours: age }), error: `REFUSED — PR #${pr} is owned by '${marker.owner}' (fresh, ${age}h). STAND DOWN or coordinate with Maya.` };
         }
         if (marker.owner === me) since = marker.since;
-        if (marker.owner === 'released') gh(['pr', 'comment', pr!, '--body', `♻️ Adopting PR #${pr} — released by its prior owner, now owned by '${me}'.`]);
-        else if (marker.owner !== me) gh(['pr', 'comment', pr!, '--body', `♻️ Reclaiming PR #${pr} — prior owner '${marker.owner}' heartbeat was ${age}h stale (>= ${staleHours()}h). Now owned by '${me}'.`]);
-        const nwo = gh(['repo', 'view', '--json', 'nameWithOwner']);
-        const nameWithOwner = (JSON.parse(nwo) as { nameWithOwner?: string }).nameWithOwner;
-        if (id && nameWithOwner) {
-          try {
+        // PATCH-or-new-marker is best-effort: no existing-marker step may strand a claim.
+        try {
+          if (marker.owner === 'released') gh(['pr', 'comment', pr!, '--body', `♻️ Adopting PR #${pr} — released by its prior owner, now owned by '${me}'.`]);
+          else if (marker.owner !== me) gh(['pr', 'comment', pr!, '--body', `♻️ Reclaiming PR #${pr} — prior owner '${marker.owner}' heartbeat was ${age}h stale (>= ${staleHours()}h). Now owned by '${me}'.`]);
+          const nameWithOwner = resolveRepoNwo(cwd, gh);
+          if (id && nameWithOwner) {
             gh(['api', `repos/${nameWithOwner}/issues/comments/${id}`, '-X', 'PATCH', '-f', `body=${markerBody(me, since, now)}`]);
             ensureLabel(gh); addLabel(gh, pr!);
             return result(0, `OK — PR #${pr} owned by '${me}' (heartbeat bumped ${now})`, { pr: Number(pr), owner: me, since, heartbeat: now });
-          } catch { /* Fall through to a new marker, matching the shell helper. */ }
-        }
+          }
+        } catch { /* Fall through to a new marker, matching the shell helper. */ }
       }
       ensureLabel(gh); addLabel(gh, pr!);
       gh(['pr', 'comment', pr!, '--body', markerBody(me, since, now)]);

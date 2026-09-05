@@ -3,6 +3,7 @@ import {
   computePrSweepVerdict,
   dispositionReceipts,
   isDispositionedReview,
+  isCodeScanningUnavailable,
   runPrSweep,
   type GhRunner,
 } from '../src/pr-sweep.js';
@@ -80,5 +81,39 @@ describe('PR sweep', () => {
 
   it('computes a mechanical failure from open code-scanning alerts', () => {
     expect(computePrSweepVerdict({ unresolvedThreadCount: 0, threadOverflow: false, openAlertCount: 1, codeScanningError: false }).clean).toBe(false);
+  });
+
+  it.each([
+    'Advanced Security must be enabled for this repository to use code scanning.',
+    'Code scanning has not been enabled for this repository.',
+    'Code security is disabled by policy.',
+    'Advanced Security has been disabled for this repository.',
+  ])('recognizes GitHub not-enabled wording: %s', (error) => {
+    expect(isCodeScanningUnavailable(new Error(error))).toBe(true);
+  });
+
+  it.each(['no analysis found', 'resource not accessible'])('does not treat %s as unavailable', (error) => {
+    expect(isCodeScanningUnavailable(new Error(error))).toBe(false);
+  });
+
+  it('fails closed for a malformed successful code-scanning response', () => {
+    const result = runPrSweep('7', '/repo', ghFor({ alerts: { nope: true } as unknown as unknown[] }));
+    expect(result.exitCode).toBe(2);
+    expect(result.data.codeScanning.status).toBe('error');
+  });
+
+  it('passes by silence for a not-enabled code-scanning error without retrying', () => {
+    const gh = ghFor();
+    const result = runPrSweep('7', '/repo', (args) => args.join(' ').includes('code-scanning/alerts') ? (() => { throw new Error('Advanced Security must be enabled for this repository to use code scanning.'); })() : gh(args));
+    expect(result.exitCode).toBe(0);
+    expect(result.data.codeScanning.status).toBe('unavailable');
+  });
+
+  it('renders a merged REST PR and its last commit timestamp', () => {
+    const gh = ghFor();
+    const result = runPrSweep('7', '/repo', (args) => args.join(' ') === 'api repos/acme/widgets/pulls/7'
+      ? JSON.stringify({ number: 7, title: 'Sweep me', state: 'closed', merged: true, head: { sha: 'abcdef1234567890' }, mergeable: true, mergeable_state: 'clean' }) : gh(args));
+    expect(result.text).toContain('[MERGED]');
+    expect(result.text).toContain('last commit 2026-08-28T11:00:00Z');
   });
 });

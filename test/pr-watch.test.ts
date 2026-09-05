@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -62,6 +62,15 @@ describe('PR watch', () => {
     expect(runPrWatch('7', { repo: 'acme/widgets', stateDir: dir }, '/repo', gh).lines).toEqual([]);
   });
 
+  it('emits review state and timestamp, and re-emits a later review by the same author', () => {
+    const dir = stateDir();
+    const first = runPrWatch('7', { repo: 'acme/widgets', stateDir: dir }, '/repo', ghFor({ reviews: [review] }));
+    const later = { ...review, submittedAt: '2026-08-28T12:01:00Z' };
+    const second = runPrWatch('7', { repo: 'acme/widgets', stateDir: dir }, '/repo', ghFor({ reviews: [review, later] }));
+    expect(first.lines).toContain('[review] bot COMMENTED @2026-08-28T12:00:00Z');
+    expect(second.lines).toContain('[review] bot COMMENTED @2026-08-28T12:01:00Z');
+  });
+
   it('seeds current items silently and emits a genuinely new item later', () => {
     const dir = stateDir();
     expect(runPrWatch('7', { repo: 'acme/widgets', stateDir: dir, seed: true }, '/repo', ghFor({ threads: [thread] })).lines).toEqual([]);
@@ -79,6 +88,14 @@ describe('PR watch', () => {
   it('surfaces a failed channel as a watch error', () => {
     const result = runPrWatch('7', { repo: 'acme/widgets', stateDir: stateDir() }, '/repo', ghFor({ fail: 'reviews' }));
     expect(result.lines).toEqual(expect.arrayContaining([expect.stringContaining('[watch-error] reviews query failed (gh)')]));
+  });
+
+  it('continues with a watch error when state storage cannot be initialized', () => {
+    const file = join(stateDir(), 'not-a-directory');
+    writeFileSync(file, 'file');
+    const result = runPrWatch('7', { repo: 'acme/widgets', stateDir: file }, '/repo', ghFor({ threads: [thread] }));
+    expect(result.code).toBe(0);
+    expect(result.lines).toEqual(expect.arrayContaining([expect.stringContaining('[watch-error] state read/append failed'), '[thread] reviewer src/a.ts:12 id=T_1']));
   });
 
   it('keys gate conclusions by SHA so the same conclusion at a new head re-emits', () => {
