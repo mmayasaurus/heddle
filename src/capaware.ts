@@ -488,12 +488,16 @@ export function adviseClaudeAccount(caps: ProviderCaps | undefined, accounts: Cl
     .filter((a) => a.overageEnabled !== false);
   // Prefer this session's own account; otherwise the first capped account that can bill.
   let red = redRows.find((a) => a.id === cur?.id) ?? redRows[0] ?? null;
-  // Single-account / provider-only snapshot (finding 1): no per-account row cleared the bar, but the
-  // provider-level 5h snapshot is FRESH (usable) at/over the cap and this session's account can bill.
-  if (!red && cur && usable && caps && caps.fiveHour.usedPercentage !== null && caps.fiveHour.usedPercentage >= OVERAGE_RED_PCT) {
-    const curRow = caps.accounts.find((a) => a.id === cur.id);
-    const curOverage = curRow?.overageEnabled ?? cur.overageEnabled ?? null;
-    if (curOverage !== false) red = { id: cur.id, used: caps.fiveHour.usedPercentage as number, spend: curRow?.overageSpend ?? null, overageEnabled: curOverage };
+  // Provider-only fallback (finding 1) — kept deliberately NARROW after the verify round (ledger 844):
+  // fire ONLY when the mirror EXPLICITLY binds the provider-level 5h snapshot to THIS session's account
+  // (activeAccount === cur) AND cur has no per-account row of its own. Otherwise the top-level number is
+  // a different account's, an aggregate, or claude.json's last-rendered value (HED-262) — it must never
+  // be attributed to cur, nor override cur's own fresh measurement.
+  if (!red && cur && usable && caps && caps.activeAccount === cur.id
+      && !caps.accounts.some((a) => a.id === cur.id)
+      && caps.fiveHour.usedPercentage !== null && caps.fiveHour.usedPercentage >= OVERAGE_RED_PCT
+      && cur.overageEnabled !== false) {
+    red = { id: cur.id, used: caps.fiveHour.usedPercentage as number, spend: null, overageEnabled: cur.overageEnabled ?? null };
   }
   const overageAlert = red ? { accountId: red.id, spend: red.spend, used: red.used } : null;
   const line = best && current && best.id === current.id

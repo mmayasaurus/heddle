@@ -159,14 +159,26 @@ describe('regression PR#HED-443 — Claude overage safeguards', () => {
     expect(advice.line).toContain('OVERAGE BILLING ACTIVE on billing');
   });
 
-  it('falls back to the provider-level 5h snapshot for THIS session when no per-account row exists (finding 1)', () => {
-    const advice = adviseClaudeAccount({ ...fresh('claude', 100), accounts: [] }, [account(true)], {});
-    expect(advice.overageAlert).toEqual({ accountId: 'acct1', spend: null, used: 100 });
-    expect(advice.line).toContain('⛔ REAL MONEY');
+  it('provider-only fallback fires ONLY when the mirror binds the snapshot to this session (finding 1)', () => {
+    // activeAccount === cur and no per-account row for cur → attribute the provider-level 100% to cur.
+    const bound = adviseClaudeAccount({ ...fresh('claude', 100), accounts: [], activeAccount: 'acct1' }, [account(true)], {});
+    expect(bound.overageAlert).toEqual({ accountId: 'acct1', spend: null, used: 100 });
+    expect(bound.line).toContain('⛔ REAL MONEY');
+    // a confirmed overage-off session account stays silent even when bound.
+    const off = adviseClaudeAccount({ ...fresh('claude', 100), accounts: [], activeAccount: 'acct1' }, [account(false)], {});
+    expect(off.overageAlert).toBeNull();
   });
 
-  it('the provider-only fallback stays silent for a confirmed overage-off session account (finding 1)', () => {
-    const advice = adviseClaudeAccount({ ...fresh('claude', 100), accounts: [] }, [account(false)], {});
+  it('provider-only fallback does NOT misattribute another account snapshot to this session (verify, ledger 844)', () => {
+    // The top-level 100% belongs to activeAccount 'acct2'; this session is 'acct1' → no alert for acct1.
+    const advice = adviseClaudeAccount({ ...fresh('claude', 100), accounts: [], activeAccount: 'acct2' }, [account(true)], {});
+    expect(advice.overageAlert).toBeNull();
+  });
+
+  it('provider-only fallback does NOT override this session own fresh below-cap row (verify, ledger 844)', () => {
+    // cur 'acct1' is really at 20%; the top-level 100% is an aggregate / another account → no false alert.
+    const caps: ProviderCaps = { ...fresh('claude', 100), accounts: [row('acct1', 20, true)], activeAccount: 'acct1' };
+    const advice = adviseClaudeAccount(caps, [account(true)], {});
     expect(advice.overageAlert).toBeNull();
     expect(advice.line).not.toContain('⛔ REAL MONEY');
   });
