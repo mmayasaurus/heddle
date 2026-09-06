@@ -343,6 +343,21 @@ describe('init-project', () => {
     expect(readFileSync(join(opts.dir, '.claude', 'commands', 'heddle-gate.md'))).toEqual(readFileSync(source));
   });
 
+  it('seeds the generic lifecycle commands from assets/commands and copies their bytes exactly (HED-478)', () => {
+    const opts = options(tempDir());
+    const plan = planInstall(opts);
+    expect(plan.steps.filter((step) => step.action === 'create').map((step) => step.step)).toEqual(expect.arrayContaining([
+      'command:startup.md', 'command:closeout.md', 'command:handoff.md', 'command:usage.md',
+    ]));
+    applyInstall(plan);
+    const assetsDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'assets', 'commands');
+    for (const file of ['startup.md', 'closeout.md', 'handoff.md', 'usage.md']) {
+      expect(readFileSync(join(opts.dir, '.claude', 'commands', file))).toEqual(readFileSync(join(assetsDir, file)));
+    }
+    // Seeded once, never rewritten: a second plan reports every command step as skip.
+    expect(planInstall(opts).steps.filter((step) => step.step.startsWith('command:')).every((step) => step.action === 'skip')).toBe(true);
+  });
+
   describe('regression PR#91 — installer safety and lossless registry updates', () => {
     it('rejects home and filesystem-root targets before any write', () => {
       const opts = options(tempDir());

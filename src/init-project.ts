@@ -296,6 +296,20 @@ function renderGateStep(dir: string, dryRun: boolean): InstallStep {
   const path = join(dir, '.claude', 'commands', 'heddle-gate.md');
   return existsSync(path) ? { step: 'heddle-gate', path, action: 'skip', reason: 'exists' } : stepFor(path, 'heddle-gate', readFileSync(installerAsset('.claude', 'commands', 'heddle-gate.md'), 'utf8'), dryRun, false);
 }
+// Generic, tenant-neutral lifecycle slash commands (HED-478): seeded into the consumer's
+// `.claude/commands/` — one file each, skip-if-present, exactly like /heddle-gate. Sourced from
+// heddle's `assets/commands/` (NOT its own fleet-specific `.claude/commands/{startup,closeout}.md`,
+// which are fleet-internal and never ship); `assets/` is inside the public-scrub scan so these stay
+// tenant-clean.
+const LIFECYCLE_COMMANDS = ['startup.md', 'closeout.md', 'handoff.md', 'usage.md'] as const;
+function renderLifecycleCommandSteps(dir: string, dryRun: boolean): InstallStep[] {
+  return LIFECYCLE_COMMANDS.map((file) => {
+    const path = join(dir, '.claude', 'commands', file);
+    return existsSync(path)
+      ? { step: `command:${file}`, path, action: 'skip', reason: 'exists' }
+      : stepFor(path, `command:${file}`, readFileSync(installerAsset('assets', 'commands', file), 'utf8'), dryRun, false);
+  });
+}
 function registryStep(input: InstallOptions, dir: string, state: any, details: any, dryRun: boolean): InstallStep {
   const projectName = details.prior?.name ?? details.name;
   const project = details.prior
@@ -324,7 +338,7 @@ export function planInstall(input: InstallOptions): InstallPlan {
   const state = registryState(homeDir);
   const details = registrationDetails(input, dir, state.registry, state.raw);
   const dryRun = input.dryRun === true;
-  const steps = [canonicalStep(canonical), renderSettingsStep(dir, canonical, dryRun), ...renderRulesSteps(dir, canonical, dryRun), renderMcpStep(dir, dryRun), renderIgnoreStep(dir, dryRun), renderGateStep(dir, dryRun), registryStep(input, dir, state, details, dryRun), enforceMarkerStep(input, dir, homeDir, dryRun)];
+  const steps = [canonicalStep(canonical), renderSettingsStep(dir, canonical, dryRun), ...renderRulesSteps(dir, canonical, dryRun), renderMcpStep(dir, dryRun), renderIgnoreStep(dir, dryRun), renderGateStep(dir, dryRun), ...renderLifecycleCommandSteps(dir, dryRun), registryStep(input, dir, state, details, dryRun), enforceMarkerStep(input, dir, homeDir, dryRun)];
   return { options: { ...input, dir, canonical, name: details.name, homeDir }, steps };
 }
 
