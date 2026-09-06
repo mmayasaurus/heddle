@@ -423,11 +423,13 @@ try {
         usageError('release: --source-ref needs a git ref');
         break;
       }
-      const result = releaseStandalone({ outDir, sourceRef, initGit: has('--init-git'), verify: has('--verify') });
-      out(json, result, () => result.ok
+      const result = releaseStandalone({
+        outDir, sourceRef, initGit: has('--init-git'), verify: has('--verify'),
+      });
+      const text = json ? JSON.stringify(result, null, 2) : result.ok
         ? `Standalone snapshot generated: ${outDir}\nsource commit: ${result.sourceCommit}\nship set: ${result.shipSetHash}`
-        : `heddle release: ${result.error}`);
-      process.exit(result.ok ? 0 : 1);
+        : `heddle release: ${result.error}`;
+      process.stdout.write(text + '\n', () => process.exit(result.ok ? 0 : 1));
       break;
     }
 

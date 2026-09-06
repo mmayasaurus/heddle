@@ -1,10 +1,10 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { cpSync, existsSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import { standaloneReadme } from './readme.js';
 import { copyShipSet, extractShipSet } from './shipset.js';
-import { scanFiles } from './scrub.js';
+import { credentialPatterns, scanFiles } from './scrub.js';
 
 export type StandaloneOptions = {
   outDir: string; sourceRef?: string; initGit?: boolean; verify?: boolean; sourceDir?: string;
@@ -12,19 +12,19 @@ export type StandaloneOptions = {
 export type StandaloneResult = { ok: boolean; error?: string; sourceCommit?: string; shipSetHash?: string };
 
 export function releaseStandalone(options: StandaloneOptions): StandaloneResult {
-  const outDir = options.outDir;
+  const outDir = resolve(options.outDir);
   if (existsSync(outDir)) return { ok: false, error: `destination already exists: ${outDir}` };
   const tempDir = `${outDir}.tmp-${process.pid}`;
   if (existsSync(tempDir)) return { ok: false, error: `temporary destination already exists: ${tempDir}` };
   try {
-    return generate(options, tempDir);
+    return generate(options, outDir, tempDir);
   } catch (error) {
     rmSync(tempDir, { recursive: true, force: true });
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
 }
 
-function generate(options: StandaloneOptions, tempDir: string): StandaloneResult {
+function generate(options: StandaloneOptions, outDir: string, tempDir: string): StandaloneResult {
   const sourceRef = options.sourceRef ?? 'HEAD';
   const extracted = extractShipSet(options.sourceDir ?? process.cwd(), sourceRef);
   try {
@@ -35,7 +35,7 @@ function generate(options: StandaloneOptions, tempDir: string): StandaloneResult
     const shipSetHash = writeRelease(tempDir, extracted.sourceCommit, sourceRef);
     if (options.verify) verifySnapshot(tempDir);
     if (options.initGit) initializeGit(tempDir, extracted.sourceCommit);
-    renameSync(tempDir, options.outDir);
+    renameSync(tempDir, outDir);
     return { ok: true, sourceCommit: extracted.sourceCommit, shipSetHash };
   } finally {
     rmSync(extracted.dir, { recursive: true, force: true });
@@ -45,12 +45,15 @@ function generate(options: StandaloneOptions, tempDir: string): StandaloneResult
 export function checkStandaloneOutput(root: string): { ok: boolean; issues: string[] } {
   const files = outputFiles(root).map((path) => ({ path, contents: readFileSync(join(root, path), 'utf8') }));
   const scrub = scanFiles(files);
+  const credentialPaths = files
+    .filter(({ path }) => credentialPatterns.some((pattern) => pattern.test(path)))
+    .map(({ path }) => `${path}: [path name carries a credential-shaped value]`);
   const artifacts = files.map(({ path }) => path).filter(isUiArtifact).map((path) => `UI artifact: ${path}`);
   const directories = ['src-tauri', 'dashboard', 'ui', 'docs/fleet']
     .filter((path) => existsSync(join(root, path)));
   const directoryIssues = directories
     .map((path) => `${path === 'docs/fleet' ? 'forbidden directory' : 'UI artifact'}: ${path}/`);
-  const issues = [...scrub.offendingLines, ...artifacts, ...directoryIssues];
+  const issues = [...scrub.offendingLines, ...credentialPaths, ...artifacts, ...directoryIssues];
   return { ok: !issues.length, issues };
 }
 
@@ -98,6 +101,17 @@ function initializeGit(root: string, sourceCommit: string): void {
 }
 
 function verifySnapshot(root: string): void {
+  const verifyDir = `${root}.verify-${process.pid}`;
+  if (existsSync(verifyDir)) throw new Error(`verification destination already exists: ${verifyDir}`);
+  try {
+    cpSync(root, verifyDir, { recursive: true });
+    verifySnapshotCopy(verifyDir);
+  } finally {
+    rmSync(verifyDir, { recursive: true, force: true });
+  }
+}
+
+function verifySnapshotCopy(root: string): void {
   const steps = [
     ['npm ci', ['ci', '--ignore-scripts']], ['npm run build', ['run', 'build']], ['npm test', ['test']],
   ] as const;

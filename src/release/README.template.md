@@ -7,9 +7,11 @@ coordinating work, not a hosted service.
 ## Install
 
 ```sh
-git clone … && npm ci && npm run build
+git clone <repository-url> && npm ci && npm run build
 node dist/cli.js doctor
 ```
+
+Replace `<repository-url>` with wherever the snapshot is published.
 
 ## Providers
 

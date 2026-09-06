@@ -1,11 +1,12 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { createHash } from 'node:crypto';
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { delimiter, dirname, join, relative, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { releaseStandalone } from '../src/release/standalone.js';
 import { useTempResources } from './helpers.js';
 
-describe('heddle release --standalone', () => {
+describe('regression PR#119 — standalone snapshot generator review findings', () => {
   const { tempDir } = useTempResources('heddle-standalone-');
 
   it('generates the CLI-only ship set deterministically', () => {
@@ -30,6 +31,8 @@ describe('heddle release --standalone', () => {
     }
     const readme = readFileSync(join(first, 'README.md'), 'utf8');
     expect(readme).toContain('generated from the heddle source repository by `heddle release --standalone`');
+    expect(readme).toContain('git clone <repository-url> && npm ci && npm run build');
+    expect(readme).toContain('Replace `<repository-url>` with wherever the snapshot is published.');
     expect(readme).not.toContain('spin' + 'ventory');
     const release = JSON.parse(readFileSync(join(first, 'RELEASE.json'), 'utf8'));
     expect(release).toMatchObject({
@@ -54,6 +57,73 @@ describe('heddle release --standalone', () => {
     expect(existsSync(`${destination}.tmp-${process.pid}`)).toBe(false);
   });
 
+  it('rejects credential-shaped file names without touching the destination', () => {
+    const root = tempDir();
+    const destination = join(root, 'destination');
+    const name = `test/${'g' + 'sk_'}${'a'.repeat(40)}.md`;
+    const source = snapshotSource(root, { [name]: 'harmless contents' });
+
+    const result = releaseStandalone({ outDir: destination, sourceDir: source });
+
+    expect(result).toMatchObject({ ok: false });
+    expect(result.error).toContain('[path name carries a credential-shaped value]');
+    expect(existsSync(destination)).toBe(false);
+    expect(existsSync(`${resolve(destination)}.tmp-${process.pid}`)).toBe(false);
+  });
+
+  it('records peeled commits for lightweight and annotated tags', () => {
+    const root = tempDir();
+    const source = snapshotSource(root);
+    execFileSync('git', ['tag', 'lightweight'], { cwd: source });
+    execFileSync('git', ['-c', 'user.name=test', '-c', 'user.email=test@example.com',
+      'tag', '-a', 'annotated', '-m', 'annotated'], { cwd: source });
+
+    for (const tag of ['lightweight', 'annotated']) {
+      const expected = execFileSync('git', ['rev-parse', `${tag}^{commit}`], {
+        cwd: source, encoding: 'utf8',
+      }).trim();
+      const output = join(root, tag);
+      const result = releaseStandalone({ outDir: output, sourceDir: source, sourceRef: tag });
+      expect(result).toMatchObject({ ok: true, sourceCommit: expected });
+      expect(JSON.parse(readFileSync(join(output, 'RELEASE.json'), 'utf8')).sourceCommit).toBe(expected);
+    }
+  });
+
+  it('verifies a disposable copy without changing the shipped hash', () => {
+    const root = tempDir();
+    const bin = join(root, 'bin');
+    const npm = join(bin, 'npm');
+    const output = join(root, 'snapshot');
+    mkdirSync(bin);
+    writeFileSync(npm, '#!/bin/sh\nmkdir -p node_modules dist\nexit 0\n');
+    chmodSync(npm, 0o755);
+    const originalPath = process.env.PATH;
+    process.env.PATH = `${bin}${delimiter}${originalPath ?? ''}`;
+    try {
+      const result = releaseStandalone({ outDir: output, sourceDir: snapshotSource(root), verify: true });
+      const release = JSON.parse(readFileSync(join(output, 'RELEASE.json'), 'utf8')) as { shipSetHash: string };
+      expect(result.ok).toBe(true);
+      expect(existsSync(join(output, 'node_modules'))).toBe(false);
+      expect(existsSync(join(output, 'dist'))).toBe(false);
+      expect(snapshotHash(output)).toBe(release.shipSetHash);
+    } finally {
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+    }
+  });
+
+  it('resolves relative destinations to the same absolute output path', () => {
+    const absolute = join(tempDir(), 'snapshot');
+    const relativeOutput = relative(process.cwd(), absolute);
+    const source = snapshotSource(tempDir());
+
+    expect(releaseStandalone({ outDir: relativeOutput, sourceDir: source }).ok).toBe(true);
+    expect(releaseStandalone({ outDir: absolute, sourceDir: source })).toMatchObject({
+      ok: false, error: `destination already exists: ${absolute}`,
+    });
+    expect(existsSync(absolute)).toBe(true);
+  });
+
   it('initializes one local snapshot commit without a remote', () => {
     const output = join(tempDir(), 'snapshot');
     const source = snapshotSource(tempDir());
@@ -70,6 +140,13 @@ function fileList(root: string, prefix = ''): string[] {
     const path = join(prefix, entry.name);
     return entry.isDirectory() ? fileList(root, path) : [path];
   }).sort();
+}
+
+function snapshotHash(root: string): string {
+  const lines = fileList(root).filter((path) => path !== 'RELEASE.json').map((path) => (
+    `${path}\n${createHash('sha256').update(readFileSync(join(root, path))).digest('hex')}`
+  ));
+  return createHash('sha256').update(lines.join('\n')).digest('hex');
 }
 
 function snapshotSource(root: string, additions: Record<string, string> = {}): string {

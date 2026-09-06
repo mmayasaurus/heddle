@@ -16,7 +16,9 @@ export function extractShipSet(sourceDir: string, sourceRef: string): { dir: str
   const tarPath = join(dir, 'source.tar');
   writeFileSync(tarPath, archive);
   execFileSync('tar', ['-xf', tarPath, '-C', dir]);
-  const sourceCommit = execFileSync('git', ['rev-parse', sourceRef], { cwd: sourceDir, encoding: 'utf8' }).trim();
+  const sourceCommit = execFileSync('git', ['rev-parse', `${sourceRef}^{commit}`], {
+    cwd: sourceDir, encoding: 'utf8',
+  }).trim();
   return { dir, sourceCommit };
 }
 
