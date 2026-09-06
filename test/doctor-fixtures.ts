@@ -60,11 +60,15 @@ guards: {never_via_cursor: []}
 export function config(
   models = { cursor: 'cursor-grok-4.6-high-fast', gemini: 'gemini-3.7-flash-high' },
   options: { cursorFallback?: string; laneDefaults?: string } = {},
-): { routing: string; lanes: string; projects: string; accounts: string } {
+): DoctorDeps['paths'] & { routing: string; lanes: string; projects: string; accounts: string } {
   const dir = resources.tempDir();
   const paths = {
     routing: join(dir, 'routing.yaml'), lanes: join(dir, 'lanes.yaml'),
     projects: join(dir, 'projects.json'), accounts: join(dir, 'accounts.json'),
+    // Point comms + the operator token at this temp dir (both nonexistent unless a test provisions
+    // them) so no runDoctor() opens the operator's real ~/.heddle/comms.db (which CommsLog would
+    // WAL/migrate) or reads the real operator token — HED-463 review (high) + cursor bugbot.
+    comms: join(dir, 'comms.db'), operatorToken: join(dir, 'operator.token'),
   };
   const cursorFallback = options.cursorFallback
     ? `\n    fallback:\n      provider: cursor\n      model: ${options.cursorFallback}`
@@ -84,8 +88,19 @@ export function fakeDeps(
   paths = config(),
   overrides: Partial<DoctorDeps> = {},
 ): Partial<DoctorDeps> {
+  const { paths: overridePaths, ...restOverrides } = overrides;
+  const dir = resources.tempDir();
   return {
-    paths,
+    // Force comms + the operator token to nonexistent temp paths, injected BEFORE the caller's paths
+    // so a paths override that omits them (e.g. the HEDDLE_ACCOUNTS / ROUTING / LANES subsets below)
+    // can never fall through to the real ~/.heddle comms.db / operator token — commsCheck runs in
+    // every runDoctor() (HED-463 round-2 review). An explicit comms/operatorToken still wins (spread
+    // last), and routing/lanes/accounts/projects are untouched so their env-resolution tests hold.
+    paths: {
+      comms: join(dir, 'comms.db'),
+      operatorToken: join(dir, 'operator.token'),
+      ...(overridePaths ?? paths),
+    },
     now: () => new Date('2026-09-10T12:00:00Z'),
     env: {},
     execFile: async (cmd, args) => {
@@ -112,7 +127,7 @@ export function fakeDeps(
       }
       throw new Error(`unexpected probe: ${key}`);
     },
-    ...overrides,
+    ...restOverrides,
   };
 }
 

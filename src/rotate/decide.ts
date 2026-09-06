@@ -91,8 +91,8 @@ export function decideRotation(
   // idle-account visibility now flows through the keeper anchors in this same merged source, a
   // persistently `unknown`/empty result here can mean the KEEPER is down (stale anchors) or the MIRROR
   // is down — not necessarily that the accounts are exhausted.
-  if (capsUsable && caps.activeAccount === null && caps.source === 'claude-tap') {
-    return { action: 'unknown', current: null, usedPct: null, reason: 'usable tap-only caps but no authoritative active account (mirror absent/stale) — cannot identify the fleet account to rotate' };
+  if (capsUsable && caps.activeAccount === null && (caps.source === 'claude-tap' || caps.source === 'claude-oauth')) {
+    return { action: 'unknown', current: null, usedPct: null, reason: 'usable tap/oauth-poll caps but no authoritative active account (mirror absent/stale) — cannot identify the fleet account to rotate' };
   }
   // The FLEET's active account, from the tap (authoritative), NOT the rotator's own CLAUDE_CONFIG_DIR
   // — the rotator is a standalone process whose env account is unrelated to the fleet's. Fall back to
