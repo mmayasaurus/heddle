@@ -65,7 +65,7 @@ workers + models into the operator's terminal statusline.
 
 ## Policy invariants (enforced in code, not just docs)
 
-1. Subscriptions only — adapters never accept API keys.
+1. Never metered overage — adapters accept keys only for no-overage billing classes (free-tier/prepaid/subscription-quota); pay-per-token is refused.
 2. Never route a model through a middleman when a direct subscription exists (e.g. no Claude/GPT/
    Gemini ids through the Cursor adapter — enforced by an allowlist check).
 3. Metered pools get route-away guards; on-demand overage is never triggered.

@@ -68,11 +68,7 @@ lands, use the built-checkout flow above.
 
 ## The rules that shape everything
 
-1. **Subscriptions only.** Every execution path is a subscription-authenticated CLI: Claude models
-   via interactive Claude Code sessions and their in-session subagents; GPT models via `codex exec`
-   (ChatGPT plan); Gemini models via `agy` (Antigravity CLI, Google plan); supplemental models
-   (Kimi K3, Composer, Grok, GLM, …) via `cursor-agent` (Cursor plan's included pool). No API keys
-   in any execution path, ever.
+1. **Never metered overage.** Every execution path bills against a subscription OR a no-overage key pool (free-tier / prepaid-credit / subscription-quota) — never per-token API billing. A pay-per-token account is refused at dispatch (operator override, default off). `src/env.ts` gates a provider's key into a worker by the account's billing class and strips every inherited billing-switch var. Execution paths use subscription CLIs — Claude models via interactive Claude Code sessions and their in-session subagents, GPT models via `codex exec` (ChatGPT plan), Gemini models via `agy` (Antigravity CLI, Google plan), and supplemental models (Kimi K3, Composer, Grok, GLM, …) via `cursor-agent` (Cursor plan's included pool) or free/prepaid key pools (e.g. Groq, OpenRouter credits) when the account's billing class carries no overage.
    **Corollary — we drive each vendor's own official binary, never a third-party client wearing
    its credentials.** Google's Antigravity FAQ, for instance, prohibits using third-party software
    with an Antigravity login (suspension/termination grounds) while its own docs demonstrate
@@ -91,9 +87,7 @@ lands, use the built-checkout flow above.
 4. **Ownership is external and canonical.** Issue tracking (Linear) and PR ownership live in the
    consumer project's existing systems; Heddle links its sub-task ledger to them, never replaces
    them.
-5. **Route away, never overage.** Metered-pool providers (Cursor "Other Models") get a guard
-   threshold; when a pool nears exhaustion, work routes elsewhere rather than incurring on-demand
-   charges.
+5. **Route away, never overage.** Metered/open-billing pools get a guard threshold; when a pool nears exhaustion, work routes elsewhere before on-demand or overage charges are incurred.
 
 ## Layout
 

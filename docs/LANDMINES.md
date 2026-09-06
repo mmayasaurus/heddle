@@ -300,3 +300,5 @@ flags churn monthly.
 - Output schemas are all different — one parser per adapter, no shared "result JSON" assumption.
 - All model IDs in this repo are snapshots. Adapters must tolerate unknown-model errors and fall
   back per the routing table.
+- **Provider billing class must be verified per-account:** A "free" tier can silently become metered; check the account's real billing status before classing it as free-tier/prepaid.
+- **Env-repoint providers (GLM/Kimi):** These providers run Claude Code under `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN`, which `src/env.ts` allows ONLY as a per-dispatch override for an env-repoint account — never inherited from the environment or configured via `settings.json`.

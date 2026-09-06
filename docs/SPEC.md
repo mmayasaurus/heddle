@@ -29,10 +29,7 @@ Repo: `github.com/<your fork>` (private). Runtime: Node 22 + TypeScript, zero-na
 
 ## 1. Hard constraints & the trilemma
 
-1. **Subscriptions only — never per-token API billing.** Enforced in code (`src/env.ts` strips
-   every API-key/base-URL/cloud-provider env var from worker processes and refuses them as
-   overrides — because each vendor treats an API key as a silent switch off the subscription, with
-   no prompt in headless mode).
+1. **Never metered overage.** Every execution path bills against a subscription OR a no-overage key pool (free-tier / prepaid-credit / subscription-quota) — never per-token API billing. Enforced in code (`src/env.ts` gates by billing class, allowing subscription + free-tier/prepaid/subscription-quota and refusing pay-per-token; strips inherited billing-switch vars from worker processes because each vendor treats an API key as a silent switch off the subscription, with no prompt in headless mode).
 2. **Official vendor CLIs as subprocesses only.** We drive each vendor's own sanctioned binary. We
    REJECTED the omp/OpenChamber approach (a third-party client reimplementing provider OAuth) on
    ToS/ban-risk grounds — it's the pattern that got the Gemini OAuth plugin's users banned, and
@@ -104,7 +101,7 @@ All live-tested this session unless noted. Commits on `main`.
   per-server `default_tools_approval_mode="approve"`; cursor needs `--approve-mcps --force`.
   memtrace + serena also pre-approved globally in `~/.codex/config.toml` (helps all codex sessions).
 - **Effort control**: `--effort` mapped per provider; verified codex rejects invalid / accepts valid.
-- **Subscription-billing guard** (`src/env.ts`): verified strips API keys, refuses them as overrides.
+- **Subscription-billing guard** (`src/env.ts`): verified gates by billing class (strips inherited billing switches; allows a no-overage account's key; refuses pay-per-token).
 - **Account rotation**: verified two distinct Codex accounts via `CODEX_HOME`.
 
 ---
