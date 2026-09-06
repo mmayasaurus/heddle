@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { run } from '../src/adapters/subprocess.js';
+import { run, GRACE_MS } from '../src/adapters/subprocess.js';
 import { useTempResources } from './helpers.js';
 
 // The shared runner all four adapters (codex/cursor/claude/agy) now depend on (HED-31). These pin
@@ -73,11 +73,12 @@ describe('subprocess run() — the shared adapter runner', () => {
     }
   });
 
-  it.skipIf(process.platform === 'win32')('settles after the grace period when an escaped descendant holds inherited pipes', async () => {
+  it.skipIf(process.platform === 'win32')('settles via the grace timer (not an early close) when an escaped descendant holds inherited pipes', async () => {
     const pidfile = join(tempDir(), 'escaped-grandchild.pid');
     // detached:true puts the grandchild in its own session so the group SIGKILL misses it; it keeps the
-    // inherited pipes open, so run() must fall back to the grace timer rather than hang on 'close'. The
+    // inherited pipes open, so 'close' can't fire and run() must fall back to the grace timer. The
     // PARENT writes the grandchild's pid synchronously so the proof does not race node startup.
+    const TIMEOUT_MS = 3000;
     const parent = [
       "const { spawn } = require('node:child_process');",
       "const fs = require('node:fs');",
@@ -85,18 +86,29 @@ describe('subprocess run() — the shared adapter runner', () => {
       `fs.writeFileSync(${JSON.stringify(pidfile)}, String(gc.pid));`,
       'setTimeout(() => {}, 60000);',
     ].join(' ');
+    let gcPid: number | undefined;
     try {
       const started = Date.now();
-      const r = await run(NODE, ['-e', parent], process.cwd(), 3000);
+      const r = await run(NODE, ['-e', parent], process.cwd(), TIMEOUT_MS);
+      const elapsed = Date.now() - started;
 
       expect(r.timedOut).toBe(true);
-      // Grace path settles at ~timeout + GRACE_MS, well under the escaped grandchild's 30s lifetime
-      // (when a hang with no grace net would otherwise settle via a late 'close').
-      expect(Date.now() - started).toBeLessThan(12_000);
+      // The grace net fired: run() waited PAST timeout + GRACE_MS rather than settling via an early
+      // 'close'. A regression that dropped the grace net and hung would blow the upper bound; one that
+      // force-settled without waiting would blow this lower bound. (Timers never fire early, so this is
+      // safe under load.)
+      expect(elapsed).toBeGreaterThan(TIMEOUT_MS + GRACE_MS - 200);
+      expect(elapsed).toBeLessThan(15_000);
       expect(existsSync(pidfile)).toBe(true);
+      gcPid = Number(readFileSync(pidfile, 'utf8'));
+      expect(gcPid).toBeGreaterThan(0);
+      // The escaped grandchild is still alive — it is what held the pipes open and forced the grace
+      // path. (Had it died, 'close' would have settled run() normally and this scenario would be
+      // untested.) reapAll cannot reach a session-detached double-fork; that is the documented limit.
+      expect(() => process.kill(gcPid as number, 0)).not.toThrow();
     } finally {
       try {
-        if (existsSync(pidfile)) process.kill(Number(readFileSync(pidfile, 'utf8')), 'SIGKILL');
+        if (gcPid !== undefined) process.kill(gcPid, 'SIGKILL');
       } catch {
         // The escaped grandchild has already exited.
       }
