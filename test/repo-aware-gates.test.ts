@@ -339,6 +339,24 @@ describe('registry-backed gate maps', () => {
     expect(stderr).toHaveBeenCalledTimes(1); expect(String(stderr.mock.calls[0][0])).toContain(invalid); stderr.mockRestore();
   });
 
+  it('a dropped app-key collision never discards a project\u2019s other maps (PR #118)', () => {
+    const registry = join(tempDir(), 'reg.json');
+    const proj = (name: string, folderKey: string, pack: string) => ({
+      name, workspaceRoots: ['/x/' + name], agentIds: [name.slice(0, 1).toUpperCase()], linearTeam: 'T',
+      defaultRoom: '#r', launcher: 'l',
+      gates: { app: { dir: 'App-Root', parent: 'Acme-Official', pack }, byFolderName: { [folderKey]: 'repo-heddle-core' } },
+    });
+    const projects = [proj('alpha', 'f-one', 'repo-heddle-core'), proj('beta', 'f-two', 'repo-heddle-dashboard'), proj('gamma', 'f-three', 'repo-heddle-core')];
+    writeFileSync(registry, JSON.stringify({ schemaVersion: 1, projects }));
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const maps = loadGateMaps(registry);
+      expect(maps.app.size).toBe(0); // the contested app key drops once (beta disagreed)
+      // gamma re-declares the dropped key: its OTHER maps must survive (the old walk skipped them)
+      for (const key of ['f-one', 'f-two', 'f-three']) expect(maps.byFolderName.get(key)).toBe('repo-heddle-core');
+    } finally { stderr.mockRestore(); }
+  });
+
   it('keeps built-ins and drops cross-project collisions while malformed gates do not break projects', () => {
     const path = join(tempDir(), 'projects.json');
     writeFileSync(path, JSON.stringify({ schemaVersion: 1, projects: [

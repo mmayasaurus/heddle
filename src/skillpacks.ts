@@ -178,10 +178,10 @@ function addGate(
   map.set(key, pack);
 }
 
-function addAppGate(apps: Map<string, AppGate>, app: AppGate, project: Project, owners: Map<string, string>): boolean {
+function addAppGate(apps: Map<string, AppGate>, app: AppGate, project: Project, owners: Map<string, string>): void {
   const key = appKey(app.parent, app.dir);
   const owner = owners.get(key);
-  if (owner === 'dropped') return true;
+  if (owner === 'dropped') return;
   if (owner && owner !== project.name && apps.get(key)?.pack !== app.pack) {
     warning(
       `projects.json gates app key ${JSON.stringify(key)} appears in both "${owner}" and `
@@ -189,11 +189,11 @@ function addAppGate(apps: Map<string, AppGate>, app: AppGate, project: Project, 
     );
     owners.set(key, 'dropped');
     apps.delete(key);
-    return false;
+    return;
   }
   if (!owner) owners.set(key, project.name);
   apps.set(key, app);
-  return false;
+  return;
 }
 
 function stringMap(value: unknown, project: Project, path: string, add: (key: string, pack: string) => void): void {
@@ -236,7 +236,9 @@ function addProjectGateMaps(
     } else if (!packDirFor(app.pack)) {
       warning(`projects.json project "${project.name}".gates.app names unknown pack "${app.pack}"`);
     } else {
-      if (addAppGate(apps, app, project, appOwners)) return;
+      // A dropped app key never discards the project's OTHER maps — each key is independent
+      // (codeant on PR #118; main's `continue` here was a round-3 wrinkle, not the design).
+      addAppGate(apps, app, project, appOwners);
     }
   }
   stringMap(gates.byFolderName, project, 'byFolderName', (key, pack) =>
