@@ -9,7 +9,7 @@ import { ENFORCEABLE } from '../src/capabilities.js';
 import { normalizeProvider } from '../src/review.js';
 
 /**
- * Behavioral checks on the SHIPPED routing table (routing/routing.v0.yaml) — the file Maya tunes by
+ * Behavioral checks on the SHIPPED routing table (routing/routing.v0.yaml) — the file the operator tunes by
  * hand. These catch the mistakes a YAML edit can introduce silently: a class pointing at a model
  * its provider doesn't list, a fallback into an excluded provider, or a Cursor route that would
  * spend a direct-subscription family through the middleman (policy `never_via_cursor`).
@@ -89,6 +89,17 @@ describe('routing.v0.yaml — shipped table invariants', () => {
       const models = table.providers[t.provider]?.models as string[] | undefined;
       expect(models, `provider "${t.provider}" declares no models`).toBeDefined();
       expect(models, `"${t.model}" not in ${t.provider}.models`).toContain(t.model);
+    }
+  });
+
+  it('every Claude-routed alias (and the claude catalog) is pinned in CLAUDE_MODEL_IDS', async () => {
+    const { CLAUDE_MODEL_IDS } = await import('../src/adapters/claude.js');
+    const pinned = Object.keys(CLAUDE_MODEL_IDS);
+    for (const m of (table.providers.claude?.models as string[] | undefined) ?? []) {
+      expect(pinned, `claude catalog alias \"${m}\" is not pinned in CLAUDE_MODEL_IDS`).toContain(m);
+    }
+    for (const c of classes) for (const t of targetsOf(c)) if (t.provider === 'claude') {
+      expect(pinned, `class ${c} routes unpinned claude model \"${t.model}\"`).toContain(t.model);
     }
   });
 

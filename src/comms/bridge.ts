@@ -27,7 +27,7 @@ import type { MessageRecord } from './types.js';
  *
  *   NOT USED: posting straight to a session's inbox socket. Its existence, path
  *     (CLAUDE_CODE_MESSAGING_SOCKET) and first-line auth frame are documented; the message frame
- *     schema is not — so heddle does not write to it (Maya's read-the-docs rule).
+ *     schema is not — so heddle does not write to it (the operator's read-the-docs rule).
  */
 
 /** Safe error → string, whatever was thrown (Error, string, null, …). */

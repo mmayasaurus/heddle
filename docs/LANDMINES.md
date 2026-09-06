@@ -54,7 +54,10 @@ flags churn monthly.
   --output-format json` prints ONE JSON object `{type:"result", subtype:"success"|…, is_error,
   result, session_id, duration_ms, num_turns, total_cost_usd, usage:{input_tokens, output_tokens,
   cache_read_input_tokens, cache_creation_input_tokens, output_tokens_details:{thinking_tokens}}}`;
-  `--effort low|medium|high|xhigh|max`; `--model fable|opus|sonnet|haiku`; `--resume <session_id>`;
+  `--effort low|medium|high|xhigh|max`; `--model <concrete id>` — the CLI also accepts bare
+  aliases (fable|opus|sonnet|haiku) but resolves them to the NEWEST family model ('opus'
+  became claude-opus-5, forbidden) so heddle NEVER passes an alias: buildArgs pins every
+  alias via CLAUDE_MODEL_IDS (src/adapters/claude.ts, HED-448); `--resume <session_id>`;
   `--append-system-prompt <text>` (packs, no file writes); `--mcp-config <file> --strict-mcp-config`;
   `--allowedTools <names…>` with `--permission-mode acceptEdits`. Session persistence writes to
   `<CLAUDE_CONFIG_DIR>/projects/<cwd-slug>/<session_id>.jsonl` — the proof that a worker ran under
