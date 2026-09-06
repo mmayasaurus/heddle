@@ -150,7 +150,7 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
       fallback = route.fallback;
       // HED-3: when the class primary is the author's provider, take the first differing pool entry.
       const pick = route.reviewerPool
-        ? pickReviewer(route, author, (provider, model) => {
+        ? pickReviewer(route, author, (provider, model, entryMcp) => {
             const cfg = providerConfig(table, provider); // own-property: a `toString` entry is unknown, not the prototype method (cubic #63)
             if (!cfg) return 'unknown provider';
             if (cfg.status === 'excluded') return 'provider excluded by policy';
@@ -160,7 +160,7 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
             // attach THAT list (else pickReviewer selects it and validateWorkerMcp then hard-fails).
             // Skip → next capable reviewer, or refuse if none — never run a reviewer without discovery.
             // Validates the actual list, so `['serena']` on cursor is caught, not just gemini+memtrace.
-            const effMcp = req.mcp ?? route.mcp ?? [];
+            const effMcp = req.mcp ?? entryMcp ?? route.mcp ?? [];
             if (effMcp.length > 0 && !mcpAttachable(provider, effMcp)) return 'cannot attach the class mcp';
             if (Array.isArray(cfg.models) && cfg.models.length && !cfg.models.includes(model)) return 'model not in provider list';
             return null;
@@ -168,7 +168,7 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
         : null;
       if (pick) {
         reviewerPick = pick;
-        target = { ...route, provider: pick.provider, model: pick.model };
+        target = { ...route, provider: pick.provider, model: pick.model, mcp: pick.mcp ?? route.mcp };
         // a fallback identical to the pick would just re-run the same reviewer — drop it
         if (fallback && fallback.provider === pick.provider && fallback.model === pick.model) fallback = undefined;
       }

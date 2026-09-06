@@ -38,6 +38,7 @@ export const ENFORCEABLE: Record<string, readonly Capability[]> = {
   groq: [],
   cerebras: [],
   openrouter: [],
+  glm: [],
   // Headless claude (HED-78): browse → WebFetch/WebSearch on the tool allowlist; exec-privileged →
   // --dangerously-skip-permissions; net has no knob (no sandbox — the Bash allowlist is the fence).
   claude: ['browse', 'exec-privileged'],

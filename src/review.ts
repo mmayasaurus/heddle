@@ -59,6 +59,8 @@ function mandateBytes(cwd: string, rel: string, raw: Buffer): Buffer {
 export interface ReviewerPick {
   provider: string;
   model: string;
+  /** An explicit empty list opts an HTTP reviewer out of a class's MCP attachment requirement. */
+  mcp?: string[];
   /** Why this reviewer: `pool:<n> (author is X)` — the nth pool entry taken because the primary matched the author. */
   reason: string;
 }
@@ -76,8 +78,11 @@ export function normalizeProvider(p: string | undefined | null): string | undefi
 
 export function pickReviewer(
   route: Route, authorProviderRaw: string | undefined,
-  /** Table-level usability gate for a pool entry (provider exists, not excluded, model listed). */
-  usable: (provider: string, model: string) => string | null = () => null,
+  /** Table-level usability gate for a pool entry (provider exists, not excluded, model listed).
+   *  Receives the entry's OWN mcp list so the gate never re-derives it by (provider,model) — a
+   *  re-lookup would inspect the WRONG entry when the pool has duplicate (provider,model) rows with
+   *  different mcp, and could reject a usable reviewer using a sibling's list (codeant #111). */
+  usable: (provider: string, model: string, mcp?: string[]) => string | null = () => null,
 ): ReviewerPick | null {
   const authorProvider = normalizeProvider(authorProviderRaw);
   if (!authorProvider) return null;
@@ -88,9 +93,9 @@ export function pickReviewer(
   for (let i = 0; i < pool.length; i++) {
     const provider = normalizeProvider(pool[i].provider);
     if (!provider || provider === authorProvider) continue;
-    const unusableReason = usable(provider, pool[i].model);
+    const unusableReason = usable(provider, pool[i].model, pool[i].mcp);
     if (unusableReason) { skipped.push(`${provider}/${pool[i].model}: ${unusableReason}`); continue; }
-    return { provider, model: pool[i].model, reason: `pool:${i + 1} (author is ${authorProvider})` };
+    return { provider, model: pool[i].model, ...(pool[i].mcp === undefined ? {} : { mcp: pool[i].mcp }), reason: `pool:${i + 1} (author is ${authorProvider})` };
   }
   throw new Error(
     `task class "${route.taskClass}": the author's provider is "${authorProvider}" and no reviewer_pool entry ` +

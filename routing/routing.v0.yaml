@@ -82,6 +82,16 @@ providers:
     max_tokens_default: 32768
     quality_tier: dynamic-quality-allowlist
     last_verified: 2026-08-20
+  glm:
+    auth: zai-coding-plan-subscription
+    execution: headless
+    base_url: https://api.z.ai/api/coding/paas/v4  # NEVER the general /api/paas/v4 endpoint
+    key_env: ZAI_API_KEY
+    models: [glm-5.3, glm-5.3-flash]
+    max_tokens_default: 32768
+    quality_tier: workhorse
+    last_verified: 2026-09-05
+    notes: subscription class; 5-hour + weekly credit pools
   cursor:
     auth: cursor-subscription         # Max plan
     # ⚠️ TWO POOLS, and they are NOT interchangeable:
