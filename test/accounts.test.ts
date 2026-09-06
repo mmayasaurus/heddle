@@ -123,6 +123,20 @@ describe('loadAccountRegistry', () => {
     expect(() => loadAccountRegistry(invalid)).toThrow(invalid);
   });
 
+  it.each([
+    ['null', null],
+    ['string', 'nope'],
+    ['array', [{ id: 'a' }]],
+  ])('rejects a non-object JSON root (%s) with the file path', (label, root) => {
+    const path = writeAccounts(`root-${label}.json`, root);
+    expect(() => loadAccountRegistry(path)).toThrow(path);
+  });
+
+  it('rejects a present provider value that is not an array', () => {
+    const path = writeAccounts('wrong-type-provider.json', { claude: {} });
+    expect(() => loadAccountRegistry(path)).toThrow(path);
+  });
+
   it('tolerates unknown top-level keys and warns while dropping id-less rows', () => {
     const path = writeAccounts('unknowns.json', {
       _doc: 'documentation', _doc_codex: 'documentation', foo: { future: true },

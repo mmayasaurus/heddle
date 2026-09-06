@@ -151,7 +151,13 @@ function toAccount(value: unknown, provider: Provider, index: number, path: stri
 
 function accountsFor(raw: Record<string, unknown>, provider: Provider, path: string): Account[] {
   const values = raw[provider];
-  if (!Array.isArray(values)) return [];
+  // Absent provider → fail-soft empty, matching the legacy readers. But a PRESENT value of the wrong
+  // type (e.g. `claude: {}`) is a hand-edit corruption the strict loader surfaces loudly rather than
+  // hiding as empty.
+  if (values === undefined) return [];
+  if (!Array.isArray(values)) {
+    throw new Error(`accounts.json at ${path}: "${provider}" must be an array when present (got ${JSON.stringify(values)})`);
+  }
   const ids = new Set<string>();
   const accounts: Account[] = [];
   for (const [index, value] of values.entries()) {
@@ -174,6 +180,12 @@ export function loadAccountRegistry(path: string = process.env.HEDDLE_ACCOUNTS ?
   } catch (error) {
     const problem = error instanceof SyntaxError ? 'is not valid JSON' : 'exists but could not be read';
     throw new Error(`accounts.json at ${path}: ${problem}`);
+  }
+  // A valid JSON scalar/array/null root is still a corrupt registry (mirrors projects.ts): reject it
+  // loudly here so a `null` root does not throw an opaque TypeError below and a string/array root does
+  // not silently read as an empty registry.
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new Error(`accounts.json at ${path}: must be a JSON object (got ${JSON.stringify(raw)})`);
   }
   // Deliberately diverges from projects.ts: accounts.json predates versioning, so absence is legacy
   // valid; there was never a schema version 1, while unknown future versions must fail loudly.
