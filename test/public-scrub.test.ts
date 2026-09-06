@@ -18,14 +18,16 @@ const companyPattern = new RegExp('vg' + 'fg', 'i');
 const homePathPattern = new RegExp('/Users/' + 'ma' + 'ya' + '(?:tobi)?\\b', 'i');
 const ownerPattern = new RegExp('mmaya' + 'saurus', 'i');
 
+// A bare prefix (`gsk_`, `csk-`, …) is legitimate DOCUMENTATION of a credential shape; only a
+// prefix followed by a key-like tail is credential-shaped (PR #112 docs round).
 const credentialPatterns = [
   new RegExp('\\bsk-' + '[A-Za-z0-9][A-Za-z0-9-]{9,}'),
-  new RegExp('g' + 'sk_'),
-  new RegExp('c' + 'sk-'),
-  new RegExp('lin_' + 'api_'),
-  new RegExp('lin_' + 'oauth_'),
-  new RegExp('gh' + 'p_'),
-  new RegExp('github_' + 'pat_'),
+  new RegExp('g' + 'sk_' + '[A-Za-z0-9]{12,}'),
+  new RegExp('c' + 'sk-' + '[A-Za-z0-9-]{12,}'),
+  new RegExp('lin_' + 'api_' + '[A-Za-z0-9]{12,}'),
+  new RegExp('lin_' + 'oauth_' + '[A-Za-z0-9]{12,}'),
+  new RegExp('gh' + 'p_' + '[A-Za-z0-9]{12,}'),
+  new RegExp('github_' + 'pat_' + '[A-Za-z0-9_]{12,}'),
 ];
 
 const identityPatterns = [
@@ -134,11 +136,36 @@ describe('regression PR#99 — public scrub rejects placeholder issue keys and e
     expect(matchesForbidden(antKey)).toBe(true);
     expect(matchesForbidden('sk-fix')).toBe(false);
     expect(matchesForbidden('an sk-and-so aside')).toBe(false);
+    const groqKey = 'g' + 'sk_' + 'abc123def456ghi789';
+    expect(matchesForbidden(groqKey)).toBe(true);
+    expect(matchesForbidden('the g' + 'sk_ prefix documents the shape')).toBe(false);
+    expect(matchesForbidden('shape: c' + 'sk-…')).toBe(false);
     const scanned = scanFiles([{ path: 'src/example.ts', contents: projKey }], []);
     expect(scanned.offendingLines).toEqual([
       `src/example.ts:1:${digest(projKey)}: [credential-shaped content redacted]`,
     ]);
     expect(scanned.offendingLines.join('\n')).not.toContain(projKey);
+  });
+
+  it('matches credential tails at the 12-character boundary', () => {
+    const twelveCharacterTail = 'abc123def456';
+    const elevenCharacterTail = 'abc123def45';
+    const prefixes = [
+      'g' + 'sk_',
+      'c' + 'sk-',
+      'lin_' + 'api_',
+      'lin_' + 'oauth_',
+      'gh' + 'p_',
+      'github_' + 'pat_',
+    ];
+
+    // Fragments shorter than 12 are documentation-scope by design; a real GitHub fine-grained PAT
+    // (`github_pat_` + 11 + `_` + 82) still matches because `_` is in its tail class.
+    for (const prefix of prefixes) {
+      expect(matchesForbidden(prefix + twelveCharacterTail)).toBe(true);
+      expect(matchesForbidden(prefix + elevenCharacterTail)).toBe(false);
+    }
+    expect(matchesForbidden('github_' + 'pat_' + elevenCharacterTail + '_' + 'a'.repeat(82))).toBe(true);
   });
 
   it('flags a shipped path whose NAME carries a forbidden identifier', () => {
@@ -160,7 +187,7 @@ describe('regression PR#99 — public scrub rejects placeholder issue keys and e
 
 function shippedFiles(): string[] {
   const output = execFileSync('git', [
-    'ls-files', '--', 'src', 'routing', 'skills', 'test', 'README.md', 'package.json',
+    'ls-files', '--', 'src', 'routing', 'skills', 'test', 'docs', ':(exclude)docs/fleet/**', 'README.md', 'package.json',
     'vitest.config.ts', ':(glob)tsconfig*.json',
   ], { encoding: 'utf8' });
 
@@ -236,9 +263,15 @@ function scanFiles(files: Array<{ path: string; contents: string }>, allowed: Ar
 }
 
 describe('public repository scrub', () => {
+  it('ships the specification while excluding fleet operations documentation', () => {
+    expect(shippedFiles()).toContain('docs/SPEC.md');
+    expect(shippedFiles()).not.toContain('docs/fleet/DASHBOARD.md');
+  });
+
   it('catches private tenant and credential strings in shipped files', () => {
     const allowed = allowlist();
-    const files = shippedFiles().map((path) => ({ path, contents: readFileSync(path, 'utf8') }));
+    const files = shippedFiles()
+      .map((path) => ({ path, contents: readFileSync(path, 'utf8') }));
     const { offendingLines, staleEntries } = scanFiles(files, allowed);
 
     expect(offendingLines, offendingLines.join('\n')).toEqual([]);

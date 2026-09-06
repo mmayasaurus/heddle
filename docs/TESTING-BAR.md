@@ -1,6 +1,6 @@
 # The heddle testing bar — behavioral assertions, not toggle-toggles
 
-> Maya, 2026-08-15: *"does turning the switch on actually turn the function on — not just the toggle."*
+> operator, 2026-08-15: *"does turning the switch on actually turn the function on — not just the toggle."*
 > This is the fleet-wide bar for every test in `heddle` and `heddle-dashboard`. The adversarial-review
 > task class (HED-3) grades against it; reviewers may block a PR whose tests only prove the toggle toggled.
 >
