@@ -28,7 +28,7 @@ const REGISTRY_MAPS: GateMaps = {
 
 const initRepo = initRepoFixture;
 
-describe('dispatch — repo-aware quality gates (HED-389)', () => {
+describe('dispatch — repo-aware quality gates (HED-389)', { timeout: 120_000 /* HED-466: full-suite load starves this git/subprocess suite; root cause HED-459 */ }, () => {
   const { tempDir, tempLedger } = useTempResources('heddle-repo-aware-gate-');
   const savedProjects = process.env.HEDDLE_PROJECTS;
   const savedPacks = process.env.HEDDLE_PACKS;
