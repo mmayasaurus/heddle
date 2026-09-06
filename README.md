@@ -165,6 +165,13 @@ dist/cli.js …`, as the MCP snippet above does).
 
 ### Verify harness health
 
+### Standalone snapshot
+
+Create a CLI-only snapshot with `heddle release --standalone <outDir>`. The generated directory
+contains the command-line source, tests, routing, skills, and public documentation; dashboard code
+and fleet operations documentation are not included. Add `--init-git` for a single local commit, or
+`--verify` to run install, build, and tests before the snapshot is placed at its destination.
+
 Run `heddle doctor` before onboarding an account or starting a session. It checks the configured
 harness binaries, login state, live model catalogs where supported, routing/config parsing, and
 provider verification freshness; `--provider` runs only that provider's checks plus global config

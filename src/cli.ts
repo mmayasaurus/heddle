@@ -21,6 +21,7 @@ import { runRuleCli } from './rules/lifecycle.js';
 import { DOCTOR_PROVIDERS, formatDoctorReport, runDoctor } from './doctor.js';
 import { readOperatorMode, writeOperatorMode, isOperatorMode, OPERATOR_MODES } from './operator-mode.js';
 import { bootstrapComms } from './comms/bootstrap.js';
+import { releaseStandalone } from './release/standalone.js';
 
 /**
  * heddle CLI — the surface orchestrators (and later the dashboard) drive.
@@ -72,6 +73,7 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
   heddle init-project <dir> [--canonical <path>] [--name <n>] [--team <KEY>] [--agents A,B,…] [--room <#room>] [--launcher <script>] [--enforce-memtrace] [--dry-run] [--json] [--show-content]
   heddle whoami [--json]         this process's bound identity (HEDDLE_AGENT / FLEET_AGENT / .fleet-agent) + worker context
   heddle doctor [--json] [--provider <p>]   verify harnesses/accounts/config; --provider runs only that provider's checks plus global config checks (exit 1 on any fail)
+  heddle release --standalone <outDir> [--source-ref <git ref>] [--init-git] [--verify] [--json]
   heddle workers [--stale <hours>] [--json]   dispatches still in flight (--stale: only orphans older than N hours)
   heddle ledger [--issue ABC-123] [--limit N] [--json]
   heddle ledger finish <id> --error "<why>"   close an orphaned in-flight row (ok=0)
@@ -402,6 +404,32 @@ try {
       const text = json ? JSON.stringify(report, null, 2) : formatDoctorReport(report);
       // Exit only after stdout drains so timed-out probes cannot keep the command alive after its report.
       process.stdout.write(text + '\n', () => process.exit(report.exitCode));
+      break;
+    }
+
+    case 'release': {
+      const standalone = process.argv[3] === '--standalone';
+      const outDir = process.argv[4];
+      const usageError = (error: string): void => {
+        out(json, { ok: false, error }, () => error);
+        process.exit(2);
+      };
+      if (!standalone || !outDir || outDir.startsWith('--')) {
+        usageError('usage: heddle release --standalone <outDir> [--source-ref <git ref>] [--init-git] [--verify]');
+        break;
+      }
+      const sourceRef = arg('--source-ref');
+      if (has('--source-ref') && (!sourceRef || sourceRef.startsWith('--'))) {
+        usageError('release: --source-ref needs a git ref');
+        break;
+      }
+      const result = releaseStandalone({
+        outDir, sourceRef, initGit: has('--init-git'), verify: has('--verify'),
+      });
+      const text = json ? JSON.stringify(result, null, 2) : result.ok
+        ? `Standalone snapshot generated: ${outDir}\nsource commit: ${result.sourceCommit}\nship set: ${result.shipSetHash}`
+        : `heddle release: ${result.error}`;
+      process.stdout.write(text + '\n', () => process.exit(result.ok ? 0 : 1));
       break;
     }
 
