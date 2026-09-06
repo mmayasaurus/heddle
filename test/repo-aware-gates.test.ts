@@ -22,7 +22,13 @@ const NO_GATE = ['worker-role', 'worker-hygiene', 'family-codex'];
 
 const initRepo = initRepoFixture;
 
-describe('dispatch — repo-aware quality gates (HED-389)', () => {
+// HED-466 (tactical): every case in this suite builds a real `git worktree add` fixture and spawns
+// git subprocesses through dispatch; under the full-suite parallel run those starve and can exceed
+// the 30s default (2× CI `build` timeouts on #105; the file passes 14/14 in isolation, ~31s). Raise
+// the per-test ceiling for THIS suite only — the pure `qualityGateForRepository` block below keeps
+// the default. This does NOT fix the underlying full-suite / shared-.git contention; that stays open
+// as HED-459 (test hermeticity / pool isolation).
+describe('dispatch — repo-aware quality gates (HED-389)', { timeout: 120_000 }, () => {
   const { tempDir, tempLedger } = useTempResources('heddle-repo-aware-gate-');
 
   /**
