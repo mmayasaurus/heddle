@@ -2,6 +2,7 @@ import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { adviseClaudeAccount, bestFableWeekly, pickClaudeAccount, type ClaudeAccount } from '../src/capaware.js';
+import { pickClaudeAccountsBatch } from '../src/account-pick.js';
 import type { ClaudeFloors } from '../src/floors.js';
 import { readClaudeTap, readProviderCaps, type ProviderCaps } from '../src/usage.js';
 import { useTempResources } from './helpers.js';
@@ -42,6 +43,70 @@ describe('pickClaudeAccount', () => {
   it('returns null for an empty registry and preserves registry order for equal fresh usage', () => {
     expect(pickClaudeAccount(undefined, [])).toBeNull();
     expect(pickClaudeAccount(claudeCaps([{ id: 'acct1', used: 20 }, { id: 'acct2', used: 20 }]), registry)?.account.id).toBe('acct1');
+  });
+});
+
+describe('pickClaudeAccountsBatch — spread-first residency ceiling', () => {
+  const floors: ClaudeFloors = { neverBelowPct: 3, residencyCapBelowPct: 10, residencyMax: 2 };
+  const accounts = (count: number): ClaudeAccount[] => Array.from({ length: count }, (_, index) => ({
+    id: `acct${index + 1}`, configDir: index === 0 ? null : `/x/.claude-acct${index + 1}`,
+  }));
+  const caps = (rows: Array<{ id: string; used: number; reset?: number | null; overageEnabled?: boolean }>): ProviderCaps => ({
+    provider: 'claude', source: 'limits.json', stale: false, capturedAt: 1,
+    fiveHour: { usedPercentage: null, resetsAt: null }, sevenDay: { usedPercentage: null, resetsAt: null },
+    windows: {}, noteCodes: [], activeAccount: null,
+    accounts: rows.map(({ id, used, reset = null, overageEnabled }) => ({
+      id, fiveHour: { usedPercentage: used, resetsAt: reset }, sevenDay: { usedPercentage: null, resetsAt: null },
+      windows: {}, noteCodes: [], limitReached: false, stale: false, overageEnabled,
+    })),
+  });
+  const agents = (count: number) => Array.from({ length: count }, (_, index) => `agent${index + 1}`);
+  const placedCounts = (result: ReturnType<typeof pickClaudeAccountsBatch>) => Object.values(result.assignments)
+    .reduce<Record<string, number>>((counts, assignment) => {
+      if ('refused' in assignment) return counts;
+      counts[assignment.account] = (counts[assignment.account] ?? 0) + 1;
+      return counts;
+    }, {});
+
+  it('places four agents one per account despite mixed fresh headroom', () => {
+    const result = pickClaudeAccountsBatch(caps([
+      { id: 'acct1', used: 40 }, { id: 'acct2', used: 10 }, { id: 'acct3', used: 70 }, { id: 'acct4', used: 20 },
+    ]), accounts(4), floors, agents(4));
+    expect(placedCounts(result)).toEqual({ acct1: 1, acct2: 1, acct3: 1, acct4: 1 });
+  });
+
+  it('spreads nine agents across four accounts within the hard ceiling', () => {
+    const result = pickClaudeAccountsBatch(caps(accounts(4).map((account) => ({ id: account.id, used: 20 }))), accounts(4), floors, agents(9));
+    const counts = Object.values(placedCounts(result)).sort((a, b) => b - a);
+    expect(counts).toEqual([3, 2, 2, 2]);
+    expect(Math.max(...counts) - Math.min(...counts)).toBeLessThanOrEqual(1);
+  });
+
+  it('places six then honestly refuses three when the two usable accounts hit the all-account ceiling', () => {
+    const result = pickClaudeAccountsBatch(caps([
+      { id: 'acct1', used: 98, reset: 900 }, { id: 'acct2', used: 99, reset: 800 },
+      { id: 'acct3', used: 20, reset: 700 }, { id: 'acct4', used: 30, reset: 600 },
+    ]), accounts(4), floors, agents(9));
+    expect(placedCounts(result)).toEqual({ acct3: 3, acct4: 3 });
+    const refusals = Object.values(result.assignments).filter((assignment) => 'refused' in assignment);
+    expect(refusals).toHaveLength(3);
+    expect(refusals.every((assignment) => assignment.reason === 'only 6 of 9 agents placeable until acct4 resets 600')).toBe(true);
+  });
+
+  it('narrates a one-fresh-account placement as degenerate', () => {
+    const result = pickClaudeAccountsBatch(caps([
+      { id: 'acct1', used: 98 }, { id: 'acct2', used: 99 }, { id: 'acct3', used: 97 }, { id: 'acct4', used: 20 },
+    ]), accounts(4), floors, agents(1));
+    expect(result.assignments.agent1).toMatchObject({ account: 'acct4', reason: expect.stringContaining('DEGENERATE: every other account floored/vetoed — not a spread') });
+  });
+
+  it('excludes an active-overage account even when it has the most headroom', () => {
+    const result = pickClaudeAccountsBatch(caps([
+      { id: 'acct1', used: 0, overageEnabled: true }, { id: 'acct2', used: 50 },
+    ]), accounts(2), floors, agents(1));
+    expect(result.assignments.agent1).toMatchObject({ account: 'acct2' });
+    expect(result.accounts.find((account) => account.account === 'acct1')).toMatchObject({ overage: true, excluded: true });
+    expect(result.assignments.agent1).not.toHaveProperty('refused');
   });
 });
 
