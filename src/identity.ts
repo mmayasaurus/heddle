@@ -7,7 +7,7 @@ import { dirname, join, resolve } from 'node:path';
  *
  * Resolution order (first hit wins), mirroring the fleet's own `lin.sh` rules:
  *   1. HEDDLE_AGENT env            — explicit heddle binding (a launcher or the dashboard sets it)
- *   2. FLEET_AGENT env             — the fleet identity the Spinventory launchers already export
+ *   2. FLEET_AGENT env             — the fleet identity the fleet launchers already export
  *   3. `.fleet-agent` file         — at `cwd` or any parent (a worktree pinned to an identity)
  *   4. unbound                     — a caller-supplied `agent` may then be used, and the ledger
  *                                    records that the identity was NOT process-bound.

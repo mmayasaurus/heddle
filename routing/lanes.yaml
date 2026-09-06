@@ -1,4 +1,4 @@
-# lanes.yaml v1 — Maya-ratified 2026-08-21 ("lanes.yaml has my full blessing!")
+# lanes.yaml v1 — operator-ratified 2026-08-21 ("lanes.yaml has operator approval!")
 # Provenance: HED-106 comment [7] (canonical), amendments in comments [3]-[6]. Config-as-code:
 # tiers/floors/caps/guards are DATA, edited by PR-reviewed config change — never in code.
 # Loaded + schema-validated by src/lanes.ts; consumed by decideRoute's tier ladder (HED-106 S1).
@@ -18,16 +18,16 @@ tiers:
     - claude-workers    # account-rotated by live meters
   T3-orchestrator:
     - fable             # NEVER on the general ladder
-  T3-escalation:        # the gated exception (Maya-approved)
+  T3-escalation:        # the gated exception (operator-approved)
     via: escalate-judgment
     opt_in: true
     requires_failed_attempts: 2   # named ledger ids, not vibes
-    fable_escalations_weekly: 3   # Maya-adjustable
+    fable_escalations_weekly: 3   # operator-adjustable
 floors:
   claude: {never_below_pct: 3, residency_cap_below_pct: 10, residency_max: 2}
   cooling_minutes: 30        # unmetered lane rest after a rate-limit refusal
   menial_verify_days: 7      # no routing without live-verification <=7 days
 caps:
-  openrouter_credits_weekly_usd: 10   # Maya-adjustable
+  openrouter_credits_weekly_usd: 10   # operator-adjustable
 guards:
   never_via_cursor: [claude, gpt, gemini]  # own-subscription families; + fable-via-cursor is NO-ZDR (privacy)

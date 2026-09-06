@@ -103,7 +103,7 @@ describe('Ledger.sweepOrphans (temp db)', () => {
     ageRow(ledger, preMigration, { hoursAgo: 2, ownerPid: null, ownerComm: null });
     // Young + no pid: nothing provable — stays.
     expect(ledger.sweepOrphans({ isOwnerAlive: () => false }).closed).toBe(0);
-    // Old + no pid: the age rule closes it (this is exactly Maya's ghost RUNNING(3) rows).
+    // Old + no pid: the age rule closes it (this is exactly the operator's ghost RUNNING(3) rows).
     ageRow(ledger, preMigration, { hoursAgo: 30 });
     expect(ledger.sweepOrphans({ isOwnerAlive: () => null }).closed).toBe(1);
   });

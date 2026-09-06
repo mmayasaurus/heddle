@@ -669,7 +669,7 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
                   from: OPERATOR, to: idle.address, kind: 'status', body: nudgeBody(idle),
                   // An automated message must never wear the human's authority: the loop lives in
                   // the operator's session, so without this demotion every nudge would be stamped
-                  // `operator` and read as Maya speaking.
+                  // `operator` and read as the operator speaking.
                   requestedTier: 'agent-message',
                   meta: { nudge: { idleMs: idle.idleMs } },
                 });
@@ -721,7 +721,7 @@ export const TOOLS = [
         mentions: { type: 'array', items: { type: 'string' }, maxItems: 16, description: 'Rooms: addresses to explicitly ping — each gets a targeted push-or-inbox delivery (never parsed from the body).' },
         hold_floor: { type: 'boolean', description: 'Rooms: take the floor before posting (multi-part reply).' },
         release_floor: { type: 'boolean', description: 'Rooms: release the floor after this post.' },
-        important: { type: 'boolean', description: 'Mark ⭐ important-for-Maya: the message is preserved as a notification (never silently dropped) atop her pocket-console Approvals feed + desktop tray until she reads it, deep-linked to this message. Tag SPARINGLY — an ⭐ is a promise the interrupt is worth her attention; orchestrators may strip abuse.' },
+        important: { type: 'boolean', description: "Mark ⭐ important-for-operator: the message is preserved as a notification (never silently dropped) atop the operator's pocket console Approvals feed + desktop tray until the operator reads it, deep-linked to this message. Tag SPARINGLY — an ⭐ is a promise the interrupt is worth the operator's attention; orchestrators may strip abuse." },
       },
       required: ['to', 'body'],
     },

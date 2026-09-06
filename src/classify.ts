@@ -19,7 +19,7 @@ import type { WorkerAdapter } from './types.js';
  * These call an adapter DIRECTLY (not the full dispatch pipeline) so a meta-classification never
  * materializes skill packs or attaches MCP.
  *
- * They ARE ledgered, as `execution_mode='classification'` rows (HED-25, Maya-decided 2026-08-17).
+ * They ARE ledgered, as `execution_mode='classification'` rows (HED-25, operator-ratified 2026-08-17).
  * They previously were not, on the reasoning that a meta-classification should not look like a
  * worker row — correct as far as it went, but the consequence was that every --auto-effort and every
  * auto-assess spent real Codex tokens that `heddle usage`, the Fleet drawer and the savings

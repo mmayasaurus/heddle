@@ -12,7 +12,7 @@ import type { ProviderCaps } from '../usage.js';
  * relaunch → resume) lives in the supervisor; this module only decides.
  */
 
-/** Utilisation thresholds, in percent, for the 5h and 7d (weekly) caps. Defaults match Maya's ask:
+/** Utilisation thresholds, in percent, for the 5h and 7d (weekly) caps. Defaults match the operator's ask:
  *  watch at 80, rotate at 90, for both windows. */
 export interface RotateThresholds {
   /** At/above this the fleet is close — logged, and (once wired) new dispatches are discouraged. */
