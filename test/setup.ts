@@ -20,6 +20,9 @@ for (const k of ['HEDDLE_AGENT', 'FLEET_AGENT', 'HEDDLE_WORKER', 'HEDDLE_DISPATC
 const empty = mkdtempSync(join(tmpdir(), 'heddle-test-usage-'));
 process.env.HEDDLE_USAGE_DIR = empty;
 process.env.HEDDLE_ACCOUNTS = join(empty, 'accounts.json');
+process.env.HEDDLE_PROJECTS = join(empty, 'projects.json');
+process.env.HOME = join(empty, 'home');
+process.env.USERPROFILE = process.env.HOME;
 
 // resolveIdentity() also walks up from cwd looking for a `.fleet-agent` file — env stripping cannot
 // neutralize that, so fail LOUDLY instead of letting the suite silently bind an identity when run

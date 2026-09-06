@@ -1,8 +1,10 @@
-import { readFileSync, existsSync, writeFileSync, unlinkSync, readdirSync, realpathSync } from 'node:fs';
+import { readFileSync, existsSync, writeFileSync, unlinkSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { basename, delimiter, dirname, join, resolve } from 'node:path';
+import { homedir } from 'node:os';
 import { withFileLock } from './matlock.js';
 import { gitRepositoryFor, type GitRepository } from './worktree.js';
+import { DEFAULT_PROJECTS_PATH, loadProjectRegistry, type Project } from './projects.js';
 
 /**
  * Skill-pack materializer.
@@ -46,12 +48,17 @@ export function packDirs(): string[] {
   // drive-letter path (C:\project\.heddle\packs) into two invalid directories (PR #34, 5 reviewers).
   const consumer = (process.env.HEDDLE_PACKS ?? '')
     .split(delimiter).map((d) => d.trim()).filter(Boolean);
-  return [...consumer, builtinPacksDir()];
+  return [...consumer, join(homedir(), '.heddle', 'packs'), builtinPacksDir()];
 }
 
 /** First directory on the search path that holds this pack, or null. */
 export function packDirFor(name: string): string | null {
-  return packDirs().find((d) => existsSync(join(d, `${name}.md`))) ?? null;
+  return packDirs().find((d) => isPackFile(join(d, `${name}.md`))) ?? null;
+}
+
+/** A pack must be a regular FILE — a directory named `<pack>.md` is not a pack (codeant, PR #112). */
+function isPackFile(path: string): boolean {
+  try { return statSync(path).isFile(); } catch { return false; }
 }
 
 /** Back-compat: the directory a bare pack lookup starts from. Prefer packDirs(). */
@@ -65,7 +72,7 @@ export function listPacks(): string[] {
   for (const dir of packDirs()) {
     if (!existsSync(dir)) continue;
     for (const f of readdirSync(dir)) {
-      if (f.endsWith('.md')) seen.add(f.replace(/\.md$/, ''));
+      if (f.endsWith('.md') && isPackFile(join(dir, f))) seen.add(f.replace(/\.md$/, ''));
     }
   }
   return [...seen].sort();
@@ -123,21 +130,128 @@ export function withMandatoryPacks(skills: readonly string[] | undefined): strin
   return out;
 }
 
-/** The consumer app checkout, by layout: `<parent>/<dir>` — the only place `quality-gate` belongs. */
-const APP_CHECKOUT = { dir: 'Rebuild-Project-Root', parent: 'Spinventory-Rebuild-Official' } as const;
-/** Main-checkout folder name → that repository's gate pack (exact names only). */
-const GATE_BY_FOLDER_NAME: ReadonlyMap<string, string> = new Map([
+/** Heddle's own repositories remain built-in; every consumer identity comes from projects.json. */
+const BUILTIN_GATE_BY_FOLDER_NAME: ReadonlyMap<string, string> = new Map([
   ['heddle', 'repo-heddle-core'],
   ['heddle-dashboard', 'repo-heddle-dashboard'],
-  ['Spinventory-Rebuild-App', 'repo-workspace'],
 ]);
-/** `origin` repository name (the GitHub name) → gate pack; covers a renamed or relocated clone. */
-const GATE_BY_ORIGIN_NAME: ReadonlyMap<string, string> = new Map([
+const BUILTIN_GATE_BY_ORIGIN_NAME: ReadonlyMap<string, string> = new Map([
   ['heddle', 'repo-heddle-core'],
   ['heddle-dashboard', 'repo-heddle-dashboard'],
-  ['Spinventory-Rebuild-Workspace', 'repo-workspace'],
-  ['Spinventory-V2-Official-App-Rebuild', 'quality-gate'],
 ]);
+
+export interface GateMaps {
+  app: ReadonlyMap<string, { dir: string; parent: string; pack: string }>;
+  byFolderName: ReadonlyMap<string, string>;
+  byOriginName: ReadonlyMap<string, string>;
+}
+
+const appKey = (parent: string, dir: string) => `${parent}\0${dir}`;
+const warning = (message: string) => process.stderr.write(`heddle: ${message}\n`);
+
+function addGate(
+  map: Map<string, string>, key: string, pack: string, project: Project,
+  owners: Map<string, string>, path: string,
+): void {
+  const owner = owners.get(key);
+  if (owner === 'built-in') {
+    warning(
+      `projects.json project "${project.name}" gates ${path} key ${JSON.stringify(key)} `
+      + 'collides with a built-in; keeping built-in',
+    );
+    return;
+  }
+  if (owner && owner !== project.name && map.get(key) !== pack) {
+    warning(
+      `projects.json gates ${path} key ${JSON.stringify(key)} appears in both "${owner}" and `
+      + `"${project.name}"; dropping it`,
+    );
+    owners.set(key, 'dropped');
+    map.delete(key);
+    return;
+  }
+  if (owner === 'dropped') return;
+  if (!owner) owners.set(key, project.name);
+  map.set(key, pack);
+}
+
+function stringMap(value: unknown, project: Project, path: string, add: (key: string, pack: string) => void): void {
+  if (value === undefined) return;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    warning(`projects.json project "${project.name}".gates.${path} must be an object; ignoring gates.${path}`);
+    return;
+  }
+  for (const [key, pack] of Object.entries(value)) {
+    if (typeof pack !== 'string' || !pack) {
+      warning(`projects.json project "${project.name}".gates.${path}.${key} must be a non-empty string; ignoring it`);
+      continue;
+    }
+    if (!packDirFor(pack)) {
+      warning(`projects.json project "${project.name}".gates.${path}.${key} names unknown pack "${pack}"`);
+      continue;
+    }
+    add(key, pack);
+  }
+}
+
+/** Loads built-ins plus the optional registry data. Any registry failure leaves only built-ins. */
+export function loadGateMaps(path = process.env.HEDDLE_PROJECTS?.trim() || DEFAULT_PROJECTS_PATH): GateMaps {
+  const folders = new Map(BUILTIN_GATE_BY_FOLDER_NAME);
+  const origins = new Map(BUILTIN_GATE_BY_ORIGIN_NAME);
+  const apps = new Map<string, { dir: string; parent: string; pack: string }>();
+  const folderOwners = new Map<string, string>(
+    [...BUILTIN_GATE_BY_FOLDER_NAME.keys()].map((key) => [key, 'built-in']),
+  );
+  const originOwners = new Map<string, string>(
+    [...BUILTIN_GATE_BY_ORIGIN_NAME.keys()].map((key) => [key, 'built-in']),
+  );
+  const appOwners = new Map<string, string>();
+  try {
+    for (const project of loadProjectRegistry(path).projects) {
+      const gates = project.gates;
+      if (gates === undefined) continue;
+      if (!gates || typeof gates !== 'object' || Array.isArray(gates)) {
+        warning(`projects.json project "${project.name}".gates must be an object; ignoring gates`);
+        continue;
+      }
+      const app = gates.app;
+      if (app !== undefined) {
+        if (!app || typeof app !== 'object' || typeof app.dir !== 'string' || !app.dir ||
+          typeof app.parent !== 'string' || !app.parent || typeof app.pack !== 'string' || !app.pack) {
+          warning(
+            `projects.json project "${project.name}".gates.app must contain non-empty dir, parent, `
+            + 'and pack strings; ignoring gates.app',
+          );
+        } else if (!packDirFor(app.pack)) {
+          warning(`projects.json project "${project.name}".gates.app names unknown pack "${app.pack}"`);
+        } else {
+          const key = appKey(app.parent, app.dir);
+          const owner = appOwners.get(key);
+          if (owner === 'dropped') {
+            continue;
+          } else if (owner && owner !== project.name && apps.get(key)?.pack !== app.pack) {
+            warning(
+              `projects.json gates app key ${JSON.stringify(key)} appears in both "${owner}" and `
+              + `"${project.name}"; dropping it`,
+            );
+            appOwners.set(key, 'dropped');
+            apps.delete(key);
+          } else {
+            if (!owner) appOwners.set(key, project.name);
+            apps.set(key, app);
+          }
+        }
+      }
+      stringMap(gates.byFolderName, project, 'byFolderName', (key, pack) =>
+        addGate(folders, key, pack, project, folderOwners, 'byFolderName'));
+      stringMap(gates.byOriginName, project, 'byOriginName', (key, pack) =>
+        addGate(origins, key, pack, project, originOwners, 'byOriginName'));
+    }
+  } catch (err) {
+    warning(`could not load project gates from ${path}; using built-ins only (${(err as Error).message})`);
+  }
+  return { app: apps, byFolderName: folders, byOriginName: origins };
+}
 
 /** The repository name in a remote URL (`…/owner/name.git`, `git@host:owner/name`), else null. */
 export function originRepoName(url: string | null): string | null {
@@ -151,30 +265,26 @@ export function originRepoName(url: string | null): string | null {
 
 /**
  * The gate pack for a repository, or null when the repository is UNKNOWN — the caller then DROPS
- * `quality-gate` rather than guess. `quality-gate` is the consumer APP gate (`npm run gate`,
- * expo-router, `cd` into the app checkout); handing it to a worker anywhere else is the fleet-scope
- * violation HED-389 exists to stop, so an unknown identity gets no gate at all.
+ * `quality-gate` rather than guess. The registry owns app-layout and repository gate selection;
+ * handing an app gate to an unknown checkout is unsafe, so unknown identity gets no gate at all.
  *
  * Identity is EXACT, and decided in this order (round-1 review #2/#3/#7):
  *   1. unknown — not a repository, or its main checkout is unlistable → null (never the worktree
  *      folder name, which for a real dispatch cwd is the WORKTREE's name, not the repo's);
- *   2. the app checkout by LAYOUT (main checkout `Rebuild-Project-Root` under a
- *      expected consumer-app parent) → `quality-gate`, checked first so no later rule can
- *      strip the app gate from the app, whatever its `origin` says;
- *   3. the main checkout's exact folder name, corroborated by `origin` when one is configured: a
- *      known folder whose origin names a DIFFERENT or unrecognized repository is ambiguous → null
- *      (codex P2 on PR #95: a folder called `heddle` pointing at `other-project.git` is not heddle);
- *      a known origin alone identifies a renamed or relocated clone.
- * Substring and prefix matches are deliberately absent: an origin that merely CONTAINS a known name,
- * or a folder that starts with one, is not that repository.
+ *   2. a registry app-layout rule (`parent` + `dir`) first;
+ *   3. exact folder name, corroborated by origin when an origin exists; or origin alone for a
+ *      renamed clone. No substrings or prefixes are identity.
+ * Built-ins are immutable: registry collisions are refused. Malformed registry data and unreadable
+ * packs fail soft, leaving the caller with no guessed gate.
  */
-export function qualityGateForRepository(repo: GitRepository | null): string | null {
+export function qualityGateForRepository(repo: GitRepository | null, maps: GateMaps = loadGateMaps()): string | null {
   if (!repo?.mainRoot) return null;
   const rootName = basename(repo.mainRoot);
-  if (rootName === APP_CHECKOUT.dir && basename(dirname(repo.mainRoot)) === APP_CHECKOUT.parent) return 'quality-gate';
-  const byFolder = GATE_BY_FOLDER_NAME.get(rootName) ?? null;
+  const app = maps.app.get(appKey(basename(dirname(repo.mainRoot)), rootName));
+  if (app) return app.pack;
+  const byFolder = maps.byFolderName.get(rootName) ?? null;
   const origin = originRepoName(repo.originUrl);
-  const byOrigin = origin ? GATE_BY_ORIGIN_NAME.get(origin) ?? null : null;
+  const byOrigin = origin ? maps.byOriginName.get(origin) ?? null : null;
   if (byFolder && origin && byOrigin !== byFolder) return null; // origin present but not corroborating — no claim
   return byFolder ?? byOrigin;
 }
@@ -193,7 +303,10 @@ function canonicalDir(dir: string): string {
  * survive by accident (round-3 review #1).
  */
 function servesBuiltinQualityGate(): boolean {
-  const dir = packDirFor('quality-gate');
+  const consumerDirs = (process.env.HEDDLE_PACKS ?? '').split(delimiter)
+    .map((dir) => dir.trim()).filter(Boolean);
+  const dir = consumerDirs.find((candidate) => isPackFile(join(candidate, 'quality-gate.md')));
+  if (!dir) return true;
   if (!dir || canonicalDir(dir) === canonicalDir(builtinPacksDir())) return true;
   try {
     return readFileSync(join(dir, 'quality-gate.md')).equals(readFileSync(join(builtinPacksDir(), 'quality-gate.md')));
@@ -210,12 +323,10 @@ function servesBuiltinQualityGate(): boolean {
  */
 export function resolveQualityGateForCwd(cwd: string, skills: readonly string[]): string[] {
   if (!skills.includes('quality-gate')) return [...skills];
-  // A CONSUMER pack named quality-gate (HEDDLE_PACKS shadowing the built-in) is that project's own
-  // gate, chosen by its configuration and read by readPack ahead of the built-in — keep it. Only
-  // heddle's built-in quality-gate, the consumer APP gate, is repository-resolved (codex P2, #95).
+  // Only an explicit HEDDLE_PACKS shadow keeps its consumer-owned gate. HOME/.heddle/packs is part
+  // of normal discovery, not a global shadow switch: its selected gate remains repository-resolved.
   if (!servesBuiltinQualityGate()) return [...skills];
-  const gate = qualityGateForRepository(gitRepositoryFor(cwd));
-  if (gate === 'quality-gate') return [...skills];
+  const gate = qualityGateForRepository(gitRepositoryFor(cwd), loadGateMaps());
   const swapped = skills.flatMap((pack) => pack === 'quality-gate' ? (gate ? [gate] : []) : [pack]);
   return swapped.filter((pack, i) => swapped.indexOf(pack) === i); // a caller may already name the repo gate
 }

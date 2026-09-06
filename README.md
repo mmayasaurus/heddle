@@ -175,7 +175,18 @@ fails; exit 0 means no failures (including timed-out, unverified probes, which w
 usage error.
 
 Framework-layer config lives under `~/.heddle/` (it spans projects, never a single repo):
-`accounts.json` (Claude accounts), `ledger.db` (dispatch/review ledger), `comms.db` (broker).
+`accounts.json` (Claude accounts), `ledger.db` (dispatch/review ledger), `comms.db` (broker), and
+`packs/` (operator skill packs, searched after `HEDDLE_PACKS` and before built-ins).
+
+`projects.json` may also define optional repository-aware `gates`: an exact app layout
+`{ "app": { "parent": "acme-org", "dir": "acme-app", "pack": "acme-app-gate" } }`, plus
+`byFolderName` and `byOriginName` maps from exact repository names to installed packs. A requested
+`quality-gate` resolves in order from a repository main root: app layout, exact folder corroborated
+by origin, then origin alone for renamed clones; otherwise it is dropped. Built-in keys cannot be
+overridden, and cross-project keys with different packs are dropped. Each defect warns on stderr and
+bad registry gate data fails soft rather than guessing a gate. An explicit `HEDDLE_PACKS` shadow of
+`quality-gate` remains consumer-owned; `~/.heddle/packs/quality-gate.md` does not disable resolution.
+See [project registry details](docs/PROJECTS.md).
 Environment overrides:
 
 | var | what |
@@ -184,9 +195,10 @@ Environment overrides:
 | `HEDDLE_ROUTING` | routing-table path (default `routing/routing.v0.yaml`) |
 | `HEDDLE_LANES` | lanes configuration path (default `routing/lanes.yaml`) |
 | `HEDDLE_ACCOUNTS` | Claude accounts registry path (default `~/.heddle/accounts.json`) — cap-aware routing reads it |
-| `HEDDLE_PACKS` | extra skill-pack search dirs, `path.delimiter`-separated (`:` on POSIX, `;` on Windows); built-ins always last |
+| `HEDDLE_PROJECTS` | project registry path (default `~/.heddle/projects.json`; blank is unset) |
+| `HEDDLE_PACKS` | extra skill-pack dirs (`path.delimiter` separated); then `~/.heddle/packs`, then built-ins |
 | `HEDDLE_COMMS_DB` | comms broker db (default `~/.heddle/comms.db`) |
-| `HEDDLE_LEDGER_DB` | dispatch/review ledger db (default `~/.heddle/ledger.db`) — comms server + rotator read it for lineage |
+| `HEDDLE_LEDGER_DB` | dispatch/review ledger db (default `~/.heddle/ledger.db`), used for lineage |
 
 (`HEDDLE_DISPATCH_ID` / `HEDDLE_PARENT` / `HEDDLE_WORKER` are set by heddle on spawned workers — not
 operator config.)

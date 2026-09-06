@@ -282,6 +282,28 @@ describe('runDoctor', () => {
     });
   });
 
+  test('regression PR#112 — HEDDLE_PROJECTS selects the projects registry path', async () => {
+    const paths = config();
+    const projects = join(resources.tempDir(), 'projects.json');
+    writeFileSync(projects, JSON.stringify({ schemaVersion: 1, projects: [] }));
+    const report = await runDoctor({}, fakeDeps(paths, {
+      paths: { routing: paths.routing, lanes: paths.lanes, accounts: paths.accounts },
+      env: { HEDDLE_PROJECTS: projects },
+    }));
+    expect(check(report, 'config:projects')).toMatchObject({ outcome: 'ok', detail: '0 projects registered' });
+  });
+
+  test('regression PR#112 — blank HEDDLE_PROJECTS falls through to the default registry', async () => {
+    const paths = config();
+    const report = await runDoctor({}, fakeDeps(paths, {
+      paths: { routing: paths.routing, lanes: paths.lanes, accounts: paths.accounts },
+      env: { HEDDLE_PROJECTS: '' },
+    }));
+    expect(check(report, 'config:projects')).toMatchObject({
+      outcome: 'ok', detail: 'absent; consumers fall back to cwd inference',
+    });
+  });
+
   test('regression: blank HEDDLE_ROUTING falls through to the default routing table', async () => {
     const paths = config();
     const report = await runDoctor(

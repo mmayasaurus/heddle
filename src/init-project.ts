@@ -188,16 +188,19 @@ function projectObjectRange(source: string, name: string): { start: number; end:
   }
   return undefined;
 }
-function replaceProjectInRawRegistry(source: string | undefined, name: string, project: unknown): string {
+export function replaceProjectInRawRegistry(source: string | undefined, name: string, project: unknown): string {
   if (source === undefined) return json({ schemaVersion: PROJECTS_SCHEMA_VERSION, projects: [project] });
   const range = projectObjectRange(source, name);
   if (!range) return source;
   const lineStart = source.lastIndexOf('\n', range.start - 1) + 1;
   const prefix = source.slice(lineStart, range.start).match(/^[ \t]*/)?.[0] ?? '';
-  const replacement = JSON.stringify(project, null, jsonIndent(source)).replace(/\n/g, `\n${prefix}`);
+  let replacement = JSON.stringify(project, null, jsonIndent(source)).replace(/\n/g, `\n${prefix}`);
+  // `gates` needs no raw-text splicing: registryStep spreads rawPrior into the rebuilt project, so
+  // the field survives STRUCTURALLY through serialization (a regex splice over raw JSON can match a
+  // "gates": sequence inside a string value — codeant on PR #112).
   return source.slice(0, range.start) + replacement + source.slice(range.end);
 }
-function registryContent(raw: any, rawContent: string | undefined, prior: any, project: any, name: string): string {
+export function registryContent(raw: any, rawContent: string | undefined, prior: any, project: any, name: string): string {
   if (prior && rawContent !== undefined) return replaceProjectInRawRegistry(rawContent, name, project);
   return json({ ...raw, projects: prior ? raw.projects.map((candidate: any) => candidate.name === name ? project : candidate) : [...raw.projects, project] }, jsonIndent(rawContent));
 }
