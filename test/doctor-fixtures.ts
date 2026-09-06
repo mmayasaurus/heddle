@@ -60,7 +60,7 @@ guards: {never_via_cursor: []}
 export function config(
   models = { cursor: 'cursor-grok-4.6-high-fast', gemini: 'gemini-3.7-flash-high' },
   options: { cursorFallback?: string; laneDefaults?: string } = {},
-): { routing: string; lanes: string; projects: string; accounts: string } {
+): DoctorDeps['paths'] & { routing: string; lanes: string; projects: string; accounts: string } {
   const dir = resources.tempDir();
   const paths = {
     routing: join(dir, 'routing.yaml'), lanes: join(dir, 'lanes.yaml'),
