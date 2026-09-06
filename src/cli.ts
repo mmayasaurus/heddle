@@ -17,6 +17,7 @@ import { claudeAccountRows, pickClaudeAccountsBatch, usableClaudeCaps } from './
 import { bindingMeter, claudeFloorsFrom } from './floors.js';
 import { loadLanes } from './lanes.js';
 import { readProviderCaps } from './usage.js';
+import { formatUsageRemaining, readUsageRemaining } from './usage-remaining.js';
 import { runRuleCli } from './rules/lifecycle.js';
 import { DOCTOR_PROVIDERS, formatDoctorReport, runDoctor } from './doctor.js';
 import { readOperatorMode, writeOperatorMode, isOperatorMode, OPERATOR_MODES } from './operator-mode.js';
@@ -86,6 +87,7 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
                                  or owner process provably gone (outcome='orphaned'); dry-run lists only
   heddle ledger report-in-session <id> (--ok | --failed) [--error "<why>"] [--input-tokens N] [--cached-input-tokens N] [--output-tokens N] [--reasoning-tokens N] [--duration-ms N] [--json]  administrative path: may report any orchestrator's handoff
   heddle usage [--since <iso>] [--json]    per-provider totals
+  heddle usage --remaining [--account <id>] [--json]  per-account quota headroom
   heddle account pick [--for <letter[,letter...]>] [--json] [--explain]   healthiest addressable Claude account for a fleet relaunch
   heddle pr own <whoami|claim|check|release|mine> [<pr#>] [--json]       coordinate ownership of a GitHub PR
   heddle pr sweep <pr#> [--json]       sweep all GitHub PR review channels and report mechanical gates
@@ -622,6 +624,19 @@ try {
     }
 
     case 'usage': {
+      if (has('--remaining')) {
+        const account = arg('--account');
+        if (has('--account') && (!account || account.startsWith('--'))) {
+          console.error('usage: heddle usage --remaining [--account <id>] [--json]');
+          process.exit(2);
+        }
+        const rows = readUsageRemaining({
+          account,
+          nowS: Math.floor(Date.now() / 1000),
+        });
+        out(json, rows, () => formatUsageRemaining(rows));
+        break;
+      }
       const ledger = new Ledger();
       const rows = ledger.usageByProvider(arg('--since'));
       // HED-25: classifier spend is REAL spend, reported separately so it is visible without
