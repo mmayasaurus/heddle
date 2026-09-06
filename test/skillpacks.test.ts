@@ -1,9 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { dispatch } from '../src/dispatch.js';
 import { useTempResources, fakeAdapter } from './helpers.js';
-import { MANDATORY_PACKS, listPacks, withMandatoryPacks } from '../src/skillpacks.js';
+import { MANDATORY_PACKS, listPacks, packDirFor, packDirs, readPack, withMandatoryPacks } from '../src/skillpacks.js';
 import type { WorkerAdapter } from '../src/types.js';
 
 describe('skill packs — mandatory union rule', () => {
@@ -34,6 +34,41 @@ describe('skill packs — mandatory union rule', () => {
     expect(MANDATORY_PACKS).toEqual(['worker-role', 'worker-hygiene']);
     const packs = listPacks();
     for (const mandatory of MANDATORY_PACKS) expect(packs).toContain(mandatory);
+  });
+});
+
+describe('skill packs — user pack directory', () => {
+  const { tempDir } = useTempResources('heddle-user-packs-test-');
+
+  it('searches HOME/.heddle/packs after HEDDLE_PACKS and before built-ins', () => {
+    const home = tempDir();
+    const userPacks = join(home, '.heddle', 'packs');
+    const envPacks = join(tempDir(), 'env-packs');
+    const savedHome = process.env.HOME;
+    const savedProfile = process.env.USERPROFILE;
+    const savedPacks = process.env.HEDDLE_PACKS;
+    mkdirSync(userPacks, { recursive: true });
+    mkdirSync(envPacks, { recursive: true });
+    writeFileSync(join(userPacks, 'user-only.md'), 'user pack');
+    writeFileSync(join(userPacks, 'quality-gate.md'), 'user quality gate');
+    try {
+      process.env.HOME = home;
+      process.env.USERPROFILE = home; // Windows homedir() reads USERPROFILE, not HOME
+      delete process.env.HEDDLE_PACKS;
+      expect(packDirFor('user-only')).toBe(userPacks);
+      expect(readPack('quality-gate')).toBe('user quality gate');
+      writeFileSync(join(envPacks, 'user-only.md'), 'env pack');
+      process.env.HEDDLE_PACKS = envPacks;
+      mkdirSync(join(userPacks, 'dir-shaped.md'));
+      expect(packDirFor('dir-shaped')).not.toBe(userPacks); // a DIRECTORY named <pack>.md is not a pack
+      expect(listPacks()).not.toContain('dir-shaped');
+      expect(packDirs()).toEqual([envPacks, userPacks, expect.any(String)]);
+      expect(readPack('user-only')).toBe('env pack');
+    } finally {
+      if (savedHome === undefined) delete process.env.HOME; else process.env.HOME = savedHome;
+      if (savedProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = savedProfile;
+      if (savedPacks === undefined) delete process.env.HEDDLE_PACKS; else process.env.HEDDLE_PACKS = savedPacks;
+    }
   });
 });
 

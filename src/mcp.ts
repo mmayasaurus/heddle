@@ -126,7 +126,7 @@ export function validateWorkerMcp(provider: string, serverNames: string[]): void
       'not write guessed config. Dispatch without --mcp for gemini, or use a codex/cursor worker.',
     );
   }
-  if (provider === 'groq' || provider === 'cerebras' || provider === 'openrouter') {
+  if (provider === 'groq' || provider === 'cerebras' || provider === 'openrouter' || provider === 'glm') {
     throw new Error(`worker MCP attachment is not supported for HTTP OpenAI-compat provider "${provider}"`);
   }
   // Any OTHER provider has no worker-MCP attachment path — throw rather than fall through to a pass

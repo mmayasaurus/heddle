@@ -27,6 +27,12 @@ export type TrackerKind = 'linear' | 'github';
 const TRACKER_KINDS: readonly TrackerKind[] = ['linear', 'github'];
 export const DEFAULT_TRACKER: TrackerKind = 'linear';
 
+export interface ProjectGates {
+  app?: { dir: string; parent: string; pack: string };
+  byFolderName?: Record<string, string>;
+  byOriginName?: Record<string, string>;
+}
+
 export interface Project {
   name: string;
   workspaceRoots: string[];
@@ -36,6 +42,8 @@ export interface Project {
   launcher: string;
   /** Issue-tracker backend; defaults to 'linear' when omitted from the registry file. */
   tracker: TrackerKind;
+  /** Optional, deliberately validated by the gate resolver so malformed gates never break dispatch. */
+  gates?: ProjectGates;
 }
 
 export interface ProjectRegistry {
@@ -111,7 +119,7 @@ function toProject(node: any, index: number, path: string): Project {
       );
     }
   }
-  return {
+  const project: Project = {
     name,
     // Canonicalized once here (symlinks dereferenced, made absolute) so projectForCwd never touches
     // the filesystem inside its matching loop, and both sides of every comparison share one space.
@@ -122,6 +130,8 @@ function toProject(node: any, index: number, path: string): Project {
     launcher: requireString(node, 'launcher', where, path),
     tracker: optionalTracker(node, where, path),
   };
+  if (node.gates !== undefined) project.gates = node.gates as ProjectGates;
+  return project;
 }
 
 /** Loud when the same agent id (case-insensitive) is claimed by more than one project — a hand-edit

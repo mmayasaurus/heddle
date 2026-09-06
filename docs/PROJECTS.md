@@ -1,24 +1,8 @@
-# Project↔fleet registry (HED-160)
+# Project registry
 
-Binds a **project** — a named set of workspace roots — to its dedicated **fleet**: which agent ids
-belong to it, which Linear team tracks its issues, which chat room is its default, and which script
-launches its sessions.
-
-Ground truth that motivated it (Maya, verbatim): "how do we have projects associate with their
-dedicated groups of agents? I want to open the Spinventory project inside heddle — the dashboard
-shows Agents A through Q, chatrooms with just Spinventory agents." Without a registry, "which agents
-belong to this project" has to be re-derived ad hoc by every consumer (dashboard roster, chatroom
-membership, session launcher). The registry makes that association explicit and shared.
-
-This doc covers the CORE module only: the loader and the two lookups in `src/projects.ts`. Wiring the
-registry into the roster, chatroom, or launcher is separate follow-up work, not covered here.
-
-## Where it lives
-
-`~/.heddle/projects.json` — the FRAMEWORK layer, **never inside a project repo**. It spans tenants
-(today Spinventory and heddle itself; more will be added later), so it cannot live inside any one of
-the repos it describes. Same layer as `~/.heddle/accounts.json` (`src/capaware.ts`, the Claude
-account registry) and the ledger (`~/.heddle/ledger.db`).
+`~/.heddle/projects.json` binds a named project to workspace roots, agents, a Linear team, a
+default room, a launcher, and optional repository-aware quality gates. Set `HEDDLE_PROJECTS` to use
+another registry path; a blank value is unset and falls back to `~/.heddle/projects.json`.
 
 ## Schema
 
@@ -27,86 +11,66 @@ account registry) and the ledger (`~/.heddle/ledger.db`).
   "schemaVersion": 1,
   "projects": [
     {
-      "name": "string",
-      "workspaceRoots": ["absolute path", "..."],
-      "agentIds": ["A", "B", "..."],
-      "linearTeam": "string",
-      "defaultRoom": "string",
-      "launcher": "string"
+      "name": "acme",
+      "workspaceRoots": ["/Users/example/Developer/acme"],
+      "agentIds": ["A", "B"],
+      "linearTeam": "ACM",
+      "defaultRoom": "#acme",
+      "launcher": "resume-acme.sh",
+      "gates": {
+        "app": { "parent": "acme-org", "dir": "acme-app", "pack": "acme-app-gate" },
+        "byFolderName": { "acme-tools": "repo-acme-tools" },
+        "byOriginName": { "acme-tools": "repo-acme-tools" }
+      }
     }
   ]
 }
 ```
 
-- `schemaVersion` — must equal `PROJECTS_SCHEMA_VERSION` in `src/projects.ts` (currently `1`). Every
-  consumer parses this file, so a version drift is caught loudly at load time instead of being
-  silently misread.
-- `projects[].name` — the project's display name.
-- `projects[].workspaceRoots` — absolute paths. A cwd under one of these belongs to the project,
-  matched on path SEGMENT boundaries (`/a/foo` does not match `/a/foobar`). When two registered
-  roots both match (nested roots, possibly from different projects), the longest match wins.
-- `projects[].agentIds` — the fleet: letters and digits (e.g. `"A".."Q"`, `"1".."6"`), matched
-  case-insensitively.
-- `projects[].linearTeam` — the Linear team key issues for this project are filed under.
-- `projects[].defaultRoom` — the chatroom a session for this project lands in by default.
-- `projects[].launcher` — the script name that resumes/launches this project's fleet.
+`gates.app` identifies an app checkout by exact parent-directory and directory names. `byFolderName`
+and `byOriginName` map exact repository names to installed packs. The loader validates ordinary
+project fields; malformed gate entries degrade fail-soft so project lookup continues.
 
-## Loading — `loadProjectRegistry(path = DEFAULT_PROJECTS_PATH)`
+- `schemaVersion` must equal `PROJECTS_SCHEMA_VERSION` in `src/projects.ts` (currently `1`).
+- `workspaceRoots` must be absolute and match cwd values only on path-segment boundaries; the longest
+  matching root wins.
+- `agentIds` match case-insensitively and cannot be claimed by two projects.
+- The remaining required non-empty fields are `name`, `linearTeam`, `defaultRoom`, and `launcher`.
 
-- **Fail-soft on absence.** No file yet is a normal state — most projects won't be registered from
-  day one — so a missing file returns `{ schemaVersion: 1, projects: [] }` rather than throwing.
-  Every consumer must work correctly against an empty registry.
-- **Loud on corruption.** This file is Maya-edited config, not generated output — same discipline as
-  the routing table (`src/routing.ts`, `loadRouting` / `listField`). Unparseable JSON, a
-  missing/mismatched `schemaVersion`, or a project missing a required field / with a non-array
-  `workspaceRoots` or `agentIds` all throw a clear `Error` naming the problem and the path.
+An absent registry is normal and loads as an empty registry. A present but unreadable registry,
+invalid JSON, a schema-version mismatch, or malformed required project fields raises a clear error
+naming the registry path. This separates normal unregistered projects from broken configuration.
 
-## Consumer contract: registry is TRUTH, cwd inference is FALLBACK
+## Consumer contract
 
-A consumer (dashboard roster, chatroom membership, session launcher — separate lanes, not built by
-this module) must:
+Consumers load the registry and first call `projectForCwd` or `projectForAgent`. Only if there is no
+registry match may they retain their existing inference fallback; an unregistered project must keep
+working. The registry is shared project identity, not a reason to remove safe fallback behavior.
 
-1. Load the registry and try `projectForCwd` / `projectForAgent` first.
-2. **Only when the registry has no match**, fall back to whatever cwd-based inference it already does
-   today.
+## Gate packs and resolution
 
-The fallback is never removed, even once every known project is registered — an unregistered project
-(a brand-new tenant, or a one-off checkout) must keep working exactly as it does today. The registry
-makes the project↔fleet association explicit; it does not become the only way that association can
-be discovered.
+Pack directories are searched in this order: directories in `HEDDLE_PACKS` (path-delimiter
+separated), `~/.heddle/packs`, then heddle built-ins. A directory named `name.md` is not a pack.
 
-## Example `~/.heddle/projects.json`
+When `quality-gate` is requested, resolution is:
 
-The two projects registered today:
+1. No repository main root: drop the gate.
+2. Exact registry app layout: use its pack.
+3. Exact main-checkout folder name, corroborated by origin when present; an exact origin alone
+   identifies a renamed clone.
+4. Otherwise drop the gate.
 
-```json
-{
-  "schemaVersion": 1,
-  "projects": [
-    {
-      "name": "Spinventory",
-      "workspaceRoots": ["/Users/mayatobi/Developer/Spinventory-Rebuild-App"],
-      "agentIds": ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "1", "2", "3", "4", "5", "6"],
-      "linearTeam": "SPI",
-      "defaultRoom": "#spinventory",
-      "launcher": "resume-sessions-spi.sh"
-    },
-    {
-      "name": "heddle",
-      "workspaceRoots": ["/Users/mayatobi/Developer/heddle", "/Users/mayatobi/Developer/heddle-dashboard"],
-      "agentIds": ["R", "S", "T", "U", "V", "W"],
-      "linearTeam": "HED",
-      "defaultRoom": "#heddle",
-      "launcher": "resume-sessions-hed.sh"
-    }
-  ]
-}
-```
+There are no substring matches. Built-in folder and origin keys are immutable: a registry collision
+is refused with a stderr warning naming the project. A key claimed by two projects with different
+packs is dropped with one stderr warning naming both projects. Warnings are per defect (deduplicated
+only where the loader already records a defect). Missing registries, malformed gates, unknown packs,
+and unrecognized repositories fail soft rather than guessing a gate.
 
-## API (`src/projects.ts`)
+An explicit `HEDDLE_PACKS` `quality-gate.md` shadow retains its consumer-owned gate. A
+`~/.heddle/packs/quality-gate.md` does not suppress repository resolution.
 
-- `PROJECTS_SCHEMA_VERSION` — the schema version this module reads/writes (`1`).
-- `DEFAULT_PROJECTS_PATH` — `~/.heddle/projects.json`.
-- `loadProjectRegistry(path?): ProjectRegistry` — see [Loading](#loading--loadprojectregistrypath--default_projects_path) above.
-- `projectForCwd(reg, cwd): Project | null` — longest-matching `workspaceRoots` entry wins.
-- `projectForAgent(reg, agentId): Project | null` — case-insensitive `agentIds` match.
+## API
+
+- `loadProjectRegistry(path?)` loads the registry; a missing file yields an empty registry.
+- `projectForCwd(registry, cwd)` selects the longest exact workspace-root boundary match.
+- `projectForAgent(registry, agentId)` matches agent IDs case-insensitively.
