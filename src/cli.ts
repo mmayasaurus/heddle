@@ -20,6 +20,9 @@ import { readProviderCaps } from './usage.js';
 import { runRuleCli } from './rules/lifecycle.js';
 import { DOCTOR_PROVIDERS, formatDoctorReport, runDoctor } from './doctor.js';
 import { readOperatorMode, writeOperatorMode, isOperatorMode, OPERATOR_MODES } from './operator-mode.js';
+import { runPrOwn } from './pr-own.js';
+import { runPrSweep } from './pr-sweep.js';
+import { runPrWatch } from './pr-watch.js';
 import { bootstrapComms } from './comms/bootstrap.js';
 
 /**
@@ -81,6 +84,10 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
   heddle ledger report-in-session <id> (--ok | --failed) [--error "<why>"] [--input-tokens N] [--cached-input-tokens N] [--output-tokens N] [--reasoning-tokens N] [--duration-ms N] [--json]  administrative path: may report any orchestrator's handoff
   heddle usage [--since <iso>] [--json]    per-provider totals
   heddle account pick [--for <letter[,letter...]>] [--json] [--explain]   healthiest addressable Claude account for a fleet relaunch
+  heddle pr own <whoami|claim|check|release|mine> [<pr#>] [--json]       coordinate ownership of a GitHub PR
+  heddle pr sweep <pr#> [--json]       sweep all GitHub PR review channels and report mechanical gates
+  heddle pr watch <pr#> [--repo <owner/repo>] [--seed] [--reset] [--json]  one read-only PR review/CI poll pass
+      env: HEDDLE_PR_OWNER; HEDDLE_PR_OWN_STALE_HOURS; HEDDLE_PR_GATE_CHECK; HEDDLE_PR_WATCH_STATE_DIR
   heddle rule <list|propose|ratify|test> [--rules <dir>]   manage proposed and active hook rules
   heddle reviews [--limit N] [--json]      adversarial-review scoreboard (author→reviewer pairs) + recent reviews
   heddle review-outcome <dispatch-id> --total N --accepted M [--notes "…"]   record how many findings you accepted
@@ -111,7 +118,8 @@ const json = has('--json');
  * Orphan hygiene at CLI start (HED-90): close provably-dead in-flight rows so every read below sees
  * an honest ledger. Skipped for `ledger sweep` (its --dry-run must observe, not mutate) AND for
  * `ledger finish` (the operator's manual close of a real orphan must win, with THEIR reason — the
- * auto-sweep pre-empting it would discard the diagnostic and fail the command), AND for `mode` — a
+ * auto-sweep pre-empting it would discard the diagnostic and fail the command), AND for `pr` — its
+ * sweep/watch/check routes are read-only observers and must not create unrelated ledger mutations — and `mode` — a
  * pure operator-mode read/write touches only ~/.heddle/operator-mode.json and has no business
  * opening, creating, or mutating the ledger (codeant HED-336): a read-only `heddle mode` on the
  * per-turn / pocket-console path must not incur ledger startup, migration, or SQLite locking.
@@ -120,7 +128,7 @@ const json = has('--json');
  * ledger — a fresh-machine setup step must not incur ledger startup, migration, or SQLite locking.
  * Best-effort — a hygiene failure must never break the command the operator actually ran.
  */
-if (cmd !== 'mode' && cmd !== 'comms' && !(cmd === 'ledger' && (process.argv[3] === 'sweep' || process.argv[3] === 'finish'))) {
+if (cmd !== 'mode' && cmd !== 'pr' && cmd !== 'comms' && !(cmd === 'ledger' && (process.argv[3] === 'sweep' || process.argv[3] === 'finish'))) {
   try {
     const { closed } = new Ledger().sweepOrphans();
     if (closed > 0) console.error(`heddle: closed ${closed} orphaned in-flight dispatch row${closed === 1 ? '' : 's'} (heddle ledger --json shows outcome='orphaned')`);
@@ -324,6 +332,57 @@ try {
         }).join('\n');
         return `${selected}\n${details}`;
       });
+      break;
+    }
+
+    case 'pr': {
+      const verb = process.argv[3];
+      if (verb === 'own') {
+        const ownership = runPrOwn(process.argv[4], process.argv[5], process.cwd());
+        if (ownership.error) console.error(ownership.error);
+        if (ownership.text) out(json, ownership.data, () => ownership.text);
+        else if (json) out(true, ownership.data, () => '');
+        process.exitCode = ownership.code;
+        break;
+      }
+      if (verb === 'sweep') {
+        const sweep = runPrSweep(process.argv[4] ?? '', process.cwd());
+        if (sweep.error) console.error(sweep.error);
+        if (sweep.text) out(json, sweep.data, () => sweep.text);
+        else if (json) out(true, sweep.data, () => '');
+        process.exitCode = sweep.exitCode;
+        break;
+      }
+      if (verb === 'watch') {
+        const watchArgs = process.argv.slice(5);
+        let repo: string | undefined;
+        let invalid = false;
+        for (let i = 0; i < watchArgs.length; i++) {
+          const value = watchArgs[i];
+          if (value === '--repo') {
+            const candidate = watchArgs[++i];
+            if (!candidate || candidate.startsWith('--')) invalid = true;
+            else repo = candidate;
+          } else if (!['--seed', '--reset', '--json'].includes(value)) invalid = true;
+        }
+        if (invalid) {
+          console.error('usage: heddle pr watch <pr#> [--repo <owner/repo>] [--seed] [--reset] [--json]');
+          process.exitCode = 2;
+          break;
+        }
+        const watch = runPrWatch(process.argv[4] ?? '', {
+          ...(repo ? { repo } : {}),
+          seed: has('--seed'),
+          reset: has('--reset'),
+        }, process.cwd());
+        if (watch.error) console.error(watch.error);
+        if (watch.lines.length) out(json, watch.data, () => watch.lines.join('\n'));
+        else if (json) out(true, watch.data, () => '');
+        process.exitCode = watch.code;
+        break;
+      }
+      console.error('usage: heddle pr own <whoami|claim|check|release|mine> [<pr#>] [--json]\n       heddle pr sweep <pr#> [--json]\n       heddle pr watch <pr#> [--repo <owner/repo>] [--seed] [--reset] [--json]');
+      process.exitCode = 2;
       break;
     }
 
