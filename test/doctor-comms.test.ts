@@ -67,17 +67,21 @@ describe('runDoctor comms readiness', () => {
     expect(existsSync(dirname(dbPath))).toBe(false);
   });
 
-  test('honors HEDDLE_COMMS_DB when no explicit comms path is injected', async () => {
+  test('resolves the comms db from HEDDLE_COMMS_DB, not DEFAULT_COMMS_PATH', async () => {
     const dir = resources.tempDir();
-    const envDb = join(dir, 'comms.db');
+    const provisioned = join(dir, 'provisioned.db');
     const tokenPath = join(dir, 'operator.token');
-    bootstrapComms({ commsDbPath: envDb, operatorTokenPath: tokenPath, projectsPath: join(dir, 'projects.json') });
-    const report = await runDoctor(
-      {},
-      fakeDeps({ ...config(), operatorToken: tokenPath }, { env: { HEDDLE_COMMS_DB: envDb } }),
-    );
+    bootstrapComms({ commsDbPath: provisioned, operatorTokenPath: tokenPath, projectsPath: join(dir, 'projects.json') });
+    const missing = join(dir, 'missing.db');
 
-    expect(check(report, 'comms:ready')).toMatchObject({ outcome: 'ok' });
+    // comms stays UNSET (undefined) so env drives resolution. Two env values that MUST yield different
+    // outcomes prove the check reads HEDDLE_COMMS_DB and not DEFAULT_COMMS_PATH — whose host ~/.heddle
+    // state a test cannot control (an assert-only-`ok` test greens even if env were ignored). Review (med).
+    const ready = await runDoctor({}, fakeDeps({ ...config(), comms: undefined, operatorToken: tokenPath }, { env: { HEDDLE_COMMS_DB: provisioned } }));
+    const absent = await runDoctor({}, fakeDeps({ ...config(), comms: undefined, operatorToken: tokenPath }, { env: { HEDDLE_COMMS_DB: missing } }));
+
+    expect(check(ready, 'comms:ready').outcome).toBe('ok');
+    expect(check(absent, 'comms:ready').outcome).toBe('warn');
   });
 
   test('fails when the comms database cannot be opened', async () => {
@@ -90,6 +94,21 @@ describe('runDoctor comms readiness', () => {
 
     expect(check(report, 'comms:ready')).toMatchObject({
       outcome: 'fail', detail: expect.stringMatching(/cannot be opened/),
+    });
+  });
+
+  test('warns when the operator token is an empty file (not a usable token)', async () => {
+    const dir = resources.tempDir();
+    const dbPath = join(dir, 'comms.db');
+    const tokenPath = join(dir, 'operator.token');
+    const log = new CommsLog(dbPath);
+    log.ensureDefaultRooms();
+    log.close();
+    writeFileSync(tokenPath, ''); // exists, but zero bytes — existsSync would report it present; statSync catches it
+    const report = await runDoctor({}, fakeDeps({ ...config(), comms: dbPath, operatorToken: tokenPath }));
+
+    expect(check(report, 'comms:ready')).toMatchObject({
+      outcome: 'warn', detail: expect.stringMatching(/operator token/),
     });
   });
 });

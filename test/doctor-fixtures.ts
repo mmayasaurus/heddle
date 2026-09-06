@@ -65,6 +65,10 @@ export function config(
   const paths = {
     routing: join(dir, 'routing.yaml'), lanes: join(dir, 'lanes.yaml'),
     projects: join(dir, 'projects.json'), accounts: join(dir, 'accounts.json'),
+    // Point comms + the operator token at this temp dir (both nonexistent unless a test provisions
+    // them) so no runDoctor() opens the operator's real ~/.heddle/comms.db (which CommsLog would
+    // WAL/migrate) or reads the real operator token — HED-463 review (high) + cursor bugbot.
+    comms: join(dir, 'comms.db'), operatorToken: join(dir, 'operator.token'),
   };
   const cursorFallback = options.cursorFallback
     ? `\n    fallback:\n      provider: cursor\n      model: ${options.cursorFallback}`

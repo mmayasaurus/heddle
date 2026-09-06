@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import { PROVIDER_REGISTRY, readSecretsEnvValue } from '../adapters/openai-compat.js';
 import { CommsLog, DEFAULT_ROOM } from '../comms/log.js';
 import { loadLanes, type LanesConfig } from '../lanes.js';
@@ -316,7 +316,7 @@ export function configChecks(
  * create ~/.heddle or the db — a health check that provisioned state would defeat its own
  * "not initialized" detection — so it gates on existsSync(commsDbPath) BEFORE constructing
  * CommsLog (whose constructor mkdirs the parent and creates the sqlite file). The operator token
- * is checked by existence only, never read (it is the operator trust root). Opening an
+ * is checked as a non-empty regular file (statSync metadata only, never its bytes). Opening an
  * older-but-migratable db applies a schema migration on construction, exactly as every CommsLog
  * opener does — not a health-check-specific mutation; a current-version db opens as a no-op.
  */
@@ -328,7 +328,10 @@ export function commsCheck(commsDbPath: string, operatorTokenPath: string): Defi
       if (!existsSync(commsDbPath)) {
         return result('warn', 'comms not initialized (no comms.db)', 'run `heddle comms init`');
       }
-      const tokenPresent = existsSync(operatorTokenPath); // existence only — never read the trust root
+      // Present = a non-empty regular file (statSync reads metadata only — never the token value);
+      // an empty file or a directory is not a usable operator token (codeant security review).
+      const tokenStat = existsSync(operatorTokenPath) ? statSync(operatorTokenPath) : null;
+      const tokenPresent = tokenStat !== null && tokenStat.isFile() && tokenStat.size > 0;
       let log: CommsLog;
       try {
         log = new CommsLog(commsDbPath);
