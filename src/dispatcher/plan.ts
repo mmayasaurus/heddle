@@ -9,8 +9,9 @@ import { mcpAttachable, webCapable } from '../mcp.js';
 import { pickReviewer, normalizeProvider, type ReviewerPick } from '../review.js';
 import { decideCapabilities, capabilityPolicy } from '../capabilities.js';
 import { readProviderCaps } from '../usage.js';
+import { loadAccountRegistry, type Account } from '../accounts.js';
 import {
-  decideRoute, readClaudeAccounts, adviseClaudeAccount, pickClaudeAccount, capAwarePolicy,
+  decideRoute, readClaudeAccounts, adviseClaudeAccount, pickClaudeAccount, capAwarePolicy, accountAtOrOverCap,
   type RouteDecision, type ClaudeAccount, type AccountAdvice, type AccountPick,
 } from '../capaware.js';
 import {
@@ -20,7 +21,42 @@ import {
 import { packsFor, requestedPacks } from './packs.js';
 import { overrideReasonGate } from './override-gate.js';
 import { webRefusalReason } from './refusals.js';
-import type { DispatchContext, DispatchRequest, DispatchPlan, InSessionOrigin } from './types.js';
+import type { DispatchContext, DispatchRequest, DispatchPlan, DispatchRefusal, InSessionOrigin } from './types.js';
+
+const PAY_PER_TOKEN_PERMIT = 'policy.cap_aware_routing.permit_pay_per_token: true';
+
+function billingDecision(account: Account | undefined, atCap: boolean, permitPayPerToken: boolean): {
+  refusal?: DispatchRefusal; advice?: string;
+} {
+  if (!account?.billingClass) return {};
+  const identity = `selected account "${account.id}" (billingClass=${account.billingClass}`;
+  if (account.billingClass === 'pay-per-token' && !permitPayPerToken) {
+    return { refusal: {
+      code: 'billing.pay-per-token',
+      reason: `${identity}) bills from token 1 and is refused by default.`,
+      instruction: `To explicitly permit this account, set ${PAY_PER_TOKEN_PERMIT}.`,
+    } };
+  }
+  const posture = account.overage?.posture;
+  if (posture === 'open-billing' && atCap) {
+    return { refusal: {
+      code: 'billing.open-billing-at-cap',
+      reason: `${identity}, overage.posture=open-billing) is at or over its five-hour cap and would enter paid overage.`,
+      instruction: `No switch overrides open-billing at cap; ${PAY_PER_TOKEN_PERMIT} is the exact pay-per-token permit lever and does not permit this posture. Select an account with headroom or change its overage posture.`,
+    } };
+  }
+  if (posture === 'bounded-prepaid') {
+    if (account.overage?.creditsRemaining === 0) {
+      return { refusal: {
+        code: 'billing.prepaid-exhausted',
+        reason: `${identity}, overage.posture=bounded-prepaid) has credits exhausted.`,
+        instruction: `No switch overrides exhausted prepaid credit; ${PAY_PER_TOKEN_PERMIT} is the exact pay-per-token permit lever and does not replenish this account. Add prepaid credit or select another account.`,
+      } };
+    }
+    if (atCap) return { advice: `burning prepaid buffer (${account.overage?.creditsRemaining} of ${account.overage?.spendLimit})` };
+  }
+  return {};
+}
 
 export function hasNoDispatchableClaudeAccount(plan: Pick<DispatchPlan,
   'target' | 'execution' | 'notDispatchable' | 'claudeAccountCount' | 'accountPick'>,
@@ -288,6 +324,20 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
       account = accountAdvice.best?.id ?? null;
     }
   }
+  const richAccount = account === null
+    ? undefined
+    : loadAccountRegistry().accounts.find((candidate) => candidate.provider === target.provider && candidate.id === account);
+  const billing = billingDecision(
+    richAccount,
+    account !== null && accountAtOrOverCap(caps[target.provider], account),
+    capAwarePolicy(table).permitPayPerToken,
+  );
+  const billingRefusal = billing.refusal;
+  const billingAdvice = billing.advice;
+  if (billingAdvice) {
+    decision.checks.push(billingAdvice);
+    decision.routeReason = `${decision.routeReason}; ${billingAdvice}`;
+  }
   // The dry run must mirror what dispatch() would do — including refusing a bare direct route.
   const gate = overrideReasonGate(req);
   const overrideReasonRequired = gate ? gate.refusal(table).reason : undefined;
@@ -308,7 +358,7 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
   const requiresWebRefusal = reachesRunTarget && !dryCaps.refusal && route.requiresWeb && !webCapable(target.provider, dryCaps.granted)
     ? webRefusalReason(route.taskClass, target.provider)
     : undefined;
-  return { route, target, fallback, origin, execution, decision, skillsForRefusal, account, accountAdvice, accountPick, rotationAccount, claudeAccountCount, notDispatchable, reviewerPick, sameProviderReview, pinnedExcludedAccount, overrideReasonRequired, capabilityRefusal, requiresWebRefusal };
+  return { route, target, fallback, origin, execution, decision, skillsForRefusal, account, accountAdvice, accountPick, rotationAccount, claudeAccountCount, notDispatchable, reviewerPick, sameProviderReview, pinnedExcludedAccount, overrideReasonRequired, billingRefusal, billingAdvice, capabilityRefusal, requiresWebRefusal };
 }
 
 /** One shared dry-run summary for `heddle route` and the `plan_dispatch` MCP tool (identical fields). */
@@ -317,7 +367,7 @@ export function summarizePlan(plan: DispatchPlan): Record<string, unknown> {
   const noDispatchableAccount = hasNoDispatchableClaudeAccount(plan);
   return {
     task_class: plan.route.taskClass,
-    would_run: notDispatchable || plan.decision.refusal || plan.sameProviderReview || plan.pinnedExcludedAccount || noDispatchableAccount || plan.overrideReasonRequired || plan.capabilityRefusal || plan.requiresWebRefusal ? null : `${plan.target.provider}/${plan.target.model}`,
+    would_run: notDispatchable || plan.decision.refusal || plan.billingRefusal || plan.sameProviderReview || plan.pinnedExcludedAccount || noDispatchableAccount || plan.overrideReasonRequired || plan.capabilityRefusal || plan.requiresWebRefusal ? null : `${plan.target.provider}/${plan.target.model}`,
     execution: plan.execution ?? null,
     in_session: plan.execution === 'in-session-subagent',
     routed_away_for_cap: plan.decision.routedAwayForCap,
@@ -329,6 +379,8 @@ export function summarizePlan(plan: DispatchPlan): Record<string, unknown> {
       ? { code: 'override-reason-required', reason: plan.overrideReasonRequired }
       : plan.sameProviderReview
       ? { code: 'same-provider-review', reason: plan.sameProviderReview }
+      : plan.billingRefusal
+      ? plan.billingRefusal
       : plan.decision.refusal
       ? plan.decision.refusal
       : plan.pinnedExcludedAccount
@@ -344,6 +396,7 @@ export function summarizePlan(plan: DispatchPlan): Record<string, unknown> {
     account: plan.account,
     account_pick: plan.accountPick ? { id: plan.accountPick.account.id, used_pct: plan.accountPick.usedPct, reason: plan.accountPick.reason, config_dir: plan.accountPick.account.configDir } : null,
     account_advice: plan.accountAdvice?.line ?? null,
+    billing_advice: plan.billingAdvice ?? null,
     reviewer_pick: plan.reviewerPick?.reason ?? null,
     would_refuse_same_provider: plan.sameProviderReview ?? null,
     skills: plan.skillsForRefusal,

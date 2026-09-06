@@ -12,6 +12,7 @@ afterEach(() => {
 describe('buildWorkerEnv — subscription-billing worker isolation (HED-30 allowlist)', () => {
   describe('inherited base env → vendor-namespace strip', () => {
     it('strips every vendor credential/billing namespace — including a NOVEL var — but keeps PATH/HOME', () => {
+      process.env.ANTHROPIC_API_KEY = 'stray-metered-key';
       process.env.ANTHROPIC_BASE_URL = 'http://evil';
       process.env.ANTHROPIC_CUSTOM_HEADERS = 'x';
       process.env.OPENAI_BASE_URL = 'http://evil';
@@ -36,7 +37,7 @@ describe('buildWorkerEnv — subscription-billing worker isolation (HED-30 allow
       process.env.PATH = '/usr/bin';
       process.env.HOME = '/home/x';
       const { env, stripped } = buildWorkerEnv();
-      for (const k of ['ANTHROPIC_BASE_URL', 'ANTHROPIC_CUSTOM_HEADERS', 'OPENAI_BASE_URL',
+      for (const k of ['ANTHROPIC_API_KEY', 'ANTHROPIC_BASE_URL', 'ANTHROPIC_CUSTOM_HEADERS', 'OPENAI_BASE_URL',
         'OPENAI_ORGANIZATION', 'GOOGLE_GENAI_USE_VERTEXAI', 'GOOGLE_CLOUD_PROJECT', 'VERTEXAI_PROJECT',
         'AWS_BEARER_TOKEN_BEDROCK', 'CURSOR_BASE_URL', 'GEMINI_BASE_URL', 'GCLOUD_ACCESS_TOKEN',
         'CLAUDE_CODE_USE_NEW_BACKEND', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'BEDROCK_BASE_URL',

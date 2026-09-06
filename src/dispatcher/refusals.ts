@@ -55,6 +55,13 @@ export function refusalOutcome(
   };
 }
 
+export function refuseBilling(
+  ctx: DispatchContext, req: DispatchRequest, taskClass: string, target: RouteTarget,
+  skills: string[], refusal: DispatchRefusal,
+): DispatchOutcome {
+  return refusalOutcome(ctx, req, taskClass, target, skills, refusal);
+}
+
 /** The requiresWeb guard's refusal reason — shared by runTarget (enforcement) and planDispatch (dry
  *  run) so a `heddle route` / plan_dispatch preview can't advertise a web-research route the real
  *  dispatch would immediately refuse (codex #76). One source of truth for the wording. */

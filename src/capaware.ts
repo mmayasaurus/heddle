@@ -33,8 +33,9 @@ import { bindingWindow, DISPATCH_SIGNAL_MAX_AGE_S, type CapsByProvider, type Pro
 export interface CapAwarePolicy {
   enabled: boolean;
   routeAwayAtPct: number;
+  permitPayPerToken: boolean;
 }
-export const DEFAULT_CAP_AWARE_POLICY: CapAwarePolicy = { enabled: true, routeAwayAtPct: 90 };
+export const DEFAULT_CAP_AWARE_POLICY: CapAwarePolicy = { enabled: true, routeAwayAtPct: 90, permitPayPerToken: false };
 /** At the provider's published cap, enabled/unknown overage must be treated as paid until confirmed off. */
 export const OVERAGE_RED_PCT = 100;
 
@@ -43,9 +44,17 @@ export function capAwarePolicy(table: RoutingTable): CapAwarePolicy {
   const pct = Number(node.route_away_at_pct);
   return {
     enabled: node.enabled !== false,
+    permitPayPerToken: node.permit_pay_per_token === true,
     // 0 is valid ("always route away"); >100 is valid ("never"); negatives/NaN fall to the default.
     routeAwayAtPct: Number.isFinite(pct) && pct >= 0 ? pct : DEFAULT_CAP_AWARE_POLICY.routeAwayAtPct,
   };
+}
+
+/** Fresh per-account five-hour cap check shared by overage warnings and dispatch billing enforcement. */
+export function accountAtOrOverCap(caps: ProviderCaps | undefined, accountId: string): boolean {
+  const row = caps?.accounts.find((account) => account.id === accountId);
+  return row !== undefined && !row.stale && row.fiveHour.usedPercentage !== null
+    && row.fiveHour.usedPercentage >= OVERAGE_RED_PCT;
 }
 
 export interface RouteDecision {
@@ -479,7 +488,7 @@ function detectOverageAlert(
   caps: ProviderCaps | undefined, accounts: ClaudeAccount[], cur: ClaudeAccount | null, usable: boolean,
 ): { accountId: string; spend: number | null; used: number } | null {
   const redRows = (caps?.accounts ?? [])
-    .filter((a) => !a.stale && a.fiveHour.usedPercentage !== null && a.fiveHour.usedPercentage >= OVERAGE_RED_PCT)
+    .filter((a) => accountAtOrOverCap(caps, a.id))
     .map((a) => ({
       id: a.id, used: a.fiveHour.usedPercentage as number, spend: a.overageSpend ?? null,
       overageEnabled: a.overageEnabled ?? accounts.find((x) => x.id === a.id)?.overageEnabled ?? null, // payload → declared → unknown

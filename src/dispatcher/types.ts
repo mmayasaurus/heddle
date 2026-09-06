@@ -98,7 +98,7 @@ export interface DispatchRequest {
  * `refusal` column.
  */
 export interface DispatchRefusal {
-  code: 'claude-in-session' | 'no-dispatchable-account' | 'not-dispatchable' | 'depth-1' | 'max-children' | 'capability-denied' | 'metered-pool-exhausted' | 'same-provider-review' | 'override-reason-required' | 'fleet-paused';
+  code: 'claude-in-session' | 'no-dispatchable-account' | 'not-dispatchable' | 'depth-1' | 'max-children' | 'capability-denied' | 'metered-pool-exhausted' | 'same-provider-review' | 'override-reason-required' | 'fleet-paused' | 'billing.pay-per-token' | 'billing.open-billing-at-cap' | 'billing.prepaid-exhausted';
   reason: string;
   /** What to do instead, when there is a clear alternative. */
   instruction?: string;
@@ -203,6 +203,10 @@ export interface DispatchPlan {
   /** Account the run bills to / is advised (see DispatchOutcome.account). */
   account: string | null;
   accountAdvice?: AccountAdvice;
+  /** Money-safety refusal for the selected rich-registry account. */
+  billingRefusal?: DispatchRefusal;
+  /** Non-blocking bounded-prepaid warning when dispatch will consume the prepaid buffer. */
+  billingAdvice?: string;
   /** HED-78: the Claude account a headless worker will run on. `undefined` = in-session/non-Claude;
    *  `null` = a registry was consulted but none is addressable (or it has no entries). */
   accountPick?: AccountPick | null;

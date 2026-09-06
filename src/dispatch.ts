@@ -11,7 +11,7 @@ import { readClaudeAccounts, pickClaudeAccount, capAwarePolicy, hardRefusal } fr
 import { classifyRotationRefusal, DEFAULT_COOLDOWN_S, DEFAULT_COOLING_PATH, readCooling, readRotationAccounts, writeCooling } from './rotation.js';
 import { basename } from 'node:path';
 import { defaultAdapterFor } from './dispatcher/adapters.js';
-import { refusalOutcome, refuseDepth1, refuseNotDispatchable, refuseInSession } from './dispatcher/refusals.js';
+import { refusalOutcome, refuseBilling, refuseDepth1, refuseNotDispatchable, refuseInSession } from './dispatcher/refusals.js';
 import { overrideReasonGate } from './dispatcher/override-gate.js';
 import { monocultureNote, formatMonocultureWarning } from './dispatcher/monoculture.js';
 import { planDispatch, resolveRotationAccount, hasNoDispatchableClaudeAccount, noDispatchableClaudeAccountReason } from './dispatcher/plan.js';
@@ -142,6 +142,10 @@ export async function dispatch(
       code: 'metered-pool-exhausted', reason: plan.decision.refusal.reason,
       instruction: 'Pick a class/route on a provider with headroom (heddle route <class> shows the live decision); never on-demand billing.',
     });
+  }
+
+  if (plan.billingRefusal) {
+    return refuseBilling(ctx, req, route.taskClass, target, skillsForRefusal, plan.billingRefusal);
   }
 
   // ---- Claude-primary → structured, ledgered in-session refusal (HED-18) ----------------------
