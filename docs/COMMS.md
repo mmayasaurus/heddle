@@ -77,7 +77,7 @@ Stores immutable log entries:
 - `body` (TEXT NOT NULL): Non-empty text content.
 - `reply_to` (INTEGER): Optional row id of the message being answered — must exist at append time
   (the log is append-only, so a dangling reply would be permanent).
-- `issue` (TEXT): Optional issue ref (e.g. `"SPI-712"`, `"HED-4"`).
+- `issue` (TEXT): Optional issue ref (e.g. `"ABC-123"`, `"HED-4"`).
 - `thread` (TEXT): Optional opaque conversation id chosen by the sender (e.g. `"HED-4/review-2"`)
   so concurrent conversations between the same parties stay separable; filter with
   `TranscriptQuery.thread`.
@@ -521,7 +521,7 @@ refuse a v2 file loudly instead of silently missing targeted posts.
   `revoked`. The token value is never written to the log, the deliveries, tool outputs or warnings
   (tested). `log_sent` mirrors DIRECT sends only (rooms/@all always go through `post_message`).
 
-  How Maya becomes operator (5 lines):
+  How operator becomes operator (5 lines):
   1. `heddle-comms --init-operator-token` (once) → prints the path only.
   2. In her session's `.mcp.json`: `"heddle-comms": { "command": "heddle-comms", "env": {
      "HEDDLE_COMMS_ROLE": "operator", "HEDDLE_COMMS_OPERATOR_TOKEN": "<contents of the file>",

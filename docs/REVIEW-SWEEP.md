@@ -9,7 +9,7 @@ This document is shared by both heddle repos; the few repo-specific facts (the d
 Review feedback arrives through five distinct channels on GitHub. Query every channel with `gh` (GitHub CLI); `jq` helps when you want to filter the JSON. Set the placeholders once and paste the commands as-is:
 
 ```shell
-OWNER=mmayasaurus REPO=$(gh repo view --json name -q .name) N=<pr-number>
+OWNER=<your fork> REPO=$(gh repo view --json name -q .name) N=<pr-number>
 ```
 
 | Channel | Scope | Inspection command | Finding criteria |
@@ -119,7 +119,7 @@ Batch fixes for a round into one push (each push spawns reviewer runs — some i
 
 ## Standing rules from the maintainer
 
-The authoritative wording lives in [CI.md](CI.md#standing-rules-maya-2026-08-15--apply-to-everyone-orchestrator-included) (no direct commits to `main`; as many revision rounds as it takes; behavioral tests, not toggle tests) — one source, not two.
+The authoritative wording lives in [CI.md](CI.md#standing-rules-operator-2026-08-15--apply-to-everyone-orchestrator-included) (no direct commits to `main`; as many revision rounds as it takes; behavioral tests, not toggle tests) — one source, not two.
 
 ## Merging
 

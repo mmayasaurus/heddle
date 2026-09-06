@@ -13,16 +13,16 @@
 ## 0. What heddle is
 
 A **cross-provider agent orchestration layer** for subscription coding CLIs. Claude (Fable 5)
-orchestrator sessions — the operator's own interactive terminal tabs — claim Linear SPI issues,
+orchestrator sessions — the operator's own interactive terminal tabs — claim Linear ABC issues,
 decompose them, and dispatch sub-tasks to the best-fit model per task, each worker loaded with only
 the skills/tools it needs. Agents converse across sessions and providers, everything is observable
 on a localhost dashboard, and work follows the existing Linear→PR ownership discipline to
-completion. Project-agnostic; Spinventory is the first consumer.
+completion. Project-agnostic; the first consumer project is the first consumer.
 
 **Two prime directives:** reduce usage of the expensive models (route work down/sideways when a
 cheaper or better-suited model wins) and improve outcomes (right model + right skills per task).
 
-Repo: `github.com/mmayasaurus/heddle` (private). Runtime: Node 22 + TypeScript, zero-native-dep
+Repo: `github.com/<your fork>` (private). Runtime: Node 22 + TypeScript, zero-native-dep
 (uses built-in `node:sqlite`).
 
 ---
@@ -134,8 +134,8 @@ owns launch-command construction, structured-output parsing, resume handle, and 
 plumbing. **All verified contracts live in `LANDMINES.md` — read it before touching an adapter.**
 
 **Worker isolation (DECIDED 2026-08-04).** The isolation question is about WORKERS (subagents),
-NOT orchestrators — the A–Q orchestrators ALREADY each run in their own git worktree. Constraint
-(Maya): too many worktrees make memtrace and RAM go crazy; worktrees are acceptable ONLY if cleaned
+NOT orchestrators — the consumer project's fleet already each run in their own git worktree. Constraint
+(operator): too many worktrees make memtrace and RAM go crazy; worktrees are acceptable ONLY if cleaned
 up + discarded the moment they're no longer used. Therefore:
 - **DEFAULT: workers run INSIDE their orchestrator's existing worktree.** No new worktrees for
   normal delegation — the orchestrator's worktree already isolates its issue, and its workers
@@ -148,7 +148,7 @@ up + discarded the moment they're no longer used. Therefore:
   exactly what keeps memtrace + RAM sane). Prefer CoW/temp-dir copies over git worktrees where
   possible, to skip the branch/overlay machinery entirely.
 - Steal Conductor's "spotlight testing" (one-way sync of one worktree's changes back to root) for
-  Docker/fixed-port stacks. Productize Spinventory's `worktree-discipline.md` for the race case.
+  Docker/fixed-port stacks. Productize the first consumer project's `worktree-discipline.md` for the race case.
 
 ---
 
@@ -183,7 +183,7 @@ model/effort/flag choices against Superset's maintained headless-flag crib-sheet
 ## 7. Orchestration & delegation discipline
 
 Orchestrators are the operator's interactive Claude Code tabs (fable by default; `--model opus` or
-the `claudex` GPT-5.6 launcher when limits hit). They claim SPI issues exactly as today (L0), then
+the `claudex` GPT-5.6 launcher when limits hit). They claim ABC issues exactly as today (L0), then
 **delegate most execution** — Fable writes specs/step-by-step instructions and dispatches the
 coding/labor to cheaper best-fit workers, doing high-level judgment + integration itself and
 stepping in only where context/judgment demand. This is the intended model, not an aspiration.
@@ -205,15 +205,15 @@ stepping in only where context/judgment demand. This is the intended model, not 
 Agents ARE allowed to do work themselves — delegation is a tool, not a mandate.
 
 **How orchestration knowledge reaches an orchestrator (DECIDED 2026-08-04 — hooks AND skills,
-split, integrated with the existing identity system).** Every A–Q agent is now a Fable orchestrator
+split, integrated with the existing identity system).** Every consumer-project fleet agent is now a Fable orchestrator
 (resume-sessions-v2.sh), so the orchestrator OPERATING MODE must be reliably present, not dependent
 on the agent remembering to load a skill:
 - **SessionStart hook — extend the existing `agent-identity.py`.** It already injects fleet identity
   + owned PRs + claimed Linear issues; append a CONCISE orchestration primer there so the role rides
-  ALONGSIDE the identity: "you are Agent K, a heddle orchestrator (owning SPI-712 / PR #2340);
+  ALONGSIDE the identity: "you are Agent K, a heddle orchestrator (owning ABC-123 / PR #2340);
   delegate sub-tasks via the heddle MCP tools; full protocol → /orchestrate." Guaranteed present
-  every session; ties the orchestrator role directly to the Linear/PR ownership system Maya asked
-  about. MUST stay tiny — SessionStart bloat causes autocompaction (Maya's session-lean discipline).
+  every session; ties the orchestrator role directly to the Linear/PR ownership system operator asked
+  about. MUST stay tiny — SessionStart bloat causes autocompaction (operator's session-lean discipline).
 - **`/orchestrate` skill — load-on-demand.** The full protocol (decomposition patterns, task-class
   reference, the dispatch loop, worker-isolation rules, delegation discipline) lives here, pulled in
   when actually orchestrating, so it costs zero session-start context.
@@ -256,7 +256,7 @@ any MCP-capable CLI gets real mid-task back-and-forth. Claude orchestrators subs
 persistent Monitor (near-instant delivery); exited workers get queued + re-invoked with their resume
 handle. The operator is a first-class address.
 
-- **Chatroom = PULL model** (Maya's decision): agents check the room when they want; `@all`/`@agent`
+- **Chatroom = PULL model** (operator's decision): agents check the room when they want; `@all`/`@agent`
   is the guaranteed-delivery exception (fires a notification). Culture is deliberately conservative
   (opinions / answers / multi-agent announcements / open questions only). Subagents may post
   sparingly and have first-class DMs (subagent↔subagent, ↔host, ↔operator). Chat stays OFF the
@@ -266,7 +266,7 @@ handle. The operator is a first-class address.
   identity): each subagent is an addressable identity on the broker (e.g. `K.1`, `K.2`) so it can
   converse with peers, its host, the operator, and the room. The broker mints/tracks these; cascade
   their archive with the parent (Paseo's "fleets don't outlive their orchestrator").
-- **Ownership glue:** Linear stays canonical; a sub-task ledger links each dispatch → SPI issue →
+- **Ownership glue:** Linear stays canonical; a sub-task ledger links each dispatch → ABC issue →
   PR so nothing orphans.
 
 ---
@@ -293,7 +293,7 @@ prompts (harness-dependent), plus a manual escape-hatch verb any process can cal
 
 ## 11. Hooks — enforcement & safeguards
 
-Hooks are both safeguards and behavior enforcement, for orchestrators AND workers (Maya's
+Hooks are both safeguards and behavior enforcement, for orchestrators AND workers (operator's
 directive). Worker-scoped hook configs are materialized per-dispatch (never edit the operator's
 global CLI configs). All four agentic CLIs ship JSON-on-stdin hook systems (Claude 25 events,
 Cursor ~18, Codex ~11, agy 9).
@@ -445,7 +445,7 @@ not skills.
 - **Spec / decompose:** `/orchestrate` [planned, P1] + `decompose-and-spec` [NEW, P1] (break an
   issue into worker specs, pick task classes, write clear worker instructions; steal OpenChamber
   "magic prompts" templating + agency-swarm structured-handoff fields).
-- **Build / code:** [have] spinventory-core, code-discovery, quality-gate, supabase-dev; [have,
+- **Build / code:** [have] consumer-project-core, code-discovery, quality-gate, supabase-dev; [have,
   invoke] sleek-style-guide, social-style-guide; [NEW, extract-from-source, P2] condensed style
   skill materialized into non-Claude workers' AGENTS.md (they can't invoke the Claude commands).
 - **Review:** `adversarial-review` [BUILT, HED-3] — the `adversarial-review` task class + skill pack:
@@ -471,12 +471,12 @@ not skills.
 
 ## 16. Build phases
 
-**Phase 1 — orchestration core (headless-runnable) — IN PROGRESS.** Goal: lettered Claude agents
-A–Q orchestrate real Spinventory work autonomously while the platform gets built alongside.
+**Phase 1 — orchestration core (headless-runnable) — IN PROGRESS.** Goal: the consumer project's
+fleet orchestrates real consumer-project work autonomously while the platform gets built alongside.
 - DONE: adapters, routing, ledger, skill packs, MCP attachment, effort, billing guard, rotation.
 - NEXT: heddle MCP server + `/orchestrate` command + rules stub (so orchestrators dispatch as a
   tool, not a shell-out) · roles layer · tiny-model layer (auditor + auto-effort + chores) ·
-  delegation-discipline hook · pilot on one real SPI issue, measure vs an all-Claude baseline, tune
+  delegation-discipline hook · pilot on one real ABC issue, measure vs an all-Claude baseline, tune
   routing from ledger data · roll out to the fleet.
 
 **Phase 2 — comms & coordination.** Broker + chatroom (works in plain iTerm before any GUI) ·
@@ -493,7 +493,7 @@ savings analytics.
 
 ---
 
-## 17. Open decisions (need Maya)
+## 17. Open decisions (need operator)
 
 1. ✅ RESOLVED (2026-08-04): worker isolation — workers share the orchestrator's worktree by
    default; only race-mode uses transient, immediately-torn-down worktrees with no memtrace overlay.
@@ -518,7 +518,7 @@ savings analytics.
   `src/{dispatch,routing,ledger,skillpacks,mcp,env,cli,types,guidance,hook-dispatch-guidance,mcp-server}.ts`;
   tests `test/*.test.ts` (`npm test`).
 - **Research detail & decision log (session-durable):** memory `project-agent-orchestration-lane`.
-- **Spinventory integration:** the L0 systems — `.claude/bin/lin.sh`, `pr-own.sh`, `pr-sweep.sh`,
+- **Consumer-project integration:** the L0 systems — `.claude/bin/lin.sh`, `pr-own.sh`, `pr-sweep.sh`,
   `agent-identity.py`, `worktree-discipline.md`; vault doc
   `_vault/architecture/agent-orchestration-plan.md`.
 - **Reference architectures to study (clean-room, don't import):** Paseo docs/ (AGPL), Superset

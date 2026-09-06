@@ -20,7 +20,7 @@ There is **one** persistent graph server for the whole fleet:
 
 ```
 memcore-server --bind 127.0.0.1:50051 \
-  --data-dir /Users/mayatobi/Developer/Spinventory-Rebuild-App/Spinventory-Rebuild-Official/Rebuild-Project-Root/.memdb
+  --data-dir <workspace-root>/.memdb
 ```
 
 Every `repo_id` (`Rebuild-Project-Root`, `heddle`, `heddle-dashboard`) is stored in **that one server's
@@ -29,9 +29,9 @@ dirs** — not the live store. When an MCP tool (or the CLI, when it attaches to
 `repo_id=heddle`, it reads this server. `index_directory` via MCP writes here — that is the path proven
 to update what the fleet reads.
 
-## The sidecar trap — why you cannot just clone Spinventory's refresh script
+## The sidecar trap — why you cannot just clone the first consumer project's refresh script
 
-Spinventory's `.memtrace-refresh.sh` runs, on a launchd timer:
+The first consumer project's `.memtrace-refresh.sh` runs, on a launchd timer:
 
 ```sh
 MEMTRACE_MEMDB_DATA_DIR="$WS/.memdb" memtrace index "$CANON"
@@ -41,7 +41,7 @@ With `MEMTRACE_MEMDB_DATA_DIR` set, the **CLI spins up its own SIDECAR memcore-s
 dir — a throwaway store nobody serves. Its own log says so verbatim:
 
 ```
-? MemDB local - sidecar memcore-server (data dir: /Users/mayatobi/Developer/Spinventory-Rebuild-App/.memdb)
+? MemDB local - sidecar memcore-server (data dir: <workspace-root>/.memdb)
 ```
 
 Proof it never reaches the live store: the script's marker records commit `1eb38c8a` (2026-07-21) while
@@ -72,25 +72,27 @@ remote-tracking refs (fetch) and its own log. Run it ad-hoc, at agent `/startup`
 
 ```
 # 1. ff the canonical to origin/main if the nag says the checkout is behind:
-git -C /Users/mayatobi/Developer/heddle merge --ff-only origin/main
+git -C <heddle-checkout> merge --ff-only origin/main
 
 # 2. re-index into the live :50051 store (MCP — agent-driven):
-index_directory(path="/Users/mayatobi/Developer/heddle", repo_id="heddle", incremental=true, branch="main")
+index_directory(path="<heddle-checkout>", repo_id="heddle", incremental=true, branch="main")
 
 # 3. record the commit ACTUALLY indexed — the checkout's HEAD after the ff, NOT a fresh
 #    origin/main (which may have advanced since the detector fetched), so the marker never over-claims:
-git -C /Users/mayatobi/Developer/heddle rev-parse HEAD \
-  > /Users/mayatobi/Developer/heddle/.memtrace-heddle-indexed-commit
+git -C <heddle-checkout> rev-parse HEAD \
+  > <heddle-checkout>/.memtrace-heddle-indexed-commit
 ```
+
+Replace `<heddle-checkout>` with the canonical checkout path for this repository.
 
 The marker is bootstrapped to `ea31787` (the commit this detector shipped against). It lives at the
 canonical root and is gitignored — it is machine-local runtime state, not tracked source.
 
-## Installing the launchd timer — Maya's call
+## Installing the launchd timer — operator's call
 
 `scripts/com.heddle.memtrace-staleness.plist` is a **template, deliberately not loaded**. Installing it
 touches the machine's launchd and sits beside a still-pending operator decision about the shared
-memtrace data-dir (tracked in HED-234), so the install step is Maya's
+memtrace data-dir (tracked in HED-234), so the install step is operator's
 firsthand:
 
 ```sh
@@ -104,5 +106,5 @@ Even installed, it only *detects* — the re-index above is still agent-driven.
 
 A truly hands-off refresh needs the CLI to index **into the live `:50051` server** without a sidecar and
 without a second writer on its data-dir. That likely requires the pending **memtrace 0.8.63 → 1.1.5**
-upgrade (a server-connect index mode) — and the upgrade itself is Maya's call (`do NOT run memtrace
+upgrade (a server-connect index mode) — and the upgrade itself is operator's call (`do NOT run memtrace
 install casually`). Until both land, this detector + the manual MCP re-index is the mechanism.

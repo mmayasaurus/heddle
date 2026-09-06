@@ -1,7 +1,7 @@
 # MODELS.md — which model for which job
 
 > Drafted 2026-08-14 by a heddle-dispatched worker (cursor/grok-4.6-high, ledger #30) from
-> `routing/routing.v0.yaml` + `skills/` + `docs/SPEC.md` + `docs/LANDMINES.md`; Maya-approved 2026-08-15.
+> `routing/routing.v0.yaml` + `skills/` + `docs/SPEC.md` + `docs/LANDMINES.md`; operator-approved 2026-08-15.
 
 Orchestrators: pick a **task class**, not a favorite model. The routing table
 (`routing/routing.v0.yaml`) is the live map; this doc is the **why**. Every
@@ -21,7 +21,7 @@ bots — do not dispatch workers there.
 | `scaffold` | cursor **composer-2.5** | codex **gpt-5.6-luna** | Fast structural drafts (files, stubs, wiring). Composer is Cursor-native, cache-warm, ~1.8s on a trivial prompt — coding-tuned, not a reasoner. |
 | `bulk-mechanical` | codex **gpt-5.6-luna** `effort=low` | cursor **composer-2.5-fast** | Renames, sweeps, codemods, boilerplate, test scaffolds. Luna+low is cheap volume. Fallback `-fast` bills ~2× on Cursor — prefer Luna. |
 | `second-opinion` | cursor **grok-4.6-high** | gemini **3.1-pro-high** | Independent diagnosis/review of a diff or plan. Diversity of *family* is the point. Grok sits on the Cursor-Models pool (does not starve PR review). |
-| `second-opinion-hard` | cursor **kimi-k3-high** | — | **Opt-in only.** ~74s even on a trivial prompt. Burns the metered "Other Models" pool that Cursor PR review draws on. Ask Maya first. |
+| `second-opinion-hard` | cursor **kimi-k3-high** | — | **Opt-in only.** ~74s even on a trivial prompt. Burns the metered "Other Models" pool that Cursor PR review draws on. Ask operator first. |
 | `quick-alt-take` | cursor **grok-4.6-medium** | — | Cheap second draft to compare against a primary. Same family as second-opinion, lower effort. |
 | `research-summarize` | claude **haiku** | luna | Doc reading, log triage, summarization. Haiku is the cheap Claude; do not use Sonnet/Opus to read logs. |
 | `documentation` | gemini **3.6-flash-low** | luna | READMEs, comments, changelogs, docstrings. Flash: cheap, fast (~3s), fine for prose over known facts. Not for designing architecture. (3.7-flash verified 8-14 — in catalog; class default pending a quota check.) |
@@ -73,7 +73,7 @@ scope creep) — the dispatcher unions it in unconditionally.
 | `family-codex` / `family-gemini` / `family-cursor` / `family-claude` | **auto-injected by target provider** | Per-family instruction style + known failure modes. Never name these yourself: the dispatcher picks the one matching the target, and a caller-supplied family pack is dropped so a fallback cannot carry two styles. |
 | `worktree-discipline` | shared-worktree workers; **required** for race-and-merge | Lane discipline + "report don't fix". Keeps parallel workers from colliding. |
 
-CONSUMER packs (a project's own conventions — e.g. Spinventory's `spinventory-core`,
+CONSUMER packs (a project's own conventions — e.g. the first consumer project's `consumer-project-core`,
 `supabase-dev`) live in that project's repo, not here: put them in `<project>/.heddle/packs` and
 point `HEDDLE_PACKS` at it. It is a colon-separated SEARCH PATH (`;` on Windows) whose entries are
 searched BEFORE heddle's built-ins, which are always searched last — so a consumer gets its own
@@ -86,10 +86,10 @@ get a temporary `AGENTS.md` block (restored after dispatch).
 
 1. **Subscriptions first, always.** No API keys, no base-URL overrides, no
    on-demand Cursor overage. `subscriptions_only: true` is a hard rule.
-   (OpenRouter-for-workers considered and REJECTED, Maya 2026-08-15.)
+   (OpenRouter-for-workers considered and REJECTED, operator 2026-08-15.)
 2. **Cursor has two pools.** "Cursor Models" (Grok + Composer) = generous
    plan allowance — **prefer these**. "Other Models" (Kimi / GPT / Claude /
-   Gemini in Cursor's catalog) = metered dollars **shared with Maya's Cursor
+   Gemini in Cursor's catalog) = metered dollars **shared with operator's Cursor
    PR-review usage**. Spending it here starves review. `kimi-k3-high` is
    `requires_explicit_opt_in`.
 3. **Route away at 90%** of the Cursor Other-Models pool (`metered_pool_guard`).
@@ -122,7 +122,7 @@ get a temporary `AGENTS.md` block (restored after dispatch).
 
 Authoritative contracts: `docs/LANDMINES.md`. Authoritative map: the YAML.
 
-## Adversarial review (BUILT — HED-3, 2026-08-15; Maya: "super important")
+## Adversarial review (BUILT — HED-3, 2026-08-15; operator: "super important")
 
 Pre-PR, before the human looks: a **different model family** is dropped into the
 author's worktree **read-only** with a **find-only** mandate; the author fixes;
@@ -155,7 +155,7 @@ the ledger scores each author→reviewer pair by accepted-finding rate.
   Ignored paths (`.gitignore`) are outside the boundary by design.
 - **The mandate pack** (`skills/adversarial-review.md`): find only, never fix;
   adversarial not agreeable; five lenses — correctness, security, **test quality
-  (Maya's bar: a test that proves a switch toggles is not a test that proves the
+  (operator's bar: a test that proves a switch toggles is not a test that proves the
   switch DOES the thing — name every test that would still pass if the feature
   were silently broken)**, docs/messages, unverifiable PR claims; a fixed report
   format ending in `VERDICT: N findings`.
@@ -201,7 +201,7 @@ and records why it chose what it chose (`route_reason` in the ledger).
   runs its declared `codex/gpt-5.6-sol` fallback as a subprocess instead of a
   headless claude worker (below the threshold you get the claude worker on the
   best account; with `in_session: true`, the structured refusal + advice).
-- **Cursor pools** (Maya-corrected model, W's fields): `included-total` gates
+- **Cursor pools** (operator-corrected model, W's fields): `included-total` gates
   Cursor's own models (`cursor-grok-*`, `composer-*`, `auto`) — soft
   route-away; `included-api` gates NAMED third-party models (kimi-k3, …) — at
   ≥ 100 % (or noteCode `cursor.includedApiExhausted`) they would bill
@@ -215,7 +215,7 @@ and records why it chose what it chose (`route_reason` in the ledger).
   the `plan_dispatch` MCP tool print the decision, the checks, the remaining
   fallback and the account advice — no ledger row, no worker.
 
-## Fable budget (BUILT — HED-76, 2026-08-16; Maya: "we are burning through fable use even just orchestrating")
+## Fable budget (BUILT — HED-76, 2026-08-16; operator: "we are burning through fable use even just orchestrating")
 
 Fable is soft-capped at **50% of an account's WEEKLY allowance**, and on day 1 of
 the week 58% of it was gone while Codex/Cursor/Gemini headroom idled — so the
@@ -248,7 +248,7 @@ from the raw 5h/7d windows:
 
 ## Claude workers & automatic account switching (BUILT — HED-78, 2026-08-15)
 
-Maya: "Yes let's def build the auto account switching!" — so Claude classes now
+operator: "Yes let's def build the auto account switching!" — so Claude classes now
 run as **out-of-process `claude -p` workers** on the registry account with the
 most 5h headroom (src/adapters/claude.ts + `pickClaudeAccount()` in
 src/capaware.ts), which ends the manual log-out/log-in juggling:
@@ -287,7 +287,7 @@ src/capaware.ts), which ends the manual log-out/log-in juggling:
   instruction (run it as your own Agent-tool subagent: shared prompt cache,
   same account) plus the account advice line.
 - **Route-away stays on**: at Claude 5h ≥ `route_away_at_pct` (90) a Claude
-  class runs its declared fallback (codex/…) instead — Maya's default (lower
+  class runs its declared fallback (codex/…) instead — operator's default (lower
   the knob if Claude should hold).
 - **Live-verified 2026-08-15**: two haiku workers, `heddle dispatch --class
   research-summarize` → ledger `account=acct1` (default, session persisted
@@ -348,7 +348,7 @@ choosing a worker instead:
   `edits_code`, fallback and opt-in. Source: `why:` / `skills:` / `edits_code:`
   fields on each class in `routing/routing.v0.yaml`; this doc stays the
   narrative.
-- **Skill-pack semantics (decided 2026-08-15, Maya via Agent R):** the YAML
+- **Skill-pack semantics (decided 2026-08-15, operator via Agent R):** the YAML
   `skills:` list **is the dispatch default** — omit `skills` and you get it. A
   caller's explicit list **replaces** those task-fit defaults (it does not
   merge with them). Separately, `worker-role` is **mandatory**: the dispatcher
