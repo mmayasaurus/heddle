@@ -1,8 +1,12 @@
 import { PROVIDER_REGISTRY } from './adapters/openai-compat.js';
 import { DEFAULT_ACCOUNTS_PATH } from './capaware.js';
+import { DEFAULT_COMMS_PATH } from './comms/log.js';
+// Importing the trust-root constant from its definition keeps a SINGLE SOURCE OF TRUTH (re-deriving join(homedir(), '.heddle', 'operator.token') would be the two-paths bug class); server.ts has no import-time I/O so the import is side-effect-free.
+import { OPERATOR_TOKEN_PATH } from './comms/server.js';
 import {
   binaryCheck,
   catalogCheck,
+  commsCheck,
   configChecks,
   freshnessCheck,
   harnesses,
@@ -39,6 +43,7 @@ export const DOCTOR_PROVIDERS = [
 /** Injected path → HEDDLE_* env (blank = unset, like the loaders) → the loader's default. */
 function resolveDoctorPaths(deps: DoctorDeps): {
   routingPath: string; lanesPath: string; accountsPath: string; projectsPath: string;
+  commsPath: string; operatorTokenPath: string;
 } {
   return {
     routingPath:
@@ -48,6 +53,8 @@ function resolveDoctorPaths(deps: DoctorDeps): {
       deps.paths.accounts ?? (deps.env.HEDDLE_ACCOUNTS || undefined) ?? DEFAULT_ACCOUNTS_PATH,
     projectsPath:
       deps.paths.projects ?? (deps.env.HEDDLE_PROJECTS || undefined) ?? DEFAULT_PROJECTS_PATH,
+    commsPath: deps.paths.comms ?? (deps.env.HEDDLE_COMMS_DB || undefined) ?? DEFAULT_COMMS_PATH,
+    operatorTokenPath: deps.paths.operatorToken ?? OPERATOR_TOKEN_PATH,
   };
 }
 
@@ -63,7 +70,14 @@ function loadLanesResult(lanesPath: string): LanesLoad {
 function buildContext(
   opts: { provider?: string },
   partial: Partial<DoctorDeps>,
-): { deps: DoctorDeps; ctx: DoctorContext; accountsPath: string; projectsPath: string } {
+): {
+  deps: DoctorDeps;
+  ctx: DoctorContext;
+  accountsPath: string;
+  projectsPath: string;
+  commsPath: string;
+  operatorTokenPath: string;
+} {
   if (
     opts.provider
     && !DOCTOR_PROVIDERS.includes(opts.provider as (typeof DOCTOR_PROVIDERS)[number])
@@ -79,7 +93,7 @@ function buildContext(
     now: partial.now ?? (() => new Date()),
     paths: partial.paths ?? {},
   };
-  const { routingPath, lanesPath, accountsPath, projectsPath } = resolveDoctorPaths(deps);
+  const { routingPath, lanesPath, accountsPath, projectsPath, commsPath, operatorTokenPath } = resolveDoctorPaths(deps);
   const lanes = loadLanesResult(lanesPath);
   const ctx: DoctorContext = {
     deps,
@@ -94,7 +108,7 @@ function buildContext(
     missing: new Set<HarnessProvider>(),
   };
 
-  return { deps, ctx, accountsPath, projectsPath };
+  return { deps, ctx, accountsPath, projectsPath, commsPath, operatorTokenPath };
 }
 
 function assembleChecks(
@@ -102,6 +116,8 @@ function assembleChecks(
   ctx: DoctorContext,
   accountsPath: string,
   projectsPath: string,
+  commsPath: string,
+  operatorTokenPath: string,
 ): Definition[] {
   const selected = new Set(
     harnesses
@@ -116,6 +132,7 @@ function assembleChecks(
       catalogCheck(harness, ctx),
     ]);
   definitions.push(...configChecks(ctx, accountsPath, projectsPath));
+  definitions.push(commsCheck(commsPath, operatorTokenPath));
   for (const [provider, config] of Object.entries(PROVIDER_REGISTRY) as Array<
     [keyof typeof PROVIDER_REGISTRY, (typeof PROVIDER_REGISTRY)[keyof typeof PROVIDER_REGISTRY]]
   >) {
@@ -133,8 +150,10 @@ export async function runDoctor(
   opts: { provider?: string },
   partial: Partial<DoctorDeps> = {},
 ): Promise<DoctorReport> {
-  const { ctx, accountsPath, projectsPath } = buildContext(opts, partial);
-  const definitions = assembleChecks(opts, ctx, accountsPath, projectsPath);
+  const { ctx, accountsPath, projectsPath, commsPath, operatorTokenPath } = buildContext(opts, partial);
+  const definitions = assembleChecks(
+    opts, ctx, accountsPath, projectsPath, commsPath, operatorTokenPath,
+  );
   const checks: CheckResult[] = [];
 
   for (const definition of definitions) {

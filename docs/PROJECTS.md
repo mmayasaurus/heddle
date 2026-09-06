@@ -66,6 +66,9 @@ packs is dropped with one stderr warning naming both projects. Warnings are per 
 only where the loader already records a defect). Missing registries, malformed gates, unknown packs,
 and unrecognized repositories fail soft rather than guessing a gate.
 
+A registry-named pack that no pack directory can serve produces a warning and no gate for that
+repository — never a fallback to another project's pack.
+
 An explicit `HEDDLE_PACKS` `quality-gate.md` shadow retains its consumer-owned gate. A
 `~/.heddle/packs/quality-gate.md` does not suppress repository resolution.
 

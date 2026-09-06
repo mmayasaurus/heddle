@@ -23,7 +23,7 @@ suite is behavioral vitest (`npm test`). See `docs/ARCHITECTURE.md` and, first, 
 
 **Read first: `docs/SPEC.md`** (the single source of truth). Detail: `docs/ORCHESTRATION.md`
 (Phase-1 mechanics) · `docs/MODELS.md` (routing/task-class narrative + cap-aware/Fable budget) ·
-`docs/ARCHITECTURE.md` (layers) · `docs/COMMS.md` (broker) · `docs/DASHBOARD.md` (the
+`docs/ARCHITECTURE.md` (layers) · `docs/COMMS.md` (broker) · `docs/fleet/DASHBOARD.md` (the
 `heddle-dashboard` product) · `docs/LANDMINES.md` (live-verified per-CLI contracts — read before
 touching an adapter) · `docs/CI.md` (CI, scanners, review-sweep).
 
@@ -85,7 +85,7 @@ lands, use the built-checkout flow above.
    session in a human's own terminal tab; Heddle never owns that terminal. The GUI is a **separate
    app** — `heddle-dashboard`, built as a Tauri fork of VelaTerm — that visualizes the fleet and
    hosts in-app terminals; it consumes heddle's ledger and comms, it is not heddle itself.
-   (`docs/DASHBOARD.md` holds the product vision — panes, roster, embedded terminals — and supersedes
+   (`docs/fleet/DASHBOARD.md` holds the product vision — panes, roster, embedded terminals — and supersedes
    the earlier "browser only, no embedded terminals" scope; its 2026-08-03 *Electron* shell decision
    predates the VelaTerm/Tauri choice and is being reconciled — HED-177.)
 4. **Ownership is external and canonical.** Issue tracking (Linear) and PR ownership live in the

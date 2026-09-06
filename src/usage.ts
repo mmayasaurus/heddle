@@ -59,6 +59,10 @@ export interface AccountCaps {
   noteCodes: string[];
   limitReached: boolean;
   stale: boolean;
+  /** Whether this account can continue into paid overage; null means the payload and registry are silent. */
+  overageEnabled?: boolean | null;
+  /** Provider-reported paid-overage spend; null when the provider does not expose it. */
+  overageSpend?: number | null;
   /** Claude only (W's HED-75 estimator): estimated share of the WEEKLY cap consumed by FABLE, in
    *  percentage points (soft cap 50). null/absent until >=3 attributed samples / other providers —
    *  optional so fixtures and the raw tap (which has no attribution) need not carry it. */
@@ -122,6 +126,48 @@ function strList(v: unknown): string[] {
   return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
 }
 
+/** Operator-declared overage posture by provider/account. Invalid or absent values remain unknown. */
+function declaredOverage(accountsPath: string): Map<string, Map<string, boolean>> {
+  const out = new Map<string, Map<string, boolean>>();
+  const raw = readJson(accountsPath) as Record<string, unknown> | null;
+  if (!raw) return out;
+  for (const [provider, entries] of Object.entries(raw)) {
+    if (!Array.isArray(entries)) continue;
+    const declared = new Map<string, boolean>();
+    for (const entry of entries) {
+      if (!entry || typeof entry !== 'object') continue;
+      const account = entry as Record<string, unknown>;
+      if (typeof account.id === 'string' && typeof account.overageEnabled === 'boolean') declared.set(account.id, account.overageEnabled);
+    }
+    if (declared.size) out.set(provider, declared);
+  }
+  return out;
+}
+
+/** Cursor overage posture from `detail.onDemand`, null-safe. `onDemand` may be absent OR explicitly
+ *  `null` (and `typeof null === 'object'`, so a bare typeof guard would then throw on `.enabled`);
+ *  a non-boolean `enabled` / non-number `used` degrade to unknown rather than crash (HED-443). */
+function cursorOverage(detail: unknown): { overageEnabled: boolean | null; overageSpend: number | null } {
+  const raw = detail && typeof detail === 'object' ? (detail as Record<string, unknown>).onDemand : null;
+  const od = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : null;
+  if (!od) return { overageEnabled: null, overageSpend: null };
+  return { overageEnabled: typeof od.enabled === 'boolean' ? od.enabled : null, overageSpend: num(od.used) };
+}
+
+/** Overlay the operator-declared overage posture (~/.heddle/accounts.json) onto every provider row the
+ *  payload is silent on. Precedence: payload value → operator declaration → null (unknown). HED-443. */
+function applyDeclaredOverage(out: CapsByProvider, accountsPath: string): void {
+  const declarations = declaredOverage(accountsPath);
+  for (const [provider, caps] of Object.entries(out)) {
+    const declared = declarations.get(provider);
+    out[provider] = { ...caps, accounts: caps.accounts.map((account) => ({
+      ...account,
+      overageEnabled: account.overageEnabled ?? declared?.get(account.id) ?? null,
+      overageSpend: account.overageSpend ?? null,
+    })) };
+  }
+}
+
 function unknownCaps(provider: string): ProviderCaps {
   return {
     provider, source: 'none', stale: true, capturedAt: null, fiveHour: UNKNOWN, sevenDay: UNKNOWN,
@@ -176,6 +222,10 @@ export function readLimitsMirror(usageDir: string, nowS: number): CapsByProvider
           noteCodes: strList(a.noteCodes),
           limitReached: a.limitReached === true,
           stale: a.stale === true,
+          // Cursor is the only provider that publishes overage in its payload; null-safe parse
+          // (detail.onDemand may be absent or explicitly null) so one bad row never throws out of
+          // readLimitsMirror and starves every provider of caps (HED-443 review, finding 2).
+          ...cursorOverage(a.detail),
           fableWeeklyEstimatePct: num(a.fableWeeklyEstimatePct),
           fableWeeklySamples: num(a.fableWeeklySamples),
         }))
@@ -321,8 +371,9 @@ function mergeClaudeAccountRows(existing: AccountCaps[], incoming: AccountCaps[]
  * itself never queries a vendor — that would add network latency to every dispatch); merged per-account
  * by id with the tap discipline, and establishing the claude provider when mirror+tap are absent/stale.
  */
-export function readProviderCaps(opts: { usageDir?: string; nowS?: number; claudePolls?: ClaudeAccountUsage[] } = {}): CapsByProvider {
+export function readProviderCaps(opts: { usageDir?: string; accountsPath?: string; nowS?: number; claudePolls?: ClaudeAccountUsage[] } = {}): CapsByProvider {
   const usageDir = opts.usageDir ?? process.env.HEDDLE_USAGE_DIR ?? DEFAULT_USAGE_DIR;
+  const accountsPath = opts.accountsPath ?? process.env.HEDDLE_ACCOUNTS ?? join(homedir(), '.heddle', 'accounts.json');
   const nowS = opts.nowS ?? Math.floor(Date.now() / 1000);
   const out: CapsByProvider = {};
   const mirror = readLimitsMirror(usageDir, nowS);
@@ -385,6 +436,9 @@ export function readProviderCaps(opts: { usageDir?: string; nowS?: number; claud
       return dispatch ? { ...a, dispatch } : a;
     }) };
   }
+  // Only Cursor currently exposes an authoritative overage flag/spend in its payload; for every other
+  // provider (and Cursor rows missing it) the operator's per-account declaration fills in.
+  applyDeclaredOverage(out, accountsPath);
   return out;
 }
 

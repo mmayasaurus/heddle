@@ -141,10 +141,12 @@ const BUILTIN_GATE_BY_ORIGIN_NAME: ReadonlyMap<string, string> = new Map([
 ]);
 
 export interface GateMaps {
-  app: ReadonlyMap<string, { dir: string; parent: string; pack: string }>;
+  app: ReadonlyMap<string, AppGate>;
   byFolderName: ReadonlyMap<string, string>;
   byOriginName: ReadonlyMap<string, string>;
 }
+
+type AppGate = { dir: string; parent: string; pack: string };
 
 const appKey = (parent: string, dir: string) => `${parent}\0${dir}`;
 const warning = (message: string) => process.stderr.write(`heddle: ${message}\n`);
@@ -161,6 +163,7 @@ function addGate(
     );
     return;
   }
+  // Same key mapped to the same pack by two projects is intentional; only a different pack drops the key.
   if (owner && owner !== project.name && map.get(key) !== pack) {
     warning(
       `projects.json gates ${path} key ${JSON.stringify(key)} appears in both "${owner}" and `
@@ -173,6 +176,24 @@ function addGate(
   if (owner === 'dropped') return;
   if (!owner) owners.set(key, project.name);
   map.set(key, pack);
+}
+
+function addAppGate(apps: Map<string, AppGate>, app: AppGate, project: Project, owners: Map<string, string>): void {
+  const key = appKey(app.parent, app.dir);
+  const owner = owners.get(key);
+  if (owner === 'dropped') return;
+  if (owner && owner !== project.name && apps.get(key)?.pack !== app.pack) {
+    warning(
+      `projects.json gates app key ${JSON.stringify(key)} appears in both "${owner}" and `
+      + `"${project.name}"; dropping it`,
+    );
+    owners.set(key, 'dropped');
+    apps.delete(key);
+    return;
+  }
+  if (!owner) owners.set(key, project.name);
+  apps.set(key, app);
+  return;
 }
 
 function stringMap(value: unknown, project: Project, path: string, add: (key: string, pack: string) => void): void {
@@ -194,11 +215,43 @@ function stringMap(value: unknown, project: Project, path: string, add: (key: st
   }
 }
 
+function addProjectGateMaps(
+  project: Project, apps: Map<string, AppGate>, folders: Map<string, string>, origins: Map<string, string>,
+  appOwners: Map<string, string>, folderOwners: Map<string, string>, originOwners: Map<string, string>,
+): void {
+  const gates = project.gates;
+  if (gates === undefined) return;
+  if (!gates || typeof gates !== 'object' || Array.isArray(gates)) {
+    warning(`projects.json project "${project.name}".gates must be an object; ignoring gates`);
+    return;
+  }
+  const app = gates.app;
+  if (app !== undefined) {
+    if (!app || typeof app !== 'object' || typeof app.dir !== 'string' || !app.dir ||
+      typeof app.parent !== 'string' || !app.parent || typeof app.pack !== 'string' || !app.pack) {
+      warning(
+        `projects.json project "${project.name}".gates.app must contain non-empty dir, parent, `
+        + 'and pack strings; ignoring gates.app',
+      );
+    } else if (!packDirFor(app.pack)) {
+      warning(`projects.json project "${project.name}".gates.app names unknown pack "${app.pack}"`);
+    } else {
+      // A dropped app key never discards the project's OTHER maps — each key is independent
+      // (codeant on PR #118; main's `continue` here was a round-3 wrinkle, not the design).
+      addAppGate(apps, app, project, appOwners);
+    }
+  }
+  stringMap(gates.byFolderName, project, 'byFolderName', (key, pack) =>
+    addGate(folders, key, pack, project, folderOwners, 'byFolderName'));
+  stringMap(gates.byOriginName, project, 'byOriginName', (key, pack) =>
+    addGate(origins, key, pack, project, originOwners, 'byOriginName'));
+}
+
 /** Loads built-ins plus the optional registry data. Any registry failure leaves only built-ins. */
 export function loadGateMaps(path = process.env.HEDDLE_PROJECTS?.trim() || DEFAULT_PROJECTS_PATH): GateMaps {
   const folders = new Map(BUILTIN_GATE_BY_FOLDER_NAME);
   const origins = new Map(BUILTIN_GATE_BY_ORIGIN_NAME);
-  const apps = new Map<string, { dir: string; parent: string; pack: string }>();
+  const apps = new Map<string, AppGate>();
   const folderOwners = new Map<string, string>(
     [...BUILTIN_GATE_BY_FOLDER_NAME.keys()].map((key) => [key, 'built-in']),
   );
@@ -208,44 +261,7 @@ export function loadGateMaps(path = process.env.HEDDLE_PROJECTS?.trim() || DEFAU
   const appOwners = new Map<string, string>();
   try {
     for (const project of loadProjectRegistry(path).projects) {
-      const gates = project.gates;
-      if (gates === undefined) continue;
-      if (!gates || typeof gates !== 'object' || Array.isArray(gates)) {
-        warning(`projects.json project "${project.name}".gates must be an object; ignoring gates`);
-        continue;
-      }
-      const app = gates.app;
-      if (app !== undefined) {
-        if (!app || typeof app !== 'object' || typeof app.dir !== 'string' || !app.dir ||
-          typeof app.parent !== 'string' || !app.parent || typeof app.pack !== 'string' || !app.pack) {
-          warning(
-            `projects.json project "${project.name}".gates.app must contain non-empty dir, parent, `
-            + 'and pack strings; ignoring gates.app',
-          );
-        } else if (!packDirFor(app.pack)) {
-          warning(`projects.json project "${project.name}".gates.app names unknown pack "${app.pack}"`);
-        } else {
-          const key = appKey(app.parent, app.dir);
-          const owner = appOwners.get(key);
-          if (owner === 'dropped') {
-            continue;
-          } else if (owner && owner !== project.name && apps.get(key)?.pack !== app.pack) {
-            warning(
-              `projects.json gates app key ${JSON.stringify(key)} appears in both "${owner}" and `
-              + `"${project.name}"; dropping it`,
-            );
-            appOwners.set(key, 'dropped');
-            apps.delete(key);
-          } else {
-            if (!owner) appOwners.set(key, project.name);
-            apps.set(key, app);
-          }
-        }
-      }
-      stringMap(gates.byFolderName, project, 'byFolderName', (key, pack) =>
-        addGate(folders, key, pack, project, folderOwners, 'byFolderName'));
-      stringMap(gates.byOriginName, project, 'byOriginName', (key, pack) =>
-        addGate(origins, key, pack, project, originOwners, 'byOriginName'));
+      addProjectGateMaps(project, apps, folders, origins, appOwners, folderOwners, originOwners);
     }
   } catch (err) {
     warning(`could not load project gates from ${path}; using built-ins only (${(err as Error).message})`);

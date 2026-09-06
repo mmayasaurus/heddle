@@ -1,8 +1,8 @@
 # CI & review on this repo
 
 Everything runs on GitHub-hosted runners (the repo is public, so minutes are free) and is defined
-in `.github/`. Ported from the Spinventory fleet's CI (deterministic tier + gate) and simplified for
-a public repo; the reviewer-fleet enablement items that need Maya's account (branch ruleset, app
+in `.github/`. Ported from the first consumer project's fleet's CI (deterministic tier + gate) and simplified for
+a public repo; the reviewer-fleet enablement items that need the operator's account (branch ruleset, app
 installs) are tracked in Linear **HED-13**.
 
 ## What runs
@@ -66,7 +66,7 @@ tab), job summaries, and the job log — plus whatever the AI reviewer apps post
 
 GitHub resolves a required status check from the newest check-run of the required name **in the newest
 check-suite** on the head commit — suite-creation order, not run-completion order (rows 1, 6, 7). Rows
-1–6 are observed `mergeable_state` from a real PR in the sandbox `mmayasaurus/heddle-gate-sandbox` (a
+1–6 are observed `mergeable_state` from a real PR in the sandbox `<your fork>` (a
 throwaway repo whose ruleset required exactly one check named `gate`, `strict:false`); row 7 is a live
 observation from dashboard#45 — not doc-inference. Legend: `blocked` = a required check is unsatisfied
 (cannot merge), `unstable` = mergeable but a non-required check is failing/pending, `clean` =
@@ -232,19 +232,21 @@ each run's total wall-clock (`createdAt` includes any queue wait), so a long-but
 up; confirm every hit with the `…/jobs` call below before acting:
 
 ```shell
-gh run list --repo mmayasaurus/heddle --workflow gate.yml --status in_progress --limit 100 \
+gh run list --repo <your fork> --workflow gate.yml --status in_progress --limit 100 \
   --json databaseId,createdAt,headBranch,event,url \
   --jq '.[] | select(((now-(.createdAt|fromdate))/60) > 30)
              | {id:.databaseId, age_min:(((now-(.createdAt|fromdate))/60)|floor),
                 branch:.headBranch, event:.event, url:.url}'   # >30 min: past any job's own timeout (build 15, gate 30)
 ```
 
+Replace `<your fork>` with the GitHub owner/name of the repository whose workflow you are inspecting.
+
 `--limit 100` is load-bearing: `gh run list` fetches **newest-first, default 20**, and the jq age
 filter runs *after* the fetch — a small limit can page right past an old wedged run and print nothing
 (a false "healthy"). Then confirm the specific run:
 
 ```shell
-gh api repos/mmayasaurus/heddle/actions/runs/<id>/jobs \
+gh api repos/<your fork>/actions/runs/<id>/jobs \
   --jq '.jobs[] | {name, status, started_at, runner_name, labels}'
 ```
 
@@ -255,7 +257,7 @@ leave it.
 **Kill a genuinely-hung run — force-cancel, never plain cancel:**
 
 ```shell
-gh api -X POST repos/mmayasaurus/heddle/actions/runs/<id>/force-cancel
+gh api -X POST repos/<your fork>/actions/runs/<id>/force-cancel
 ```
 
 `force-cancel` is GitHub's documented last-resort endpoint (it bypasses `always()`); plain `gh run
@@ -274,17 +276,17 @@ stays cancelled/absent → still blocking. Re-trigger a **commit-path** run to p
 (HEAD is unchanged — verdicts are SHA-bound, so any double-sweep merge-pin stays valid):
 
 ```shell
-gh pr close <n> --repo mmayasaurus/heddle && \
-  gh pr reopen <n> --repo mmayasaurus/heddle
+gh pr close <n> --repo <your fork> && \
+  gh pr reopen <n> --repo <your fork>
 ```
 
 `reopened` is a commit-path event (in `gate.yml` `types:`), so it re-runs the real `build` and
 republishes the marker with the **true** verdict for that SHA — green if the code is actually green;
 infra recovery on a genuinely-red SHA correctly stays red. If `reopen` fails (auth/network) the PR is
-left **closed** — check `gh pr view <n> --repo mmayasaurus/heddle --json state` and reopen manually. Confirm `headRefOid` is
+left **closed** — check `gh pr view <n> --repo <your fork> --json state` and reopen manually. Confirm `headRefOid` is
 unchanged afterward.
 
-Break-glass alternative (no PR churn): `gh workflow run gate.yml --repo mmayasaurus/heddle --ref <branch>` (`workflow_dispatch`,
+Break-glass alternative (no PR churn): `gh workflow run gate.yml --repo <your fork> --ref <branch>` (`workflow_dispatch`,
 also commit-path). **Force-cancel the hung run first** — a dispatch run uses the ref-keyed concurrency
 group (`gate-<ref>-run`), not the hung run's PR-number group, so it does not displace the hung run,
 which could later `always()`-publish `FAILURE` over your fresh marker. Do **not** reach for `gh run
@@ -310,7 +312,7 @@ fleet automates the same sweep with a script kept outside this repo. Two clean s
 apart against the SAME commit are the bar (late-landing bots), and merges are merge commits — never squash,
 never force.
 
-### Standing rules (Maya, 2026-08-15 — apply to everyone, orchestrator included)
+### Standing rules (operator, 2026-08-15 — apply to everyone, orchestrator included)
 
 - **No direct commits to `main`.** Every change goes on a branch → PR → the full review sweep → merge.
 - **As many revision rounds as it takes.** Every reviewer bot on both repos is there on purpose; every
@@ -326,6 +328,6 @@ never force.
 
 ## Deliberately NOT here
 
-Spinventory's Deep Reviewers I–V, its Gemini review workflow and PR-Agent are OpenRouter/Ollama-keyed
-and are **not** ported (Maya, 2026-08-15: no OpenRouter expansion; the public repos already get
+the first consumer project's Deep Reviewers I–V, its Gemini review workflow and PR-Agent are OpenRouter/Ollama-keyed
+and are **not** ported (operator, 2026-08-15: no OpenRouter expansion; the public repos already get
 15+ free reviewers). Recorded in HED-13 — please don't re-propose.

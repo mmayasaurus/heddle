@@ -1,5 +1,6 @@
-import { existsSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import { PROVIDER_REGISTRY, readSecretsEnvValue } from '../adapters/openai-compat.js';
+import { CommsLog, DEFAULT_ROOM } from '../comms/log.js';
 import { loadLanes, type LanesConfig } from '../lanes.js';
 import { loadProjectRegistry } from '../projects.js';
 import { listTaskClasses, loadRouting, resolveRoute } from '../routing.js';
@@ -7,6 +8,7 @@ import { accountResult, catalogModels, loginStatus, targetModels } from './parse
 import {
   probe,
   probeFailure,
+  errorText,
   result,
   type CheckResult,
   type DoctorDeps,
@@ -307,6 +309,47 @@ export function configChecks(
       run: async () => accountResult(accountsPath),
     },
   ];
+}
+
+/**
+ * comms readiness (HED-463 / HED-409 acceptance "doctor comms: ok"). READ-ONLY: it must never
+ * create ~/.heddle or the db — a health check that provisioned state would defeat its own
+ * "not initialized" detection — so it gates on existsSync(commsDbPath) BEFORE constructing
+ * CommsLog (whose constructor mkdirs the parent and creates the sqlite file). The operator token
+ * is checked as a non-empty regular file (statSync metadata only, never its bytes). Opening an
+ * older-but-migratable db applies a schema migration on construction, exactly as every CommsLog
+ * opener does — not a health-check-specific mutation; a current-version db opens as a no-op.
+ */
+export function commsCheck(commsDbPath: string, operatorTokenPath: string): Definition {
+  return {
+    id: 'comms:ready',
+    kind: 'comms',
+    run: async () => {
+      if (!existsSync(commsDbPath)) {
+        return result('warn', 'comms not initialized (no comms.db)', 'run `heddle comms init`');
+      }
+      // Present = a non-empty regular file (statSync reads metadata only — never the token value);
+      // an empty file or a directory is not a usable operator token (codeant security review).
+      const tokenStat = existsSync(operatorTokenPath) ? statSync(operatorTokenPath) : null;
+      const tokenPresent = tokenStat !== null && tokenStat.isFile() && tokenStat.size > 0;
+      let log: CommsLog;
+      try {
+        log = new CommsLog(commsDbPath);
+      } catch (err) {
+        return result('fail', `comms.db present but cannot be opened: ${errorText(err)}`, 'run `heddle comms init`');
+      }
+      try {
+        if (log.room(DEFAULT_ROOM) === null) {
+          return result('fail', `comms.db present but ${DEFAULT_ROOM} room missing (partial or corrupt db)`, 'run `heddle comms init`');
+        }
+      } finally {
+        log.close();
+      }
+      return tokenPresent
+        ? result('ok', `comms.db, operator token, ${DEFAULT_ROOM} present`)
+        : result('warn', `comms.db + ${DEFAULT_ROOM} present, operator token missing`, 'run `heddle comms init` to enable the operator role');
+    },
+  };
 }
 
 export function freshnessCheck(
