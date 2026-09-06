@@ -61,6 +61,7 @@ describe('skill packs — user pack directory', () => {
       process.env.HEDDLE_PACKS = envPacks;
       mkdirSync(join(userPacks, 'dir-shaped.md'));
       expect(packDirFor('dir-shaped')).not.toBe(userPacks); // a DIRECTORY named <pack>.md is not a pack
+      expect(listPacks()).not.toContain('dir-shaped');
       expect(packDirs()).toEqual([envPacks, userPacks, expect.any(String)]);
       expect(readPack('user-only')).toBe('env pack');
     } finally {

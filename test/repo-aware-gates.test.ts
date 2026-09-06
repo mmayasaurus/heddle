@@ -3,8 +3,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { dispatch, planDispatch } from '../src/dispatch.js';
 import { builtinPacksDir, loadGateMaps, originRepoName, qualityGateForRepository, type GateMaps } from '../src/skillpacks.js';
-import { projectForAgent, projectForCwd } from '../src/projects.js';
-import { registryContent, replaceProjectInRawRegistry } from '../src/init-project.js';
+import { loadProjectRegistry, projectForAgent, projectForCwd } from '../src/projects.js';
 import { parentCheckoutOf } from '../src/worktree.js';
 import { fakeAdapter, IDENTITIES, initRepoFixture, useTempResources } from './helpers.js';
 
@@ -174,6 +173,29 @@ describe('dispatch — repo-aware quality gates (HED-389)', () => {
     }
   });
 
+  it('does not treat HOME/.heddle/packs as a consumer shadow (regression PR#112 — user pack scope)', async () => {
+    const home = join(tempDir(), 'home');
+    const savedHome = process.env.HOME;
+    const savedProfile = process.env.USERPROFILE;
+    const saved = process.env.HEDDLE_PACKS;
+    mkdirSync(join(home, '.heddle', 'packs'), { recursive: true });
+    writeFileSync(join(home, '.heddle', 'packs', 'quality-gate.md'), '# User gate\nUSER-GATE-MARKER\n');
+    process.env.HOME = home;
+    process.env.USERPROFILE = home;
+    delete process.env.HEDDLE_PACKS;
+    try {
+      const cwd = initRepo(join(tempDir(), 'heddle'), '.worktrees/Y', { linkedWorktree: true });
+      const heddle = await editingDispatch(cwd);
+      expect(heddle.skills).toEqual(['worker-role', 'worker-hygiene', 'repo-heddle-core', 'family-codex']);
+      const unknown = await editingDispatch(initRepo(join(tempDir(), 'unknown-repo'), 'worker'));
+      expect(unknown.skills).toEqual(NO_GATE);
+    } finally {
+      if (savedHome === undefined) delete process.env.HOME; else process.env.HOME = savedHome;
+      if (savedProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = savedProfile;
+      if (saved === undefined) delete process.env.HEDDLE_PACKS; else process.env.HEDDLE_PACKS = saved;
+    }
+  });
+
   it('fails safe in an unknown repository: no gate at all rather than the app gate', async () => {
     const cwd = initRepo(join(tempDir(), 'unknown-repo'), 'worker');
     const { agents, skills, ledgerSkills } = await editingDispatch(cwd);
@@ -317,30 +339,36 @@ describe('registry-backed gate maps', () => {
     expect(stderr).toHaveBeenCalledTimes(1); expect(String(stderr.mock.calls[0][0])).toContain(invalid); stderr.mockRestore();
   });
 
-  it('uses first duplicate keys, registry overrides, and degrades malformed gates without breaking projects', () => {
+  it('keeps built-ins and drops cross-project collisions while malformed gates do not break projects', () => {
     const path = join(tempDir(), 'projects.json');
     writeFileSync(path, JSON.stringify({ schemaVersion: 1, projects: [
-      project('first', { byFolderName: { heddle: 'repo-workspace' } }),
-      project('second', { byFolderName: { heddle: 'quality-gate' } }),
+      project('first', { byFolderName: { heddle: 'repo-workspace', contested: 'repo-workspace' } }),
+      project('second', { byFolderName: { heddle: 'quality-gate', contested: 'quality-gate' } }),
       project('bad', { byFolderName: { bad: 1 } }),
     ] }));
     const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     const maps = loadGateMaps(path);
-    expect(qualityGateForRepository({ topLevel: '/x/heddle', mainRoot: '/x/heddle', originUrl: null }, maps)).toBe('repo-workspace');
-    expect(stderr).toHaveBeenCalledTimes(2);
-    expect(projectForAgent({ schemaVersion: 1, projects: [project('bad', { byFolderName: { bad: 1 } })] }, 'bad')?.name).toBe('bad');
-    expect(projectForCwd({ schemaVersion: 1, projects: [project('bad', { byFolderName: { bad: 1 } })] }, '/tmp/acme/x')?.name).toBe('bad');
+    expect(qualityGateForRepository({ topLevel: '/x/heddle', mainRoot: '/x/heddle', originUrl: null }, maps)).toBe('repo-heddle-core');
+    expect(qualityGateForRepository({ topLevel: '/x/contested', mainRoot: '/x/contested', originUrl: null }, maps)).toBeNull();
+    expect(stderr).toHaveBeenCalledTimes(4);
+    expect(String(stderr.mock.calls[0][0])).toContain('first');
+    expect(String(stderr.mock.calls[1][0])).toContain('second');
     stderr.mockRestore();
   });
 
-  it('preserves gates structurally while re-registering and never returns a registry pack on a miss', () => {
-    const gates = '"gates":{"byFolderName":{"acme":"repo-workspace"}}';
-    const source = `{"schemaVersion":1,"projects":[{"name":"toy","workspaceRoots":["/x"],"agentIds":["A"],"linearTeam":"X","defaultRoom":"#x","launcher":"x",${gates}}]}`;
-    const next = { name: 'toy', workspaceRoots: ['/x'], agentIds: ['A'], linearTeam: 'Y', defaultRoom: '#x', launcher: 'x', gates: { byFolderName: { acme: 'repo-workspace' } } };
-    // Structural, not byte-for-byte: registryStep spreads rawPrior into the rebuilt project, and a
-    // raw-text splice was rejected (it can match a "gates": sequence inside a string — PR #112).
-    expect(JSON.parse(replaceProjectInRawRegistry(source, 'toy', next)).projects[0].gates).toEqual(next.gates);
-    expect(JSON.parse(registryContent({ schemaVersion: 1, projects: [next] }, source, next, next, 'toy')).projects[0].gates).toEqual(next.gates);
+  it('keeps malformed gates loaded from disk from breaking project lookups', () => {
+    const path = join(tempDir(), 'malformed-gates.json');
+    writeFileSync(path, JSON.stringify({ schemaVersion: 1, projects: [project('bad', { byFolderName: { bad: 1 } })] }));
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const registry = loadProjectRegistry(path);
+    expect(projectForAgent(registry, 'bad')?.name).toBe('bad');
+    expect(projectForCwd(registry, '/tmp/acme/x')?.name).toBe('bad');
+    loadGateMaps(path);
+    expect(stderr).toHaveBeenCalledTimes(1);
+    stderr.mockRestore();
+  });
+
+  it('never returns a registry pack on a miss', () => {
     for (const repo of [null, { topLevel: '/x/unknown', mainRoot: '/x/unknown', originUrl: null }, { topLevel: '/x/acme', mainRoot: null, originUrl: null }]) {
       expect(qualityGateForRepository(repo, { app: new Map(), byFolderName: new Map(), byOriginName: new Map() })).toBeNull();
     }
