@@ -19,6 +19,12 @@ import { isAbsolute, join, resolve, sep } from 'node:path';
 
 export const PROJECTS_SCHEMA_VERSION = 1;
 
+export interface ProjectGates {
+  app?: { dir: string; parent: string; pack: string };
+  byFolderName?: Record<string, string>;
+  byOriginName?: Record<string, string>;
+}
+
 export interface Project {
   name: string;
   workspaceRoots: string[];
@@ -26,6 +32,8 @@ export interface Project {
   linearTeam: string;
   defaultRoom: string;
   launcher: string;
+  /** Optional, deliberately validated by the gate resolver so malformed gates never break dispatch. */
+  gates?: ProjectGates;
 }
 
 export interface ProjectRegistry {
@@ -87,7 +95,7 @@ function toProject(node: any, index: number, path: string): Project {
       );
     }
   }
-  return {
+  const project: Project = {
     name,
     // Canonicalized once here (symlinks dereferenced, made absolute) so projectForCwd never touches
     // the filesystem inside its matching loop, and both sides of every comparison share one space.
@@ -97,6 +105,8 @@ function toProject(node: any, index: number, path: string): Project {
     defaultRoom: requireString(node, 'defaultRoom', where, path),
     launcher: requireString(node, 'launcher', where, path),
   };
+  if (node.gates !== undefined) project.gates = node.gates as ProjectGates;
+  return project;
 }
 
 /** Loud when the same agent id (case-insensitive) is claimed by more than one project — a hand-edit

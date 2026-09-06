@@ -1,6 +1,6 @@
 # `heddle init-project` — portable discipline installer (HED-84)
 
-> Slice of the HED-299 `heddle init` epic (workstreams 2–3). Maya-approved design 2026-08-15
+> Slice of the HED-299 `heddle init` epic (workstreams 2–3). operator-approved design 2026-08-15
 > ("yes and yes"); this doc is the build contract for v1. HED-96 later relocates the CANONICAL
 > to heddle's own `fleet/` — this installer is what links FROM the canonical into any project, so
 > it is written against a *configurable* canonical root, never a byte-copy.
@@ -52,7 +52,7 @@ rewritten once present.
    copies — "no byte-copied drift").
 3. **Rules stubs** — `<dir>/.claude/rules/{pr-review-sweep,pr-ownership,worktree-discipline}.md`
    as short stubs that REFERENCE the canonical rule by absolute path (same stub→canonical pattern
-   Spinventory uses for its style guides). Skip if present.
+   the first consumer project uses for its style guides). Skip if present.
 4. **`.mcp.json`** — ensure `memtrace` and `serena` server entries exist (merge; never drop others).
    Entry shapes copied from heddle's own `.mcp.json` if present; otherwise the step is reported
    `skip(no template)` until heddle ships its own `.mcp.json` — never a placeholder stub that could
@@ -73,7 +73,7 @@ rewritten once present.
    (record-only). PRESENCE in this file is what opts a root into the memtrace-first hook's registry
    layer (see "Hook parameterization") — a root merely listed in `projects.json` is NOT
    memtrace-managed. Default `false` for a freshly-initialized repo;
-   flipping to `true` is Maya's call (per-root ENFORCEMENT design). The root is resolved from its
+   flipping to `true` is operator's call (per-root ENFORCEMENT design). The root is resolved from its
    existing parent at plan time, making the key stable when the target directory is first created;
    any existing aliases of that same canonical root are folded into one key. Other roots are preserved.
 9. **Verify** — print what was installed, what was skipped and why, and a human-steps checklist:
@@ -87,7 +87,7 @@ registry layer WITHOUT removing the hardcoded lists, consulted only after they a
 
 - A root participates ONLY if it is PRESENT as a key in `~/.heddle/memtrace-enforce.json` (the
   installer's marker) — merely appearing in `projects.json` `workspaceRoots` does nothing. This is
-  what keeps the change behaviour-neutral: the documented example registry lists the Spinventory
+  what keeps the change behaviour-neutral: the documented example registry lists the first consumer project
   WORKSPACE root, and without the opt-in every workspace-level cwd would have flipped from
   "unindexed" to "indexed repo" (review ledger 514, H1).
 - Matching: longest opted-in root, path-SEGMENT boundaries (`/a/foo` never matches `/a/foobar`);
@@ -106,8 +106,8 @@ registry layer WITHOUT removing the hardcoded lists, consulted only after they a
 ## Non-goals (v1)
 
 Relocating the canonical into heddle (`HED-96`), `heddle.toml` constant extraction + Linear
-bootstrap (`HED-299` ws1/ws3), `--force` overwrite, copying Spinventory-specific assets (style
-guides, vault, SPI reviewer fleet) — those stay project-local by design.
+bootstrap (`HED-299` ws1/ws3), `--force` overwrite, copying consumer-project-specific assets (style
+guides, vault, ABC reviewer fleet) — those stay project-local by design.
 
 ## Acceptance (the HED-96 demo's first half)
 

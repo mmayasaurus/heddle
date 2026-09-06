@@ -3,10 +3,10 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { loadRouting, listTaskClasses, resolveRoute, directRoute, neverViaCursorPrefixes, isNeverViaCursor, providerExecution } from '../src/routing.js';
+import { loadRouting, listTaskClasses, resolveRoute, directRoute, neverViaCursorPrefixes, isNeverViaCursor, providerExecution, type Route } from '../src/routing.js';
 import { mcpAttachable, webCapable } from '../src/mcp.js';
 import { ENFORCEABLE } from '../src/capabilities.js';
-import { normalizeProvider } from '../src/review.js';
+import { normalizeProvider, pickReviewer } from '../src/review.js';
 
 /**
  * Behavioral checks on the SHIPPED routing table (routing/routing.v0.yaml) — the file the operator tunes by
@@ -42,7 +42,7 @@ describe('routing.v0.yaml — shipped table invariants', () => {
     const targets: Array<{ label: string; provider: string; mcp?: string[]; capabilities?: string[] }> = [
       { label: 'primary', provider: r.provider, mcp: r.mcp, capabilities: r.capabilities },
       ...(r.fallback ? [{ label: 'fallback', provider: r.fallback.provider, mcp: r.fallback.mcp, capabilities: r.fallback.capabilities }] : []),
-      ...(r.reviewerPool ?? []).map((e, i) => ({ label: `reviewer_pool[${i}]`, provider: e.provider, mcp: r.mcp, capabilities: r.capabilities })),
+      ...(r.reviewerPool ?? []).map((e, i) => ({ label: `reviewer_pool[${i}]`, provider: e.provider, mcp: e.mcp ?? r.mcp, capabilities: r.capabilities })),
     ];
     for (const t of targets) {
       // Normalize (trim + lowercase) exactly as dispatch does before attach, so a cased YAML entry
@@ -134,6 +134,25 @@ describe('routing.v0.yaml — shipped table invariants', () => {
   });
 });
 
+describe('pickReviewer — per-entry mcp reaches the usability gate (codeant #111)', () => {
+  it('checks each duplicate (provider,model) pool entry against its own mcp list', () => {
+    // Author is cursor (so both glm entries are eligible different-family reviewers). The two entries
+    // share (glm, glm-5.3) but differ in mcp: the first demands [memtrace] (unattachable for an HTTP
+    // provider), the second opts out with []. A gate that re-derived mcp by (provider,model) would
+    // test BOTH against the first entry's list and wrongly reject the usable second one (→ throws).
+    const route = {
+      taskClass: 'dup', provider: 'cursor', model: 'cursor-grok-4.6-high',
+      reviewerPool: [
+        { provider: 'glm', model: 'glm-5.3', mcp: ['memtrace'] },
+        { provider: 'glm', model: 'glm-5.3', mcp: [] },
+      ],
+    } as unknown as Route;
+    // Gate mirrors plan.ts: reject only when the entry's OWN mcp is a non-empty, unattachable list.
+    const usable = (_p: string, _m: string, mcp?: string[]) => ((mcp ?? []).length > 0 ? 'cannot attach the class mcp' : null);
+    expect(pickReviewer(route, 'cursor', usable)).toMatchObject({ provider: 'glm', model: 'glm-5.3', mcp: [], reason: 'pool:2 (author is cursor)' });
+  });
+});
+
 describe('resolveRoute / directRoute — policy fences', () => {
   const table = loadRouting(TABLE_PATH);
   const directSubscriptionModels = ['claude-opus-4.6', 'gpt-5.6', 'gemini-3-pro', 'o1-preview', 'o3-mini'];
@@ -141,6 +160,22 @@ describe('resolveRoute / directRoute — policy fences', () => {
 
   it('adversarial-review defaults to memtrace so a reviewer gets code discovery (HED-205)', () => {
     expect(resolveRoute(table, 'adversarial-review').mcp).toEqual(['memtrace']);
+  });
+
+  it('Stage 1: GLM is a known, directly-dispatchable provider but is wired into NO class auto-routing', () => {
+    // HED-422 Stage 1 ships GLM as provider plumbing only. An HTTP worker never receives materialized
+    // AGENTS.md packs or a "run git yourself" diff (runTarget inlines those for CLI providers), so a
+    // diff/doc review auto-routed to GLM would run without its brief — worse than refusing. It is
+    // therefore absent from every primary / fallback / reviewer_pool slot; Stage 1b adds HTTP-aware
+    // delivery + exhaustion routing before GLM re-enters the pool (cursor #111 finding, follow-up).
+    for (const taskClass of listTaskClasses(table)) {
+      const route = resolveRoute(table, taskClass);
+      const providers = [route.provider, route.fallback?.provider, ...(route.reviewerPool ?? []).map((e) => e.provider)]
+        .filter((p): p is string => Boolean(p)).map((p) => normalizeProvider(p));
+      expect(providers, `class "${taskClass}" must not auto-route to glm in Stage 1`).not.toContain('glm');
+    }
+    // …but it stays reachable for an explicit, self-contained brief.
+    expect(() => directRoute(table, 'glm', 'glm-5.3')).not.toThrow();
   });
 
   it('rejects an unknown class and lists every known class in the message', () => {

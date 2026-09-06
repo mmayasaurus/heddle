@@ -221,7 +221,7 @@ flags churn monthly.
 
 ## Worker cwd confinement — in-repo worktrees (HED-98, observed live 2026-08-16)
 
-- **The hazard:** Maya's layout puts agent worktrees INSIDE the repo (`<repo>/.worktrees/<agent>`),
+- **The hazard:** operator's layout puts agent worktrees INSIDE the repo (`<repo>/.worktrees/<agent>`),
   and a linked worktree's `.git` is a FILE pointing at the parent. A worker that resolves "the
   project root" by walking up therefore lands in the CANONICAL checkout. Observed: an agy docs
   worker dispatched with `--cwd <repo>/.worktrees/agentv` wrote its edit into `<repo>/docs/COMMS.md`,
@@ -259,7 +259,7 @@ flags churn monthly.
       `model` — but NOT an arbitrary `env` or per-call `-c` passthrough. So a caller that is NOT
       editing the route has, for a worker that must write outside cwd/tmp, only `exec-privileged`
       (heavyweight, trusted-only) or arranging the cwd so writes land inside it. A first-class
-      env/writable-roots passthrough on `dispatch_worker` is criterion 3 (sandbox-widening → held for Maya).
+      env/writable-roots passthrough on `dispatch_worker` is criterion 3 (sandbox-widening → held for operator).
     - **codex-CLI env-redirect** (whichever layer sets the env): point a tool's home/cache into the
       cwd — `CARGO_HOME=<cwd>/.cargo`, `XDG_CACHE_HOME=<cwd>/.cache` — but NOT `RUSTUP_HOME`, `~/.npm`,
       or `~/Library`, which need their own vars. `-c writable_roots` (validated: flips a blocked `$HOME`

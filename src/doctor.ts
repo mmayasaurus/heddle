@@ -51,7 +51,8 @@ function resolveDoctorPaths(deps: DoctorDeps): {
     lanesPath: deps.paths.lanes ?? (deps.env.HEDDLE_LANES || undefined) ?? defaultLanesPath(),
     accountsPath:
       deps.paths.accounts ?? (deps.env.HEDDLE_ACCOUNTS || undefined) ?? DEFAULT_ACCOUNTS_PATH,
-    projectsPath: deps.paths.projects ?? DEFAULT_PROJECTS_PATH,
+    projectsPath:
+      deps.paths.projects ?? (deps.env.HEDDLE_PROJECTS || undefined) ?? DEFAULT_PROJECTS_PATH,
     commsPath: deps.paths.comms ?? (deps.env.HEDDLE_COMMS_DB || undefined) ?? DEFAULT_COMMS_PATH,
     operatorTokenPath: deps.paths.operatorToken ?? OPERATOR_TOKEN_PATH,
   };

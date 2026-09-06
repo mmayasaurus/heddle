@@ -29,6 +29,8 @@ describe('buildWorkerEnv — subscription-billing worker isolation (HED-30 allow
       process.env.BEDROCK_BASE_URL = 'http://evil';          // BEDROCK_ prefix
       process.env.VERTEX_PROJECT = 'p';                      // VERTEX_ prefix
       process.env.FOUNDRY_API_KEY = 'x';                     // FOUNDRY_ prefix
+      process.env.ZAI_API_KEY = 'x';                         // ZAI_ prefix
+      process.env.GLM_FOO = 'x';                             // GLM_ prefix
       process.env.ANTHROPIC_SOMETHING_BRAND_NEW = 'x'; // future var the exact denylist never listed
       process.env.CODEX_API_KEY = 'x';                  // explicit list (no bare CODEX_ prefix — CODEX_HOME is a selector)
       process.env.PATH = '/usr/bin';
@@ -38,7 +40,7 @@ describe('buildWorkerEnv — subscription-billing worker isolation (HED-30 allow
         'OPENAI_ORGANIZATION', 'GOOGLE_GENAI_USE_VERTEXAI', 'GOOGLE_CLOUD_PROJECT', 'VERTEXAI_PROJECT',
         'AWS_BEARER_TOKEN_BEDROCK', 'CURSOR_BASE_URL', 'GEMINI_BASE_URL', 'GCLOUD_ACCESS_TOKEN',
         'CLAUDE_CODE_USE_NEW_BACKEND', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'BEDROCK_BASE_URL',
-        'VERTEX_PROJECT', 'FOUNDRY_API_KEY', 'ANTHROPIC_SOMETHING_BRAND_NEW', 'CODEX_API_KEY']) {
+        'VERTEX_PROJECT', 'FOUNDRY_API_KEY', 'ZAI_API_KEY', 'GLM_FOO', 'ANTHROPIC_SOMETHING_BRAND_NEW', 'CODEX_API_KEY']) {
         expect(env[k], `${k} must be stripped`).toBeUndefined();
         expect(stripped).toContain(k);
       }
@@ -112,6 +114,10 @@ describe('buildWorkerEnv — subscription-billing worker isolation (HED-30 allow
   });
 
   describe('invariants', () => {
+    it('refuses an override that would pass the Z.ai API key to a worker', () => {
+      expect(() => buildWorkerEnv({ overrides: { ZAI_API_KEY: 'must-not-leak' } })).toThrow(/refusing to set "ZAI_API_KEY".*vendor billing\/endpoint switch/i);
+    });
+
     it('unset wins last — an override cannot re-introduce a var the caller unset', () => {
       const { env } = buildWorkerEnv({ overrides: { CLAUDE_CONFIG_DIR: '/b' }, unset: ['CLAUDE_CONFIG_DIR'] });
       expect(env.CLAUDE_CONFIG_DIR).toBeUndefined();

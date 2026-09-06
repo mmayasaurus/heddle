@@ -53,6 +53,23 @@ describe('init-project', () => {
     expect(registry.projects[0]).toMatchObject({ name: 'toy', workspaceRoots: [realpathSync.native(opts.dir)] });
   });
 
+  it('regression PR#112 — re-registration preserves prior gates in the written registry', () => {
+    const opts = options(tempDir());
+    const gates = { byFolderName: { acme: 'repo-workspace' } };
+    mkdirSync(join(opts.homeDir, '.heddle'), { recursive: true });
+    writeFileSync(join(opts.homeDir, '.heddle', 'projects.json'), JSON.stringify({
+      schemaVersion: 1,
+      projects: [{
+        name: 'toy', workspaceRoots: [opts.dir], agentIds: ['Z'], linearTeam: 'OLD',
+        defaultRoom: '#old', launcher: 'old.sh', gates,
+      }],
+    }));
+    applyInstall(planInstall({ ...opts, team: 'NEW' }));
+    const registry = JSON.parse(readFileSync(join(opts.homeDir, '.heddle', 'projects.json'), 'utf8'));
+    expect(registry.projects[0]).toMatchObject({ linearTeam: 'NEW', gates });
+    expect(registry.projects[0].gates).toEqual(gates);
+  });
+
   it('never purges a suffixed backup of a discipline hook (.py.bak / .py-disabled)', () => {
     const opts = options(tempDir());
     mkdirSync(join(opts.dir, '.claude'));

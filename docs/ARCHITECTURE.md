@@ -27,7 +27,7 @@ useful without owning any of them.
 
 The industry-gap piece: real cross-session, cross-provider agent conversations.
 
-- **Store**: SQLite append-only message log — `from`, `to`, `thread`, task ref (e.g. SPI issue),
+- **Store**: SQLite append-only message log — `from`, `to`, `thread`, task ref (e.g. ABC issue),
   session, model, type (`chat` | `handoff` | `status` | `needs-human` | `permission-request`),
   body, timestamps.
 - **Push**: WebSocket feed; one row = one frame.

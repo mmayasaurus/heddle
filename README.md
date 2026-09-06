@@ -23,7 +23,7 @@ suite is behavioral vitest (`npm test`). See `docs/ARCHITECTURE.md` and, first, 
 
 **Read first: `docs/SPEC.md`** (the single source of truth). Detail: `docs/ORCHESTRATION.md`
 (Phase-1 mechanics) · `docs/MODELS.md` (routing/task-class narrative + cap-aware/Fable budget) ·
-`docs/ARCHITECTURE.md` (layers) · `docs/COMMS.md` (broker) · `docs/DASHBOARD.md` (the
+`docs/ARCHITECTURE.md` (layers) · `docs/COMMS.md` (broker) · `docs/fleet/DASHBOARD.md` (the
 `heddle-dashboard` product) · `docs/LANDMINES.md` (live-verified per-CLI contracts — read before
 touching an adapter) · `docs/CI.md` (CI, scanners, review-sweep).
 
@@ -85,7 +85,7 @@ lands, use the built-checkout flow above.
    session in a human's own terminal tab; Heddle never owns that terminal. The GUI is a **separate
    app** — `heddle-dashboard`, built as a Tauri fork of VelaTerm — that visualizes the fleet and
    hosts in-app terminals; it consumes heddle's ledger and comms, it is not heddle itself.
-   (`docs/DASHBOARD.md` holds the product vision — panes, roster, embedded terminals — and supersedes
+   (`docs/fleet/DASHBOARD.md` holds the product vision — panes, roster, embedded terminals — and supersedes
    the earlier "browser only, no embedded terminals" scope; its 2026-08-03 *Electron* shell decision
    predates the VelaTerm/Tauri choice and is being reconciled — HED-177.)
 4. **Ownership is external and canonical.** Issue tracking (Linear) and PR ownership live in the
@@ -175,7 +175,18 @@ fails; exit 0 means no failures (including timed-out, unverified probes, which w
 usage error.
 
 Framework-layer config lives under `~/.heddle/` (it spans projects, never a single repo):
-`accounts.json` (Claude accounts), `ledger.db` (dispatch/review ledger), `comms.db` (broker).
+`accounts.json` (Claude accounts), `ledger.db` (dispatch/review ledger), `comms.db` (broker), and
+`packs/` (operator skill packs, searched after `HEDDLE_PACKS` and before built-ins).
+
+`projects.json` may also define optional repository-aware `gates`: an exact app layout
+`{ "app": { "parent": "acme-org", "dir": "acme-app", "pack": "acme-app-gate" } }`, plus
+`byFolderName` and `byOriginName` maps from exact repository names to installed packs. A requested
+`quality-gate` resolves in order from a repository main root: app layout, exact folder corroborated
+by origin, then origin alone for renamed clones; otherwise it is dropped. Built-in keys cannot be
+overridden, and cross-project keys with different packs are dropped. Each defect warns on stderr and
+bad registry gate data fails soft rather than guessing a gate. An explicit `HEDDLE_PACKS` shadow of
+`quality-gate` remains consumer-owned; `~/.heddle/packs/quality-gate.md` does not disable resolution.
+See [project registry details](docs/PROJECTS.md).
 Environment overrides:
 
 | var | what |
@@ -184,9 +195,10 @@ Environment overrides:
 | `HEDDLE_ROUTING` | routing-table path (default `routing/routing.v0.yaml`) |
 | `HEDDLE_LANES` | lanes configuration path (default `routing/lanes.yaml`) |
 | `HEDDLE_ACCOUNTS` | Claude accounts registry path (default `~/.heddle/accounts.json`) — cap-aware routing reads it |
-| `HEDDLE_PACKS` | extra skill-pack search dirs, `path.delimiter`-separated (`:` on POSIX, `;` on Windows); built-ins always last |
+| `HEDDLE_PROJECTS` | project registry path (default `~/.heddle/projects.json`; blank is unset) |
+| `HEDDLE_PACKS` | extra skill-pack dirs (`path.delimiter` separated); then `~/.heddle/packs`, then built-ins |
 | `HEDDLE_COMMS_DB` | comms broker db (default `~/.heddle/comms.db`) |
-| `HEDDLE_LEDGER_DB` | dispatch/review ledger db (default `~/.heddle/ledger.db`) — comms server + rotator read it for lineage |
+| `HEDDLE_LEDGER_DB` | dispatch/review ledger db (default `~/.heddle/ledger.db`), used for lineage |
 
 (`HEDDLE_DISPATCH_ID` / `HEDDLE_PARENT` / `HEDDLE_WORKER` are set by heddle on spawned workers — not
 operator config.)
