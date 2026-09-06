@@ -299,7 +299,7 @@ describe('heddle account pick CLI', () => {
     const parsed = JSON.parse(result.stdout);
     expect(parsed.assignments.R.account).toBe('near-cap');
     expect(parsed.assignments.S.account).toBe('near-cap');
-    expect(parsed.assignments.U).toMatchObject({ refused: true, reason: expect.stringMatching(/1 floored.*1 at residency cap/) });
+    expect(parsed.assignments.U).toMatchObject({ refused: true, reason: 'only 2 of 3 agents placeable until near-cap resets unknown' });
     expect(parsed.accounts).toEqual(expect.arrayContaining([
       expect.objectContaining({ account: 'near-cap', residents: 2 }),
       expect.objectContaining({ account: 'floored', floored: true }),
@@ -347,9 +347,10 @@ describe('heddle account pick CLI', () => {
       env: { HEDDLE_ACCOUNTS: accountsPath, HEDDLE_USAGE_DIR: usageDir },
     });
 
-    const assignments = JSON.parse(result.stdout).assignments as Record<string, { account: string }>;
-    expect(assignments.R.account).toBe('healthy');
-    expect(assignments.S.account).toBe('healthy');
+    expect(result.code).toBe(1);
+    const assignments = JSON.parse(result.stdout).assignments as Record<string, { account: string } | { refused: true; reason: string }>;
+    expect(assignments.R).toMatchObject({ account: 'healthy' });
+    expect(assignments.S).toMatchObject({ refused: true, reason: 'only 1 of 2 agents placeable until healthy resets unknown' });
   }, 30_000);
 
   it('regression PR#88 — never places a batch agent on an unmetered registered account', async () => {
@@ -361,11 +362,11 @@ describe('heddle account pick CLI', () => {
       env: { HEDDLE_ACCOUNTS: accountsPath, HEDDLE_USAGE_DIR: usageDir },
     });
 
-    expect(result).toMatchObject({ code: 0, stderr: '' });
-    const assignments = JSON.parse(result.stdout).assignments as Record<string, { account: string }>;
-    expect(assignments.R.account).toBe('healthy');
-    expect(assignments.S.account).toBe('healthy');
-    expect(Object.values(assignments).map(({ account }) => account)).not.toContain('ghost');
+    expect(result).toMatchObject({ code: 1, stderr: '' });
+    const assignments = JSON.parse(result.stdout).assignments as Record<string, { account: string } | { refused: true; reason: string }>;
+    expect(assignments.R).toMatchObject({ account: 'healthy' });
+    expect(assignments.S).toMatchObject({ refused: true, reason: 'only 1 of 2 agents placeable until healthy resets unknown' });
+    expect(Object.values(assignments).flatMap((assignment) => 'account' in assignment ? [assignment.account] : [])).not.toContain('ghost');
   }, 30_000);
 
   it('refuses an all-unmetered batch and identifies its exclusive refusal bucket', async () => {
