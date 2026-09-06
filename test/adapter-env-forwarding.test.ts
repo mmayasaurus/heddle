@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 // Mock the subprocess boundary so we assert the ARGS each adapter forwards, without spawning.
 vi.mock('../src/adapters/subprocess.js', () => ({
-  run: vi.fn().mockResolvedValue({ stdout: '', stderr: '', exitCode: 1, timedOut: false }),
+  run: vi.fn().mockResolvedValue({ stdout: '', stderr: '', exitCode: 1, timedOut: false, truncated: false }),
 }));
 
 import { run } from '../src/adapters/subprocess.js';
@@ -31,7 +31,7 @@ describe('subprocess adapters forward envUnset to run (HED-268 account-selector 
 
   it('includes Cursor stderr on a parsed is_error result', async () => {
     mockedRun.mockClear();
-    mockedRun.mockResolvedValueOnce({ stdout: JSON.stringify({ type: 'result', is_error: true, result: '', duration_ms: 1 }), stderr: 'rate limit diagnostic', exitCode: 1, timedOut: false });
+    mockedRun.mockResolvedValueOnce({ stdout: JSON.stringify({ type: 'result', is_error: true, result: '', duration_ms: 1 }), stderr: 'rate limit diagnostic', exitCode: 1, timedOut: false, truncated: false });
     const result = await new CursorAdapter().dispatch('x', { model: 'kimi-k3', cwd: '/tmp' });
     expect(result.error).toContain('stderr tail: rate limit diagnostic');
   });
