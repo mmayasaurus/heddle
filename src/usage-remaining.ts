@@ -124,8 +124,8 @@ export function formatUsageRemaining(rows: UsageRemainingRow[]): string {
   ]);
   const widths = headings.map((heading, index) => Math.max(
     heading.length,
-    ...values.map((row) => row[index].length),
+    ...values.map((row) => (row.at(index) ?? '').length),
   ));
-  const format = (row: string[]): string => row.map((value, index) => value.padEnd(widths[index])).join('  ');
+  const format = (row: string[]): string => row.map((value, index) => value.padEnd(widths.at(index) ?? 0)).join('  ');
   return [format(headings), ...values.map(format)].join('\n');
 }
