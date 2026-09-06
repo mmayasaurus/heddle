@@ -24,6 +24,12 @@ import type { ClaudeAccount } from './capaware.js';
  */
 
 export const CLAUDE_USAGE_ENDPOINT = 'https://api.anthropic.com/api/oauth/usage';
+/**
+ * Live IDENTITY endpoint. VERIFIED 2026-09-06 (Agent U): `/api/oauth/usage` carries NO identity block
+ * at all — `account.uuid` / `account.email` / `organization.uuid` come from this sibling profile
+ * endpoint (same Bearer + `anthropic-beta` + UA). READ-ONLY GET; its failure never stales headroom.
+ */
+export const CLAUDE_PROFILE_ENDPOINT = 'https://api.anthropic.com/api/oauth/profile';
 export const CLAUDE_OAUTH_BETA = 'oauth-2025-04-20';
 /** A stable, honest User-Agent — the endpoint is reverse-engineered; identify the client plainly. */
 export const CLAUDE_USAGE_USER_AGENT = 'heddle-claude-usage/1.0';
@@ -317,6 +323,7 @@ export interface ClaudePollDeps extends TokenReaderDeps {
   httpTimeoutMs?: number;
   userAgent?: string;
   usageUrl?: string;
+  profileUrl?: string;
   /** Own clock, for a deterministic `capturedAt` in tests. */
   now?: () => Date;
   /** Loud-warning sink (default: process.stderr). Injected so tests can assert warnings fired. */
@@ -360,6 +367,32 @@ async function fetchUsage(token: string, deps: ClaudePollDeps): Promise<{
   return parseUsageResponse(body);
 }
 
+/**
+ * GET the profile endpoint for the LIVE identity (account.uuid / email / organization.uuid). READ-ONLY.
+ * Its failure returns a null identity + a real error string, but is NEVER allowed to stale headroom —
+ * identity and headroom are independent reads, so a profile 401/timeout must not hide real usage.
+ */
+async function fetchProfile(token: string, deps: ClaudePollDeps): Promise<{ identity: ClaudeLiveIdentity | null; error?: string }> {
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const timeoutMs = deps.httpTimeoutMs ?? CLAUDE_HTTP_TIMEOUT_MS;
+  const url = deps.profileUrl ?? CLAUDE_PROFILE_ENDPOINT;
+  let res: Response;
+  try {
+    res = await fetchImpl(url, { headers: authHeaders(token, deps.userAgent ?? CLAUDE_USAGE_USER_AGENT), signal: AbortSignal.timeout(timeoutMs) });
+  } catch (err) {
+    return { identity: null, error: `profile: ${shortError(err)}` };
+  }
+  if (!res.ok) return { identity: null, error: `profile: HTTP ${res.status}` };
+  let body: unknown;
+  try {
+    body = await res.json();
+  } catch (err) {
+    return { identity: null, error: `profile: ${shortError(err)}` };
+  }
+  const identity = parseIdentity(body);
+  return identity ? { identity } : { identity: null, error: 'profile: response carried no account.uuid' };
+}
+
 /** Poll one account. Never throws: every failure becomes a first-class UNKNOWN row, never a false 0%. */
 export async function pollClaudeAccountUsage(account: ClaudeAccount, deps: ClaudePollDeps = {}): Promise<ClaudeAccountUsage> {
   const capturedAt = (deps.now?.() ?? new Date()).toISOString();
@@ -381,16 +414,20 @@ export async function pollClaudeAccountUsage(account: ClaudeAccount, deps: Claud
       error: tokenRead.error,
     };
   }
-  const usage = await fetchUsage(tokenRead.token, deps);
+  // Headroom (usage) and identity (profile) are INDEPENDENT reads, in parallel: /api/oauth/usage carries
+  // no identity, so live identity comes from /api/oauth/profile. A profile failure yields a null identity
+  // and a real error, but NEVER stales the row — `stale` tracks the USAGE outcome only, so real headroom
+  // survives an identity hiccup.
+  const [usage, profile] = await Promise.all([fetchUsage(tokenRead.token, deps), fetchProfile(tokenRead.token, deps)]);
   const noteCodes = [`claude.oauthPoll.${usage.source}`];
-  if (!usage.liveIdentity) noteCodes.push('claude.identityUnverified');
-  const errBits = [usage.error, usage.liveIdentity ? undefined : 'usage response: no live identity'].filter((x): x is string => Boolean(x));
+  if (!profile.identity) noteCodes.push('claude.identityUnverified');
+  const errBits = [usage.error, profile.error].filter((x): x is string => Boolean(x));
   return {
     ...base,
     tokenSource: tokenRead.source,
     source: usage.source,
     stale: usage.source !== 'ok',
-    liveIdentity: usage.liveIdentity,
+    liveIdentity: profile.identity,
     fiveHour: usage.fiveHour,
     sevenDay: usage.sevenDay,
     extra: usage.extra,

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -50,17 +51,21 @@ function deps(over: Partial<ClaudePollDeps>): ClaudePollDeps {
 }
 
 describe('claudeKeychainService', () => {
-  const home = '/Users/mayatobi';
-  it('uses the bare service for the default dir and an 8-hex sha256 suffix for pinned dirs', () => {
+  // Neutral fixture home — never a real machine path (public-scrub: shipped files carry no private paths/hashes).
+  const home = '/home/tester';
+  const suffix = (abs: string) => `Claude Code-credentials-${createHash('sha256').update(abs).digest('hex').slice(0, 8)}`;
+  it('uses the bare service for the default dir and an 8-hex sha256(absPath) suffix for pinned dirs', () => {
     expect(claudeKeychainService(null, home)).toBe('Claude Code-credentials');
-    expect(claudeKeychainService('/Users/mayatobi/.claude', home)).toBe('Claude Code-credentials');
-    // Verified 4/4 on this machine (Agent U, 2026-09-06).
-    expect(claudeKeychainService('/Users/mayatobi/.claude-acct1', home)).toBe('Claude Code-credentials-a92ea116');
-    expect(claudeKeychainService('/Users/mayatobi/.claude-acct4', home)).toBe('Claude Code-credentials-b8ac112a');
+    expect(claudeKeychainService('/home/tester/.claude', home)).toBe('Claude Code-credentials');
+    // The suffix is the exact algorithm VERIFIED live (Agent U, 2026-09-06): sha256 of the NFC-normalized
+    // absolute dir (no trailing slash), first 8 hex. Computed here, never hardcoded, so no real machine
+    // path or account hash lands in a shipped file.
+    expect(claudeKeychainService('/home/tester/.claude-acct1', home)).toBe(suffix('/home/tester/.claude-acct1'));
+    expect(claudeKeychainService('/home/tester/.claude-acct1', home)).toMatch(/^Claude Code-credentials-[0-9a-f]{8}$/);
   });
   it('normalizes trailing slashes so a dir and its slashed form share one service', () => {
-    expect(claudeKeychainService('/Users/mayatobi/.claude-acct2/', home)).toBe(claudeKeychainService('/Users/mayatobi/.claude-acct2', home));
-    expect(claudeKeychainService('/Users/mayatobi/.claude/', home)).toBe('Claude Code-credentials');
+    expect(claudeKeychainService('/home/tester/.claude-acct2/', home)).toBe(claudeKeychainService('/home/tester/.claude-acct2', home));
+    expect(claudeKeychainService('/home/tester/.claude/', home)).toBe('Claude Code-credentials');
   });
 });
 
@@ -148,24 +153,19 @@ describe('readClaudeAccessToken (read-only, injected I/O)', () => {
 
 describe('pollClaudeAccountUsage (hermetic)', () => {
   const okToken: TokenRead = { ok: true, token: 'tok', source: 'keychain' };
-  it('resolves live identity from the usage response without requesting another endpoint', async () => {
-    const requested: string[] = [];
+  it('takes identity from the PROFILE endpoint, not the usage body (they are separate reads)', async () => {
     const row = await pollClaudeAccountUsage(acct('acct4'), deps({
       readToken: () => okToken,
-      fetchImpl: (async (input: string | URL | Request) => {
-        requested.push(String(input));
-        return new Response(JSON.stringify({
-          data: {
-            five_hour: { utilization: 15 },
-            seven_day: { utilization: 3 },
-            account: { uuid: 'U4', email_address: 'v@x' },
-            organization: { uuid: 'O4' },
-          },
-        }));
-      }) as typeof fetch,
+      // The usage body carries a DIFFERENT account block; identity must come from /profile, never usage
+      // (verified live: /api/oauth/usage has no identity at all).
+      fetchImpl: stubFetch({
+        ...URLS,
+        usageByToken: { tok: { json: { five_hour: { utilization: 15 }, account: { uuid: 'U-STALE-USAGE' } } } },
+        profileByToken: { tok: { json: { account: { uuid: 'U4', email: 'v@x' }, organization: { uuid: 'O4' } } } },
+      }),
     }));
-    expect(requested).toEqual([URLS.usageUrl]);
     expect(row.liveIdentity).toEqual({ accountUuid: 'U4', email: 'v@x', organizationUuid: 'O4' });
+    expect(row.fiveHour.utilization).toBe(15);
   });
   it('happy path: 200 usage + 200 profile → ok, fresh windows, live identity', async () => {
     const row = await pollClaudeAccountUsage(acct('acct4'), deps({
@@ -190,7 +190,7 @@ describe('pollClaudeAccountUsage (hermetic)', () => {
     expect(row).toMatchObject({ source: 'http-error', stale: true });
     expect(row.fiveHour.utilization).toBeNull();
     expect(row.error).toContain('HTTP 429');
-    expect(row.liveIdentity).toBeNull();
+    expect(row.liveIdentity).toMatchObject({ accountUuid: 'U1' }); // identity is an independent read — a usage error must not erase it
   });
 
   it('malformed usage JSON → parse-error, stale, unknown', async () => {
@@ -211,16 +211,16 @@ describe('pollClaudeAccountUsage (hermetic)', () => {
     expect(row.fiveHour.utilization).toBeNull();
   });
 
-  it('usage 200 without account.uuid → fresh partial headroom, NO identity, identityUnverified note', async () => {
+  it('usage 200 but the PROFILE endpoint fails → fresh headroom, NO identity, identityUnverified + real profile error', async () => {
     const row = await pollClaudeAccountUsage(acct('acct2'), deps({
       readToken: () => okToken,
       fetchImpl: stubFetch({ ...URLS, usageByToken: { tok: { json: { five_hour: { utilization: 35 } } } }, profileByToken: { tok: { status: 401 } } }),
     }));
-    expect(row).toMatchObject({ source: 'ok', stale: false }); // headroom is real and usable
+    expect(row).toMatchObject({ source: 'ok', stale: false }); // headroom is real and usable despite no identity
     expect(row.fiveHour.utilization).toBe(35);
     expect(row.liveIdentity).toBeNull();
     expect(row.noteCodes).toContain('claude.identityUnverified');
-    expect(row.error).toContain('no live identity');
+    expect(row.error).toContain('profile: HTTP 401');
   });
 
   it('token absent → no-token, stale, unknown, no network calls', async () => {
