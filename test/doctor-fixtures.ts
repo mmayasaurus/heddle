@@ -88,8 +88,19 @@ export function fakeDeps(
   paths = config(),
   overrides: Partial<DoctorDeps> = {},
 ): Partial<DoctorDeps> {
+  const { paths: overridePaths, ...restOverrides } = overrides;
+  const dir = resources.tempDir();
   return {
-    paths,
+    // Force comms + the operator token to nonexistent temp paths, injected BEFORE the caller's paths
+    // so a paths override that omits them (e.g. the HEDDLE_ACCOUNTS / ROUTING / LANES subsets below)
+    // can never fall through to the real ~/.heddle comms.db / operator token — commsCheck runs in
+    // every runDoctor() (HED-463 round-2 review). An explicit comms/operatorToken still wins (spread
+    // last), and routing/lanes/accounts/projects are untouched so their env-resolution tests hold.
+    paths: {
+      comms: join(dir, 'comms.db'),
+      operatorToken: join(dir, 'operator.token'),
+      ...(overridePaths ?? paths),
+    },
     now: () => new Date('2026-09-10T12:00:00Z'),
     env: {},
     execFile: async (cmd, args) => {
@@ -116,7 +127,7 @@ export function fakeDeps(
       }
       throw new Error(`unexpected probe: ${key}`);
     },
-    ...overrides,
+    ...restOverrides,
   };
 }
 
