@@ -458,6 +458,37 @@ export interface AccountAdvice {
   line: string;
 }
 
+/** Narrow provider-only fallback (HED-443 finding 1): the provider-level 5h snapshot counts for THIS
+ *  session's account ONLY when the mirror explicitly binds it (activeAccount === cur), cur has no row
+ *  of its own, the snapshot is at/over the cap, and cur can bill. Otherwise the top-level number is a
+ *  different account's, an aggregate, or claude.json's last-rendered value (HED-262) and is not cur's. */
+function providerLevelOverage(caps: ProviderCaps | undefined, cur: ClaudeAccount | null, usable: boolean):
+  { id: string; used: number; spend: number | null } | null {
+  if (!cur || !usable || !caps || caps.activeAccount !== cur.id) return null;
+  if (caps.accounts.some((a) => a.id === cur.id)) return null;
+  const used = caps.fiveHour.usedPercentage;
+  if (used === null || used < OVERAGE_RED_PCT || cur.overageEnabled === false) return null;
+  return { id: cur.id, used, spend: null };
+}
+
+/** Paid-overage RED detection for the five-hour cap (HED-443). Fresh per-account rows first, each keyed
+ *  on its OWN staleness (never the provider snapshot's), filtered to accounts that CAN bill (enabled or
+ *  unknown) BEFORE the pick so a confirmed-off account never masks a billing one; then the narrow
+ *  provider-level fallback for this session. Prefers this session's account; else the first billable. */
+function detectOverageAlert(
+  caps: ProviderCaps | undefined, accounts: ClaudeAccount[], cur: ClaudeAccount | null, usable: boolean,
+): { accountId: string; spend: number | null; used: number } | null {
+  const redRows = (caps?.accounts ?? [])
+    .filter((a) => !a.stale && a.fiveHour.usedPercentage !== null && a.fiveHour.usedPercentage >= OVERAGE_RED_PCT)
+    .map((a) => ({
+      id: a.id, used: a.fiveHour.usedPercentage as number, spend: a.overageSpend ?? null,
+      overageEnabled: a.overageEnabled ?? accounts.find((x) => x.id === a.id)?.overageEnabled ?? null, // payload → declared → unknown
+    }))
+    .filter((a) => a.overageEnabled !== false);
+  const red = redRows.find((a) => a.id === cur?.id) ?? redRows[0] ?? providerLevelOverage(caps, cur, usable);
+  return red ? { accountId: red.id, spend: red.spend, used: red.used } : null;
+}
+
 export function adviseClaudeAccount(caps: ProviderCaps | undefined, accounts: ClaudeAccount[], env: NodeJS.ProcessEnv = process.env): AccountAdvice {
   // A snapshot that is stale/absent at the PROVIDER level is unusable regardless of per-row flags.
   const usable = caps !== undefined && !caps.stale && caps.source !== 'none';
@@ -474,32 +505,7 @@ export function adviseClaudeAccount(caps: ProviderCaps | undefined, accounts: Cl
   // suppress a FRESH per-account reading at/over the cap — that suppression is the exact silent-billing
   // miss HED-443 exists to prevent, so the per-row `stale` flag is the freshness gate here, not
   // `caps.stale` (review findings 1 + 4).
-  const redRows = (caps?.accounts ?? [])
-    .filter((a) => !a.stale && a.fiveHour.usedPercentage !== null && a.fiveHour.usedPercentage >= OVERAGE_RED_PCT)
-    .map((a) => ({
-      id: a.id,
-      used: a.fiveHour.usedPercentage as number,
-      spend: a.overageSpend ?? null,
-      overageEnabled: a.overageEnabled ?? accounts.find((x) => x.id === a.id)?.overageEnabled ?? null, // payload → declared → unknown
-    }))
-    // Only accounts that CAN bill (enabled OR unknown) — an explicitly-off account never alerts and,
-    // critically, must not MASK another capped account that can bill, so this filter runs BEFORE the
-    // pick (finding 3). Unknown stays conservative: it alerts.
-    .filter((a) => a.overageEnabled !== false);
-  // Prefer this session's own account; otherwise the first capped account that can bill.
-  let red = redRows.find((a) => a.id === cur?.id) ?? redRows[0] ?? null;
-  // Provider-only fallback (finding 1) — kept deliberately NARROW after the verify round (ledger 844):
-  // fire ONLY when the mirror EXPLICITLY binds the provider-level 5h snapshot to THIS session's account
-  // (activeAccount === cur) AND cur has no per-account row of its own. Otherwise the top-level number is
-  // a different account's, an aggregate, or claude.json's last-rendered value (HED-262) — it must never
-  // be attributed to cur, nor override cur's own fresh measurement.
-  if (!red && cur && usable && caps && caps.activeAccount === cur.id
-      && !caps.accounts.some((a) => a.id === cur.id)
-      && caps.fiveHour.usedPercentage !== null && caps.fiveHour.usedPercentage >= OVERAGE_RED_PCT
-      && cur.overageEnabled !== false) {
-    red = { id: cur.id, used: caps.fiveHour.usedPercentage as number, spend: null, overageEnabled: cur.overageEnabled ?? null };
-  }
-  const overageAlert = red ? { accountId: red.id, spend: red.spend, used: red.used } : null;
+  const overageAlert = detectOverageAlert(caps, accounts, cur, usable);
   const line = best && current && best.id === current.id
     ? `Claude accounts: this session is already on the account with the most 5h headroom (${best.id}, ${best.usedPct.toFixed(0)}% used).`
     : best

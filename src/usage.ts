@@ -151,6 +151,20 @@ function cursorOverage(detail: unknown): { overageEnabled: boolean | null; overa
   return { overageEnabled: typeof od.enabled === 'boolean' ? od.enabled : null, overageSpend: num(od.used) };
 }
 
+/** Overlay the operator-declared overage posture (~/.heddle/accounts.json) onto every provider row the
+ *  payload is silent on. Precedence: payload value → operator declaration → null (unknown). HED-443. */
+function applyDeclaredOverage(out: CapsByProvider, accountsPath: string): void {
+  const declarations = declaredOverage(accountsPath);
+  for (const [provider, caps] of Object.entries(out)) {
+    const declared = declarations.get(provider);
+    out[provider] = { ...caps, accounts: caps.accounts.map((account) => ({
+      ...account,
+      overageEnabled: account.overageEnabled ?? declared?.get(account.id) ?? null,
+      overageSpend: account.overageSpend ?? null,
+    })) };
+  }
+}
+
 function unknownCaps(provider: string): ProviderCaps {
   return {
     provider, source: 'none', stale: true, capturedAt: null, fiveHour: UNKNOWN, sevenDay: UNKNOWN,
@@ -347,20 +361,9 @@ export function readProviderCaps(opts: { usageDir?: string; accountsPath?: strin
       return dispatch ? { ...a, dispatch } : a;
     }) };
   }
-  // Only Cursor currently exposes an authoritative overage flag/spend in its payload. For every
-  // other provider (and Cursor rows missing that payload), use the operator's per-account posture.
-  const declarations = declaredOverage(accountsPath);
-  for (const [provider, caps] of Object.entries(out)) {
-    const declared = declarations.get(provider);
-    out[provider] = {
-      ...caps,
-      accounts: caps.accounts.map((account) => ({
-        ...account,
-        overageEnabled: account.overageEnabled ?? declared?.get(account.id) ?? null,
-        overageSpend: account.overageSpend ?? null,
-      })),
-    };
-  }
+  // Only Cursor currently exposes an authoritative overage flag/spend in its payload; for every other
+  // provider (and Cursor rows missing it) the operator's per-account declaration fills in.
+  applyDeclaredOverage(out, accountsPath);
   return out;
 }
 
