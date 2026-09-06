@@ -10,19 +10,15 @@ build, updating is the first step.
 
 **Please do not open a public issue for a security problem.**
 
-Use GitHub's private vulnerability reporting: go to the
-[Security tab](https://github.com/mmayasaurus/heddle/security) of this repository and choose
-*Report a vulnerability*. The report stays private between you and the maintainers until a fix is
-published.
+Use GitHub's private vulnerability reporting from this repository's Security tab and choose *Report
+a vulnerability*. The report stays private between you and the maintainers until a fix is published.
 
 A useful report includes the affected commit, your platform and provider CLI versions, what an
 attacker gains, and the shortest sequence of steps that reproduces the problem. A proof of concept
 helps but is not required.
 
-This repository is the orchestration layer. The desktop dashboard lives in
-[heddle-dashboard](https://github.com/mmayasaurus/heddle-dashboard) and has its own policy; that
-project is a fork of [VelaTerm](https://github.com/vlinx-io/VelaTerm), so a vulnerability inherited
-from upstream — one that reproduces on unmodified VelaTerm — should go to upstream as well.
+This repository is the orchestration layer. The desktop dashboard is a separate product with its
+own policy. A vulnerability inherited from an upstream project should be reported upstream as well.
 
 ## What to expect
 

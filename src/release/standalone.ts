@@ -1,0 +1,111 @@
+import { execFileSync, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { existsSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { standaloneReadme } from './readme.js';
+import { copyShipSet, extractShipSet } from './shipset.js';
+import { scanFiles } from './scrub.js';
+
+export type StandaloneOptions = {
+  outDir: string; sourceRef?: string; initGit?: boolean; verify?: boolean; sourceDir?: string;
+};
+export type StandaloneResult = { ok: boolean; error?: string; sourceCommit?: string; shipSetHash?: string };
+
+export function releaseStandalone(options: StandaloneOptions): StandaloneResult {
+  const outDir = options.outDir;
+  if (existsSync(outDir)) return { ok: false, error: `destination already exists: ${outDir}` };
+  const tempDir = `${outDir}.tmp-${process.pid}`;
+  if (existsSync(tempDir)) return { ok: false, error: `temporary destination already exists: ${tempDir}` };
+  try {
+    return generate(options, tempDir);
+  } catch (error) {
+    rmSync(tempDir, { recursive: true, force: true });
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+function generate(options: StandaloneOptions, tempDir: string): StandaloneResult {
+  const sourceRef = options.sourceRef ?? 'HEAD';
+  const extracted = extractShipSet(options.sourceDir ?? process.cwd(), sourceRef);
+  try {
+    copyShipSet(extracted.dir, tempDir);
+    writeFileSync(join(tempDir, 'README.md'), standaloneReadme(version(tempDir), extracted.sourceCommit));
+    const gate = checkStandaloneOutput(tempDir);
+    if (!gate.ok) throw new Error(gate.issues.join('\n'));
+    const shipSetHash = writeRelease(tempDir, extracted.sourceCommit, sourceRef);
+    if (options.verify) verifySnapshot(tempDir);
+    if (options.initGit) initializeGit(tempDir, extracted.sourceCommit);
+    renameSync(tempDir, options.outDir);
+    return { ok: true, sourceCommit: extracted.sourceCommit, shipSetHash };
+  } finally {
+    rmSync(extracted.dir, { recursive: true, force: true });
+  }
+}
+
+export function checkStandaloneOutput(root: string): { ok: boolean; issues: string[] } {
+  const files = outputFiles(root).map((path) => ({ path, contents: readFileSync(join(root, path), 'utf8') }));
+  const scrub = scanFiles(files);
+  const artifacts = files.map(({ path }) => path).filter(isUiArtifact).map((path) => `UI artifact: ${path}`);
+  const directories = ['src-tauri', 'dashboard', 'ui', 'docs/fleet']
+    .filter((path) => existsSync(join(root, path)));
+  const directoryIssues = directories
+    .map((path) => `${path === 'docs/fleet' ? 'forbidden directory' : 'UI artifact'}: ${path}/`);
+  const issues = [...scrub.offendingLines, ...artifacts, ...directoryIssues];
+  return { ok: !issues.length, issues };
+}
+
+function outputFiles(root: string, prefix = ''): string[] {
+  return readdirSync(join(root, prefix), { withFileTypes: true }).flatMap((entry) => {
+    const path = join(prefix, entry.name);
+    return entry.isDirectory() ? outputFiles(root, path) : [path];
+  });
+}
+
+function isUiArtifact(path: string): boolean {
+  return /\.tsx$/.test(path) || path.startsWith('src-tauri/') || /^(dashboard|ui)(\/|$)/.test(path);
+}
+
+function version(root: string): string {
+  return (JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as { version: string }).version;
+}
+
+function writeRelease(root: string, sourceCommit: string, sourceRef: string): string {
+  const shipSetHash = hashShipSet(root);
+  const release = {
+    heddleVersion: version(root), sourceCommit, sourceRef,
+    generator: 'heddle release --standalone', shipSetHash,
+  };
+  writeFileSync(join(root, 'RELEASE.json'), `${JSON.stringify(release, null, 2)}\n`);
+  return shipSetHash;
+}
+
+function hashShipSet(root: string): string {
+  const lines = outputFiles(root).sort().map((path) => `${path}\n${hashFile(join(root, path))}`);
+  return createHash('sha256').update(lines.join('\n')).digest('hex');
+}
+
+function hashFile(path: string): string {
+  return createHash('sha256').update(readFileSync(path)).digest('hex');
+}
+
+function initializeGit(root: string, sourceCommit: string): void {
+  execFileSync('git', ['init', '-b', 'main'], { cwd: root, stdio: 'ignore' });
+  execFileSync('git', ['add', '.'], { cwd: root, stdio: 'ignore' });
+  execFileSync('git', [
+    '-c', 'user.name=heddle', '-c', 'user.email=heddle@localhost',
+    'commit', '-m', `heddle standalone snapshot ${sourceCommit}`,
+  ], { cwd: root, stdio: 'ignore' });
+}
+
+function verifySnapshot(root: string): void {
+  const steps = [
+    ['npm ci', ['ci', '--ignore-scripts']], ['npm run build', ['run', 'build']], ['npm test', ['test']],
+  ] as const;
+  for (const [label, args] of steps) {
+    console.log(`verify: ${label}`);
+    const result = spawnSync('npm', args, {
+      cwd: root, stdio: 'inherit', timeout: 900_000,
+    });
+    if (result.error || result.status !== 0) throw new Error(`verification failed: ${label}`);
+  }
+}
