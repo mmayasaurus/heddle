@@ -96,10 +96,9 @@ function codeEditingWarning(
     ? `Recommended for ${cls}: ${recommended.join(', ')} — omit \`skills\` to get the class default ` +
       `[${defaults.join(', ')}], or pass an explicit list that includes at least one of them.`
     : tabled.length
-    ? `The class default [${tabled.join(', ')}] resolves to NO gate for cwd ${input.cwd}: quality-gate is the ` +
-      `consumer app gate and is dropped outside a recognized repository (HED-389). Dispatch from a ` +
-      `recognized checkout, or pass an explicit list naming the right repo gate pack (repo-heddle-core, ` +
-      `repo-heddle-dashboard, repo-workspace).`
+    ? `The class default [${tabled.join(', ')}] resolves to NO gate for cwd ${input.cwd}: quality-gate is a ` +
+      `per-repository gate resolved from the project registry (HED-389/HED-439) and is dropped outside a ` +
+      `registered repository — register the repository's gate under gates in ~/.heddle/projects.json, or pass an explicit pack list.`
     : `The routing table lists no default packs for ${cls} either — consider quality-gate ` +
       `(verification) and code-discovery (graph-first navigation), or add defaults to routing.v0.yaml.`;
   return {

@@ -45,7 +45,11 @@ describe('heddle-comms server (in-process)', () => {
   const servers: CommsServer[] = [];
   const clients: Client[] = [];
 
-  const baseEnv = () => ({ HEDDLE_COMMS_DB: dbPath, HEDDLE_LEDGER_DB: join(dir, 'no-such-ledger.db') });
+  const baseEnv = () => ({
+    HEDDLE_COMMS_DB: dbPath,
+    HEDDLE_LEDGER_DB: join(dir, 'no-such-ledger.db'),
+    HEDDLE_PID_BRIDGE_PARENT_START_MS: String(Date.now() - 60_000),
+  });
   const initToken = (opts: { rotate?: boolean } = {}) => initOperatorToken({ ...opts, path: tokenPath });
 
   async function connect(env: Record<string, string>, extra: Partial<Parameters<typeof createCommsServer>[0]> = {}) {

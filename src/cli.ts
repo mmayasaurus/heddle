@@ -17,6 +17,7 @@ import { claudeAccountRows, pickClaudeAccountsBatch, usableClaudeCaps } from './
 import { bindingMeter, claudeFloorsFrom } from './floors.js';
 import { loadLanes } from './lanes.js';
 import { readProviderCaps } from './usage.js';
+import { runRuleCli } from './rules/lifecycle.js';
 import { DOCTOR_PROVIDERS, formatDoctorReport, runDoctor } from './doctor.js';
 import { readOperatorMode, writeOperatorMode, isOperatorMode, OPERATOR_MODES } from './operator-mode.js';
 import { runPrOwn } from './pr-own.js';
@@ -87,6 +88,7 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
   heddle pr sweep <pr#> [--json]       sweep all GitHub PR review channels and report mechanical gates
   heddle pr watch <pr#> [--repo <owner/repo>] [--seed] [--reset] [--json]  one read-only PR review/CI poll pass
       env: HEDDLE_PR_OWNER; HEDDLE_PR_OWN_STALE_HOURS; HEDDLE_PR_GATE_CHECK; HEDDLE_PR_WATCH_STATE_DIR
+  heddle rule <list|propose|ratify|test> [--rules <dir>]   manage proposed and active hook rules
   heddle reviews [--limit N] [--json]      adversarial-review scoreboard (author→reviewer pairs) + recent reviews
   heddle review-outcome <dispatch-id> --total N --accepted M [--notes "…"]   record how many findings you accepted
 `;
@@ -635,6 +637,11 @@ try {
           `${r.runs} runs, in=${r.input_tokens} out=${r.output_tokens}`).join('\n');
         return `${workers}\n\nclassifiers (not worker dispatches):\n${clsLines}`;
       });
+      break;
+    }
+
+    case 'rule': {
+      process.exitCode = await runRuleCli(process.argv.slice(3));
       break;
     }
 

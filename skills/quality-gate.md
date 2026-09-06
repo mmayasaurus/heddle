@@ -1,12 +1,10 @@
-Before reporting any code change complete, run the gate from the consumer app's canonical checkout (the registered app layout, or your worktree):
-
-```
-npm run gate        # lint + typecheck (both tsconfigs) + vitest — matches CI
-npm run e2e:web     # additionally after UI changes (Playwright web smoke)
-```
+Before reporting any code change complete, run the quality gate declared by this repository's operator pack.
+The registry resolves that pack from `gates.app`, `gates.byFolderName`, or `gates.byOriginName`; this
+built-in file is served only when the registry names it or a dispatch requests it explicitly — an
+unrecognized repository gets NO gate at all (HED-389: dropped, never guessed).
 
 Rules:
-- A bug fix REQUIRES a regression test named for it:
+- Never report a change complete without the project's gate passing. A bug fix REQUIRES a regression test named for it:
   `describe('regression PR#NNNN — <symptom>')`, forward-only, when vitest-reachable.
 - Never bypass CI. No `--admin` merges, no `[skip ci]`, no merging on red or pending.
 - Report honestly: what passed, what was only written vs actually run, what is unverified,
@@ -24,5 +22,4 @@ Rules:
   `.git` inside cwd — and disables the network BY DEFAULT (the `net` capability re-enables it). A test
   failing only under the worker MAY be hitting one of those rather than a real bug — but it also may
   not; NAME it with its command so the orchestrator can tell which, don't assume. See docs/LANDMINES.md.)
-- Tests never live under `app/` (expo-router bundles `*.test` as a route and web-export goes red).
-  Put them in `components/` or the repo's test directories.
+- Test placement rules are the project's own — the operator pack states them.

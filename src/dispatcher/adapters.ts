@@ -14,6 +14,7 @@ export function defaultAdapterFor(provider: string): WorkerAdapter {
     case 'groq': return new OpenAICompatAdapter('groq');
     case 'cerebras': return new OpenAICompatAdapter('cerebras');
     case 'openrouter': return new OpenAICompatAdapter('openrouter');
+    case 'glm': return new OpenAICompatAdapter('glm');
     default:
       throw new Error(`no adapter for provider "${provider}"`);
   }
