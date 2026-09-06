@@ -135,6 +135,48 @@ describe('regression PR#HED-443 — Claude overage safeguards', () => {
     expect(advice.line).not.toContain('⛔ REAL MONEY');
     expect(advice.line).toContain('97% used');
   });
+
+  // Per-account row builder (mirrors capped()'s row shape).
+  const row = (id: string, used: number | null, over: boolean | null = null, opts: { stale?: boolean; spend?: number | null } = {}) =>
+    ({ id, fiveHour: { usedPercentage: used, resetsAt: null }, sevenDay: { usedPercentage: null, resetsAt: null }, windows: {}, noteCodes: [], limitReached: false, stale: opts.stale ?? false, overageEnabled: over, overageSpend: opts.spend ?? null });
+
+  it('alerts on a FRESH per-account 100% row even when the PROVIDER snapshot is stale (findings 1+4)', () => {
+    // readClaudeTap marks the provider stale when claude.json is missing while per-account rows stay
+    // fresh; the alert must key on the row's own freshness, not caps.stale, or billing goes silent.
+    const caps: ProviderCaps = { ...fresh('claude', 100), stale: true, accounts: [row('acct1', 100, null)] };
+    const advice = adviseClaudeAccount(caps, [account()], {});
+    expect(advice.overageAlert).toEqual({ accountId: 'acct1', spend: null, used: 100 });
+    expect(advice.line).toContain('⛔ REAL MONEY');
+  });
+
+  it('an overage-off account at cap does not MASK another capped account that can bill (finding 3)', () => {
+    const caps: ProviderCaps = { ...fresh('claude', 100), accounts: [row('safe', 100, false), row('billing', 100, null)] };
+    const advice = adviseClaudeAccount(caps, [
+      { id: 'safe', configDir: null, overageEnabled: false },
+      { id: 'billing', configDir: '/tmp/.claude-billing' },
+    ], {}); // no CLAUDE_CONFIG_DIR → current resolves to the null-configDir account 'safe'
+    expect(advice.overageAlert).toEqual({ accountId: 'billing', spend: null, used: 100 });
+    expect(advice.line).toContain('OVERAGE BILLING ACTIVE on billing');
+  });
+
+  it('falls back to the provider-level 5h snapshot for THIS session when no per-account row exists (finding 1)', () => {
+    const advice = adviseClaudeAccount({ ...fresh('claude', 100), accounts: [] }, [account(true)], {});
+    expect(advice.overageAlert).toEqual({ accountId: 'acct1', spend: null, used: 100 });
+    expect(advice.line).toContain('⛔ REAL MONEY');
+  });
+
+  it('the provider-only fallback stays silent for a confirmed overage-off session account (finding 1)', () => {
+    const advice = adviseClaudeAccount({ ...fresh('claude', 100), accounts: [] }, [account(false)], {});
+    expect(advice.overageAlert).toBeNull();
+    expect(advice.line).not.toContain('⛔ REAL MONEY');
+  });
+
+  it('reports overage spend when the payload carries it', () => {
+    const caps: ProviderCaps = { ...fresh('claude', 100), accounts: [row('acct1', 100, true, { spend: 4.2 })] };
+    const advice = adviseClaudeAccount(caps, [account(true)], {});
+    expect(advice.overageAlert).toEqual({ accountId: 'acct1', spend: 4.2, used: 100 });
+    expect(advice.line).toContain('spend 4.2');
+  });
 });
 
 // HED-106 / HED-264 — the tier-ladder expansion walk INSIDE decideRoute. Gated on opts.ladder, so the

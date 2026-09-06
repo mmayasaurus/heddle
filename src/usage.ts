@@ -141,6 +141,16 @@ function declaredOverage(accountsPath: string): Map<string, Map<string, boolean>
   return out;
 }
 
+/** Cursor overage posture from `detail.onDemand`, null-safe. `onDemand` may be absent OR explicitly
+ *  `null` (and `typeof null === 'object'`, so a bare typeof guard would then throw on `.enabled`);
+ *  a non-boolean `enabled` / non-number `used` degrade to unknown rather than crash (HED-443). */
+function cursorOverage(detail: unknown): { overageEnabled: boolean | null; overageSpend: number | null } {
+  const raw = detail && typeof detail === 'object' ? (detail as Record<string, unknown>).onDemand : null;
+  const od = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : null;
+  if (!od) return { overageEnabled: null, overageSpend: null };
+  return { overageEnabled: typeof od.enabled === 'boolean' ? od.enabled : null, overageSpend: num(od.used) };
+}
+
 function unknownCaps(provider: string): ProviderCaps {
   return {
     provider, source: 'none', stale: true, capturedAt: null, fiveHour: UNKNOWN, sevenDay: UNKNOWN,
@@ -195,13 +205,10 @@ export function readLimitsMirror(usageDir: string, nowS: number): CapsByProvider
           noteCodes: strList(a.noteCodes),
           limitReached: a.limitReached === true,
           stale: a.stale === true,
-          overageEnabled: typeof (a.detail as Record<string, unknown> | undefined)?.onDemand === 'object'
-            && typeof ((a.detail as Record<string, unknown>).onDemand as Record<string, unknown>).enabled === 'boolean'
-            ? ((a.detail as Record<string, unknown>).onDemand as Record<string, unknown>).enabled as boolean
-            : null,
-          overageSpend: typeof (a.detail as Record<string, unknown> | undefined)?.onDemand === 'object'
-            ? num(((a.detail as Record<string, unknown>).onDemand as Record<string, unknown>).used)
-            : null,
+          // Cursor is the only provider that publishes overage in its payload; null-safe parse
+          // (detail.onDemand may be absent or explicitly null) so one bad row never throws out of
+          // readLimitsMirror and starves every provider of caps (HED-443 review, finding 2).
+          ...cursorOverage(a.detail),
           fableWeeklyEstimatePct: num(a.fableWeeklyEstimatePct),
           fableWeeklySamples: num(a.fableWeeklySamples),
         }))

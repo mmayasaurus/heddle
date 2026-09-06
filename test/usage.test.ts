@@ -38,6 +38,36 @@ describe('usage cap readers', () => {
     expect(caps.find((account) => account.id === 'unknown')).toMatchObject({ overageEnabled: null, overageSpend: null });
   });
 
+  it('parses a Cursor row whose detail.onDemand is null without crashing, and keeps other providers (finding 2)', () => {
+    // typeof null === 'object', so a bare typeof guard would pass then throw on `.enabled`, taking the
+    // WHOLE mirror read down and starving every provider of caps — the incident's silent-billing path.
+    const dir = tempDir(); const nowS = writtenAt + 10;
+    writeFileSync(join(dir, 'limits.json'), JSON.stringify({
+      writtenAt: nowS - 5,
+      limits: [
+        { provider: 'cursor', capturedAt: nowS - 5, staleAfterSecs: 3600,
+          accounts: [{ id: 'cursor-ide', detail: { onDemand: null }, fiveHour: { usedPercentage: null, resetsAt: null } }] },
+        { provider: 'claude', capturedAt: nowS - 5, staleAfterSecs: 3600, fiveHour: { usedPercentage: 40, resetsAt: null },
+          accounts: [{ id: 'acct1', fiveHour: { usedPercentage: 40, resetsAt: null } }] },
+      ],
+    }));
+    const caps = readLimitsMirror(dir, nowS)!;
+    expect(caps.cursor.accounts[0]).toMatchObject({ id: 'cursor-ide', overageEnabled: null, overageSpend: null });
+    expect(caps.claude.fiveHour.usedPercentage).toBe(40); // one bad row must not starve other providers
+  });
+
+  it('a payload overage posture wins over an operator declaration (precedence, finding 5)', () => {
+    const dir = tempDir(); const nowS = writtenAt + 10;
+    writeFileSync(join(dir, 'accounts.json'), JSON.stringify({ cursor: [{ id: 'cursor-ide', overageEnabled: true }] }));
+    writeFileSync(join(dir, 'limits.json'), JSON.stringify({
+      writtenAt: nowS - 5,
+      limits: [{ provider: 'cursor', capturedAt: nowS - 5, staleAfterSecs: 3600,
+        accounts: [{ id: 'cursor-ide', detail: { onDemand: { enabled: false, used: 0 } }, fiveHour: { usedPercentage: null, resetsAt: null } }] }],
+    }));
+    const caps = readProviderCaps({ usageDir: dir, accountsPath: join(dir, 'accounts.json'), nowS });
+    expect(caps.cursor.accounts[0]).toMatchObject({ overageEnabled: false, overageSpend: 0 }); // payload false beats declared true
+  });
+
   it('treats old, corrupt, missing, and malformed mirrors as unknown', () => {
     const dir = tempDir(); copyFileSync(fixture, join(dir, 'limits.json'));
     expect(readLimitsMirror(dir, writtenAt + 10_000)).toBeNull();

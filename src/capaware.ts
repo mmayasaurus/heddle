@@ -449,7 +449,10 @@ export interface AccountAdvice {
   current: { id: string; usedPct: number | null } | null;
   /** Per-account view for the trace / UI. */
   known: { id: string; usedPct: number | null; stale: boolean }[];
-  /** Paid-overage risk at the five-hour cap; null only when no account is at the red threshold or it is confirmed off. */
+  /** Paid-overage risk at the five-hour cap. Non-null when a FRESH reading (per-account, else the
+   *  provider-level snapshot for this session's account) is at/over OVERAGE_RED_PCT and that account's
+   *  overage posture is enabled OR unknown; null when no such capped account exists or every capped
+   *  account is confirmed overage-off. */
   overageAlert: { accountId: string; spend: number | null; used: number } | null;
   /** One line for an in-session refusal instruction / `heddle route`. */
   line: string;
@@ -466,15 +469,33 @@ export function adviseClaudeAccount(caps: ProviderCaps | undefined, accounts: Cl
   const best = bestRow ? { id: bestRow.id, usedPct: bestRow.usedPct, configDir: accounts.find((a) => a.id === bestRow.id)?.configDir ?? null } : null;
   const cur = currentClaudeAccount(accounts, env);
   const current = cur ? { id: cur.id, usedPct: known.find((r) => r.id === cur.id)?.usedPct ?? null } : null;
-  const redRows = rows
-    .filter((row): row is { id: string; usedPct: number; stale: boolean } => row.usedPct !== null && row.usedPct >= OVERAGE_RED_PCT && !row.stale)
-    .map((row) => ({ row, account: accounts.find((account) => account.id === row.id), caps: caps?.accounts.find((account) => account.id === row.id) }));
-  // Prefer the account that owns this session; otherwise surface the first capped registered account.
-  const red = redRows.find((candidate) => candidate.row.id === cur?.id) ?? redRows[0];
-  const overageEnabled = red?.caps?.overageEnabled ?? red?.account?.overageEnabled ?? null;
-  const overageAlert = red && overageEnabled !== false
-    ? { accountId: red.row.id, spend: red.caps?.overageSpend ?? null, used: red.row.usedPct }
-    : null;
+  // Overage RED detection is deliberately INDEPENDENT of the provider-level `usable` gate above: a
+  // stale provider snapshot (claude.json missing → readClaudeTap marks the PROVIDER stale) must never
+  // suppress a FRESH per-account reading at/over the cap — that suppression is the exact silent-billing
+  // miss HED-443 exists to prevent, so the per-row `stale` flag is the freshness gate here, not
+  // `caps.stale` (review findings 1 + 4).
+  const redRows = (caps?.accounts ?? [])
+    .filter((a) => !a.stale && a.fiveHour.usedPercentage !== null && a.fiveHour.usedPercentage >= OVERAGE_RED_PCT)
+    .map((a) => ({
+      id: a.id,
+      used: a.fiveHour.usedPercentage as number,
+      spend: a.overageSpend ?? null,
+      overageEnabled: a.overageEnabled ?? accounts.find((x) => x.id === a.id)?.overageEnabled ?? null, // payload → declared → unknown
+    }))
+    // Only accounts that CAN bill (enabled OR unknown) — an explicitly-off account never alerts and,
+    // critically, must not MASK another capped account that can bill, so this filter runs BEFORE the
+    // pick (finding 3). Unknown stays conservative: it alerts.
+    .filter((a) => a.overageEnabled !== false);
+  // Prefer this session's own account; otherwise the first capped account that can bill.
+  let red = redRows.find((a) => a.id === cur?.id) ?? redRows[0] ?? null;
+  // Single-account / provider-only snapshot (finding 1): no per-account row cleared the bar, but the
+  // provider-level 5h snapshot is FRESH (usable) at/over the cap and this session's account can bill.
+  if (!red && cur && usable && caps && caps.fiveHour.usedPercentage !== null && caps.fiveHour.usedPercentage >= OVERAGE_RED_PCT) {
+    const curRow = caps.accounts.find((a) => a.id === cur.id);
+    const curOverage = curRow?.overageEnabled ?? cur.overageEnabled ?? null;
+    if (curOverage !== false) red = { id: cur.id, used: caps.fiveHour.usedPercentage as number, spend: curRow?.overageSpend ?? null, overageEnabled: curOverage };
+  }
+  const overageAlert = red ? { accountId: red.id, spend: red.spend, used: red.used } : null;
   const line = best && current && best.id === current.id
     ? `Claude accounts: this session is already on the account with the most 5h headroom (${best.id}, ${best.usedPct.toFixed(0)}% used).`
     : best
