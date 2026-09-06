@@ -59,7 +59,7 @@ rewritten once present.
    shadow a working config.
 5. **`.memtraceignore`** — ensure `.worktrees/` and `.memdb*/` lines exist (append-only).
 6. **Per-repo commands** — `<dir>/.claude/commands/heddle-gate.md`, plus the generic lifecycle
-   commands `startup.md`, `closeout.md`, `handoff.md`, `usage.md`, each seeded from heddle's own copy
+   commands `startup.md`, `closeout.md`, `handoff.md`, `heddle-usage.md`, each seeded from heddle's own copy
    if absent and never rewritten once present. `/heddle-gate` comes from heddle's own
    `.claude/commands/`; the lifecycle four come from `assets/commands/` — tenant-neutral bodies kept
    inside the public-scrub scan, deliberately NOT heddle's own fleet-specific

@@ -301,7 +301,7 @@ function renderGateStep(dir: string, dryRun: boolean): InstallStep {
 // heddle's `assets/commands/` (NOT its own fleet-specific `.claude/commands/{startup,closeout}.md`,
 // which are fleet-internal and never ship); `assets/` is inside the public-scrub scan so these stay
 // tenant-clean.
-const LIFECYCLE_COMMANDS = ['startup.md', 'closeout.md', 'handoff.md', 'usage.md'] as const;
+const LIFECYCLE_COMMANDS = ['startup.md', 'closeout.md', 'handoff.md', 'heddle-usage.md'] as const;
 function renderLifecycleCommandSteps(dir: string, dryRun: boolean): InstallStep[] {
   return LIFECYCLE_COMMANDS.map((file) => {
     const path = join(dir, '.claude', 'commands', file);

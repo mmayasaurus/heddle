@@ -347,11 +347,11 @@ describe('init-project', () => {
     const opts = options(tempDir());
     const plan = planInstall(opts);
     expect(plan.steps.filter((step) => step.action === 'create').map((step) => step.step)).toEqual(expect.arrayContaining([
-      'command:startup.md', 'command:closeout.md', 'command:handoff.md', 'command:usage.md',
+      'command:startup.md', 'command:closeout.md', 'command:handoff.md', 'command:heddle-usage.md',
     ]));
     applyInstall(plan);
     const assetsDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'assets', 'commands');
-    for (const file of ['startup.md', 'closeout.md', 'handoff.md', 'usage.md']) {
+    for (const file of ['startup.md', 'closeout.md', 'handoff.md', 'heddle-usage.md']) {
       expect(readFileSync(join(opts.dir, '.claude', 'commands', file))).toEqual(readFileSync(join(assetsDir, file)));
     }
     // Seeded once, never rewritten: a second plan reports every command step as skip.
