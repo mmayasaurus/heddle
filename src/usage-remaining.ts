@@ -88,7 +88,7 @@ export function readUsageRemaining(opts: UsageRemainingOptions = {}): UsageRemai
         // Per-account rows use the ACCOUNT's own freshness: the Claude tap keeps per-account
         // captures current even when the assembled provider-level mirror is stale, so OR-ing in
         // provider.stale here would blank live account data (review: codeant/cursor on #124).
-        const stale = account.stale === true;
+        const stale = account.stale;
         const noteCodes = account.noteCodes.length ? account.noteCodes : provider.noteCodes;
         pushRow(rows, { provider: provider.provider, account: account.id, window: '5h', cap: account.fiveHour, stale, capturedAt, noteCodes, nowS });
         pushRow(rows, { provider: provider.provider, account: account.id, window: '7d', cap: account.sevenDay, stale, capturedAt, noteCodes, nowS });
