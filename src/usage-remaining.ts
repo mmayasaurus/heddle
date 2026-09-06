@@ -1,4 +1,4 @@
-import { readProviderCaps, type AccountCaps, type CapWindow, type ProviderCaps } from './usage.js';
+import { readProviderCaps, type CapWindow } from './usage.js';
 
 export type UsageRemainingSource = 'vendor-meter' | 'unavailable';
 
@@ -35,40 +35,37 @@ function providerOrder(left: string, right: string): number {
   return left.localeCompare(right);
 }
 
-function rowNotes(provider: ProviderCaps, account: AccountCaps | null): string[] {
-  return account?.noteCodes.length ? account.noteCodes : provider.noteCodes;
+interface RowInput {
+  provider: string;
+  account: string | null;
+  window: string;
+  cap: CapWindow;
+  stale: boolean;
+  capturedAt: number | null;
+  noteCodes: string[];
+  nowS: number;
 }
 
-function appendRows(
-  rows: UsageRemainingRow[],
-  provider: ProviderCaps,
-  account: AccountCaps | null,
-  nowS: number,
-): void {
-  const stale = provider.stale || account?.stale === true;
-  const noteCodes = rowNotes(provider, account);
-  const windows: Array<[string, CapWindow]> = [
-    ['5h', account?.fiveHour ?? provider.fiveHour],
-    ['7d', account?.sevenDay ?? provider.sevenDay],
-    ...Object.entries(account?.windows ?? provider.windows),
-  ];
-
-  for (const [window, cap] of windows) {
-    const unavailable = stale || cap.usedPercentage === null;
-    rows.push({
-      provider: provider.provider,
-      account: account?.id ?? null,
-      window,
-      usedPercentage: unavailable ? null : cap.usedPercentage,
-      resetsAt: cap.resetsAt,
-      resetsInSecs: cap.resetsAt === null ? null : cap.resetsAt - nowS,
-      source: unavailable ? 'unavailable' : 'vendor-meter',
-      stale,
-      capturedAt: provider.capturedAt,
-      ageSecs: provider.capturedAt === null ? null : nowS - provider.capturedAt,
-      noteCodes,
-    });
-  }
+function pushRow(rows: UsageRemainingRow[], input: RowInput): void {
+  const { cap } = input;
+  // A row is unavailable when its OWN capture is stale or the window has no percentage — it then
+  // shows a dash, never a number. Freshness is judged at the row's own level (per-account for an
+  // account row, per-provider for a provider row), so a fresh account is never blanked by a stale
+  // provider-level mirror.
+  const unavailable = input.stale || cap.usedPercentage === null;
+  rows.push({
+    provider: input.provider,
+    account: input.account,
+    window: input.window,
+    usedPercentage: unavailable ? null : cap.usedPercentage,
+    resetsAt: cap.resetsAt,
+    resetsInSecs: cap.resetsAt === null ? null : cap.resetsAt - input.nowS,
+    source: unavailable ? 'unavailable' : 'vendor-meter',
+    stale: input.stale,
+    capturedAt: input.capturedAt,
+    ageSecs: input.capturedAt === null ? null : input.nowS - input.capturedAt,
+    noteCodes: input.noteCodes,
+  });
 }
 
 /** Read the provider mirror and turn every account/window cap into a remaining-quota display row. */
@@ -82,15 +79,40 @@ export function readUsageRemaining(opts: UsageRemainingOptions = {}): UsageRemai
   const accountFilter = opts.account?.toLocaleLowerCase();
   const rows: UsageRemainingRow[] = [];
 
-  for (const provider of Object.values(caps).sort((left, right) => providerOrder(left.provider, right.provider))) {
-    if (!provider.accounts.length) {
-      if (accountFilter) continue;
-      appendRows(rows, provider, null, nowS);
+  const providers = Object.values(caps).sort((left, right) => providerOrder(left.provider, right.provider));
+  for (const provider of providers) {
+    const { capturedAt } = provider;
+    if (provider.accounts.length) {
+      for (const account of provider.accounts) {
+        if (accountFilter && account.id.toLocaleLowerCase() !== accountFilter) continue;
+        // Per-account rows use the ACCOUNT's own freshness: the Claude tap keeps per-account
+        // captures current even when the assembled provider-level mirror is stale, so OR-ing in
+        // provider.stale here would blank live account data (review: codeant/cursor on #124).
+        const stale = account.stale === true;
+        const noteCodes = account.noteCodes.length ? account.noteCodes : provider.noteCodes;
+        pushRow(rows, { provider: provider.provider, account: account.id, window: '5h', cap: account.fiveHour, stale, capturedAt, noteCodes, nowS });
+        pushRow(rows, { provider: provider.provider, account: account.id, window: '7d', cap: account.sevenDay, stale, capturedAt, noteCodes, nowS });
+        for (const [id, cap] of Object.entries(account.windows)) {
+          pushRow(rows, { provider: provider.provider, account: account.id, window: id, cap, stale, capturedAt, noteCodes, nowS });
+        }
+      }
+      // Provider-level named windows are the binding view across accounts (cursor included-* /
+      // usage-based, codex per-model buckets) and are NOT carried on the per-account rows — emit
+      // them ONCE (account: null) so provider meters are never hidden when accounts exist. A `??`
+      // over an empty {} would have kept the empty map and dropped these entirely (same review).
+      if (!accountFilter) {
+        for (const [id, cap] of Object.entries(provider.windows)) {
+          pushRow(rows, { provider: provider.provider, account: null, window: id, cap, stale: provider.stale, capturedAt, noteCodes: provider.noteCodes, nowS });
+        }
+      }
       continue;
     }
-    for (const account of provider.accounts) {
-      if (accountFilter && account.id.toLocaleLowerCase() !== accountFilter) continue;
-      appendRows(rows, provider, account, nowS);
+    if (accountFilter) continue;
+    const noteCodes = provider.noteCodes;
+    pushRow(rows, { provider: provider.provider, account: null, window: '5h', cap: provider.fiveHour, stale: provider.stale, capturedAt, noteCodes, nowS });
+    pushRow(rows, { provider: provider.provider, account: null, window: '7d', cap: provider.sevenDay, stale: provider.stale, capturedAt, noteCodes, nowS });
+    for (const [id, cap] of Object.entries(provider.windows)) {
+      pushRow(rows, { provider: provider.provider, account: null, window: id, cap, stale: provider.stale, capturedAt, noteCodes, nowS });
     }
   }
   return rows;
