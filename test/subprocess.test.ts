@@ -1,12 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { execFileSync } from 'node:child_process';
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { run } from '../src/adapters/subprocess.js';
+import { useTempResources } from './helpers.js';
 
 // The shared runner all four adapters (codex/cursor/claude/agy) now depend on (HED-31). These pin
 // the centralized timeout/SIGKILL, spawn-error, settle-once, and UTF-8 behavior directly, rather
 // than only through each adapter's integration tests (gitar #69).
 const NODE = process.execPath; // absolute → independent of the (billing-stripped) worker PATH
 describe('subprocess run() — the shared adapter runner', () => {
+  const { tempDir } = useTempResources('heddle-subprocess-');
   it('captures stdout, stderr, and the exit code on a clean exit', async () => {
     const r = await run(NODE, ['-e', 'process.stdout.write("out"); process.stderr.write("err")'], process.cwd(), 10_000);
     expect(r).toEqual({ stdout: 'out', stderr: 'err', exitCode: 0, timedOut: false, truncated: false });
@@ -25,34 +28,79 @@ describe('subprocess run() — the shared adapter runner', () => {
   });
 
   it.skipIf(process.platform === 'win32')('kills a timed-out process group, including a pipe-holding grandchild', async () => {
-    const marker = `heddle-subprocess-group-${process.pid}-${Date.now()}-${Math.random()}`;
+    const pidfile = join(tempDir(), 'grandchild.pid');
+    // The PARENT writes the grandchild's pid synchronously (spawn().pid is available immediately), so
+    // proving the grandchild spawned does not race the grandchild's own node startup under suite load.
     const parent = [
       "const { spawn } = require('node:child_process');",
-      `spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)', ${JSON.stringify(marker)}], { stdio: 'inherit' });`,
+      "const fs = require('node:fs');",
+      "const gc = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'inherit' });",
+      `fs.writeFileSync(${JSON.stringify(pidfile)}, String(gc.pid));`,
       'setTimeout(() => {}, 60000);',
     ].join(' ');
-    const started = Date.now();
-    const r = await run(NODE, ['-e', parent], process.cwd(), 500);
+    let gcPid: number | undefined;
+    try {
+      const started = Date.now();
+      const r = await run(NODE, ['-e', parent], process.cwd(), 3000);
 
-    expect(r.timedOut).toBe(true);
-    expect(r.exitCode).toBeNull();
-    expect(Date.now() - started).toBeLessThan(2_000);
+      expect(r.timedOut).toBe(true);
+      expect(r.exitCode).toBeNull();
+      expect(Date.now() - started).toBeLessThan(15_000);
+      expect(existsSync(pidfile)).toBe(true);
+      gcPid = Number(readFileSync(pidfile, 'utf8'));
+      expect(gcPid).toBeGreaterThan(0);
 
-    let survivors = '';
-    for (let attempt = 0; attempt < 20; attempt += 1) {
-      try {
-        survivors = execFileSync('pgrep', ['-f', marker], { encoding: 'utf8' }).trim();
-      } catch (error) {
-        if ((error as { status?: unknown }).status === 1) {
-          survivors = '';
-        } else {
+      let reaped = false;
+      for (let attempt = 0; attempt < 200; attempt += 1) {
+        try {
+          process.kill(gcPid, 0);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ESRCH') {
+            reaped = true;
+            break;
+          }
           throw error;
         }
+        await new Promise((resolve) => setTimeout(resolve, 25));
       }
-      if (survivors.length === 0) break;
-      await new Promise((resolve) => setTimeout(resolve, 25));
+      expect(reaped).toBe(true);
+    } finally {
+      try {
+        if (gcPid !== undefined) process.kill(gcPid, 'SIGKILL');
+      } catch {
+        // The grandchild was already reaped.
+      }
     }
-    expect(survivors).toBe('');
+  });
+
+  it.skipIf(process.platform === 'win32')('settles after the grace period when an escaped descendant holds inherited pipes', async () => {
+    const pidfile = join(tempDir(), 'escaped-grandchild.pid');
+    // detached:true puts the grandchild in its own session so the group SIGKILL misses it; it keeps the
+    // inherited pipes open, so run() must fall back to the grace timer rather than hang on 'close'. The
+    // PARENT writes the grandchild's pid synchronously so the proof does not race node startup.
+    const parent = [
+      "const { spawn } = require('node:child_process');",
+      "const fs = require('node:fs');",
+      "const gc = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], { detached: true, stdio: 'inherit' });",
+      `fs.writeFileSync(${JSON.stringify(pidfile)}, String(gc.pid));`,
+      'setTimeout(() => {}, 60000);',
+    ].join(' ');
+    try {
+      const started = Date.now();
+      const r = await run(NODE, ['-e', parent], process.cwd(), 3000);
+
+      expect(r.timedOut).toBe(true);
+      // Grace path settles at ~timeout + GRACE_MS, well under the escaped grandchild's 30s lifetime
+      // (when a hang with no grace net would otherwise settle via a late 'close').
+      expect(Date.now() - started).toBeLessThan(12_000);
+      expect(existsSync(pidfile)).toBe(true);
+    } finally {
+      try {
+        if (existsSync(pidfile)) process.kill(Number(readFileSync(pidfile, 'utf8')), 'SIGKILL');
+      } catch {
+        // The escaped grandchild has already exited.
+      }
+    }
   });
 
   // NOTE: the timer's exit-at-deadline guard (child already exited when the timer fires → don't flag
