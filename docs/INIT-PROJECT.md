@@ -58,8 +58,14 @@ rewritten once present.
    `skip(no template)` until heddle ships its own `.mcp.json` — never a placeholder stub that could
    shadow a working config.
 5. **`.memtraceignore`** — ensure `.worktrees/` and `.memdb*/` lines exist (append-only).
-6. **Per-repo `/heddle-gate` command** — `<dir>/.claude/commands/heddle-gate.md` from heddle's own
-   copy if absent.
+6. **Per-repo commands** — `<dir>/.claude/commands/heddle-gate.md`, plus the generic lifecycle
+   commands `startup.md`, `closeout.md`, `handoff.md`, `heddle-usage.md`, each seeded from heddle's own copy
+   if absent and never rewritten once present. `/heddle-gate` comes from heddle's own
+   `.claude/commands/`; the lifecycle four come from `assets/commands/` — tenant-neutral bodies kept
+   inside the public-scrub scan, deliberately NOT heddle's own fleet-specific
+   `.claude/commands/{startup,closeout}.md` (which never ship). They discover team/tracker/paths at
+   runtime (`heddle projects`, `heddle usage`, plain `git`/`gh`, the seeded rule stubs), so they carry
+   no hard-coded identity.
 7. **Registry** — upsert `~/.heddle/projects.json` (`src/projects.ts` schema v1): `name` (default
    basename), `workspaceRoots` += resolved `<dir>`, `agentIds`/`linearTeam`/`defaultRoom`/`launcher`
    from flags (required on first registration, preserved on re-run). Registry is TRUTH (docs/PROJECTS.md). The upsert is VALIDATED BEFORE WRITE by round-tripping the
