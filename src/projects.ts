@@ -20,6 +20,14 @@ import { isAbsolute, join, resolve, sep } from 'node:path';
 
 export const PROJECTS_SCHEMA_VERSION = 1;
 
+/** Tracker backend for a project's issue tracking (HED-408). ABSENT in a registry file means the
+ *  default (linear), so registries written before HED-408 load unchanged; lin.sh reads the same
+ *  `tracker` field from this registry to pick its backend. Add a kind as new TrackerAdapter
+ *  backends land. */
+export type TrackerKind = 'linear' | 'github';
+const TRACKER_KINDS: readonly TrackerKind[] = ['linear', 'github'];
+export const DEFAULT_TRACKER: TrackerKind = 'linear';
+
 export interface Project {
   name: string;
   workspaceRoots: string[];
@@ -27,6 +35,8 @@ export interface Project {
   linearTeam: string;
   defaultRoom: string;
   launcher: string;
+  /** Issue-tracker backend; defaults to 'linear' when omitted from the registry file. */
+  tracker: TrackerKind;
 }
 
 export interface ProjectRegistry {
@@ -74,6 +84,20 @@ function requireStringArray(node: any, key: string, where: string, path: string)
   return v;
 }
 
+/** OPTIONAL tracker selector — absent (or null) means the default backend, so a registry written
+ *  before HED-408 loads unchanged; a PRESENT value must be a known TrackerKind (loud on a hand-edit
+ *  typo, same discipline as requireString). */
+function optionalTracker(node: any, where: string, path: string): TrackerKind {
+  const v = node.tracker;
+  if (v === undefined || v === null) return DEFAULT_TRACKER;
+  if (typeof v !== 'string' || !(TRACKER_KINDS as readonly string[]).includes(v)) {
+    throw new Error(
+      `projects.json at ${path}: ${where}.tracker must be one of ${JSON.stringify(TRACKER_KINDS)} when present (got ${JSON.stringify(v)})`,
+    );
+  }
+  return v as TrackerKind;
+}
+
 function toProject(node: any, index: number, path: string): Project {
   if (!node || typeof node !== 'object') {
     throw new Error(`projects.json at ${path}: projects[${index}] must be an object (got ${JSON.stringify(node)})`);
@@ -97,6 +121,7 @@ function toProject(node: any, index: number, path: string): Project {
     linearTeam: requireString(node, 'linearTeam', where, path),
     defaultRoom: requireString(node, 'defaultRoom', where, path),
     launcher: requireString(node, 'launcher', where, path),
+    tracker: optionalTracker(node, where, path),
   };
 }
 
