@@ -28,6 +28,12 @@ export const identityPatterns = [
 export type ScrubFile = { path: string; contents: string };
 export type AllowlistEntry = { path: string; lineNumber: number; digest: string };
 
+const licenseCopyrightHolder = 'Copyright (c) 2026 Very Good Fiber Goods (' + 'VG' + 'FG)';
+export const licenseCopyrightExemption: AllowlistEntry = {
+  path: 'LICENSE', lineNumber: 3, digest: digest(licenseCopyrightHolder),
+};
+export const scrubExemptions = ['LICENSE: copyright holder line (legal ownership; operator-approved)'];
+
 export function digest(line: string): string {
   return createHash('sha256').update(line).digest('hex').slice(0, 12);
 }

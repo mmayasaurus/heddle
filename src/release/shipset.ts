@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, sep } from 'node:path';
 
 const rootFiles = new Set([
   'package.json', 'package-lock.json', 'tsconfig.json', 'tsconfig.test.json', 'vitest.config.ts', '.gitignore',
@@ -29,6 +29,7 @@ export function copyShipSet(source: string, destination: string): void {
 }
 
 export function isIncluded(path: string): boolean {
+  path = toPosixPath(path);
   return rootFiles.has(path) || path.startsWith('src/') || path.startsWith('test/') || path.startsWith('routing/')
     || path.startsWith('skills/') || (path.startsWith('docs/') && !path.startsWith('docs/fleet/'))
     || path === '.github/workflows/gate.yml';
@@ -36,9 +37,13 @@ export function isIncluded(path: string): boolean {
 
 function files(root: string, prefix = ''): string[] {
   return readdirSync(join(root, prefix), { withFileTypes: true }).flatMap((entry) => {
-    const path = join(prefix, entry.name);
+    const path = toPosixPath(join(prefix, entry.name));
     return entry.isDirectory() ? files(root, path) : [path];
   });
+}
+
+function toPosixPath(path: string): string {
+  return path.split(sep).join('/').replaceAll('\\', '/');
 }
 
 function copyFile(source: string, destination: string, path: string): void {

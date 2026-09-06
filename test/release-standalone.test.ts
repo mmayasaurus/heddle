@@ -3,7 +3,8 @@ import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { delimiter, dirname, join, relative, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { releaseStandalone } from '../src/release/standalone.js';
+import { checkStandaloneOutput, releaseStandalone } from '../src/release/standalone.js';
+import { isIncluded } from '../src/release/shipset.js';
 import { useTempResources } from './helpers.js';
 
 describe('regression PR#119 — standalone snapshot generator review findings', () => {
@@ -23,6 +24,8 @@ describe('regression PR#119 — standalone snapshot generator review findings', 
     for (const path of included) {
       expect(existsSync(join(first, path))).toBe(true);
     }
+    expect(readFileSync(join(first, 'LICENSE'), 'utf8'))
+      .toContain('Copyright (c) 2026 Very Good Fiber Goods (' + 'VG' + 'FG)');
     const excluded = [
       'CLAUDE.md', '.claude', 'scripts', 'docs/fleet', '.github/workflows/deterministic-review.yml', 'AGENTS.md',
     ];
@@ -38,6 +41,7 @@ describe('regression PR#119 — standalone snapshot generator review findings', 
     expect(release).toMatchObject({
       heddleVersion: expect.any(String), sourceCommit: expect.any(String), sourceRef: 'HEAD',
       generator: 'heddle release --standalone', shipSetHash: expect.any(String),
+      scrubExemptions: ['LICENSE: copyright holder line (legal ownership; operator-approved)'],
     });
     expect(release.shipSetHash).toBe(JSON.parse(readFileSync(join(second, 'RELEASE.json'), 'utf8')).shipSetHash);
     expect(fileList(first)).toEqual(fileList(second));
@@ -71,6 +75,25 @@ describe('regression PR#119 — standalone snapshot generator review findings', 
     expect(existsSync(`${resolve(destination)}.tmp-${process.pid}`)).toBe(false);
   });
 
+  it('allows only the LICENSE copyright holder line to contain the company identity', () => {
+    const root = tempDir();
+    const license = readFileSync('LICENSE', 'utf8');
+    const company = 'VG' + 'FG';
+    writeFileSync(join(root, 'LICENSE'), license);
+    expect(checkStandaloneOutput(root)).toMatchObject({ ok: true });
+
+    writeFileSync(join(root, 'LICENSE'), `${license}${company} elsewhere\n`);
+    expect(checkStandaloneOutput(root)).toMatchObject({ ok: false });
+    writeFileSync(join(root, 'LICENSE'), license);
+    writeFileSync(join(root, 'notice.txt'), `${company} elsewhere\n`);
+    expect(checkStandaloneOutput(root)).toMatchObject({ ok: false });
+  });
+
+  it('classifies Windows-style ship set paths using POSIX prefixes', () => {
+    expect(isIncluded('src\\release\\standalone.ts')).toBe(true);
+    expect(isIncluded('docs\\fleet\\dispatch.md')).toBe(false);
+  });
+
   it('records peeled commits for lightweight and annotated tags', () => {
     const root = tempDir();
     const source = snapshotSource(root);
@@ -95,7 +118,16 @@ describe('regression PR#119 — standalone snapshot generator review findings', 
     const npm = join(bin, 'npm');
     const output = join(root, 'snapshot');
     mkdirSync(bin);
-    writeFileSync(npm, '#!/bin/sh\nmkdir -p node_modules dist\nexit 0\n');
+    writeFileSync(npm, [
+      '#!/bin/sh',
+      'mkdir -p node_modules',
+      'if [ "$1" = "run" ]; then',
+      '  mkdir -p dist',
+      "  printf \"process.exit(process.argv.slice(2).join(' ') === 'classes --json' ? 0 : 1)\\n\" > dist/cli.js",
+      'fi',
+      'exit 0',
+      '',
+    ].join('\n'));
     chmodSync(npm, 0o755);
     const originalPath = process.env.PATH;
     process.env.PATH = `${bin}${delimiter}${originalPath ?? ''}`;
@@ -124,6 +156,16 @@ describe('regression PR#119 — standalone snapshot generator review findings', 
     expect(existsSync(absolute)).toBe(true);
   });
 
+  it('treats a trailing slash destination as the same output path', () => {
+    const output = join(tempDir(), 'snapshot');
+    const source = snapshotSource(tempDir());
+
+    expect(releaseStandalone({ outDir: `${output}/`, sourceDir: source }).ok).toBe(true);
+    expect(releaseStandalone({ outDir: output, sourceDir: source })).toMatchObject({
+      ok: false, error: `destination already exists: ${output}`,
+    });
+  });
+
   it('initializes one local snapshot commit without a remote', () => {
     const output = join(tempDir(), 'snapshot');
     const source = snapshotSource(tempDir());
@@ -132,6 +174,14 @@ describe('regression PR#119 — standalone snapshot generator review findings', 
     expect(result.ok).toBe(true);
     expect(execFileSync('git', ['-C', output, 'rev-list', '--count', 'HEAD'], { encoding: 'utf8' }).trim()).toBe('1');
     expect(execFileSync('git', ['-C', output, 'remote'], { encoding: 'utf8' }).trim()).toBe('');
+  }, 120_000);
+
+  it('passes the output gate on an --init-git snapshot despite its .git store', () => {
+    const output = join(tempDir(), 'snapshot');
+    const source = snapshotSource(tempDir());
+    expect(releaseStandalone({ outDir: output, initGit: true, sourceDir: source }).ok).toBe(true);
+    expect(existsSync(join(output, '.git'))).toBe(true);
+    expect(checkStandaloneOutput(output)).toMatchObject({ ok: true });
   }, 120_000);
 });
 

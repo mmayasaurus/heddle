@@ -28,3 +28,6 @@ See [the provider matrix](docs/PROVIDER-MATRIX.md) for supported providers and t
 
 This snapshot was generated from the heddle source repository by `heddle release --standalone`; the
 dashboard is a separate product and is not included. Version {{version}}; source commit {{sourceCommit}}.
+
+When generated with `--verify`, the snapshot is checked on a disposable copy by installing dependencies,
+building the CLI, and running a CLI smoke command. It does not run the full source test suite.

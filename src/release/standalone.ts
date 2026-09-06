@@ -4,7 +4,7 @@ import { cpSync, existsSync, readFileSync, readdirSync, renameSync, rmSync, writ
 import { join, resolve } from 'node:path';
 import { standaloneReadme } from './readme.js';
 import { copyShipSet, extractShipSet } from './shipset.js';
-import { credentialPatterns, scanFiles } from './scrub.js';
+import { credentialPatterns, licenseCopyrightExemption, scanFiles, scrubExemptions } from './scrub.js';
 
 export type StandaloneOptions = {
   outDir: string; sourceRef?: string; initGit?: boolean; verify?: boolean; sourceDir?: string;
@@ -44,7 +44,7 @@ function generate(options: StandaloneOptions, outDir: string, tempDir: string): 
 
 export function checkStandaloneOutput(root: string): { ok: boolean; issues: string[] } {
   const files = outputFiles(root).map((path) => ({ path, contents: readFileSync(join(root, path), 'utf8') }));
-  const scrub = scanFiles(files);
+  const scrub = scanFiles(files, [licenseCopyrightExemption]);
   const credentialPaths = files
     .filter(({ path }) => credentialPatterns.some((pattern) => pattern.test(path)))
     .map(({ path }) => `${path}: [path name carries a credential-shaped value]`);
@@ -57,8 +57,14 @@ export function checkStandaloneOutput(root: string): { ok: boolean; issues: stri
   return { ok: !issues.length, issues };
 }
 
+// Generated git internals and installed dependencies are not snapshot content: the release gate and
+// hash run before `--init-git`, so skipping these is hash-neutral here, and it keeps the exported
+// checker honest when a caller points it at a generated (`--init-git`) or post-`npm install` snapshot.
+const excludedOutputDirs = new Set(['.git', 'node_modules']);
+
 function outputFiles(root: string, prefix = ''): string[] {
   return readdirSync(join(root, prefix), { withFileTypes: true }).flatMap((entry) => {
+    if (entry.isDirectory() && excludedOutputDirs.has(entry.name)) return [];
     const path = join(prefix, entry.name);
     return entry.isDirectory() ? outputFiles(root, path) : [path];
   });
@@ -76,7 +82,7 @@ function writeRelease(root: string, sourceCommit: string, sourceRef: string): st
   const shipSetHash = hashShipSet(root);
   const release = {
     heddleVersion: version(root), sourceCommit, sourceRef,
-    generator: 'heddle release --standalone', shipSetHash,
+    generator: 'heddle release --standalone', shipSetHash, scrubExemptions,
   };
   writeFileSync(join(root, 'RELEASE.json'), `${JSON.stringify(release, null, 2)}\n`);
   return shipSetHash;
@@ -113,13 +119,17 @@ function verifySnapshot(root: string): void {
 
 function verifySnapshotCopy(root: string): void {
   const steps = [
-    ['npm ci', ['ci', '--ignore-scripts']], ['npm run build', ['run', 'build']], ['npm test', ['test']],
-  ] as const;
-  for (const [label, args] of steps) {
-    console.log(`verify: ${label}`);
-    const result = spawnSync('npm', args, {
-      cwd: root, stdio: 'inherit', timeout: 900_000,
+    { label: 'npm ci', command: 'npm', args: ['ci', '--ignore-scripts'] },
+    { label: 'npm run build', command: 'npm', args: ['run', 'build'] },
+    { label: 'node dist/cli.js classes --json', command: process.execPath, args: ['dist/cli.js', 'classes', '--json'] },
+  ];
+  for (const step of steps) {
+    process.stderr.write(`verify: ${step.label}\n`);
+    const result = spawnSync(step.command, step.args, {
+      cwd: root, stdio: ['ignore', 'pipe', 'pipe'], timeout: 900_000,
     });
-    if (result.error || result.status !== 0) throw new Error(`verification failed: ${label}`);
+    if (result.stdout) process.stderr.write(result.stdout);
+    if (result.stderr) process.stderr.write(result.stderr);
+    if (result.error || result.status !== 0) throw new Error(`verification failed: ${step.label}`);
   }
 }

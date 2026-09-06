@@ -428,6 +428,7 @@ try {
       });
       const text = json ? JSON.stringify(result, null, 2) : result.ok
         ? `Standalone snapshot generated: ${outDir}\nsource commit: ${result.sourceCommit}\nship set: ${result.shipSetHash}`
+          + '\nscrub exemption: LICENSE copyright holder line (legal ownership; operator-approved)'
         : `heddle release: ${result.error}`;
       process.stdout.write(text + '\n', () => process.exit(result.ok ? 0 : 1));
       break;
