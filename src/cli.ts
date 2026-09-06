@@ -607,9 +607,13 @@ try {
       const registry = loadAccountRegistry();
       if (action === 'list') {
         out(json, registry, () => {
-          const columns = ['id', 'provider', 'harness', 'tier', 'billingClass', 'credentialRef', 'lastVerified'] as const;
+          const columns = ['id', 'provider', 'harness', 'tier', 'billingClass', 'overage', 'credentialRef', 'lastVerified'] as const;
           const rows = registry.accounts.map((account) => [
-            account.id, account.provider, account.harness, account.tier ?? '-', account.billingClass ?? '-', account.credentialRef, account.lastVerified ?? '-',
+            account.id, account.provider, account.harness, account.tier ?? '-', account.billingClass ?? '-',
+            account.overage?.posture === 'bounded-prepaid'
+              ? `bounded-prepaid ($${account.overage.creditsRemaining} of $${account.overage.spendLimit})`
+              : account.overage?.posture ?? '-',
+            account.credentialRef, account.lastVerified ?? '-',
           ]);
           const widths = columns.map((column, index) => Math.max(column.length, ...rows.map((row) => row[index]!.length)));
           const format = (row: readonly string[]): string => row.map((value, index) => value.padEnd(widths[index]!)).join('  ').trimEnd();
@@ -621,7 +625,7 @@ try {
         let pass = 0;
         let warn = 0;
         let fail = 0;
-        const lines = registry.accounts.map((account) => {
+        const lines = registry.accounts.flatMap((account) => {
           const localPath = account.provider === 'claude' ? account.configDir : account.provider === 'codex' ? account.codexHome : account.keyFile;
           const pathOk = localPath === null || localPath === undefined || (() => {
             try {
@@ -631,14 +635,23 @@ try {
           })();
           if (!pathOk) {
             fail += 1;
-            return `FAIL  ${account.id} (${account.provider}): required credential path missing or wrong type: ${localPath}`;
+            const line = `FAIL  ${account.id} (${account.provider}): required credential path missing or wrong type: ${localPath}`;
+            return account.overage?.posture === 'bounded-prepaid'
+              ? [line, `INFO  ${account.id} (${account.provider}): burning prepaid buffer $${account.overage.creditsRemaining} of $${account.overage.spendLimit} — rotate soon`]
+              : [line];
           }
           if (account.provider === 'claude' && account.loggedIn === false) {
             warn += 1;
-            return `WARN  ${account.id} (claude): logged-out`;
+            const line = `WARN  ${account.id} (claude): logged-out`;
+            return account.overage?.posture === 'bounded-prepaid'
+              ? [line, `INFO  ${account.id} (${account.provider}): burning prepaid buffer $${account.overage.creditsRemaining} of $${account.overage.spendLimit} — rotate soon`]
+              : [line];
           }
           pass += 1;
-          return `PASS  ${account.id} (${account.provider})`;
+          const line = `PASS  ${account.id} (${account.provider})`;
+          return account.overage?.posture === 'bounded-prepaid'
+            ? [line, `INFO  ${account.id} (${account.provider}): burning prepaid buffer $${account.overage.creditsRemaining} of $${account.overage.spendLimit} — rotate soon`]
+            : [line];
         });
         console.log([...lines, `Summary: ${pass} PASS, ${warn} WARN, ${fail} FAIL`, 'Deeper login and live-identity checks are delegated to the heddle doctor health path (HED-399) when available.'].join('\n'));
         if (fail) process.exitCode = 1;

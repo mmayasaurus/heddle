@@ -64,6 +64,29 @@ describe('loadAccountRegistry', () => {
     expect(accounts[1]!.notes).toBe('direct notes');
   });
 
+  it('carries each overage posture through the unified model', () => {
+    const path = writeAccounts('overage.json', {
+      claude: [{ id: 'hard-stop', overage: { posture: 'hard-stop' } }],
+      codex: [{ id: 'bounded', overage: { posture: 'bounded-prepaid', spendLimit: 39, creditsRemaining: 12.5 } }],
+      cursor: [{ id: 'open-billing', overage: { posture: 'open-billing' } }],
+    });
+    expect(loadAccountRegistry(path).accounts.map(({ id, overage }) => ({ id, overage }))).toEqual([
+      { id: 'hard-stop', overage: { posture: 'hard-stop' } },
+      { id: 'bounded', overage: { posture: 'bounded-prepaid', spendLimit: 39, creditsRemaining: 12.5 } },
+      { id: 'open-billing', overage: { posture: 'open-billing' } },
+    ]);
+  });
+
+  it.each([
+    ['invalid posture', { posture: 'unlimited' }],
+    ['bounded-prepaid missing spendLimit', { posture: 'bounded-prepaid', creditsRemaining: 1 }],
+    ['bounded-prepaid missing creditsRemaining', { posture: 'bounded-prepaid', spendLimit: 1 }],
+    ['hard-stop carrying spendLimit', { posture: 'hard-stop', spendLimit: 1 }],
+  ])('rejects %s overage with the file path', (_label, overage) => {
+    const path = writeAccounts(`bad-overage-${_label}.json`, { claude: [{ id: 'a', overage }] });
+    expect(() => loadAccountRegistry(path)).toThrow(path);
+  });
+
   it.each([undefined, 2])('accepts schemaVersion %s', (schemaVersion) => {
     const path = writeAccounts(`version-${String(schemaVersion)}.json`, {
       ...(schemaVersion === undefined ? {} : { schemaVersion }), claude: [],
