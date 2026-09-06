@@ -23,7 +23,7 @@ memcore-server --bind 127.0.0.1:50051 \
   --data-dir <workspace-root>/.memdb
 ```
 
-Every `repo_id` (`Rebuild-Project-Root`, `heddle`, `heddle-dashboard`) is stored in **that one server's
+Every `repo_id` (`<consumer-repo_id>`, `heddle`, `heddle-dashboard`) is stored in **that one server's
 data-dir**, reached over the socket. `heddle/.memdb` and `heddle-dashboard/.memdb` are **dead local
 dirs** — not the live store. When an MCP tool (or the CLI, when it attaches to `:50051`) queries
 `repo_id=heddle`, it reads this server. `index_directory` via MCP writes here — that is the path proven
@@ -44,13 +44,13 @@ dir — a throwaway store nobody serves. Its own log says so verbatim:
 ? MemDB local - sidecar memcore-server (data dir: <workspace-root>/.memdb)
 ```
 
-Proof it never reaches the live store: the script's marker records commit `1eb38c8a` (2026-07-21) while
-the live `:50051` server holds `Rebuild-Project-Root` at `e910adda` (2026-08-01) — **different commits,
-different stores**. (The live store reached `e910adda` by another path — a husky post-merge hook or a
+Proof it never reaches the live store: the script's marker records commit `<sha>` (2026-07-21) while
+the live `:50051` server holds `<consumer-repo_id>` at `<sha>` (2026-08-01) — **different commits,
+different stores**. (The live store reached `<sha>` by another path — a husky post-merge hook or a
 manual MCP index — not this script.) That launchd agent is also currently **unloaded**.
 
 **Consequence:** a shell/launchd job driving `memtrace index` (0.8.63) either sidecars into a store
-nobody reads, or would have to open the live `Rebuild-Project-Root/.memdb` *concurrently with the running
+nobody reads, or would have to open the live `<consumer-repo_id>/.memdb` *concurrently with the running
 `:50051` server* — a corruption risk we will not take. And a launchd shell job **cannot call MCP tools**.
 So an unattended shell job cannot safely update the live graph today.
 

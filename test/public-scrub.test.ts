@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
@@ -147,6 +147,27 @@ describe('regression PR#99 — public scrub rejects placeholder issue keys and e
     expect(scanned.offendingLines.join('\n')).not.toContain(projKey);
   });
 
+  it('matches credential tails at the 12-character boundary', () => {
+    const twelveCharacterTail = 'abc123def456';
+    const elevenCharacterTail = 'abc123def45';
+    const prefixes = [
+      'g' + 'sk_',
+      'c' + 'sk-',
+      'lin_' + 'api_',
+      'lin_' + 'oauth_',
+      'gh' + 'p_',
+      'github_' + 'pat_',
+    ];
+
+    // Fragments shorter than 12 are documentation-scope by design; a real GitHub fine-grained PAT
+    // (`github_pat_` + 11 + `_` + 82) still matches because `_` is in its tail class.
+    for (const prefix of prefixes) {
+      expect(matchesForbidden(prefix + twelveCharacterTail)).toBe(true);
+      expect(matchesForbidden(prefix + elevenCharacterTail)).toBe(false);
+    }
+    expect(matchesForbidden('github_' + 'pat_' + elevenCharacterTail + '_' + 'a'.repeat(82))).toBe(true);
+  });
+
   it('flags a shipped path whose NAME carries a forbidden identifier', () => {
     const badPath = 'test/' + 'spin' + 'ventory' + '-fixture.txt';
     const scanned = scanFiles([{ path: badPath, contents: 'clean contents' }], []);
@@ -242,10 +263,14 @@ function scanFiles(files: Array<{ path: string; contents: string }>, allowed: Ar
 }
 
 describe('public repository scrub', () => {
+  it('ships the specification while excluding fleet operations documentation', () => {
+    expect(shippedFiles()).toContain('docs/SPEC.md');
+    expect(shippedFiles()).not.toContain('docs/fleet/DASHBOARD.md');
+  });
+
   it('catches private tenant and credential strings in shipped files', () => {
     const allowed = allowlist();
     const files = shippedFiles()
-      .filter((path) => existsSync(path))
       .map((path) => ({ path, contents: readFileSync(path, 'utf8') }));
     const { offendingLines, staleEntries } = scanFiles(files, allowed);
 

@@ -3,7 +3,7 @@
 Run this at the start of a heddle session (or after a compaction that lost your place). It reads
 **live sources only**. There is deliberately no hand-maintained "current state" document to consult:
 the audit that produced this command found Spinventory's `_vault/decisions/`, `_vault/sessions/` and
-`.session/` all empty in practice (docs/SPINVENTORY-PARITY.md), so a status file is a thing that rots
+`.session/` all empty in practice (docs/fleet/SPINVENTORY-PARITY.md), so a status file is a thing that rots
 between the moment you write it and the moment someone trusts it. Git, Linear, and the GitHub API
 cannot rot — they are the state.
 

@@ -397,7 +397,7 @@ choosing a worker instead:
   ```json
   { "hooks": { "PreToolUse": [ { "matcher": "mcp__heddle__dispatch_worker", "hooks": [ {
       "type": "command", "timeout": 10,
-      "command": "node --disable-warning=ExperimentalWarning /Users/<you>/Developer/heddle/dist/hook-dispatch-guidance.js"
+      "command": "node --disable-warning=ExperimentalWarning <heddle-checkout>/dist/hook-dispatch-guidance.js"
   } ] } ] } }
   ```
   (merge into your existing `hooks` object — `PreToolUse` must be nested under `"hooks"`, not at the

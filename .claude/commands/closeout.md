@@ -5,7 +5,7 @@ that the next agent (or the next you, post-compaction) can pick up from **durabl
 
 The handoff artifacts are deliberately Linear comments, pushed branches and PR state — **not** a local
 session file. The audit behind this command found every hand-maintained session/state directory in the
-parent project empty in practice (docs/SPINVENTORY-PARITY.md): a file nobody maintains is worse than no
+parent project empty in practice (docs/fleet/SPINVENTORY-PARITY.md): a file nobody maintains is worse than no
 file, because it still gets read. Push the truth where teammates already look.
 
 `lin.sh` and `pr-own.sh` live in the workspace bin (canonical path in `.claude/rules/issue-tracking.md`;

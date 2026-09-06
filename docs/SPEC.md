@@ -3,7 +3,7 @@
 > **Single source of truth for the whole heddle plan.** Authoritative where it conflicts with
 > older docs. Last consolidated 2026-08-04 after the full ecosystem research pass (omp, Paseo,
 > Conductor, OpenChamber, Superset, Happy Coder). Companion docs carry the detail:
-> `ARCHITECTURE.md` (layers), `ORCHESTRATION.md` (Phase-1 mechanics), `DASHBOARD.md` (UI vision —
+> `ARCHITECTURE.md` (layers), `ORCHESTRATION.md` (Phase-1 mechanics), the dashboard product (its own repository; fleet-operations notes are excluded from this pack) (UI vision —
 > its tmux references are SUPERSEDED here), `LANDMINES.md` (verified per-CLI contracts — the
 > ground truth for anyone touching an adapter). Session-durable research detail lives in the
 > `project-agent-orchestration-lane` memory.
@@ -17,7 +17,7 @@ orchestrator sessions — the operator's own interactive terminal tabs — claim
 decompose them, and dispatch sub-tasks to the best-fit model per task, each worker loaded with only
 the skills/tools it needs. Agents converse across sessions and providers, everything is observable
 on a localhost dashboard, and work follows the existing Linear→PR ownership discipline to
-completion. Project-agnostic; the first consumer project is the first consumer.
+completion. Project-agnostic; a private multi-agent app-rebuild fleet is the first consumer.
 
 **Two prime directives:** reduce usage of the expensive models (route work down/sideways when a
 cheaper or better-suited model wins) and improve outcomes (right model + right skills per task).
@@ -134,7 +134,7 @@ owns launch-command construction, structured-output parsing, resume handle, and 
 plumbing. **All verified contracts live in `LANDMINES.md` — read it before touching an adapter.**
 
 **Worker isolation (DECIDED 2026-08-04).** The isolation question is about WORKERS (subagents),
-NOT orchestrators — the consumer project's fleet already each run in their own git worktree. Constraint
+NOT orchestrators — the consumer fleet's agents already each run in their own git worktree. Constraint
 (operator): too many worktrees make memtrace and RAM go crazy; worktrees are acceptable ONLY if cleaned
 up + discarded the moment they're no longer used. Therefore:
 - **DEFAULT: workers run INSIDE their orchestrator's existing worktree.** No new worktrees for
@@ -352,7 +352,7 @@ session mirrored in a separate terminal app.
   Unix-socket, fd-handoff so terminals survive a dashboard restart, in-memory ring buffer,
   multi-subscriber fan-out; pin node-pty ≥1.2.0-beta.14 — 1.1.0 leaks fds on macOS; run the daemon
   under Node, node-pty breaks under Bun). Keep the PTY layer dumb; logic lives above.
-- **Layout** (from `DASHBOARD.md`, minus tmux): left orchestrator roster (expand → issues/PRs/
+- **Layout** (from the dashboard product (its own repository; fleet-operations notes are excluded from this pack), minus tmux): left orchestrator roster (expand → issues/PRs/
   subagents; double-click → terminal); center app-tabs = one terminal per orchestrator with inner
   subagent tabs + a chatroom tab; right Linear/GitHub panes (movable popups to the REAL apps via
   BrowserView, always in sync); bottom per-provider usage meters.
@@ -511,7 +511,7 @@ savings analytics.
 
 - **Verified per-CLI contracts & gotchas:** `docs/LANDMINES.md` (READ before touching an adapter).
 - **Layer detail:** `docs/ARCHITECTURE.md`. **Phase-1 mechanics:** `docs/ORCHESTRATION.md`.
-  **Dashboard UI vision:** `docs/DASHBOARD.md` (tmux parts superseded by §13 here).
+  **Dashboard UI vision:** the dashboard product (its own repository; fleet-operations notes are excluded from this pack; tmux parts superseded by §13 here).
 - **Routing policy:** `routing/routing.v0.yaml`. **Skill packs:** `skills/`.
 - **Comms broker (built so far):** `docs/COMMS.md` — log schema, address grammar, `CommsLog` API.
 - **Code:** `src/adapters/*.ts` (codex, cursor, agy, claude protocol), `src/comms/*.ts` (broker) and

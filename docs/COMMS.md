@@ -511,7 +511,7 @@ refuse a v2 file loudly instead of silently missing targeted posts.
   **fixed trust root** (`~/.heddle/operator.token`, 0600 enforced with chmod even on rotation) — no
   env var can point the server at another file. A model cannot edit its own MCP config and agent
   sessions never see that env, so "origin-verified" means "configured as the operator's session";
-  her posts carry tier `operator` (never wrapped untrusted). The operator does not mint children.
+  their posts carry tier `operator` (never wrapped untrusted). The operator does not mint children.
   `HEDDLE_COMMS_ROLE=operator` WITHOUT a matching token binds nothing (the server runs unbound and
   refuses sender tools) — no env-only escalation; a worker (`HEDDLE_WORKER=1` /
   `HEDDLE_COMMS_ADDRESS`) can never bind operator even if it inherited the operator session's env.
@@ -521,9 +521,9 @@ refuse a v2 file loudly instead of silently missing targeted posts.
   `revoked`. The token value is never written to the log, the deliveries, tool outputs or warnings
   (tested). `log_sent` mirrors DIRECT sends only (rooms/@all always go through `post_message`).
 
-  How operator becomes operator (5 lines):
+  How a human session becomes operator (5 lines):
   1. `heddle-comms --init-operator-token` (once) → prints the path only.
-  2. In her session's `.mcp.json`: `"heddle-comms": { "command": "heddle-comms", "env": {
+  2. In their session's `.mcp.json`: `"heddle-comms": { "command": "heddle-comms", "env": {
      "HEDDLE_COMMS_ROLE": "operator", "HEDDLE_COMMS_OPERATOR_TOKEN": "<contents of the file>",
      "HEDDLE_COMMS_PUSH": "1" } }`.
   3. Start the session with `--dangerously-load-development-channels server:heddle-comms` (push;
