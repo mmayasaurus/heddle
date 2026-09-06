@@ -48,7 +48,7 @@ export function hasSeenKey(contents: string, key: string): boolean {
 }
 
 function stateDirectory(options: PrWatchOptions): string {
-  // This pack is repo-agnostic: it must not inherit Spinventory's ~/.claude state location.
+  // This pack is repo-agnostic: it must not inherit a consumer project's ~/.claude state location.
   return options.stateDir ?? process.env.HEDDLE_PR_WATCH_STATE_DIR ?? process.env.PR_WATCH_STATE_DIR ?? join(homedir(), '.heddle', 'pr-watch');
 }
 function parse<T>(raw: string): T { return JSON.parse(raw) as T; }

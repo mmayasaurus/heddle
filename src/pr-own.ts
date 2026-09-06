@@ -153,7 +153,7 @@ export function runPrOwn(command: string | undefined, pr: string | undefined, cw
       if (marker.owner === 'released') return result(0, `RELEASED — PR #${pr} was handed off by its prior owner and is free to adopt: heddle pr own claim ${pr}`, { verdict: 'RELEASED', pr: Number(pr), owner: marker.owner });
       if (marker.owner === me) return result(0, `YOURS — you (${me}) own PR #${pr} (heartbeat ${age}h ago). Proceed.`, { verdict: 'YOURS', pr: Number(pr), owner: me, ageHours: age });
       if (age >= staleHours()) return result(0, `STALE — PR #${pr} was owned by '${marker.owner}' but the heartbeat is ${age}h old (>= ${staleHours()}h). Reclaimable: heddle pr own claim ${pr}`, { verdict: 'STALE', pr: Number(pr), owner: marker.owner, ageHours: age });
-      return result(3, `OWNED:${marker.owner} (fresh, heartbeat ${age}h ago) — STAND DOWN. Another instance is actively driving PR #${pr}. Do not push/merge/deepreview; coordinate with Maya if you think it should be yours.`, { verdict: 'OWNED', pr: Number(pr), owner: marker.owner, ageHours: age });
+      return result(3, `OWNED:${marker.owner} (fresh, heartbeat ${age}h ago) — STAND DOWN. Another instance is actively driving PR #${pr}. Do not push/merge/deepreview; coordinate with the operator if you think it should be yours.`, { verdict: 'OWNED', pr: Number(pr), owner: marker.owner, ageHours: age });
     }
 
     if (command === 'claim') {
@@ -164,7 +164,7 @@ export function runPrOwn(command: string | undefined, pr: string | undefined, cw
         const { marker, id } = latest;
         const age = ageHours(marker.heartbeat);
         if (marker.owner !== me && marker.owner !== 'released' && age < staleHours()) {
-          return { ...result(3, '', { verdict: 'REFUSED', pr: Number(pr), owner: marker.owner, ageHours: age }), error: `REFUSED — PR #${pr} is owned by '${marker.owner}' (fresh, ${age}h). STAND DOWN or coordinate with Maya.` };
+          return { ...result(3, '', { verdict: 'REFUSED', pr: Number(pr), owner: marker.owner, ageHours: age }), error: `REFUSED — PR #${pr} is owned by '${marker.owner}' (fresh, ${age}h). STAND DOWN or coordinate with the operator.` };
         }
         if (marker.owner === me) since = marker.since;
         // PATCH-or-new-marker is best-effort: no existing-marker step may strand a claim.
