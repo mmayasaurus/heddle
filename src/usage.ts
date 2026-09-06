@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import type { ClaudeAccountUsage } from './claude-usage.js';
 
 /**
  * Provider cap reader — what the router (HED-67) and account picker (HED-68) consult at dispatch.
@@ -70,8 +71,10 @@ export interface AccountCaps {
 
 export interface ProviderCaps {
   provider: string;
-  /** Where the numbers came from; `none` = nothing usable (treat every window as unknown). */
-  source: 'limits.json' | 'claude-tap' | 'none';
+  /** Where the numbers came from; `none` = nothing usable (treat every window as unknown).
+   *  `claude-oauth` (HED-451) = live per-account OAuth-usage polls injected into readProviderCaps — like
+   *  `claude-tap`, it names NO authoritative active account (activeAccount stays null). */
+  source: 'limits.json' | 'claude-tap' | 'claude-oauth' | 'none';
   /** True when the snapshot must not drive routing (missing, too old, or flagged stale upstream). */
   stale: boolean;
   capturedAt: number | null;
@@ -263,10 +266,62 @@ export function readClaudeTap(usageDir: string, nowS: number): ProviderCaps | nu
 }
 
 /**
+ * HED-451 — map one live OAuth-usage poll row → an AccountCaps row. A fresh 200 (`source: 'ok'`)
+ * carries real windows; EVERY other outcome is stale/unknown, NEVER a false 0% (guardrail #3). The
+ * poll's `utilization` maps to `usedPercentage`; normalizeWindow applies the shared rollover-to-0 rule.
+ */
+function claudePollToAccountCaps(row: ClaudeAccountUsage, nowS: number): AccountCaps {
+  const ok = row.source === 'ok';
+  return {
+    id: row.id,
+    fiveHour: ok ? normalizeWindow({ usedPercentage: row.fiveHour.utilization, resetsAt: row.fiveHour.resetsAt }, nowS) : UNKNOWN,
+    sevenDay: ok ? normalizeWindow({ usedPercentage: row.sevenDay.utilization, resetsAt: row.sevenDay.resetsAt }, nowS) : UNKNOWN,
+    windows: {},
+    noteCodes: row.noteCodes,
+    limitReached: false,
+    stale: !ok,
+  };
+}
+
+/**
+ * Provider-level Claude view built purely from live polls — the source that kills the blank-at-launch
+ * trap when NEITHER the dashboard mirror nor the statusline tap has written anything yet. Null when
+ * there are no poll rows; stale (so it never drives routing) when NONE of the rows is a fresh `ok`.
+ * capturedAt is `nowS` so a fresh poll is inside every downstream freshness budget (account-pick.ts).
+ */
+function readClaudePollCaps(rows: ClaudeAccountUsage[], nowS: number): ProviderCaps | null {
+  if (rows.length === 0) return null;
+  const accounts = rows.map((r) => claudePollToAccountCaps(r, nowS));
+  return {
+    provider: 'claude', source: 'claude-oauth', stale: !accounts.some((a) => !a.stale),
+    capturedAt: nowS, fiveHour: UNKNOWN, sevenDay: UNKNOWN, windows: {}, noteCodes: [],
+    accounts, activeAccount: null,
+  };
+}
+
+/**
+ * Merge incoming Claude account rows into existing by id — the SAME discipline the tap merge uses: a
+ * FRESH incoming row fills a stale/absent one, and an unknown (stale) incoming row NEVER overwrites a
+ * known-fresh row (which would drop a mirror row's fableWeeklyEstimatePct and a false 0% both).
+ */
+function mergeClaudeAccountRows(existing: AccountCaps[], incoming: AccountCaps[]): AccountCaps[] {
+  const byId = new Map(existing.map((a) => [a.id, a]));
+  for (const t of incoming) {
+    const e = byId.get(t.id);
+    if (!e || (e.stale && !t.stale)) byId.set(t.id, t);
+  }
+  return [...byId.values()];
+}
+
+/**
  * Everything the router needs, for every provider it might route to. Never throws; a provider with
  * no usable snapshot comes back `source: 'none', stale: true` (= unknown).
+ *
+ * `claudePolls` (HED-451) are live OAuth-usage poll rows a CALLER has already fetched (readProviderCaps
+ * itself never queries a vendor — that would add network latency to every dispatch); merged per-account
+ * by id with the tap discipline, and establishing the claude provider when mirror+tap are absent/stale.
  */
-export function readProviderCaps(opts: { usageDir?: string; nowS?: number } = {}): CapsByProvider {
+export function readProviderCaps(opts: { usageDir?: string; nowS?: number; claudePolls?: ClaudeAccountUsage[] } = {}): CapsByProvider {
   const usageDir = opts.usageDir ?? process.env.HEDDLE_USAGE_DIR ?? DEFAULT_USAGE_DIR;
   const nowS = opts.nowS ?? Math.floor(Date.now() / 1000);
   const out: CapsByProvider = {};
@@ -290,6 +345,26 @@ export function readProviderCaps(opts: { usageDir?: string; nowS?: number } = {}
         if (!existing || (existing.stale && !t.stale)) byId.set(t.id, t);
       }
       out.claude = { ...m, accounts: [...byId.values()] };
+    }
+  }
+  // HED-451: fold in live OAuth-usage polls the caller fetched. Same merge as the tap: a fresh poll
+  // row fills a stale/absent per-account row; an unknown poll row never overwrites a known-fresh row.
+  // When neither mirror nor tap is usable, the poll ESTABLISHES the claude provider (the launch-trap fix).
+  const polls = opts.claudePolls;
+  if (polls && polls.length) {
+    const pollCaps = readClaudePollCaps(polls, nowS);
+    if (pollCaps) {
+      const m = out.claude;
+      if (m && !m.stale) {
+        // A fresh mirror/tap is already the provider view — only fill/append per-account rows, never
+        // downgrade it (mergeClaudeAccountRows keeps the fresh mirror row, so its fable fields survive).
+        if (pollCaps.accounts.length) out.claude = { ...m, accounts: mergeClaudeAccountRows(m.accounts, pollCaps.accounts) };
+      } else if (!pollCaps.stale) {
+        // No usable mirror/tap AND the poll has at least one fresh row → establish the provider from the
+        // poll (the launch-trap fix), carrying over any rows the earlier sources already knew.
+        out.claude = { ...pollCaps, accounts: mergeClaudeAccountRows(m?.accounts ?? [], pollCaps.accounts) };
+      }
+      // else: nothing usable anywhere (poll all-unknown too) → leave out.claude, so it stays source:'none'.
     }
   }
   for (const p of ['claude', 'codex', 'cursor', 'gemini']) if (!out[p]) out[p] = unknownCaps(p);
