@@ -16,6 +16,8 @@ before it becomes a problem. It reports and advises; it never changes anything.
 
 ## 2. Account headroom / rotation
 
+- Run `heddle usage --remaining` — per-account 5h/7d quota headroom with a typed source and
+  freshness, alongside the ledger-consumption view from `heddle usage`.
 - Run `heddle account pick --explain` — the healthiest addressable account and WHY.
 - Use it to judge whether the active account is near a limit and a rotation is due.
 
