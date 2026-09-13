@@ -56,6 +56,10 @@ Two vendored hooks import `hook_utils` from `~/.claude/lib` via an absolute, hom
 
 `hooks-diff` compares only files present in the canon; an installed file that is no longer in the canon is not reported (asserted in `test/fleet.test.ts`). Inert for cutover — settings entries reference canon files by name — but worth knowing when reading its output.
 
+## Standalone snapshot: deliberately excluded
+
+`fleet/hooks/` is NOT in the standalone release ship-set (`src/release/shipset.ts`), and that is a decision, not an omission: the canon carries this fleet's identity by construction (operator name, scope text, machine paths), and the snapshot's output scrub gate — correctly — rejects generation when it is included (verified empirically 2026-09-13: `release --standalone --verify` returns `ok:false` on `fleet/hooks/agent-identity.py` identity strings). In a generated snapshot, `heddle fleet install-hooks` / `hooks-diff` therefore fail with `fleet hook canon not found` by design. Shipping a canon in the snapshot requires a GENERICIZED canon — a later HED-96 phase, the same portability work as the cutover blockers below.
+
 ## Cutover blockers found in review
 
 `require-memtrace-first.py` derives `PROJECT_ROOT` from `Path(__file__).resolve().parent.parent.parent` and hardcodes workspace-relative expectations. An installed copy at `~/.heddle/fleet/hooks` therefore resolves `PROJECT_ROOT` to `~/.heddle` and misclassifies working directories. Pointing settings at the installed copy of this hook is blocked until a later phase adds an explicit project-root override to the canon at source, or cutover invokes this one hook from the repository checkout.
