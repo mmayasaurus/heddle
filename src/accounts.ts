@@ -1,4 +1,5 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
 import { DEFAULT_ACCOUNTS_PATH } from './capaware.js';
 
 export const ACCOUNTS_SCHEMA_VERSION = 2;
@@ -60,6 +61,21 @@ const billingClasses = new Set<BillingClass>([
 ]);
 const tiers = new Set<AccountTier>(['T0', 'T1', 'T2', 'T3']);
 const overagePostures = new Set<OveragePosture>(['hard-stop', 'bounded-prepaid', 'open-billing']);
+
+let atomicWriteSequence = 0;
+
+// Mirrors init-project's temp-in-the-same-directory write so a registry is never half-written.
+function atomicWriteFile(path: string, content: string): void {
+  mkdirSync(dirname(path), { recursive: true });
+  const temporary = join(dirname(path), `.${basename(path)}.${process.pid}.${atomicWriteSequence++}.tmp`);
+  try {
+    writeFileSync(temporary, content, { mode: 0o600 });
+    if (existsSync(path)) chmodSync(temporary, statSync(path).mode);
+    renameSync(temporary, path);
+  } finally {
+    try { if (existsSync(temporary)) unlinkSync(temporary); } catch { /* preserve original failure */ }
+  }
+}
 
 function normalizedPath(row: Row, key: 'configDir' | 'codexHome' | 'keyFile'): string | null {
   return typeof row[key] === 'string' && row[key] ? row[key] : null;
@@ -232,4 +248,49 @@ export function loadAccountRegistry(path: string = process.env.HEDDLE_ACCOUNTS ?
       ...accountsFor(raw, 'cursor', path),
     ],
   };
+}
+
+/** Replace an account by its stable provider/id identity without duplicating it. */
+export function upsertAccount(registry: AccountRegistry, account: Account): AccountRegistry {
+  const index = registry.accounts.findIndex((candidate) => candidate.provider === account.provider && candidate.id === account.id);
+  const accounts = [...registry.accounts];
+  if (index === -1) accounts.push(account);
+  else accounts[index] = { ...accounts[index], ...account };
+  return { schemaVersion: ACCOUNTS_SCHEMA_VERSION, accounts };
+}
+
+function accountRow(account: Account): Row {
+  const { provider: _provider, credentialRef: _credentialRef, ...fields } = account;
+  return Object.fromEntries(Object.entries(fields).filter(([, value]) => value !== undefined)) as Row;
+}
+
+function existingRaw(path: string): Record<string, unknown> {
+  if (!existsSync(path)) return {};
+  try {
+    const value = JSON.parse(readFileSync(path, 'utf8'));
+    return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Writes the provider-keyed on-disk shape. Existing unknown top-level and matching-row fields are
+ * retained so forward-compatible metadata survives a wizard rerun.
+ */
+export function writeAccountRegistry(
+  registry: AccountRegistry,
+  path: string = process.env.HEDDLE_ACCOUNTS ?? DEFAULT_ACCOUNTS_PATH,
+): void {
+  const raw = existingRaw(path);
+  const output: Record<string, unknown> = { ...raw, schemaVersion: ACCOUNTS_SCHEMA_VERSION };
+  for (const provider of ['claude', 'codex', 'cursor'] as const) {
+    const prior = Array.isArray(raw[provider]) ? raw[provider] : [];
+    const byId = new Map(prior.filter((row): row is Row => Boolean(row) && typeof row === 'object' && !Array.isArray(row))
+      .filter((row) => typeof row.id === 'string').map((row) => [row.id as string, row]));
+    output[provider] = registry.accounts
+      .filter((account) => account.provider === provider)
+      .map((account) => ({ ...byId.get(account.id), ...accountRow(account) }));
+  }
+  atomicWriteFile(path, JSON.stringify(output, null, 2) + '\n');
 }

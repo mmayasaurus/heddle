@@ -1,8 +1,8 @@
-import { writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { readClaudeAccounts } from '../src/capaware.js';
-import { loadAccountRegistry } from '../src/accounts.js';
+import { loadAccountRegistry, upsertAccount, writeAccountRegistry } from '../src/accounts.js';
 import { readRotationAccounts } from '../src/rotation.js';
 import { useTempResources } from './helpers.js';
 
@@ -196,5 +196,42 @@ describe('loadAccountRegistry', () => {
       .toEqual(readClaudeAccounts(path).map(({ id, configDir }) => ({ id, configDir })));
     expect(registry.accounts.filter((account) => account.provider === 'codex').map(({ id, codexHome }) => ({ id, codexHome })))
       .toEqual(readRotationAccounts(path).codex.map(({ id, codexHome }) => ({ id, codexHome })));
+  });
+});
+
+describe('account registry writes', () => {
+  const { tempDir } = useTempResources('heddle-account-writes-test-');
+
+  it('round-trips an account without persisting its derived credential reference', () => {
+    const path = join(tempDir(), 'round-trip.json');
+    const registry = upsertAccount({ schemaVersion: 2, accounts: [] }, {
+      id: 'claude-pro', provider: 'claude', harness: 'claude-code', credentialRef: 'claude:/tmp/claude-pro',
+      billingClass: 'subscription-quota', tier: 'T2', configDir: '/tmp/claude-pro', loggedIn: true,
+    });
+    writeAccountRegistry(registry, path);
+    expect(JSON.parse(readFileSync(path, 'utf8')).claude[0]).not.toHaveProperty('credentialRef');
+    expect(loadAccountRegistry(path)).toEqual(registry);
+  });
+
+  it('upserts by provider and id while preserving raw top-level and row fields', () => {
+    const path = join(tempDir(), 'preserve.json');
+    writeFileSync(path, JSON.stringify({
+      schemaVersion: 2, _doc: 'keep this', claude: [{ id: 'same', configDir: '/old', futureField: 'kept' }],
+    }));
+    const updated = upsertAccount(loadAccountRegistry(path), {
+      id: 'same', provider: 'claude', harness: 'claude-code', credentialRef: 'claude:/new', configDir: '/new', tier: 'T1',
+    });
+    writeAccountRegistry(updated, path);
+    const raw = JSON.parse(readFileSync(path, 'utf8'));
+    expect(raw._doc).toBe('keep this');
+    expect(raw.claude).toHaveLength(1);
+    expect(raw.claude[0]).toMatchObject({ id: 'same', configDir: '/new', tier: 'T1', futureField: 'kept' });
+  });
+
+  it('uses an atomic temporary file and leaves no temporary files behind', () => {
+    const path = join(tempDir(), 'atomic.json');
+    writeAccountRegistry({ schemaVersion: 2, accounts: [] }, path);
+    expect(existsSync(path)).toBe(true);
+    expect(readdirSync(tempDir()).filter((name) => name.includes('.tmp'))).toEqual([]);
   });
 });

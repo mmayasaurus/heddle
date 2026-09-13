@@ -3,7 +3,7 @@
 // pollute stdout parsing for agents, so it is suppressed at the entry point only —
 // `--disable-warning=<type>` silences just that category (`--no-warnings` would hide every
 // process warning; its `=…` suffix is ignored — verified Node 22.23, 2026-08-15).
-import { existsSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { dispatch, planDispatch, summarizePlan } from './dispatch.js';
 import { Ledger } from './ledger.js';
 import { loadRouting, describeTaskClasses } from './routing.js';
@@ -26,6 +26,9 @@ import { runPrSweep } from './pr-sweep.js';
 import { runPrWatch } from './pr-watch.js';
 import { bootstrapComms } from './comms/bootstrap.js';
 import { loadAccountRegistry } from './accounts.js';
+import { NativeCliRunner, type NativeProvider } from './wizard/cli-runner.js';
+import { ReadlinePrompter, ScriptedPrompter } from './wizard/prompt.js';
+import { runAccountsAdd } from './wizard/accounts-add.js';
 import { releaseStandalone } from './release/standalone.js';
 
 /**
@@ -73,6 +76,7 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
   heddle projects [--json]       registered projects and their fleets (~/.heddle/projects.json; HED-160)
   heddle accounts list [--json]  registered Claude, Codex, and Cursor accounts
   heddle accounts verify         verify local credential paths and recorded Claude login state
+  heddle accounts add [--provider <p>] [--answers <file>]  add native-login accounts interactively
   heddle comms init [--json]     initialize the comms database, operator token, and registered project rooms
   heddle mode [desktop|mobile|away] [--note "<t>"] [--json]   operator mode (HED-336): no arg prints
                                  the current mode; a mode word sets it (~/.heddle/operator-mode.json —
@@ -707,6 +711,24 @@ try {
 
     case 'accounts': {
       const action = process.argv[3];
+      if (action === 'add') {
+        const requested = arg('--provider');
+        if (requested && !['claude', 'codex', 'cursor'].includes(requested)) throw new Error('--provider must be claude, codex, or cursor');
+        const answersPath = arg('--answers');
+        const prompter = answersPath
+          ? new ScriptedPrompter(JSON.parse(readFileSync(answersPath, 'utf8')) as unknown[])
+          : new ReadlinePrompter();
+        try {
+          const summary = await runAccountsAdd(
+            { ...(requested ? { provider: requested as NativeProvider } : {}) },
+            { prompter, runner: new NativeCliRunner(), report: (line) => process.stderr.write(`${line}\n`) },
+          );
+          process.stdout.write(`${JSON.stringify(summary)}\n`);
+        } finally {
+          prompter.close();
+        }
+        break;
+      }
       const registry = loadAccountRegistry();
       if (action === 'list') {
         out(json, registry, () => {
@@ -760,7 +782,7 @@ try {
         if (fail) process.exitCode = 1;
         break;
       }
-      console.error('usage: heddle accounts <list|verify> [--json]');
+      console.error('usage: heddle accounts <list|verify|add> [--json]');
       process.exitCode = 2;
       break;
     }
