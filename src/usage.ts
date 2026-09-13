@@ -102,6 +102,11 @@ function num(v: unknown): number | null {
   return typeof v === 'number' && Number.isFinite(v) ? v : null;
 }
 
+function pct(v: unknown): number | null {
+  const n = num(v);
+  return n !== null && n >= 0 && n <= 100 ? n : null;
+}
+
 /** A window whose reset time has passed rolled over — the provider will report ~0 on next capture. */
 function normalizeWindow(w: unknown, nowS: number): CapWindow {
   if (!w || typeof w !== 'object') return UNKNOWN;
@@ -332,14 +337,14 @@ export function readOauthUsageSidecars(usageDir: string, nowS: number): ClaudeAc
     // claude.rs::oauth_exact guard): treating negative age as "captured moments ago" would pin a
     // bad reading as fresh indefinitely. Omit it — same as aged/invalid.
     if (capturedAt === null || capturedAt > nowS || nowS - capturedAt > OAUTH_SIDECAR_MAX_AGE_S) continue;
-    const fiveHourPct = num(raw.fiveHourPct);
-    const sevenDayPct = num(raw.sevenDayPct);
+    const fiveHourPct = pct(raw.fiveHourPct);
+    const sevenDayPct = pct(raw.sevenDayPct);
     if (fiveHourPct === null && sevenDayPct === null) continue;
     const byModelRaw = raw.byModel;
     const weeklyByModel: Record<string, number> = {};
     if (byModelRaw && typeof byModelRaw === 'object') {
       for (const [name, percent] of Object.entries(byModelRaw as Record<string, unknown>)) {
-        const value = num(percent);
+        const value = pct(percent);
         if (value !== null) weeklyByModel[name] = value;
       }
     }
@@ -393,11 +398,13 @@ function readClaudePollCaps(rows: ClaudeAccountUsage[], nowS: number): ProviderC
  * FRESH incoming row fills a stale/absent one, and an unknown (stale) incoming row NEVER overwrites a
  * known-fresh row (which would drop a mirror row's fableWeeklyEstimatePct and a false 0% both).
  */
+const isKeeperAnchor = (a: AccountCaps): boolean => a.noteCodes.includes('claude.keeperAnchor');
+
 function mergeClaudeAccountRows(existing: AccountCaps[], incoming: AccountCaps[]): AccountCaps[] {
   const byId = new Map(existing.map((a) => [a.id, a]));
   for (const t of incoming) {
     const e = byId.get(t.id);
-    if (!e || (e.stale && !t.stale)) byId.set(t.id, t);
+    if (!e || (e.stale && !t.stale) || (isKeeperAnchor(e) && !isKeeperAnchor(t) && !t.stale)) byId.set(t.id, t);
   }
   return [...byId.values()];
 }

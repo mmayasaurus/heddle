@@ -147,6 +147,16 @@ describe('buildOauthUsageSidecar', () => {
       extra: null, modelLimits: [], weeklyByModel: {}, noteCodes: [],
     })).toBeNull();
   });
+
+  it('does not replace a sidecar with an empty ok poll, but retains model-only usage', () => {
+    const base = {
+      id: 'acct1', configDir: '/x/acct1', tokenSource: 'keychain' as const, source: 'ok' as const, stale: false, capturedAt: CAP_AT,
+      liveIdentity: null, fiveHour: { utilization: null, resetsAt: null }, sevenDay: { utilization: null, resetsAt: null },
+      extra: null, modelLimits: [], noteCodes: [],
+    };
+    expect(buildOauthUsageSidecar({ ...base, weeklyByModel: {} })).toBeNull();
+    expect(buildOauthUsageSidecar({ ...base, weeklyByModel: { Fable: 47 } })).toMatchObject({ fablePct: 47, byModel: { Fable: 47 } });
+  });
 });
 
 describe('parseIdentity', () => {

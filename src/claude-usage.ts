@@ -483,11 +483,15 @@ export interface OauthUsageSidecar {
 /** Build the disk-only OAuth sidecar without including any credential or identity data. */
 export function buildOauthUsageSidecar(row: ClaudeAccountUsage): OauthUsageSidecar | null {
   if (row.source !== 'ok') return null;
+  const fiveHourPct = row.fiveHour.utilization;
+  const sevenDayPct = row.sevenDay.utilization;
+  const byModel = row.weeklyByModel;
+  if (fiveHourPct === null && sevenDayPct === null && Object.keys(byModel).length === 0) return null;
   return {
     fablePct: row.weeklyByModel.Fable ?? row.weeklyByModel['Claude Fable'] ?? null,
-    fiveHourPct: row.fiveHour.utilization,
-    sevenDayPct: row.sevenDay.utilization,
-    byModel: row.weeklyByModel,
+    fiveHourPct,
+    sevenDayPct,
+    byModel,
     capturedAt: Math.floor(Date.parse(row.capturedAt) / 1000),
     source: 'oauth-usage',
     fiveHourResetsAt: row.fiveHour.resetsAt,

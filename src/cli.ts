@@ -3,7 +3,7 @@
 // pollute stdout parsing for agents, so it is suppressed at the entry point only —
 // `--disable-warning=<type>` silences just that category (`--no-warnings` would hide every
 // process warning; its `=…` suffix is ignored — verified Node 22.23, 2026-08-15).
-import { existsSync, mkdirSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { dispatch, planDispatch, summarizePlan } from './dispatch.js';
 import { Ledger } from './ledger.js';
@@ -645,6 +645,13 @@ try {
           }
           const safeId = row.id.replace(/[^A-Za-z0-9_.-]/g, '_');
           const path = join(usageDir, `claude-${safeId}.oauth-usage.json`);
+          try {
+            const existing = JSON.parse(readFileSync(path, 'utf8')) as { capturedAt?: unknown };
+            if (typeof existing.capturedAt === 'number' && Number.isFinite(existing.capturedAt) && existing.capturedAt > sidecar.capturedAt) {
+              skipped.push({ id: row.id, source: `${row.source} (newer sidecar kept)` });
+              continue;
+            }
+          } catch { /* absent or corrupt sidecars are replaced atomically */ }
           const tempPath = join(usageDir, `.claude-${safeId}.oauth-usage-${process.pid}-${Date.now()}.tmp`);
           writeFileSync(tempPath, JSON.stringify(sidecar));
           renameSync(tempPath, path);

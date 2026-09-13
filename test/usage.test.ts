@@ -150,6 +150,24 @@ describe('usage cap readers', () => {
     expect(readProviderCaps({ usageDir: dir, nowS }).claude).toMatchObject({ source: 'none', stale: true });
   });
 
+  it('omits an OAuth sidecar whose window percentages are out of range', () => {
+    const dir = tempDir(); const nowS = writtenAt + 10;
+    writeFileSync(join(dir, 'claude-acct2.oauth-usage.json'), JSON.stringify({
+      fiveHourPct: 150, sevenDayPct: -3, capturedAt: nowS - 5, source: 'oauth-usage',
+    }));
+    expect(readOauthUsageSidecars(dir, nowS)).toEqual([]);
+  });
+
+  it('prefers a real OAuth sidecar reading over a fresh synthetic keeper anchor', () => {
+    const dir = tempDir(); const nowS = writtenAt + 10;
+    writeFileSync(join(dir, 'claude-acct2.keeper.json'), JSON.stringify({ account: 'acct2', startedAt: nowS - 60, resets_at: nowS + 3600 }));
+    writeFileSync(join(dir, 'claude-acct2.oauth-usage.json'), JSON.stringify({
+      fiveHourPct: 40, sevenDayPct: 9, capturedAt: nowS - 5, source: 'oauth-usage',
+      fiveHourResetsAt: nowS + 3600, sevenDayResetsAt: nowS + 86400,
+    }));
+    expect(readProviderCaps({ usageDir: dir, nowS }).claude.accounts.find((a) => a.id === 'acct2')?.fiveHour.usedPercentage).toBe(40);
+  });
+
   it('keeps a fresh mirror account over an OAuth sidecar row', () => {
     const dir = tempDir(); const nowS = writtenAt + 10;
     writeFileSync(join(dir, 'limits.json'), JSON.stringify({ writtenAt: nowS - 1, limits: [{ provider: 'claude', capturedAt: nowS - 1, staleAfterSecs: 600,
