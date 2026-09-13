@@ -27,6 +27,7 @@ import { runPrWatch } from './pr-watch.js';
 import { bootstrapComms } from './comms/bootstrap.js';
 import { loadAccountRegistry } from './accounts.js';
 import { releaseStandalone } from './release/standalone.js';
+import { assembleTop, renderTopText } from './top.js';
 
 /**
  * heddle CLI — the surface orchestrators (and later the dashboard) drive.
@@ -90,6 +91,7 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
   heddle ledger report-in-session <id> (--ok | --failed) [--error "<why>"] [--input-tokens N] [--cached-input-tokens N] [--output-tokens N] [--reasoning-tokens N] [--duration-ms N] [--json]  administrative path: may report any orchestrator's handoff
   heddle usage [--since <iso>] [--json]    per-provider totals
   heddle usage --remaining [--account <id>] [--json]  per-account quota headroom
+  heddle top [--once] [--json]  one disk-only dashboard snapshot (watch mode is Slice 2)
   heddle account pick [--for <letter[,letter...]>] [--json] [--explain]   healthiest addressable Claude account for a fleet relaunch
   heddle pr own <whoami|claim|check|release|mine> [<pr#>] [--json]       coordinate ownership of a GitHub PR
   heddle pr sweep <pr#> [--json]       sweep all GitHub PR review channels and report mechanical gates
@@ -135,7 +137,7 @@ const json = has('--json');
  * ledger — a fresh-machine setup step must not incur ledger startup, migration, or SQLite locking.
  * Best-effort — a hygiene failure must never break the command the operator actually ran.
  */
-if (cmd !== 'mode' && cmd !== 'pr' && cmd !== 'comms' && !(cmd === 'ledger' && (process.argv[3] === 'sweep' || process.argv[3] === 'finish'))) {
+if (cmd !== 'mode' && cmd !== 'pr' && cmd !== 'comms' && cmd !== 'top' && !(cmd === 'ledger' && (process.argv[3] === 'sweep' || process.argv[3] === 'finish'))) {
   try {
     const { closed } = new Ledger().sweepOrphans();
     if (closed > 0) console.error(`heddle: closed ${closed} orphaned in-flight dispatch row${closed === 1 ? '' : 's'} (heddle ledger --json shows outcome='orphaned')`);
@@ -339,6 +341,17 @@ try {
         }).join('\n');
         return `${selected}\n${details}`;
       });
+      break;
+    }
+
+    case 'top': {
+      if (!process.argv.slice(3).every((value) => value === '--once' || value === '--json')) {
+        console.error('usage: heddle top [--once] [--json]');
+        process.exit(2);
+      }
+      // TODO(HED-430 slice 2): replace this one-shot seam with TTY watch-mode.
+      const view = assembleTop();
+      out(json, view, () => renderTopText(view));
       break;
     }
 
