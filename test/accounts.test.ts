@@ -77,6 +77,44 @@ describe('loadAccountRegistry', () => {
     ]);
   });
 
+  it('carries an envRepoint through the unified model', () => {
+    const path = writeAccounts('env-repoint.json', {
+      claude: [{ id: 'glm', envRepoint: { baseUrl: 'https://api.z.ai/api/anthropic', authTokenRef: 'GLM_API_KEY' } }],
+    });
+    expect(loadAccountRegistry(path).accounts[0]!.envRepoint).toEqual({
+      baseUrl: 'https://api.z.ai/api/anthropic', authTokenRef: 'GLM_API_KEY',
+    });
+  });
+
+  it('stores envRepoint authTokenRef verbatim as a reference, never a token', () => {
+    const path = writeAccounts('env-repoint-reference.json', {
+      claude: [{ id: 'glm', envRepoint: { baseUrl: 'https://api.z.ai/api/anthropic', authTokenRef: 'GLM_API_KEY' } }],
+    });
+    expect(loadAccountRegistry(path).accounts[0]!.envRepoint!.authTokenRef).toBe('GLM_API_KEY');
+  });
+
+  it.each([
+    ['non-object', 'x'],
+    ['array', []],
+    ['null', null],
+    ['missing baseUrl', { authTokenRef: 'NAME' }],
+    ['empty baseUrl', { baseUrl: '', authTokenRef: 'NAME' }],
+    ['non-URL baseUrl', { baseUrl: 'not a url', authTokenRef: 'NAME' }],
+    ['non-http baseUrl', { baseUrl: 'ftp://x', authTokenRef: 'NAME' }],
+    ['missing authTokenRef', { baseUrl: 'https://x.test' }],
+    ['empty authTokenRef', { baseUrl: 'https://x.test', authTokenRef: '' }],
+  ])('rejects %s envRepoint with the file path', (_label, envRepoint) => {
+    const path = writeAccounts(`bad-env-repoint-${_label}.json`, { claude: [{ id: 'a', envRepoint }] });
+    expect(() => loadAccountRegistry(path)).toThrow(path);
+  });
+
+  it('tolerates and ignores unknown envRepoint keys', () => {
+    const path = writeAccounts('future-env-repoint.json', {
+      claude: [{ id: 'a', envRepoint: { baseUrl: 'https://x.test', authTokenRef: 'NAME', futureField: 'x' } }],
+    });
+    expect(loadAccountRegistry(path).accounts[0]!.envRepoint).toEqual({ baseUrl: 'https://x.test', authTokenRef: 'NAME' });
+  });
+
   it.each([
     ['invalid posture', { posture: 'unlimited' }],
     ['bounded-prepaid missing spendLimit', { posture: 'bounded-prepaid', creditsRemaining: 1 }],
