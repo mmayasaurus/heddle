@@ -115,6 +115,27 @@ describe('regression PR#119 — standalone snapshot generator review findings', 
     }
   });
 
+  it('rejects a dirty checkout, a non-main checkout, and a ref outside main HEAD', () => {
+    const root = tempDir();
+    const source = snapshotSource(root);
+    writeFileSync(join(source, 'uncommitted.txt'), 'dirty');
+    expect(releaseStandalone({ outDir: join(root, 'dirty'), sourceDir: source })).toMatchObject({
+      ok: false, error: 'standalone releases require a clean main checkout',
+    });
+    execFileSync('git', ['checkout', '-qb', 'release-test'], { cwd: source });
+    execFileSync('git', ['add', '.'], { cwd: source });
+    execFileSync('git', ['-c', 'user.name=test', '-c', 'user.email=test@example.com', 'commit', '-qm', 'branch'], {
+      cwd: source,
+    });
+    expect(releaseStandalone({ outDir: join(root, 'branch'), sourceDir: source })).toMatchObject({
+      ok: false, error: 'standalone releases must be generated from a main checkout',
+    });
+    execFileSync('git', ['checkout', '-q', 'main'], { cwd: source });
+    expect(releaseStandalone({ outDir: join(root, 'ref'), sourceDir: source, sourceRef: 'release-test' })).toMatchObject({
+      ok: false, error: 'standalone releases must be generated from main HEAD',
+    });
+  });
+
   it('verifies a disposable copy without changing the shipped hash', () => {
     const root = tempDir();
     const bin = join(root, 'bin');
@@ -216,7 +237,7 @@ function snapshotSource(root: string, additions: Record<string, string> = {}): s
     mkdirSync(dirname(join(source, path)), { recursive: true });
     writeFileSync(join(source, path), contents);
   }
-  execFileSync('git', ['init', '-q'], { cwd: source });
+  execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: source });
   execFileSync('git', ['add', '.'], { cwd: source });
   execFileSync('git', [
     '-c', 'user.name=test', '-c', 'user.email=test@example.com', 'commit', '-qm', 'source',
