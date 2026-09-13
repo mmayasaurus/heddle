@@ -12,7 +12,7 @@ dist/
 .memtrace-staleness.log
 .memtrace-staleness.launchd.log
 
-# Agent worktrees live INSIDE the repo (Maya 2026-08-15) — never tracked
+# Agent worktrees live inside the repository and are never tracked.
 .worktrees/
 
 # Claude project settings are tracked; per-machine local state is not

@@ -1,46 +1,11 @@
 import { readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
+import { credentialPatterns, digest, identityPatterns, matchesForbidden, scanFiles } from '../src/release/scrub.js';
 
 const allowlistPath = new URL('./public-scrub.allowlist.txt', import.meta.url);
 
-// This scanner is a regression guard against accidental identity leaks.
-// Deliberate encodings are out of scope.
-// Reviewers remain responsible for detecting them.
-const tenantPattern = new RegExp('spin' + 'ventory', 'i');
-const placeholderPattern = new RegExp('\\b' + 'S' + 'PI-n\\b', 'i');
-const issuePattern = new RegExp('\\b' + 'S' + 'PI-' + '\\d+', 'i');
-const teamPattern = new RegExp('\\b' + 'S' + 'PI' + '(?:[-_][A-Za-z0-9]+)?\\b', 'i');
-const personalNamePattern = new RegExp('\\b' + 'ma' + 'ya\\b', 'i');
-const localUsernamePattern = new RegExp('\\b' + 'ma' + 'ya' + 'tobi\\b', 'i');
-const companyPattern = new RegExp('vg' + 'fg', 'i');
-const homePathPattern = new RegExp('/Users/' + 'ma' + 'ya' + '(?:tobi)?\\b', 'i');
-const ownerPattern = new RegExp('mmaya' + 'saurus', 'i');
-
-// A bare prefix (`gsk_`, `csk-`, …) is legitimate DOCUMENTATION of a credential shape; only a
-// prefix followed by a key-like tail is credential-shaped (PR #112 docs round).
-const credentialPatterns = [
-  new RegExp('\\bsk-' + '[A-Za-z0-9][A-Za-z0-9-]{9,}'),
-  new RegExp('g' + 'sk_' + '[A-Za-z0-9]{12,}'),
-  new RegExp('c' + 'sk-' + '[A-Za-z0-9-]{12,}'),
-  new RegExp('lin_' + 'api_' + '[A-Za-z0-9]{12,}'),
-  new RegExp('lin_' + 'oauth_' + '[A-Za-z0-9]{12,}'),
-  new RegExp('gh' + 'p_' + '[A-Za-z0-9]{12,}'),
-  new RegExp('github_' + 'pat_' + '[A-Za-z0-9_]{12,}'),
-];
-
-const identityPatterns = [
-  tenantPattern,
-  placeholderPattern,
-  issuePattern,
-  teamPattern,
-  personalNamePattern,
-  localUsernamePattern,
-  companyPattern,
-  homePathPattern,
-  ownerPattern,
-];
+const placeholderPattern = identityPatterns[1];
 
 describe('regression PR#99 — public scrub rejects placeholder issue keys and exact-line exemptions', () => {
   it('matches forbidden identity fragments while retaining boundary-safe allowed examples', () => {
@@ -194,12 +159,6 @@ function shippedFiles(): string[] {
   return output.split('\n').filter(Boolean);
 }
 
-const forbiddenPatterns = [...identityPatterns, ...credentialPatterns];
-
-function digest(line: string): string {
-  return createHash('sha256').update(line).digest('hex').slice(0, 12);
-}
-
 function parseAllowlist(contents: string): Array<{ path: string; lineNumber: number; digest: string }> {
   return contents
     .split('\n')
@@ -216,50 +175,6 @@ function parseAllowlist(contents: string): Array<{ path: string; lineNumber: num
 
 function allowlist(): Array<{ path: string; lineNumber: number; digest: string }> {
   return parseAllowlist(readFileSync(allowlistPath, 'utf8'));
-}
-
-function matchesForbidden(line: string): boolean {
-  return forbiddenPatterns.some((pattern) => pattern.test(line));
-}
-
-function scanFiles(files: Array<{ path: string; contents: string }>, allowed: Array<{ path: string; lineNumber: number; digest: string }>) {
-  const flaggedEntries = new Set<string>();
-  const offendingLines: string[] = [];
-
-  for (const { path, contents } of files) {
-    // Path names are public too: a tracked `test/<tenant>-fixture.txt` must fail even with clean
-    // contents. Identity patterns only — credential shapes make no sense in a path.
-    if (identityPatterns.some((pattern) => pattern.test(path))) {
-      offendingLines.push(`${path}: [path name carries a forbidden identifier]`);
-    }
-    contents.split('\n').forEach((line, index) => {
-      if (!matchesForbidden(line)) return;
-      const entry = `${path}:${index + 1}`;
-      const lineDigest = digest(line);
-      const allowedEntry = allowed.find((candidate) => candidate.path === path && candidate.lineNumber === index + 1);
-      if (allowedEntry?.digest === lineDigest) {
-        flaggedEntries.add(`${entry}:${lineDigest}`);
-      } else {
-        // A credential-shaped hit is never echoed: the failure would copy a live secret into public
-        // CI logs. The path:line:digest entry stays pasteable (digest is over the real line).
-        const shown = credentialPatterns.some((pattern) => pattern.test(line))
-          ? '[credential-shaped content redacted]'
-          : line;
-        offendingLines.push(`${entry}:${lineDigest}: ${shown}`);
-      }
-    });
-  }
-
-  return {
-    offendingLines,
-    staleEntries: allowed
-      .map(({ path, lineNumber, digest: entryDigest }) => ({ entry: `${path}:${lineNumber}:${entryDigest}`, path, lineNumber }))
-      .filter(({ entry }) => !flaggedEntries.has(entry))
-      .map(({ entry, path, lineNumber }) => {
-        const line = files.find((file) => file.path === path)?.contents.split('\n')[lineNumber - 1];
-        return line !== undefined && matchesForbidden(line) ? `stale allowlist entry ${path}:${lineNumber} (line changed)` : `${path}:${lineNumber}`;
-      }),
-  };
 }
 
 describe('public repository scrub', () => {
