@@ -53,6 +53,7 @@ function sameMode(source: string, target: string): boolean {
 
 function installAction(source: string, target: string): Extract<FleetHookAction, 'created' | 'updated' | 'unchanged'> {
   if (!existsSync(target)) return 'created';
+  if (!statSync(target).isFile()) throw new Error(`target exists and is not a regular file: ${target}`);
   return sameContent(source, target) && sameMode(source, target) ? 'unchanged' : 'updated';
 }
 
@@ -82,9 +83,10 @@ export function installFleetHooks(options: FleetHookOptions = {}): FleetHookInst
       }
       files.push({ name, action });
     } catch (error) {
-      const installed = files.filter((file) => file.action === 'created' || file.action === 'updated').map((file) => file.name);
+      const written = files.filter((file) => file.action === 'created' || file.action === 'updated').map((file) => file.name);
+      const unchanged = files.filter((file) => file.action === 'unchanged').map((file) => file.name);
       const detail = error instanceof Error ? error.message : String(error);
-      throw new Error(`fleet hook installation failed for ${name}; files already installed this run: ${installed.length ? installed.join(', ') : 'none'}; ${detail}`, { cause: error });
+      throw new Error(`fleet hook installation failed for ${name}; files written this run: ${written.length ? written.join(', ') : 'none'}; unchanged: ${unchanged.length ? unchanged.join(', ') : 'none'}; ${detail}`, { cause: error });
     }
   }
   return { targetDir, dryRun: options.dryRun === true, files };

@@ -790,7 +790,14 @@ try {
         const report = installFleetHooks({ dryRun: has('--dry-run') });
         out(json, report, () => [
           `target: ${report.targetDir}`,
-          ...report.files.map((file) => `${report.dryRun ? 'would ' : ''}${file.action} ${file.name}`),
+          ...report.files.map((file) => {
+            const text = !report.dryRun ? file.action
+              : file.action === 'created' ? 'would create'
+                : file.action === 'updated' ? 'would update'
+                  : file.action === 'unchanged' ? 'would leave unchanged'
+                    : `would ${file.action}`;
+            return `${text} ${file.name}`;
+          }),
         ].join('\n'));
         break;
       }

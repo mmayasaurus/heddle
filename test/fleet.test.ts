@@ -67,7 +67,7 @@ describe('fleet hooks', () => {
     expect(statSync(join(paths.targetDir, 'first.py')).mode & 0o777).toBe(0o755);
   });
 
-  it('cleans temporary files and reports partial installation when a target path cannot be replaced', () => {
+  it('reports partial installation when a target path is not a regular file without writing during dry-run', () => {
     const paths = fixture(tempDir());
     mkdirSync(paths.targetDir, { recursive: true });
     mkdirSync(join(paths.targetDir, 'second.py'));
@@ -79,26 +79,50 @@ describe('fleet hooks', () => {
     }
     expect(error).toBeInstanceOf(Error);
     expect((error as Error).message).toMatch(/second\.py/);
-    expect((error as Error).message).toContain('files already installed this run: first.py');
+    expect((error as Error).message).toContain('files written this run: first.py; unchanged: none');
+    expect((error as Error).message).toContain(`target exists and is not a regular file: ${join(paths.targetDir, 'second.py')}`);
     expect(readFileSync(join(paths.targetDir, 'first.py'))).toEqual(readFileSync(join(paths.canonicalDir, 'first.py')));
     expect(readdirSync(paths.targetDir).filter((name) => /\.tmp$/.test(name))).toEqual([]);
+    expect(() => installFleetHooks({ ...paths, dryRun: true })).toThrow(`target exists and is not a regular file: ${join(paths.targetDir, 'second.py')}`);
   });
 
-  it('reports fleet CLI drift status, usage failures, and dry-run JSON without writes', async () => {
+  it('reports fleet CLI text and JSON contracts for installs and drift', async () => {
     const home = withTempHome();
     const installed = await runCli(['fleet', 'install-hooks'], { home });
     expect(installed.code).toBe(0);
     const targetDir = join(home, '.heddle', 'fleet', 'hooks');
+    expect(installed.stdout).toContain(`target: ${targetDir}`);
+    const installedJson = await runCli(['fleet', 'install-hooks', '--json'], { home });
+    expect(JSON.parse(installedJson.stdout)).toEqual(expect.objectContaining({
+      dryRun: false,
+      targetDir,
+      files: expect.any(Array),
+    }));
+
     writeFileSync(join(targetDir, 'agent-identity.py'), 'drift\n');
-    expect((await runCli(['fleet', 'hooks-diff'], { home })).code).toBe(1);
+    const drift = await runCli(['fleet', 'hooks-diff', '--json'], { home });
+    expect(drift.code).toBe(1);
+    expect(JSON.parse(drift.stdout)).toEqual({
+      clean: false,
+      files: expect.arrayContaining([{ name: 'agent-identity.py', action: 'differing' }]),
+    });
     await runCli(['fleet', 'install-hooks'], { home });
-    expect((await runCli(['fleet', 'hooks-diff'], { home })).code).toBe(0);
+    const clean = await runCli(['fleet', 'hooks-diff', '--json'], { home });
+    expect(clean.code).toBe(0);
+    expect(JSON.parse(clean.stdout)).toEqual({ clean: true, files: [] });
     expect((await runCli(['fleet', 'unknown-action'], { home })).code).toBe(2);
 
     const dryRunHome = withTempHome();
+    const dryRunText = await runCli(['fleet', 'install-hooks', '--dry-run'], { home: dryRunHome });
+    expect(dryRunText.stdout).toContain(`target: ${join(dryRunHome, '.heddle', 'fleet', 'hooks')}`);
+    expect(dryRunText.stdout.split('\n').slice(1).filter(Boolean).every((line) => line.startsWith('would '))).toBe(true);
     const dryRun = await runCli(['fleet', 'install-hooks', '--dry-run', '--json'], { home: dryRunHome });
     expect(dryRun.code).toBe(0);
-    expect(JSON.parse(dryRun.stdout)).toEqual(expect.objectContaining({ dryRun: true }));
+    expect(JSON.parse(dryRun.stdout)).toEqual(expect.objectContaining({
+      dryRun: true,
+      targetDir: join(dryRunHome, '.heddle', 'fleet', 'hooks'),
+      files: expect.any(Array),
+    }));
     expect(existsSync(join(dryRunHome, '.heddle', 'fleet', 'hooks'))).toBe(false);
   });
 });

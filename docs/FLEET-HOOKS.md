@@ -23,6 +23,8 @@ would create agent-identity.py
 
 Without `--dry-run`, the action is unprefixed (for example, `created agent-identity.py`). `--json` is available for both install modes and includes the target, file actions, and `dryRun: true` or `dryRun: false`.
 
+If installation fails partway through, files handled earlier in the run remain installed. The error names the file that failed and separately lists files written in that run and files left unchanged.
+
 Compare the installed copies with the vendored canon:
 
 ```sh
@@ -57,3 +59,5 @@ Two vendored hooks import `hook_utils` from `~/.claude/lib` via an absolute, hom
 ## Cutover blockers found in review
 
 `require-memtrace-first.py` derives `PROJECT_ROOT` from `Path(__file__).resolve().parent.parent.parent` and hardcodes workspace-relative expectations. An installed copy at `~/.heddle/fleet/hooks` therefore resolves `PROJECT_ROOT` to `~/.heddle` and misclassifies working directories. Pointing settings at the installed copy of this hook is blocked until a later phase adds an explicit project-root override to the canon at source, or cutover invokes this one hook from the repository checkout.
+
+`agent-preflight.py` falls back to an author-machine absolute `HEDDLE_CANON` path, so other machines report `SKIP`; `remind-owned-prs.py` invokes the workspace `pr-own.sh` by absolute path. Both are correct for this machine and are tracked for the canon home repository on HED-499; this review does not change either hook.
