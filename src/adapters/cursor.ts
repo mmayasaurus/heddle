@@ -1,6 +1,6 @@
 import { FAMILY_PREFIXES } from '../routing.js';
 import type { DispatchOptions, WorkerAdapter, WorkerResult, TokenUsage } from '../types.js';
-import { lastResultJson } from './parse.js';
+import { failIfTruncated, lastResultJson } from './parse.js';
 import { run } from './subprocess.js';
 
 /**
@@ -47,7 +47,7 @@ export class CursorAdapter implements WorkerAdapter {
     // envUnset forwarded for parity with claude/codex (HED-268): rotation unsets CURSOR_API_KEY for the
     // machine-login account. (buildWorkerEnv already vendor-strips CURSOR_*, so this is belt-and-suspenders,
     // but the adapters must be uniform so no future selector-unset is silently dropped here.)
-    const { stdout, stderr, exitCode } =
+    const { stdout, stderr, exitCode, truncated } =
       await run(this.bin, args, opts.cwd, opts.timeoutMs ?? 600_000, opts.env, opts.envUnset);
     const durationMs = Date.now() - started;
 
@@ -55,10 +55,11 @@ export class CursorAdapter implements WorkerAdapter {
     const result: any = lastResultJson(stdout);
 
     if (!result) {
-      return {
+      const res: WorkerResult = {
         ok: false, output: '', exitCode, durationMs,
         error: `no result JSON from cursor-agent (exit ${exitCode}); stderr tail: ${stderr.slice(-400)}`,
       };
+      return failIfTruncated(res, truncated, 'cursor-agent');
     }
 
     // usage block confirmed live 2026-08-01 (undocumented at research time):
@@ -73,7 +74,7 @@ export class CursorAdapter implements WorkerAdapter {
       : undefined;
 
     const ok = exitCode === 0 && result.is_error !== true;
-    return {
+    const res: WorkerResult = {
       ok,
       output: typeof result.result === 'string' ? result.result : JSON.stringify(result.result ?? ''),
       sessionId: result.session_id,
@@ -83,5 +84,6 @@ export class CursorAdapter implements WorkerAdapter {
       error: ok ? undefined : `cursor-agent is_error=${result.is_error} (exit ${exitCode}); stderr tail: ${stderr.slice(-400)}`,
       raw: result,
     };
+    return failIfTruncated(res, truncated, 'cursor-agent');
   }
 }

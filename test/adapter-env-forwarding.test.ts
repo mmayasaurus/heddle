@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 // Mock the subprocess boundary so we assert the ARGS each adapter forwards, without spawning.
 vi.mock('../src/adapters/subprocess.js', () => ({
   run: vi.fn().mockResolvedValue({ stdout: '', stderr: '', exitCode: 1, timedOut: false, truncated: false }),
+  DEFAULT_MAX_STREAM_BYTES: 32 * 1024 * 1024,
 }));
 
 import { run } from '../src/adapters/subprocess.js';
