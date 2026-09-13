@@ -1,12 +1,13 @@
 import { existsSync } from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
 import { loadAccountRegistry, type Account } from './accounts.js';
-import { DEFAULT_COMMS_PATH, CommsLog, type SessionRecord } from './comms/log.js';
-import { DEFAULT_LEDGER_PATH, Ledger } from './ledger.js';
-import { readProviderCaps, type AccountCaps } from './usage.js';
-import { readUsageRemaining, type UsageRemainingRow } from './usage-remaining.js';
+import { DEFAULT_COMMS_PATH, DEFAULT_SESSION_STALE_MS, type SessionRecord } from './comms/log.js';
+import { DEFAULT_LEDGER_PATH } from './ledger.js';
+import { readProviderCaps, type CapWindow, type CapsByProvider } from './usage.js';
+import type { UsageRemainingRow } from './usage-remaining.js';
 
 export interface TopAccount {
-  id: string;
+  id: string | null;
   provider: string;
   billingClass: Account['billingClass'] | null;
   tier: Account['tier'] | null;
@@ -51,15 +52,7 @@ function safeAccounts(path: string | undefined): Account[] {
   }
 }
 
-function safeUsage(opts: AssembleTopOptions): UsageRemainingRow[] {
-  try {
-    return readUsageRemaining({ usageDir: opts.usageDir, accountsPath: opts.accountsPath, nowS: opts.nowS });
-  } catch {
-    return [];
-  }
-}
-
-function safeCaps(opts: AssembleTopOptions): Record<string, { accounts: AccountCaps[] }> {
+function safeCaps(opts: AssembleTopOptions): CapsByProvider {
   try {
     return readProviderCaps({ usageDir: opts.usageDir, accountsPath: opts.accountsPath, nowS: opts.nowS });
   } catch {
@@ -67,46 +60,102 @@ function safeCaps(opts: AssembleTopOptions): Record<string, { accounts: AccountC
   }
 }
 
-function accountKeys(accounts: Account[], rows: UsageRemainingRow[], caps: Record<string, { accounts: AccountCaps[] }>): Array<{ provider: string; id: string }> {
-  const keys = new Map<string, { provider: string; id: string }>();
-  for (const account of accounts) keys.set(`${account.provider}\0${account.id}`, { provider: account.provider, id: account.id });
-  for (const row of rows) {
-    if (row.account !== null) keys.set(`${row.provider}\0${row.account}`, { provider: row.provider, id: row.account });
-  }
-  for (const [provider, providerCaps] of Object.entries(caps)) {
-    for (const account of providerCaps.accounts) keys.set(`${provider}\0${account.id}`, { provider, id: account.id });
-  }
-  return [...keys.values()].sort((left, right) => left.provider.localeCompare(right.provider) || left.id.localeCompare(right.id));
+function usageRow(provider: string, account: string | null, window: string, cap: CapWindow, stale: boolean, capturedAt: number | null, noteCodes: string[], nowS: number): UsageRemainingRow {
+  const unavailable = stale || cap.usedPercentage === null;
+  return {
+    provider, account, window,
+    usedPercentage: unavailable ? null : cap.usedPercentage,
+    resetsAt: cap.resetsAt,
+    resetsInSecs: cap.resetsAt === null ? null : cap.resetsAt - nowS,
+    source: unavailable ? 'unavailable' : 'vendor-meter',
+    stale,
+    capturedAt,
+    ageSecs: capturedAt === null ? null : nowS - capturedAt,
+    noteCodes,
+  };
 }
 
-function safeAgents(path: string): TopAgent[] {
+/** Keep the same account/provider window semantics as readUsageRemaining, from this one caps snapshot. */
+function usageRows(caps: CapsByProvider, nowS: number): UsageRemainingRow[] {
+  const rows: UsageRemainingRow[] = [];
+  for (const provider of Object.values(caps).sort((left, right) => left.provider.localeCompare(right.provider))) {
+    if (provider.accounts.length) {
+      for (const account of provider.accounts) {
+        const noteCodes = account.noteCodes.length ? account.noteCodes : provider.noteCodes;
+        rows.push(usageRow(provider.provider, account.id, '5h', account.fiveHour, account.stale, provider.capturedAt, noteCodes, nowS));
+        rows.push(usageRow(provider.provider, account.id, '7d', account.sevenDay, account.stale, provider.capturedAt, noteCodes, nowS));
+        for (const [window, cap] of Object.entries(account.windows)) {
+          rows.push(usageRow(provider.provider, account.id, window, cap, account.stale, provider.capturedAt, noteCodes, nowS));
+        }
+      }
+      for (const [window, cap] of Object.entries(provider.windows)) {
+        rows.push(usageRow(provider.provider, null, window, cap, provider.stale, provider.capturedAt, provider.noteCodes, nowS));
+      }
+      continue;
+    }
+    rows.push(usageRow(provider.provider, null, '5h', provider.fiveHour, provider.stale, provider.capturedAt, provider.noteCodes, nowS));
+    rows.push(usageRow(provider.provider, null, '7d', provider.sevenDay, provider.stale, provider.capturedAt, provider.noteCodes, nowS));
+    for (const [window, cap] of Object.entries(provider.windows)) {
+      rows.push(usageRow(provider.provider, null, window, cap, provider.stale, provider.capturedAt, provider.noteCodes, nowS));
+    }
+  }
+  return rows;
+}
+
+function accountKeys(accounts: Account[], rows: UsageRemainingRow[], caps: CapsByProvider): Array<{ provider: string; id: string | null }> {
+  const keys = new Map<string, { provider: string; id: string | null }>();
+  const key = (provider: string, id: string | null): string => `${provider}\0${id ?? ''}`;
+  for (const account of accounts) keys.set(key(account.provider, account.id), { provider: account.provider, id: account.id });
+  for (const row of rows) {
+    if (row.account !== null) keys.set(key(row.provider, row.account), { provider: row.provider, id: row.account });
+    else if (!caps[row.provider]?.accounts.length && row.usedPercentage !== null) keys.set(key(row.provider, null), { provider: row.provider, id: null });
+  }
+  for (const [provider, providerCaps] of Object.entries(caps)) {
+    for (const account of providerCaps.accounts) keys.set(key(provider, account.id), { provider, id: account.id });
+  }
+  return [...keys.values()].sort((left, right) => left.provider.localeCompare(right.provider) || (left.id ?? '').localeCompare(right.id ?? ''));
+}
+
+function safeAgents(path: string, nowS: number): TopAgent[] {
   if (!existsSync(path)) return [];
-  let log: CommsLog | null = null;
+  let db: DatabaseSync | null = null;
   try {
-    log = new CommsLog(path);
-    return log.liveSessions().map((session) => ({ session, model: null, contextPercent: null, worktree: null }));
+    // This is CommsLog.liveSessions' query with an injected clock, opened read-only so top cannot migrate the log.
+    db = new DatabaseSync(path, { readOnly: true });
+    const cutoff = new Date(nowS * 1_000 - DEFAULT_SESSION_STALE_MS).toISOString();
+    const sessions = db.prepare(`
+      SELECT address, session_id AS sessionId, session_name AS sessionName, pid, socket,
+             started_at AS startedAt, heartbeat_at AS heartbeatAt
+      FROM sessions WHERE heartbeat_at >= ? ORDER BY address
+    `).all(cutoff) as unknown as SessionRecord[];
+    return sessions.map((session) => ({ session, model: null, contextPercent: null, worktree: null }));
   } catch {
     return [];
   } finally {
-    log?.close();
+    db?.close();
   }
 }
 
 function safeWorkers(path: string): TopWorker[] {
   if (!existsSync(path)) return [];
-  let ledger: Ledger | null = null;
+  let db: DatabaseSync | null = null;
   try {
-    ledger = new Ledger(path);
-    const inFlight = ledger.inFlight();
-    const inFlightIds = new Set(inFlight.map((row) => Number(row.id)));
+    // Ledger's normal constructor configures WAL and migrations. The dashboard must never do either.
+    db = new DatabaseSync(path, { readOnly: true });
+    const workers = db.prepare(`
+      SELECT *, CASE WHEN finished_at IS NULL THEN 'in-flight' ELSE 'recent' END AS top_state
+      FROM dispatches
+      WHERE execution_mode IS NULL OR execution_mode <> 'classification'
+      ORDER BY CASE WHEN finished_at IS NULL THEN 0 ELSE 1 END, id DESC
+      LIMIT 20
+    `).all() as Record<string, unknown>[];
     return [
-      ...inFlight.map((dispatch) => ({ state: 'in-flight' as const, dispatch })),
-      ...ledger.recent().filter((dispatch) => !inFlightIds.has(Number(dispatch.id))).map((dispatch) => ({ state: 'recent' as const, dispatch })),
+      ...workers.map(({ top_state, ...dispatch }) => ({ state: top_state as TopWorker['state'], dispatch })),
     ];
   } catch {
     return [];
   } finally {
-    ledger?.close();
+    db?.close();
   }
 }
 
@@ -114,12 +163,13 @@ function safeWorkers(path: string): TopWorker[] {
 export function assembleTop(opts: AssembleTopOptions = {}): TopView {
   const nowS = opts.nowS ?? Math.floor(Date.now() / 1_000);
   const accounts = safeAccounts(opts.accountsPath);
-  const usage = safeUsage({ ...opts, nowS });
   const caps = safeCaps({ ...opts, nowS });
+  const usage = usageRows(caps, nowS);
   const byRegistryKey = new Map(accounts.map((account) => [`${account.provider}\0${account.id}`, account]));
-  const topAccounts = accountKeys(accounts, usage, caps).map(({ provider, id }) => {
-    const account = byRegistryKey.get(`${provider}\0${id}`);
-    const cap = caps[provider]?.accounts.find((candidate) => candidate.id === id);
+  const keys = accountKeys(accounts, usage, caps);
+  const topAccounts = keys.map(({ provider, id }) => {
+    const account = id === null ? undefined : byRegistryKey.get(`${provider}\0${id}`);
+    const cap = id === null ? undefined : caps[provider]?.accounts.find((candidate) => candidate.id === id);
     return {
       id,
       provider,
@@ -127,15 +177,17 @@ export function assembleTop(opts: AssembleTopOptions = {}): TopView {
       tier: account?.tier ?? null,
       loggedIn: account?.loggedIn ?? (cap?.dispatch?.reason === 'logged-out' ? false : null),
       dispatchExcluded: cap?.dispatch?.dispatchable === false,
-      usage: usage.filter((row) => row.provider === provider && row.account === id),
+      usage: usage.filter((row) => row.provider === provider && (row.account === id || (
+        row.account === null && id !== null && keys.find((candidate) => candidate.provider === provider && candidate.id !== null)?.id === id
+      ))),
     };
   });
   const commsPath = opts.commsPath ?? (process.env.HEDDLE_COMMS_DB || DEFAULT_COMMS_PATH);
-  const ledgerPath = opts.ledgerPath ?? DEFAULT_LEDGER_PATH;
+  const ledgerPath = opts.ledgerPath ?? process.env.HEDDLE_LEDGER_DB ?? DEFAULT_LEDGER_PATH;
 
   return {
     accounts: topAccounts,
-    agents: safeAgents(commsPath),
+    agents: safeAgents(commsPath, nowS),
     workers: safeWorkers(ledgerPath),
     capturedAt: new Date(nowS * 1_000).toISOString(),
   };
@@ -161,7 +213,7 @@ function meter(row: UsageRemainingRow): string {
 export function renderTopText(view: TopView): string {
   const accounts = view.accounts.length
     ? view.accounts.flatMap((account) => [
-      `${account.provider}/${account.id}  ${account.loggedIn === false ? 'logged out' : account.loggedIn === true ? 'logged in' : 'login —'}`
+      `${account.id === null ? account.provider : `${account.provider}/${account.id}`}  ${account.loggedIn === false ? 'logged out' : account.loggedIn === true ? 'logged in' : 'login —'}`
         + `${account.tier ? `  ${account.tier}` : ''}${account.billingClass ? `  ${account.billingClass}` : ''}`
         + `${account.dispatchExcluded ? '  dispatch excluded' : ''}`,
       ...(account.usage.length ? account.usage.map((row) => `  ${meter(row)}`) : ['  —']),

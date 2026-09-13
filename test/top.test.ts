@@ -1,13 +1,15 @@
-import { readdirSync, statSync, writeFileSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { CommsLog } from '../src/comms/log.js';
+import { Ledger } from '../src/ledger.js';
 import { assembleTop, renderTopText } from '../src/top.js';
 import { useTempResources } from './helpers.js';
 import { runCli } from './helpers/cli.js';
 
 const { tempDir } = useTempResources('heddle-top-test-');
 
-function fixture(opts: { stale?: boolean; accounts?: number } = {}): { usageDir: string; accountsPath: string } {
+function fixture(opts: { stale?: boolean; accounts?: number; providerWindow?: boolean } = {}): { usageDir: string; accountsPath: string } {
   const usageDir = tempDir();
   const accountsPath = join(usageDir, 'accounts.json');
   const nowS = Math.floor(Date.now() / 1_000);
@@ -25,6 +27,7 @@ function fixture(opts: { stale?: boolean; accounts?: number } = {}): { usageDir:
       provider: 'claude',
       capturedAt: nowS - (opts.stale ? 1_200 : 120),
       staleAfterSecs: 900,
+      ...(opts.providerWindow ? { windows: [{ id: 'included-total', usedPercentage: 42, resetsAt: nowS + 86_400 }] } : {}),
       accounts: accounts.map((account, index) => ({
         id: account.id,
         fiveHour: { usedPercentage: 20 + index, resetsAt: nowS + 3_600 },
@@ -47,6 +50,30 @@ function fixture(opts: { stale?: boolean; accounts?: number } = {}): { usageDir:
 
 function snapshot(dir: string): Map<string, number> {
   return new Map(readdirSync(dir).sort().map((name) => [name, statSync(join(dir, name)).mtimeMs]));
+}
+
+function snapshotFile(path: string): { mtimeMs: number; size: number; bytes: Buffer } {
+  const stat = statSync(path);
+  return { mtimeMs: stat.mtimeMs, size: stat.size, bytes: readFileSync(path) };
+}
+
+function workerLedger(): string {
+  const path = join(tempDir(), 'ledger.db');
+  const ledger = new Ledger(path);
+  const worker = ledger.start({
+    orchestrator: 'U', taskClass: 'implementation', provider: 'codex', model: 'gpt-5.6-terra',
+    skills: null, issue: 'HED-430', pr: null, cwd: '/tmp/top', promptPreview: 'worker',
+    sessionId: null, fellBackFrom: null,
+  });
+  ledger.finish(worker, { ok: true });
+  for (let index = 0; index < 21; index++) {
+    ledger.recordClassification({
+      orchestrator: 'U', identitySource: 'test', kind: 'assess', provider: 'codex', model: 'gpt-5.6-luna',
+      cwd: '/tmp/top', promptPreview: `classification ${index}`, ok: true,
+    });
+  }
+  ledger.close();
+  return path;
 }
 
 describe('heddle top', () => {
@@ -109,6 +136,43 @@ describe('heddle top', () => {
 
     expect(result).toMatchObject({ code: 0, stderr: '' });
     expect(snapshot(usageDir)).toEqual(before);
+  });
+
+  it('preserves provider-level meters instead of dropping account:null rows', () => {
+    const { usageDir, accountsPath } = fixture({ providerWindow: true });
+    const view = assembleTop({ usageDir, accountsPath });
+
+    expect(view.accounts.find((account) => account.id === 'acct-1')?.usage)
+      .toEqual(expect.arrayContaining([expect.objectContaining({ account: null, window: 'included-total', usedPercentage: 42 })]));
+  });
+
+  it('reads HEDDLE_LEDGER_DB without changing the ledger or showing classifications as workers', async () => {
+    const { usageDir, accountsPath } = fixture();
+    const ledgerPath = workerLedger();
+    const before = snapshotFile(ledgerPath);
+    const result = await runCli(['top', '--json'], {
+      env: { HEDDLE_USAGE_DIR: usageDir, HEDDLE_ACCOUNTS: accountsPath, HEDDLE_LEDGER_DB: ledgerPath },
+    });
+    const view = JSON.parse(result.stdout) as { workers: Array<{ dispatch: { task_class: string; execution_mode: string | null } }> };
+
+    expect(result).toMatchObject({ code: 0, stderr: '' });
+    expect(view.workers.map((worker) => worker.dispatch.task_class)).toEqual(['implementation']);
+    expect(view.workers.every((worker) => worker.dispatch.execution_mode !== 'classification')).toBe(true);
+    expect(snapshotFile(ledgerPath)).toEqual(before);
+  });
+
+  it('uses nowS for session liveness as well as meter freshness', () => {
+    const { usageDir, accountsPath } = fixture();
+    const commsPath = join(tempDir(), 'comms.db');
+    const nowS = 1_000_000_000;
+    const log = new CommsLog(commsPath, { now: () => new Date((nowS - 10) * 1_000).toISOString() });
+    log.registerSession({ address: 'U', sessionId: 'session-u' });
+    log.close();
+    const before = snapshotFile(commsPath);
+
+    const view = assembleTop({ usageDir, accountsPath, commsPath, nowS });
+    expect(view.agents).toMatchObject([{ session: { address: 'U', sessionId: 'session-u' } }]);
+    expect(snapshotFile(commsPath)).toEqual(before);
   });
 
   it('renders the supplied view without reading sources', () => {
