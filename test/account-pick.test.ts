@@ -51,13 +51,13 @@ describe('pickClaudeAccountsBatch — spread-first residency ceiling', () => {
   const accounts = (count: number): ClaudeAccount[] => Array.from({ length: count }, (_, index) => ({
     id: `acct${index + 1}`, configDir: index === 0 ? null : `/x/.claude-acct${index + 1}`,
   }));
-  const caps = (rows: Array<{ id: string; used: number; reset?: number | null; overageEnabled?: boolean }>): ProviderCaps => ({
+  const caps = (rows: Array<{ id: string; used: number; reset?: number | null; overageEnabled?: boolean; stale?: boolean }>): ProviderCaps => ({
     provider: 'claude', source: 'limits.json', stale: false, capturedAt: 1,
     fiveHour: { usedPercentage: null, resetsAt: null }, sevenDay: { usedPercentage: null, resetsAt: null },
     windows: {}, noteCodes: [], activeAccount: null,
-    accounts: rows.map(({ id, used, reset = null, overageEnabled }) => ({
+    accounts: rows.map(({ id, used, reset = null, overageEnabled, stale = false }) => ({
       id, fiveHour: { usedPercentage: used, resetsAt: reset }, sevenDay: { usedPercentage: null, resetsAt: null },
-      windows: {}, noteCodes: [], limitReached: false, stale: false, overageEnabled,
+      windows: {}, noteCodes: [], limitReached: false, stale, overageEnabled,
     })),
   });
   const agents = (count: number) => Array.from({ length: count }, (_, index) => `agent${index + 1}`);
@@ -90,7 +90,10 @@ describe('pickClaudeAccountsBatch — spread-first residency ceiling', () => {
     expect(placedCounts(result)).toEqual({ acct3: 3, acct4: 3 });
     const refusals = Object.values(result.assignments).filter((assignment) => 'refused' in assignment);
     expect(refusals).toHaveLength(3);
-    expect(refusals.every((assignment) => assignment.reason === 'only 6 of 9 agents placeable until acct4 resets 600')).toBe(true);
+    // acct3/acct4 are the at-ceiling usable accounts; rolling THEIR window restores headroom, not a
+    // resident slot. The reset that frees a slot is the soonest FLOORED account re-entering eligibility —
+    // acct2 (800), sooner than acct1 (900) (cursor HED-446).
+    expect(refusals.every((assignment) => assignment.reason === 'only 6 of 9 agents placeable until acct2 resets 800')).toBe(true);
   });
 
   it('narrates a one-fresh-account placement as degenerate', () => {
@@ -107,6 +110,29 @@ describe('pickClaudeAccountsBatch — spread-first residency ceiling', () => {
     expect(result.assignments.agent1).toMatchObject({ account: 'acct2' });
     expect(result.accounts.find((account) => account.account === 'acct1')).toMatchObject({ overage: true, excluded: true });
     expect(result.assignments.agent1).not.toHaveProperty('refused');
+  });
+
+  it('counts existing residents in the ceiling so a populated census still places new agents (codeant HED-446)', () => {
+    // Old ceil(new / accounts) = ceil(2/4) = 1 would treat every account (2 residents) as over-ceiling
+    // and refuse the whole batch; ceil((8 existing + 2 new) / 4) = 3 leaves room, so both new agents place.
+    const census = new Map([['acct1', 2], ['acct2', 2], ['acct3', 2], ['acct4', 2]]);
+    const result = pickClaudeAccountsBatch(
+      caps(accounts(4).map((account) => ({ id: account.id, used: 20 }))), accounts(4), floors, agents(2), census,
+    );
+    const placed = Object.values(result.assignments).filter((assignment) => !('refused' in assignment));
+    expect(placed).toHaveLength(2);
+    expect(Object.values(result.assignments).some((assignment) => 'refused' in assignment)).toBe(false);
+  });
+
+  it('ignores overageEnabled on a STALE caps row and does not exclude for overage (codeant HED-446)', () => {
+    // A stale poll's overage flag is obsolete billing metadata; it must not override the fresh registry
+    // (which declares no overage here). The fresh-overage exclusion is covered by the test above.
+    const result = pickClaudeAccountsBatch(caps([
+      { id: 'acct1', used: 0, overageEnabled: true, stale: true }, { id: 'acct2', used: 50 },
+    ]), accounts(2), floors, agents(1));
+    const acct1 = result.accounts.find((account) => account.account === 'acct1');
+    expect(acct1).toMatchObject({ overage: false });
+    expect(acct1?.excluded).toBe(false);
   });
 });
 

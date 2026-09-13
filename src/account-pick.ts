@@ -64,7 +64,9 @@ export function claudeAccountRows(
     const loggedOut = account.loggedIn === false;
     const dispatchExcluded = isDispatchExcluded(caps, account.id);
     const capsAccount = caps.accounts.find((row) => row.id === account.id);
-    const overage = (capsAccount?.overageEnabled ?? account.overageEnabled ?? false) === true;
+    // A caps-row overage flag is authoritative only while the row is FRESH; a stale poll's flag is
+    // obsolete and must fall through to the durable registry value, never override it (codeant HED-446).
+    const overage = ((capsAccount && !capsAccount.stale ? capsAccount.overageEnabled : undefined) ?? account.overageEnabled ?? false) === true;
     return {
       account: account.id,
       usedPct5h,
@@ -97,7 +99,11 @@ export function pickClaudeAccountsBatch(
   const rows = claudeAccountRows(caps, accounts, floors, residents);
   const accountById = new Map(accounts.map((account) => [account.id, account]));
   const assignments: Record<string, BatchAssignment> = {};
-  const ceiling = accounts.length === 0 ? 0 : Math.ceil(agents.length / accounts.length);
+  // Spread ceiling reflects TOTAL load — existing residents (the injected census, HED-340) PLUS the new
+  // agents — divided across every account. Dividing only the new agents let a populated census sit above
+  // a tiny ceiling and refuse the whole batch even with ample headroom (codeant HED-446).
+  const existingResidents = accounts.reduce((sum, account) => sum + (residents.get(account.id) ?? 0), 0);
+  const ceiling = accounts.length === 0 ? 0 : Math.ceil((existingResidents + agents.length) / accounts.length);
   // INCLUSIVE boundary, matching the ratified floor (HED-261, R nod 2026-08-22): the ticket's
   // "≤10%-remaining accounts carry max N" → headroom ≤ residency_cap_below_pct triggers the cap. The
   // field name reads exclusive but the ratified semantic wins, exactly as never_below_pct is inclusive.
@@ -112,15 +118,21 @@ export function pickClaudeAccountsBatch(
     if (candidates.length === 0) {
       const eligibleRows = rows.filter(otherwiseEligible);
       if (eligibleRows.length > 0 && eligibleRows.every(isAtCeiling)) {
-        const soonest = [...eligibleRows].sort((a, b) => {
-          const aReset = valuesFor(caps, a.account).resetsAt;
-          const bReset = valuesFor(caps, b.account).resetsAt;
-          return (aReset ?? Infinity) - (bReset ?? Infinity) || a.account.localeCompare(b.account);
-        })[0];
-        const reset = valuesFor(caps, soonest.account).resetsAt;
+        const placed = Object.values(assignments).filter((assignment) => !('refused' in assignment)).length;
+        // The only event that frees a slot is a FLOORED account (and floored is its ONLY barrier)
+        // re-entering eligibility when its window resets — that adds a fresh account's worth of ceiling.
+        // An at-ceiling account's own reset restores headroom, not a resident slot, so naming it would
+        // promise an unblock that never comes (cursor HED-446). Name the soonest-resetting such account;
+        // with none, the batch simply exceeds the spread ceiling and no reset changes that.
+        const unblocker = rows
+          .filter((row) => row.floored && !row.loggedOut && !row.dispatchExcluded && !row.overage)
+          .map((row) => ({ account: row.account, reset: valuesFor(caps, row.account).resetsAt }))
+          .sort((a, b) => (a.reset ?? Infinity) - (b.reset ?? Infinity) || a.account.localeCompare(b.account))[0];
         assignments[agent] = {
           refused: true,
-          reason: `only ${Object.values(assignments).filter((assignment) => !('refused' in assignment)).length} of ${agents.length} agents placeable until ${soonest.account} resets ${reset ?? 'unknown'}`,
+          reason: unblocker
+            ? `only ${placed} of ${agents.length} agents placeable until ${unblocker.account} resets ${unblocker.reset ?? 'unknown'}`
+            : `only ${placed} of ${agents.length} agents placeable: every usable account is at the spread ceiling (${ceiling} per account) and no reset frees a slot`,
         };
         continue;
       }

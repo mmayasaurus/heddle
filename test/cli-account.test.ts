@@ -299,7 +299,10 @@ describe('heddle account pick CLI', () => {
     const parsed = JSON.parse(result.stdout);
     expect(parsed.assignments.R.account).toBe('near-cap');
     expect(parsed.assignments.S.account).toBe('near-cap');
-    expect(parsed.assignments.U).toMatchObject({ refused: true, reason: 'only 2 of 3 agents placeable until near-cap resets unknown' });
+    // near-cap is at BOTH the residency ceiling and the low-headroom cap; rolling its window restores
+    // headroom, not a resident slot. The floored account re-entering eligibility on reset is what frees a
+    // slot, so the refusal names it (its reset time is unknown here) (cursor HED-446).
+    expect(parsed.assignments.U).toMatchObject({ refused: true, reason: 'only 2 of 3 agents placeable until floored resets unknown' });
     expect(parsed.accounts).toEqual(expect.arrayContaining([
       expect.objectContaining({ account: 'near-cap', residents: 2 }),
       expect.objectContaining({ account: 'floored', floored: true }),
@@ -350,7 +353,10 @@ describe('heddle account pick CLI', () => {
     expect(result.code).toBe(1);
     const assignments = JSON.parse(result.stdout).assignments as Record<string, { account: string } | { refused: true; reason: string }>;
     expect(assignments.R).toMatchObject({ account: 'healthy' });
-    expect(assignments.S).toMatchObject({ refused: true, reason: 'only 1 of 2 agents placeable until healthy resets unknown' });
+    // healthy is the at-ceiling usable account; naming ITS reset would promise an unblock that never
+    // comes. weekly-wall is 7d-floored — its reset re-adds an eligible account, so it is the unblocker
+    // the refusal names (its reset time is unknown here) (cursor HED-446).
+    expect(assignments.S).toMatchObject({ refused: true, reason: 'only 1 of 2 agents placeable until weekly-wall resets unknown' });
   }, 30_000);
 
   it('regression PR#88 — never places a batch agent on an unmetered registered account', async () => {
@@ -365,7 +371,10 @@ describe('heddle account pick CLI', () => {
     expect(result).toMatchObject({ code: 1, stderr: '' });
     const assignments = JSON.parse(result.stdout).assignments as Record<string, { account: string } | { refused: true; reason: string }>;
     expect(assignments.R).toMatchObject({ account: 'healthy' });
-    expect(assignments.S).toMatchObject({ refused: true, reason: 'only 1 of 2 agents placeable until healthy resets unknown' });
+    // ghost is unmetered (never a placement target) and there is NO floored account whose reset could
+    // free a slot — the batch simply exceeds the spread ceiling, so the refusal says exactly that with
+    // no reset named (cursor HED-446).
+    expect(assignments.S).toMatchObject({ refused: true, reason: 'only 1 of 2 agents placeable: every usable account is at the spread ceiling (1 per account) and no reset frees a slot' });
     expect(Object.values(assignments).flatMap((assignment) => 'account' in assignment ? [assignment.account] : [])).not.toContain('ghost');
   }, 30_000);
 
