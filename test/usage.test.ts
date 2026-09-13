@@ -1,7 +1,7 @@
 import { copyFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { bindingWindow, readClaudeTap, readLimitsMirror, readProviderCaps } from '../src/usage.js';
+import { bindingWindow, readClaudeTap, readLimitsMirror, readOauthUsageSidecars, readProviderCaps } from '../src/usage.js';
 import { useTempResources } from './helpers.js';
 
 const fixture = join(process.cwd(), 'test/fixtures/limits.golden.json');
@@ -118,6 +118,46 @@ describe('usage cap readers', () => {
     for (const provider of ['codex', 'cursor', 'gemini']) expect(fromTap[provider]).toMatchObject({ source: 'none', stale: true });
     const empty = readProviderCaps({ usageDir: tempDir(), nowS });
     for (const provider of ['claude', 'codex', 'cursor', 'gemini']) expect(empty[provider]).toMatchObject({ source: 'none', stale: true });
+  });
+
+  it('reads a fresh OAuth sidecar as Claude OAuth caps', () => {
+    const dir = tempDir(); const nowS = writtenAt + 10;
+    writeFileSync(join(dir, 'claude-acct2.oauth-usage.json'), JSON.stringify({
+      fablePct: 44, fiveHourPct: 16, sevenDayPct: 8, byModel: { Fable: 44 }, capturedAt: nowS - 1,
+      source: 'oauth-usage', fiveHourResetsAt: nowS + 3600, sevenDayResetsAt: nowS + 86400,
+    }));
+    expect(readOauthUsageSidecars(dir, nowS)).toHaveLength(1);
+    const caps = readProviderCaps({ usageDir: dir, nowS }).claude;
+    expect(caps).toMatchObject({ source: 'claude-oauth', stale: false });
+    expect(caps.accounts.find((row) => row.id === 'acct2')).toMatchObject({ fiveHour: { usedPercentage: 16 }, sevenDay: { usedPercentage: 8 } });
+  });
+
+  it('omits an aged OAuth sidecar and leaves Claude unknown', () => {
+    const dir = tempDir(); const nowS = writtenAt + 10_000;
+    writeFileSync(join(dir, 'claude-acct2.oauth-usage.json'), JSON.stringify({
+      fiveHourPct: 16, sevenDayPct: 8, capturedAt: nowS - 901, source: 'oauth-usage',
+    }));
+    expect(readOauthUsageSidecars(dir, nowS)).toEqual([]);
+    expect(readProviderCaps({ usageDir: dir, nowS }).claude).toMatchObject({ source: 'none', stale: true });
+  });
+
+  it('omits an OAuth sidecar stamped in the future (clock skew), never pinning it fresh', () => {
+    const dir = tempDir(); const nowS = writtenAt + 10;
+    writeFileSync(join(dir, 'claude-acct2.oauth-usage.json'), JSON.stringify({
+      fiveHourPct: 16, sevenDayPct: 8, capturedAt: nowS + 120, source: 'oauth-usage',
+    }));
+    expect(readOauthUsageSidecars(dir, nowS)).toEqual([]);
+    expect(readProviderCaps({ usageDir: dir, nowS }).claude).toMatchObject({ source: 'none', stale: true });
+  });
+
+  it('keeps a fresh mirror account over an OAuth sidecar row', () => {
+    const dir = tempDir(); const nowS = writtenAt + 10;
+    writeFileSync(join(dir, 'limits.json'), JSON.stringify({ writtenAt: nowS - 1, limits: [{ provider: 'claude', capturedAt: nowS - 1, staleAfterSecs: 600,
+      accounts: [{ id: 'acct2', fiveHour: { usedPercentage: 20, resetsAt: nowS + 3600 }, fableWeeklyEstimatePct: 30 }],
+    }] }));
+    writeFileSync(join(dir, 'claude-acct2.oauth-usage.json'), JSON.stringify({ fiveHourPct: 99, sevenDayPct: 5, byModel: { Fable: 47 }, capturedAt: nowS - 1, source: 'oauth-usage' }));
+    const account = readProviderCaps({ usageDir: dir, nowS }).claude.accounts.find((row) => row.id === 'acct2');
+    expect(account).toMatchObject({ fiveHour: { usedPercentage: 20 }, fableWeeklyEstimatePct: 30 });
   });
 
   it('selects the five-hour window before seven-day and rejects unknown or stale caps', () => {
