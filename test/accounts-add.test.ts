@@ -49,4 +49,22 @@ describe('accounts add wizard', () => {
     expect(existsSync(path)).toBe(true);
     expect(loadAccountRegistry(path)).toEqual({ schemaVersion: 2, accounts: [] });
   });
+
+  it('records a Cursor account as a machine-login row (keyFile null) so rotation can use it', async () => {
+    const path = join(tempDir(), 'cursor.json');
+    const summary = await runAccountsAdd({ provider: 'cursor', registryPath: path }, {
+      prompter: new ScriptedPrompter([true, 'work', 'paid', 'T1', false, false]), runner: fakeRunner,
+    });
+    expect(summary.added).toEqual(['work']);
+    expect(loadAccountRegistry(path).accounts[0]).toMatchObject({
+      id: 'work', provider: 'cursor', keyFile: null, credentialRef: 'cursor:default',
+    });
+  });
+
+  it('rejects a path-traversal account id', async () => {
+    const path = join(tempDir(), 'evil.json');
+    await expect(runAccountsAdd({ provider: 'claude', registryPath: path }, {
+      prompter: new ScriptedPrompter([true, '../../escape']), runner: fakeRunner,
+    })).rejects.toThrow(/invalid account id/);
+  });
 });

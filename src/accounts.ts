@@ -275,8 +275,12 @@ function existingRaw(path: string): Record<string, unknown> {
 }
 
 /**
- * Writes the provider-keyed on-disk shape. Existing unknown top-level and matching-row fields are
- * retained so forward-compatible metadata survives a wizard rerun.
+ * Writes the provider-keyed on-disk shape. This writer is UPSERT-ONLY — it never removes a row:
+ * unknown top-level keys and matching-row fields are retained so forward-compatible metadata survives
+ * a wizard rerun, and any row present on disk that this in-memory registry never saw (a concurrent
+ * writer added it after we loaded) is preserved verbatim rather than clobbered. That closes the
+ * data-loss window in the read-modify-write; it is not a lock — a true compare-and-swap against
+ * concurrent writers is a follow-up (HED-503). A caller that must delete a row cannot use this function.
  */
 export function writeAccountRegistry(
   registry: AccountRegistry,
@@ -285,12 +289,18 @@ export function writeAccountRegistry(
   const raw = existingRaw(path);
   const output: Record<string, unknown> = { ...raw, schemaVersion: ACCOUNTS_SCHEMA_VERSION };
   for (const provider of ['claude', 'codex', 'cursor'] as const) {
-    const prior = Array.isArray(raw[provider]) ? raw[provider] : [];
-    const byId = new Map(prior.filter((row): row is Row => Boolean(row) && typeof row === 'object' && !Array.isArray(row))
-      .filter((row) => typeof row.id === 'string').map((row) => [row.id as string, row]));
-    output[provider] = registry.accounts
-      .filter((account) => account.provider === provider)
-      .map((account) => ({ ...byId.get(account.id), ...accountRow(account) }));
+    const priorRows = (Array.isArray(raw[provider]) ? raw[provider] : [])
+      .filter((row): row is Row => Boolean(row) && typeof row === 'object' && !Array.isArray(row) && typeof row.id === 'string');
+    const byId = new Map(priorRows.map((row) => [row.id as string, row]));
+    const mineIds = new Set(registry.accounts.filter((account) => account.provider === provider).map((account) => account.id));
+    output[provider] = [
+      ...registry.accounts
+        .filter((account) => account.provider === provider)
+        .map((account) => ({ ...byId.get(account.id), ...accountRow(account) })),
+      // A row on disk this registry never saw — a concurrent writer added it after we loaded — survives
+      // verbatim (appended, not dropped), keeping the writer upsert-only.
+      ...priorRows.filter((row) => !mineIds.has(row.id as string)),
+    ];
   }
   atomicWriteFile(path, JSON.stringify(output, null, 2) + '\n');
 }

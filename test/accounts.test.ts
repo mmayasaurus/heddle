@@ -234,4 +234,21 @@ describe('account registry writes', () => {
     expect(existsSync(path)).toBe(true);
     expect(readdirSync(tempDir()).filter((name) => name.includes('.tmp'))).toEqual([]);
   });
+
+  it('preserves a concurrently-added row the in-memory registry never saw (upsert-only)', () => {
+    const path = join(tempDir(), 'concurrent.json');
+    // This process loads an empty registry...
+    const loadedEarly = loadAccountRegistry(path);
+    // ...then a concurrent writer adds a codex row and persists it.
+    writeAccountRegistry(upsertAccount(loadAccountRegistry(path), {
+      id: 'cx', provider: 'codex', harness: 'codex-cli', credentialRef: 'codex:default', codexHome: null,
+    }), path);
+    // This process, still holding the stale (empty) registry, adds its own claude row and writes.
+    writeAccountRegistry(upsertAccount(loadedEarly, {
+      id: 'cl', provider: 'claude', harness: 'claude-code', credentialRef: 'claude:default', configDir: null,
+    }), path);
+    // The concurrent codex row survives instead of being clobbered by the stale write.
+    expect(loadAccountRegistry(path).accounts.map((account) => `${account.provider}:${account.id}`).sort())
+      .toEqual(['claude:cl', 'codex:cx']);
+  });
 });

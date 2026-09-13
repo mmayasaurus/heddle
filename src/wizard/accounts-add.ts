@@ -16,25 +16,34 @@ function pathFor(provider: NativeProvider, id: string): string {
   return join(homedir(), '.heddle', 'accounts', provider, id);
 }
 
-function accountEnv(provider: NativeProvider, path: string): NodeJS.ProcessEnv {
-  // claude/codex isolate an account through a config-dir env var. cursor's per-account isolation
-  // mechanism is undocumented (deferred to HED-503), so its login uses the default store and the
-  // recorded keyFile is the INTENDED location, not a verified isolation path.
-  if (provider === 'claude') return { ...process.env, CLAUDE_CONFIG_DIR: path };
-  if (provider === 'codex') return { ...process.env, CODEX_HOME: path };
+// claude/codex isolate an account with a per-account dir + config-dir env var. cursor uses the
+// MACHINE login (its per-account isolation is undocumented — HED-503): no dir, and it records
+// keyFile:null, which is exactly the machine-login row rotation.pickCursorAccount selects (a non-null
+// keyFile would be misread as an API-key file by readCursorKey and the account would be unusable).
+function accountEnv(provider: NativeProvider, configPath: string | null): NodeJS.ProcessEnv {
+  if (provider === 'claude' && configPath) return { ...process.env, CLAUDE_CONFIG_DIR: configPath };
+  if (provider === 'codex' && configPath) return { ...process.env, CODEX_HOME: configPath };
   return { ...process.env };
 }
 
-function makeAccount(provider: NativeProvider, id: string, path: string, tier: AccountTier, billingClass: BillingClass): Account {
-  const base = { id, provider, harness: provider === 'claude' ? 'claude-code' : provider === 'codex' ? 'codex-cli' : 'cursor-agent', credentialRef: `${provider}:${path}`, billingClass, tier };
-  return provider === 'claude' ? { ...base, configDir: path } : provider === 'codex' ? { ...base, codexHome: path } : { ...base, keyFile: path };
+function makeAccount(provider: NativeProvider, id: string, configPath: string | null, tier: AccountTier, billingClass: BillingClass): Account {
+  const base = { id, provider, harness: provider === 'claude' ? 'claude-code' : provider === 'codex' ? 'codex-cli' : 'cursor-agent', credentialRef: `${provider}:${configPath ?? 'default'}`, billingClass, tier };
+  if (provider === 'claude') return { ...base, configDir: configPath };
+  if (provider === 'codex') return { ...base, codexHome: configPath };
+  return { ...base, keyFile: null };
 }
 
 async function addOne(provider: NativeProvider, deps: AccountsAddDeps, ordinal: number, registryPath: string, summary: AccountsAddSummary): Promise<void> {
   const id = await deps.prompter.text(`Account id for ${services[provider]}`, `${provider}-${ordinal}`);
-  const path = pathFor(provider, id);
-  const env = accountEnv(provider, path);
-  mkdirSync(path, { recursive: true });
+  // Confine the id — it becomes a path segment under ~/.heddle/accounts, so reject path separators
+  // and traversal (must start alphanumeric; letters/digits/'.'/'_'/'-' only).
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id)) {
+    throw new Error(`invalid account id ${JSON.stringify(id)} — use letters, digits, '.', '_', '-' (no path separators or '..')`);
+  }
+  // cursor uses the machine login (no per-account dir); claude/codex isolate under a per-account dir.
+  const configPath = provider === 'cursor' ? null : pathFor(provider, id);
+  const env = accountEnv(provider, configPath);
+  if (configPath) mkdirSync(configPath, { recursive: true });
   try {
     deps.runner.login(provider, env);
   } catch (error) {
@@ -49,7 +58,7 @@ async function addOne(provider: NativeProvider, deps: AccountsAddDeps, ordinal: 
   const billingClass: BillingClass = billing === 'paid' ? 'subscription-quota' : 'free-tier';
   const tier = await deps.prompter.select(`${services[provider]} plan tier`, ['T0', 'T1', 'T2', 'T3']) as AccountTier;
   let registry = loadAccountRegistry(registryPath);
-  const account = makeAccount(provider, id, path, tier, billingClass);
+  const account = makeAccount(provider, id, configPath, tier, billingClass);
   let probe;
   try { probe = deps.runner.status(provider, env); } catch (error) { probe = { stdout: '', stderr: String(error), exitCode: null, timedOut: false }; }
   // loginStatus returns boolean | undefined; `=== true` deliberately treats an indeterminate probe

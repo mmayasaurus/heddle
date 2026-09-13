@@ -27,7 +27,7 @@ import { runPrWatch } from './pr-watch.js';
 import { bootstrapComms } from './comms/bootstrap.js';
 import { loadAccountRegistry } from './accounts.js';
 import { NativeCliRunner, type NativeProvider } from './wizard/cli-runner.js';
-import { ReadlinePrompter, ScriptedPrompter } from './wizard/prompt.js';
+import { ReadlinePrompter, ScriptedPrompter, type Prompter } from './wizard/prompt.js';
 import { runAccountsAdd } from './wizard/accounts-add.js';
 import { releaseStandalone } from './release/standalone.js';
 
@@ -713,14 +713,21 @@ try {
       const action = process.argv[3];
       if (action === 'add') {
         const requested = arg('--provider');
+        if (has('--provider') && (requested === undefined || requested.startsWith('--'))) throw new Error('--provider needs a value: claude, codex, or cursor');
         if (requested && !['claude', 'codex', 'cursor'].includes(requested)) throw new Error('--provider must be claude, codex, or cursor');
         const answersPath = arg('--answers');
-        const prompter = answersPath
-          ? new ScriptedPrompter(JSON.parse(readFileSync(answersPath, 'utf8')) as unknown[])
-          : new ReadlinePrompter();
+        if (has('--answers') && (answersPath === undefined || answersPath.startsWith('--'))) throw new Error('--answers needs a path to a JSON answer file');
+        let prompter: Prompter;
+        if (answersPath !== undefined) {
+          const parsed: unknown = JSON.parse(readFileSync(answersPath, 'utf8'));
+          if (!Array.isArray(parsed)) throw new Error(`--answers file must contain a JSON array of answers (got ${parsed === null ? 'null' : typeof parsed})`);
+          prompter = new ScriptedPrompter(parsed);
+        } else {
+          prompter = new ReadlinePrompter();
+        }
         try {
           const summary = await runAccountsAdd(
-            { ...(requested ? { provider: requested as NativeProvider } : {}) },
+            requested ? { provider: requested as NativeProvider } : {},
             { prompter, runner: new NativeCliRunner(), report: (line) => process.stderr.write(`${line}\n`) },
           );
           process.stdout.write(`${JSON.stringify(summary)}\n`);
