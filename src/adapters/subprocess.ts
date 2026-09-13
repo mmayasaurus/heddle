@@ -1,39 +1,178 @@
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { buildWorkerEnv } from '../env.js';
 
+// The largest persisted worker result is ~34 KB; raw stream-json includes tool blocks, so 32 MiB
+// leaves a >100× margin for legitimate output while bounding runaway stdout/stderr to ~64 MiB.
+export const DEFAULT_MAX_STREAM_BYTES = 32 * 1024 * 1024;
+// How long to wait for the normal 'close' before force-settling — used by two distinct paths: the
+// DRAIN path (a natural 'exit' whose 'close' is late because a pipe-holding grandchild keeps the
+// inherited fds open — the child is already dead) and the GRACE path (the timeout fired; 'close' may
+// never come, and the child may even still be alive if the kill could not reach it — which is why the
+// grace path unref()s and the drain path does not). Exported so the grace/drain tests reference it.
+export const GRACE_MS = 1000;
+
+const liveChildren = new Set<ChildProcess>();
+let exitHandlersInstalled = false;
+
+// SIGKILL the child's whole process group, falling back to a direct child kill on ANY failure. A
+// process.kill(-pid) failure is ambiguous: the group may be gone (child already dead — child.kill is
+// then a silent no-op) OR the child may have left its group via setpgid and still be alive under its
+// own pid (child.kill then actually kills it). So the fallback is unconditional. Windows and a missing
+// pid have no process-group semantics / no pid to negate — they can only do the direct kill.
+function killGroupOrChild(child: ChildProcess): void {
+  if (process.platform !== 'win32' && child.pid !== undefined) {
+    try {
+      process.kill(-child.pid, 'SIGKILL');
+      return;
+    } catch {
+      // Group gone, or the child left its group — fall through to a direct child kill.
+    }
+  }
+  try {
+    child.kill('SIGKILL');
+  } catch {
+    // Already exited, or cannot be killed (best effort).
+  }
+}
+
+function reapAll(): void {
+  // Full Windows process-tree reaping (taskkill /T) is out of scope; killGroupOrChild is child-only there.
+  for (const child of liveChildren) killGroupOrChild(child);
+}
+
+function installExitHandlers(): void {
+  if (exitHandlersInstalled) return;
+  exitHandlersInstalled = true;
+  for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) {
+    const handler = () => {
+      reapAll();
+      process.removeListener(signal, handler);
+      process.kill(process.pid, signal);
+    };
+    process.on(signal, handler);
+  }
+  process.on('exit', reapAll);
+}
+
+function capAppend(acc: string, accBytes: number, chunk: string, cap: number):
+  { acc: string; accBytes: number; hit: boolean } {
+  if (accBytes >= cap) return { acc, accBytes, hit: true };
+
+  const chunkBytes = Buffer.byteLength(chunk);
+  if (accBytes + chunkBytes <= cap) {
+    return { acc: acc + chunk, accBytes: accBytes + chunkBytes, hit: false };
+  }
+
+  let taken = '';
+  let used = accBytes;
+  for (const cp of chunk) {
+    const cpBytes = Buffer.byteLength(cp);
+    if (used + cpBytes > cap) break;
+    taken += cp;
+    used += cpBytes;
+  }
+  return { acc: acc + taken, accBytes: used, hit: true };
+}
+
 export function run(bin: string, args: string[], cwd: string, timeoutMs: number,
-                    envOverrides?: Record<string, string>, envUnset?: string[]):
-  Promise<{ stdout: string; stderr: string; exitCode: number | null; timedOut: boolean }> {
+                    envOverrides?: Record<string, string>, envUnset?: string[],
+                    maxStreamBytes = DEFAULT_MAX_STREAM_BYTES):
+  Promise<{ stdout: string; stderr: string; exitCode: number | null; timedOut: boolean; truncated: boolean }> {
   return new Promise((resolve) => {
     // stdin 'ignore' is load-bearing — every subprocess adapter must close stdin.
     const { env } = buildWorkerEnv({ overrides: envOverrides, unset: envUnset });
-    const child = spawn(bin, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(bin, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+    installExitHandlers();
+    if (child.pid !== undefined) liveChildren.add(child);
     // Decode as UTF-8 at the stream so a multi-byte char split across two chunks is not corrupted by
     // `+= d` Buffer→string coercion (codacy/copilot #69 — a latent bug all four original runners shared).
     child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');
     let stdout = '';
     let stderr = '';
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    let truncated = false;
     // 'error' and 'close' can BOTH fire (e.g. spawn failure then close) — settle exactly once.
     let settled = false;
     let killedByTimer = false;
-    const settle = (
-      v: { stdout: string; stderr: string; exitCode: number | null },
-      signal: NodeJS.Signals | null = null,
-    ) => {
+    let graceTimer: NodeJS.Timeout | undefined;
+    let drainTimer: NodeJS.Timeout | undefined;
+    const finish = (exitCode: number | null, timedOut: boolean) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      // Decide timedOut from the OUTCOME signal, not a pre-kill guess: a timeout ONLY if the timer
-      // fired AND the process died from OUR SIGKILL. A natural exit reports a real code (signal null);
-      // an external SIGTERM racing the deadline reports SIGTERM — neither is our timeout (copilot/cubic
-      // #69). Keying on the death signal is exact regardless of event-loop timing.
-      resolve({ ...v, timedOut: killedByTimer && signal === 'SIGKILL' });
+      if (graceTimer !== undefined) clearTimeout(graceTimer);
+      if (drainTimer !== undefined) clearTimeout(drainTimer);
+      resolve({ stdout, stderr, exitCode, timedOut, truncated });
     };
-    const timer = setTimeout(() => { killedByTimer = true; child.kill('SIGKILL'); }, timeoutMs);
-    child.stdout.on('data', (d) => { stdout += d; });
-    child.stderr.on('data', (d) => { stderr += d; });
-    child.on('close', (code, signal) => settle({ stdout, stderr, exitCode: code }, signal));
-    child.on('error', (err) => settle({ stdout, stderr: `${stderr}\nspawn error: ${String(err)}`, exitCode: null }));
+    const timer = setTimeout(() => {
+      killedByTimer = true;
+      try {
+        killGroupOrChild(child);
+      } finally {
+        // Arm the grace net unconditionally — even if the kill threw. If 'close' has not settled run()
+        // by GRACE_MS (an escaped setsid/double-fork grandchild still holding the inherited pipes, or a
+        // kill that could not land), destroy the streams and force-settle as timedOut, so run() can
+        // never outlast timeoutMs + GRACE_MS.
+        graceTimer = setTimeout(() => {
+          if (settled) return;
+          // unref so a still-alive child the kill could not reach (e.g. EPERM) does not keep the event
+          // loop open via its process handle after we force-settle — destroying the streams frees only
+          // those, not the process handle. (The natural-'exit' drain path needs no unref: the child has
+          // already exited there, so its handle is gone and unref would be a no-op.)
+          child.unref();
+          child.stdout.destroy();
+          child.stderr.destroy();
+          finish(null, true);
+        }, GRACE_MS);
+      }
+    }, timeoutMs);
+    child.stdout.on('data', (d: string) => {
+      const capped = capAppend(stdout, stdoutBytes, d, maxStreamBytes);
+      stdout = capped.acc;
+      stdoutBytes = capped.accBytes;
+      truncated ||= capped.hit;
+    });
+    child.stderr.on('data', (d: string) => {
+      const capped = capAppend(stderr, stderrBytes, d, maxStreamBytes);
+      stderr = capped.acc;
+      stderrBytes = capped.accBytes;
+      truncated ||= capped.hit;
+    });
+    child.on('exit', (code) => {
+      // 'exit' (the process ended) is the ONLY signal that the child is truly dead, so it is the sole
+      // point that removes it from reapAll's registry — never 'close'/'error'/finish()/grace, any of
+      // which can fire while the process is still alive (an EPERM-unkillable child, or a grace
+      // force-settle) and would wrongly drop it from the parent-cancel sweep.
+      liveChildren.delete(child);
+      // If the child ended on its OWN (not our timeout kill) but a pipe-holding grandchild keeps the
+      // inherited streams open, 'close' may never fire. Cancel the now-moot deadline and arm a short
+      // drain; if 'close' has not settled by then, settle with the ACTUAL exit status rather than
+      // waiting out the whole timeout and mislabeling a finished run as timedOut.
+      if (killedByTimer || settled) return;
+      clearTimeout(timer);
+      drainTimer = setTimeout(() => {
+        if (settled) return;
+        child.stdout.destroy();
+        child.stderr.destroy();
+        finish(code, false);
+      }, GRACE_MS);
+    });
+    child.on('close', (code, signal) => {
+      // Decide timedOut from the outcome signal, not a pre-kill guess.
+      finish(code, killedByTimer && signal === 'SIGKILL');
+    });
+    child.on('error', (err) => {
+      // A post-spawn kill error (e.g. EPERM surfacing asynchronously after the timer fired) can land
+      // here; it must NOT masquerade as a spawn failure or steal the timedOut result. When the timer
+      // already fired, keep the diagnostic in stderr and let the grace net settle as timedOut.
+      if (killedByTimer) {
+        stderr = `${stderr}\nkill error: ${String(err)}`;
+        return;
+      }
+      stderr = `${stderr}\nspawn error: ${String(err)}`;
+      finish(null, false);
+    });
   });
 }
