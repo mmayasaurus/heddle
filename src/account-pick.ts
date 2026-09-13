@@ -23,6 +23,7 @@ export interface ClaudeAccountRow {
   floored: boolean;
   loggedOut: boolean;
   dispatchExcluded: boolean;
+  overage: boolean;
   excluded: boolean;
   residents: number;
 }
@@ -62,6 +63,10 @@ export function claudeAccountRows(
     const floored = isFloored(usedPct5h, usedPct7d, floors);
     const loggedOut = account.loggedIn === false;
     const dispatchExcluded = isDispatchExcluded(caps, account.id);
+    const capsAccount = caps.accounts.find((row) => row.id === account.id);
+    // A caps-row overage flag is authoritative only while the row is FRESH; a stale poll's flag is
+    // obsolete and must fall through to the durable registry value, never override it (codeant HED-446).
+    const overage = ((capsAccount && !capsAccount.stale ? capsAccount.overageEnabled : undefined) ?? account.overageEnabled ?? false) === true;
     return {
       account: account.id,
       usedPct5h,
@@ -71,7 +76,8 @@ export function claudeAccountRows(
       floored,
       loggedOut,
       dispatchExcluded,
-      excluded: floored || loggedOut || dispatchExcluded,
+      overage,
+      excluded: floored || loggedOut || dispatchExcluded || overage,
       residents: residentsByAccount.get(account.id) ?? 0,
     };
   });
@@ -93,26 +99,55 @@ export function pickClaudeAccountsBatch(
   const rows = claudeAccountRows(caps, accounts, floors, residents);
   const accountById = new Map(accounts.map((account) => [account.id, account]));
   const assignments: Record<string, BatchAssignment> = {};
+  // Spread ceiling reflects TOTAL load — existing residents (the injected census, HED-340) PLUS the new
+  // agents — divided across every account. Dividing only the new agents let a populated census sit above
+  // a tiny ceiling and refuse the whole batch even with ample headroom (codeant HED-446).
+  const existingResidents = accounts.reduce((sum, account) => sum + (residents.get(account.id) ?? 0), 0);
+  const ceiling = accounts.length === 0 ? 0 : Math.ceil((existingResidents + agents.length) / accounts.length);
   // INCLUSIVE boundary, matching the ratified floor (HED-261, R nod 2026-08-22): the ticket's
   // "≤10%-remaining accounts carry max N" → headroom ≤ residency_cap_below_pct triggers the cap. The
   // field name reads exclusive but the ratified semantic wins, exactly as never_below_pct is inclusive.
-  const isAtCap = (row: ClaudeAccountRow): boolean => row.headroomPct !== null && row.headroomPct <= floors.residencyCapBelowPct &&
+  const isAtLowHeadroomCap = (row: ClaudeAccountRow): boolean => row.headroomPct !== null && row.headroomPct <= floors.residencyCapBelowPct &&
     (residents.get(row.account) ?? 0) >= floors.residencyMax;
+  const isAtCeiling = (row: ClaudeAccountRow): boolean => ceiling > 0 && (residents.get(row.account) ?? 0) >= ceiling;
+  const isAtCap = (row: ClaudeAccountRow): boolean => isAtCeiling(row) || isAtLowHeadroomCap(row);
+  const otherwiseEligible = (row: ClaudeAccountRow): boolean => !row.excluded && row.headroomPct !== null;
 
   for (const agent of agents) {
     const candidates = rows.filter((row) => !row.excluded && row.headroomPct !== null && !isAtCap(row));
     if (candidates.length === 0) {
-      let floored = 0, capped = 0, loggedOut = 0, dispatchExcluded = 0, unmetered = 0;
+      const eligibleRows = rows.filter(otherwiseEligible);
+      if (eligibleRows.length > 0 && eligibleRows.every(isAtCeiling)) {
+        const placed = Object.values(assignments).filter((assignment) => !('refused' in assignment)).length;
+        // The only event that frees a slot is a FLOORED account (and floored is its ONLY barrier)
+        // re-entering eligibility when its window resets — that adds a fresh account's worth of ceiling.
+        // An at-ceiling account's own reset restores headroom, not a resident slot, so naming it would
+        // promise an unblock that never comes (cursor HED-446). Name the soonest-resetting such account;
+        // with none, the batch simply exceeds the spread ceiling and no reset changes that.
+        const unblocker = rows
+          .filter((row) => row.floored && !row.loggedOut && !row.dispatchExcluded && !row.overage)
+          .map((row) => ({ account: row.account, reset: valuesFor(caps, row.account).resetsAt }))
+          .sort((a, b) => (a.reset ?? Infinity) - (b.reset ?? Infinity) || a.account.localeCompare(b.account))[0];
+        assignments[agent] = {
+          refused: true,
+          reason: unblocker
+            ? `only ${placed} of ${agents.length} agents placeable until ${unblocker.account} resets ${unblocker.reset ?? 'unknown'}`
+            : `only ${placed} of ${agents.length} agents placeable: every usable account is at the spread ceiling (${ceiling} per account) and no reset frees a slot`,
+        };
+        continue;
+      }
+      let floored = 0, capped = 0, loggedOut = 0, dispatchExcluded = 0, overage = 0, unmetered = 0;
       for (const row of rows) {
         if (row.loggedOut) loggedOut++;
         else if (row.dispatchExcluded) dispatchExcluded++;
+        else if (row.overage) overage++;
         else if (row.floored) floored++;
         else if (isAtCap(row)) capped++;
         else if (row.headroomPct === null) unmetered++;
       }
       assignments[agent] = {
         refused: true,
-        reason: `no eligible Claude account: ${floored} floored, ${capped} at residency cap, ${loggedOut} logged-out, ${dispatchExcluded} dispatch-excluded, ${unmetered} unmetered`,
+        reason: `no eligible Claude account: ${floored} floored, ${capped} at residency cap, ${loggedOut} logged-out, ${dispatchExcluded} dispatch-excluded, ${overage} overage, ${unmetered} unmetered`,
       };
       continue;
     }
@@ -132,7 +167,7 @@ export function pickClaudeAccountsBatch(
       usedPct7d,
       bindingMeter: bindingMeter(usedPct5h, usedPct7d),
       resetsAt,
-      reason: `account:${account.id} batch placement (residents ${currentResidents}, headroom ${selected.headroomPct === null ? 'unknown' : `${selected.headroomPct.toFixed(0)}%`})`,
+      reason: `account:${account.id} batch placement${rows.filter(otherwiseEligible).length === 1 ? ' (DEGENERATE: every other account floored/vetoed — not a spread)' : ''} (residents ${currentResidents}, headroom ${selected.headroomPct === null ? 'unknown' : `${selected.headroomPct.toFixed(0)}%`})`,
       for: agent,
     };
     residents.set(account.id, currentResidents + 1);
