@@ -19,7 +19,10 @@ export function useTempResources(prefix = 'heddle-test-') {
         // A test may explicitly close a ledger before resource cleanup.
       }
     }
-    for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
+    // maxRetries/retryDelay ride out a transient ENOTEMPTY/EBUSY when a temp dir holds a git repo
+    // (e.g. release-standalone's source/.git): a recursive rm can race the OS releasing .git entries
+    // under load. Retries engage only with recursive:true (Node fs). — HED-505
+    for (const dir of dirs) rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     dirs.length = 0;
     ledgers.length = 0;
   });
