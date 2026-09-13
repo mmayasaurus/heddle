@@ -19,13 +19,16 @@ export function lastResultJson(stdout: string): any | undefined {
 }
 
 /**
- * run() sets truncated:true when a worker stream hit the byte cap and output was dropped, so the
- * stdout/stderr the adapter parsed is INCOMPLETE — a truncated stream can still parse into a
+ * This keys on STDOUT truncation only: stderr truncation does not fail the turn because adapters
+ * parse the result from stdout. A truncated stdout stream can still parse into a
  * plausible-but-incomplete result (an earlier NDJSON event, a cut final JSON), so a parsed ok:true
  * is unreliable. Force an explicit turn failure, preserving raw/usage/exitCode for the ledger.
  */
-export function failIfTruncated(result: WorkerResult, truncated: boolean, cli: string): WorkerResult {
-  if (!truncated) return result;
-  const note = `${cli} output exceeded the ${DEFAULT_MAX_STREAM_BYTES}-byte stream cap and was truncated — result unreliable, treated as a turn failure`;
-  return { ...result, ok: false, error: result.error ? `${note}; ${result.error}` : note };
+export function failIfTruncated(result: WorkerResult, stdoutTruncated: boolean, cli: string, stderr = ''): WorkerResult {
+  if (!stdoutTruncated) return result;
+  const note = `${cli} stdout exceeded the ${DEFAULT_MAX_STREAM_BYTES}-byte stream cap and was truncated — result unreliable, treated as a turn failure`;
+  const error = result.error
+    ? `${note}; ${result.error}`
+    : stderr.trim().length ? `${note}; stderr tail: ${stderr.slice(-400)}` : note;
+  return { ...result, ok: false, error };
 }

@@ -47,7 +47,7 @@ export class CursorAdapter implements WorkerAdapter {
     // envUnset forwarded for parity with claude/codex (HED-268): rotation unsets CURSOR_API_KEY for the
     // machine-login account. (buildWorkerEnv already vendor-strips CURSOR_*, so this is belt-and-suspenders,
     // but the adapters must be uniform so no future selector-unset is silently dropped here.)
-    const { stdout, stderr, exitCode, truncated } =
+    const { stdout, stderr, exitCode, stdoutTruncated } =
       await run(this.bin, args, opts.cwd, opts.timeoutMs ?? 600_000, opts.env, opts.envUnset);
     const durationMs = Date.now() - started;
 
@@ -59,7 +59,7 @@ export class CursorAdapter implements WorkerAdapter {
         ok: false, output: '', exitCode, durationMs,
         error: `no result JSON from cursor-agent (exit ${exitCode}); stderr tail: ${stderr.slice(-400)}`,
       };
-      return failIfTruncated(res, truncated, 'cursor-agent');
+      return failIfTruncated(res, stdoutTruncated, 'cursor-agent', stderr);
     }
 
     // usage block confirmed live 2026-08-01 (undocumented at research time):
@@ -84,6 +84,6 @@ export class CursorAdapter implements WorkerAdapter {
       error: ok ? undefined : `cursor-agent is_error=${result.is_error} (exit ${exitCode}); stderr tail: ${stderr.slice(-400)}`,
       raw: result,
     };
-    return failIfTruncated(res, truncated, 'cursor-agent');
+    return failIfTruncated(res, stdoutTruncated, 'cursor-agent', stderr);
   }
 }

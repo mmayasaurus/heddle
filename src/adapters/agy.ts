@@ -137,7 +137,7 @@ export class AgyAdapter implements WorkerAdapter {
 
     const budget = normalizedBudget(opts.timeoutMs);
     const started = Date.now();
-    let { stdout, stderr, exitCode, timedOut, truncated } = await run(this.bin, args, opts.cwd, budget, opts.env);
+    let { stdout, stderr, exitCode, timedOut, stdoutTruncated } = await run(this.bin, args, opts.cwd, budget, opts.env);
 
     // Upstream #573: agy -p can hang indefinitely with zero output when several other
     // long-running CLI agent processes are active (contention in startup/handshake; staggered
@@ -150,14 +150,14 @@ export class AgyAdapter implements WorkerAdapter {
       // Rebuild the argv for the probe: its --print-timeout must fit the PROBE's budget, not the
       // original one (amazon-q, PR #102) — a hung agy still emits nothing either way.
       const retryArgs = this.buildArgs(prompt, { ...opts, timeoutMs: retryBudget });
-      ({ stdout, stderr, exitCode, timedOut, truncated } = await run(this.bin, retryArgs, opts.cwd, retryBudget, opts.env));
+      ({ stdout, stderr, exitCode, timedOut, stdoutTruncated } = await run(this.bin, retryArgs, opts.cwd, retryBudget, opts.env));
       if (timedOut && stdout.trim().length === 0) {
         const res: WorkerResult = {
           ok: false, output: '', exitCode, durationMs: Date.now() - started,
           error: `agy produced no output in ${budget}ms, nor in a ${retryBudget}ms retry probe — ` +
             `matches upstream #573 concurrency-hang signature; route to a fallback provider`,
         };
-        return failIfTruncated(res, truncated, 'agy');
+        return failIfTruncated(res, stdoutTruncated, 'agy', stderr);
       }
     }
 
@@ -169,7 +169,7 @@ export class AgyAdapter implements WorkerAdapter {
         error: `agy produced no stdout (exit ${exitCode}, timedOut=${timedOut}); ` +
           `stderr tail: ${stderr.slice(-400)}`,
       };
-      return failIfTruncated(res, truncated, 'agy');
+      return failIfTruncated(res, stdoutTruncated, 'agy', stderr);
     }
 
     let reportedModel: string | undefined;
@@ -197,7 +197,7 @@ export class AgyAdapter implements WorkerAdapter {
           : `no result event from agy (exit ${exitCode}); stderr tail: ${stderr.slice(-400)}`,
         raw: events,
       };
-      return failIfTruncated(res, truncated, 'agy');
+      return failIfTruncated(res, stdoutTruncated, 'agy', stderr);
     }
 
     const usage: TokenUsage | undefined = result.usage
@@ -226,6 +226,6 @@ export class AgyAdapter implements WorkerAdapter {
           : `agy status=${result.status} (exit ${exitCode})`,
       raw: events,
     };
-    return failIfTruncated(res, truncated, 'agy');
+    return failIfTruncated(res, stdoutTruncated, 'agy', stderr);
   }
 }

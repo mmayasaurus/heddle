@@ -12,14 +12,15 @@ import { CodexAdapter } from '../src/adapters/codex.js';
 import { CursorAdapter } from '../src/adapters/cursor.js';
 
 const mockedRun = vi.mocked(run);
-const baseRun = { stderr: '', exitCode: 0, timedOut: false };
-const cursorOutput = JSON.stringify({ type: 'result', is_error: false, result: 'cursor response' });
-const claudeOutput = JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'claude response' });
+const baseRun = { stderr: '', exitCode: 0, timedOut: false, stdoutTruncated: false, stderrTruncated: false };
+const cursorOutput = JSON.stringify({ type: 'result', is_error: false, result: 'cursor response', session_id: 'cursor-session', usage: { inputTokens: 1, outputTokens: 1 } });
+const claudeOutput = JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'claude response', session_id: 'claude-session', usage: { input_tokens: 1, output_tokens: 1 } });
 const codexOutput = [
+  JSON.stringify({ type: 'thread.started', thread_id: 'codex-session' }),
   JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } }),
   JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'codex response' } }),
 ].join('\n');
-const agyOutput = JSON.stringify({ event: 'result', result: { status: 'SUCCESS', response: 'agy response' } });
+const agyOutput = JSON.stringify({ event: 'result', result: { status: 'SUCCESS', response: 'agy response', conversation_id: 'agy-session', usage: { input_tokens: 1, output_tokens: 1 } } });
 
 describe('subprocess adapter truncation handling', () => {
   it.each([
@@ -28,12 +29,16 @@ describe('subprocess adapter truncation handling', () => {
     ['codex', new CodexAdapter(), codexOutput, { model: 'gpt-5.6-terra', cwd: '/tmp' }],
     ['agy', new AgyAdapter(), agyOutput, { model: 'gemini-3.6-flash-low', cwd: '/tmp' }],
   ] as const)('%s turns an otherwise successful truncated stream into a failure', async (_name, adapter, stdout, options) => {
-    mockedRun.mockResolvedValueOnce({ ...baseRun, stdout, truncated: true });
+    mockedRun.mockResolvedValueOnce({ ...baseRun, stdout, stdoutTruncated: true, stderrTruncated: false });
 
     const result = await adapter.dispatch('work', options);
 
     expect(result.ok).toBe(false);
     expect(result.error).toContain('truncated');
+    expect(result.exitCode).toBe(0);
+    expect(result.raw).toBeDefined();
+    expect(result.usage).toBeDefined();
+    expect(result.sessionId).toBeDefined();
   });
 
   it.each([
@@ -42,7 +47,20 @@ describe('subprocess adapter truncation handling', () => {
     ['codex', new CodexAdapter(), codexOutput, { model: 'gpt-5.6-terra', cwd: '/tmp' }],
     ['agy', new AgyAdapter(), agyOutput, { model: 'gemini-3.6-flash-low', cwd: '/tmp' }],
   ] as const)('%s preserves successful parsing when the stream is not truncated', async (_name, adapter, stdout, options) => {
-    mockedRun.mockResolvedValueOnce({ ...baseRun, stdout, truncated: false });
+    mockedRun.mockResolvedValueOnce({ ...baseRun, stdout, stdoutTruncated: false, stderrTruncated: false });
+
+    const result = await adapter.dispatch('work', options);
+
+    expect(result.ok).toBe(true);
+  });
+
+  it.each([
+    ['cursor', new CursorAdapter(), cursorOutput, { model: 'kimi-k3', cwd: '/tmp' }],
+    ['claude', new ClaudeAdapter(), claudeOutput, { model: 'sonnet', cwd: '/tmp' }],
+    ['codex', new CodexAdapter(), codexOutput, { model: 'gpt-5.6-terra', cwd: '/tmp' }],
+    ['agy', new AgyAdapter(), agyOutput, { model: 'gemini-3.6-flash-low', cwd: '/tmp' }],
+  ] as const)('%s preserves successful parsing when only stderr is truncated', async (_name, adapter, stdout, options) => {
+    mockedRun.mockResolvedValueOnce({ ...baseRun, stdout, stdoutTruncated: false, stderrTruncated: true });
 
     const result = await adapter.dispatch('work', options);
 
