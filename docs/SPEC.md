@@ -12,6 +12,8 @@
 
 ## 0. What heddle is
 
+For a CLI-only distribution snapshot, use `heddle release --standalone <outDir>`.
+
 A **cross-provider agent orchestration layer** for subscription coding CLIs. Claude (Fable 5)
 orchestrator sessions — the operator's own interactive terminal tabs — claim Linear ABC issues,
 decompose them, and dispatch sub-tasks to the best-fit model per task, each worker loaded with only

@@ -6,8 +6,10 @@ import {
   type ClaudeAccountUsage,
   type ClaudePollDeps,
   type TokenRead,
+  buildOauthUsageSidecar,
   claudeKeychainService,
   parseIdentity,
+  parseWeeklyByModel,
   parseUsageResponse,
   pollClaudeAccountUsage,
   pollClaudeUsage,
@@ -111,6 +113,52 @@ describe('parseUsageResponse', () => {
   });
 });
 
+describe('parseWeeklyByModel', () => {
+  it('keeps valid weekly-scoped model percentages and skips unsafe or malformed entries', () => {
+    expect(parseWeeklyByModel({ data: { limits: [
+      { kind: 'weekly_scoped', percent: 41, scope: { model: { display_name: 'Fable' } } },
+      { percent: 52.5, scope: { model: { display_name: 'Claude Fable' } } },
+      { percent: 12, scope: { model: { display_name: 'not/safe' } } },
+      { percent: 101, scope: { model: { display_name: 'Too High' } } },
+      { percent: '8', scope: { model: { display_name: 'Not A Number' } } },
+    ] } })).toEqual({ Fable: 41, 'Claude Fable': 52.5 });
+    expect(parseWeeklyByModel({ limits: 'garbage' })).toEqual({});
+  });
+});
+
+describe('buildOauthUsageSidecar', () => {
+  it('keeps usable OAuth windows and Fable usage without secrets', () => {
+    const row: ClaudeAccountUsage = {
+      id: 'acct1', configDir: '/x/acct1', tokenSource: 'keychain', source: 'ok', stale: false, capturedAt: CAP_AT,
+      liveIdentity: null, fiveHour: { utilization: 14, resetsAt: 1_800_001_000 }, sevenDay: { utilization: 3, resetsAt: 1_800_060_000 },
+      extra: null, modelLimits: [], weeklyByModel: { Fable: 47, Other: 11 }, noteCodes: [],
+    };
+    expect(buildOauthUsageSidecar(row)).toEqual({
+      fablePct: 47, fiveHourPct: 14, sevenDayPct: 3, byModel: { Fable: 47, Other: 11 },
+      capturedAt: Math.floor(Date.parse(CAP_AT) / 1000), source: 'oauth-usage',
+      fiveHourResetsAt: 1_800_001_000, sevenDayResetsAt: 1_800_060_000,
+    });
+  });
+
+  it('does not create a sidecar for an unknown poll result', () => {
+    expect(buildOauthUsageSidecar({
+      id: 'acct1', configDir: '/x/acct1', tokenSource: null, source: 'no-token', stale: true, capturedAt: CAP_AT,
+      liveIdentity: null, fiveHour: { utilization: null, resetsAt: null }, sevenDay: { utilization: null, resetsAt: null },
+      extra: null, modelLimits: [], weeklyByModel: {}, noteCodes: [],
+    })).toBeNull();
+  });
+
+  it('does not replace a sidecar with an empty ok poll, but retains model-only usage', () => {
+    const base = {
+      id: 'acct1', configDir: '/x/acct1', tokenSource: 'keychain' as const, source: 'ok' as const, stale: false, capturedAt: CAP_AT,
+      liveIdentity: null, fiveHour: { utilization: null, resetsAt: null }, sevenDay: { utilization: null, resetsAt: null },
+      extra: null, modelLimits: [], noteCodes: [],
+    };
+    expect(buildOauthUsageSidecar({ ...base, weeklyByModel: {} })).toBeNull();
+    expect(buildOauthUsageSidecar({ ...base, weeklyByModel: { Fable: 47 } })).toMatchObject({ fablePct: 47, byModel: { Fable: 47 } });
+  });
+});
+
 describe('parseIdentity', () => {
   it('reads account.uuid + account.email + organization.uuid', () => {
     expect(parseIdentity({ account: { uuid: 'U1', email: 'a@x' }, organization: { uuid: 'O1' } })).toEqual({
@@ -172,14 +220,28 @@ describe('pollClaudeAccountUsage (hermetic)', () => {
       readToken: () => okToken,
       fetchImpl: stubFetch({
         ...URLS,
-        usageByToken: { tok: { json: { five_hour: { utilization: 15 }, seven_day: { utilization: 3 }, account: { uuid: 'U4', email_address: 'v@x' }, organization: { uuid: 'O4' } } } },
+        usageByToken: { tok: { json: { five_hour: { utilization: 15 }, seven_day: { utilization: 3 }, limits: [{ percent: 47, scope: { model: { display_name: 'Fable' } } }], account: { uuid: 'U4', email_address: 'v@x' }, organization: { uuid: 'O4' } } } },
         profileByToken: { tok: { json: { account: { uuid: 'U4', email: 'v@x' }, organization: { uuid: 'O4' } } } },
       }),
     }));
     expect(row).toMatchObject({ id: 'acct4', source: 'ok', stale: false, tokenSource: 'keychain', capturedAt: CAP_AT });
     expect(row.fiveHour.utilization).toBe(15);
+    expect(row.weeklyByModel).toEqual({ Fable: 47 });
     expect(row.liveIdentity).toEqual({ accountUuid: 'U4', email: 'v@x', organizationUuid: 'O4' });
     expect(row.loggedIn).toBe(true);
+  });
+
+  it('scrubs a weekly model display name that reflects the bearer token', async () => {
+    const token: TokenRead = { ok: true, token: 'secret-token', source: 'keychain' };
+    const row = await pollClaudeAccountUsage(acct('acct4'), deps({
+      readToken: () => token,
+      fetchImpl: stubFetch({
+        ...URLS,
+        usageByToken: { 'secret-token': { json: { limits: [{ percent: 1, scope: { model: { display_name: 'secret-token' } } }] } } },
+        profileByToken: { 'secret-token': { json: { account: { uuid: 'U4' } } } },
+      }),
+    }));
+    expect(row.weeklyByModel).toEqual({});
   });
 
   it('non-200 usage → http-error, stale, windows unknown (NOT 0%)', async () => {
@@ -296,12 +358,12 @@ const okRow = (id: string, u5: number | null, u7: number | null, reset?: { r5?: 
   id, configDir: `/x/${id}`, loggedIn: true, tokenSource: 'keychain', source: 'ok', stale: false, capturedAt: CAP_AT,
   liveIdentity: { accountUuid: `U-${id}`, email: `${id}@x`, organizationUuid: null },
   fiveHour: { utilization: u5, resetsAt: reset?.r5 ?? null }, sevenDay: { utilization: u7, resetsAt: reset?.r7 ?? null },
-  extra: null, modelLimits: [], noteCodes: ['claude.oauthPoll.ok'],
+  extra: null, modelLimits: [], weeklyByModel: {}, noteCodes: ['claude.oauthPoll.ok'],
 });
 const unknownRow = (id: string, source: ClaudeAccountUsage['source']): ClaudeAccountUsage => ({
   id, configDir: `/x/${id}`, loggedIn: true, tokenSource: source === 'no-token' ? null : 'keychain', source, stale: true, capturedAt: CAP_AT,
   liveIdentity: null, fiveHour: { utilization: null, resetsAt: null }, sevenDay: { utilization: null, resetsAt: null },
-  extra: null, modelLimits: [], noteCodes: [`claude.oauthPoll.${source}`],
+  extra: null, modelLimits: [], weeklyByModel: {}, noteCodes: [`claude.oauthPoll.${source}`],
 });
 
 describe('readProviderCaps — claude-oauth poll merge', () => {
