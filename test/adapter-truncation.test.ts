@@ -66,4 +66,21 @@ describe('subprocess adapter truncation handling', () => {
 
     expect(result.ok).toBe(true);
   });
+
+  it.each([
+    ['cursor', new CursorAdapter(), cursorOutput, { model: 'kimi-k3', cwd: '/tmp' }],
+    ['claude', new ClaudeAdapter(), claudeOutput, { model: 'sonnet', cwd: '/tmp' }],
+    ['codex', new CodexAdapter(), codexOutput, { model: 'gpt-5.6-terra', cwd: '/tmp' }],
+    ['agy', new AgyAdapter(), agyOutput, { model: 'gemini-3.6-flash-low', cwd: '/tmp' }],
+  ] as const)('%s attaches the stderr tail when a truncated success carries stderr diagnostics', async (_name, adapter, stdout, options) => {
+    // A truncated stdout that STILL parsed to success has no error of its own, so failIfTruncated
+    // must surface the stderr tail as the only diagnostic (round-1 finding B). Guards that branch:
+    // without it the error would be the truncation note alone and this assertion would fail.
+    mockedRun.mockResolvedValueOnce({ ...baseRun, stdout, stdoutTruncated: true, stderrTruncated: false, stderr: 'diag-from-cli' });
+
+    const result = await adapter.dispatch('work', options);
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain('stderr tail: diag-from-cli');
+  });
 });
