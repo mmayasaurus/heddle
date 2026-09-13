@@ -3,7 +3,8 @@
 // pollute stdout parsing for agents, so it is suppressed at the entry point only —
 // `--disable-warning=<type>` silences just that category (`--no-warnings` would hide every
 // process warning; its `=…` suffix is ignored — verified Node 22.23, 2026-08-15).
-import { existsSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { dispatch, planDispatch, summarizePlan } from './dispatch.js';
 import { Ledger } from './ledger.js';
 import { loadRouting, describeTaskClasses } from './routing.js';
@@ -16,7 +17,8 @@ import { pickClaudeAccount, readClaudeAccounts } from './capaware.js';
 import { claudeAccountRows, pickClaudeAccountsBatch, usableClaudeCaps } from './account-pick.js';
 import { bindingMeter, claudeFloorsFrom } from './floors.js';
 import { loadLanes } from './lanes.js';
-import { readProviderCaps } from './usage.js';
+import { DEFAULT_USAGE_DIR, readProviderCaps } from './usage.js';
+import { buildOauthUsageSidecar, pollClaudeUsage } from './claude-usage.js';
 import { formatUsageRemaining, readUsageRemaining } from './usage-remaining.js';
 import { runRuleCli } from './rules/lifecycle.js';
 import { DOCTOR_PROVIDERS, formatDoctorReport, runDoctor } from './doctor.js';
@@ -26,6 +28,7 @@ import { runPrSweep } from './pr-sweep.js';
 import { runPrWatch } from './pr-watch.js';
 import { bootstrapComms } from './comms/bootstrap.js';
 import { loadAccountRegistry } from './accounts.js';
+import { diffFleetHooks, installFleetHooks } from './fleet.js';
 import { releaseStandalone } from './release/standalone.js';
 
 /**
@@ -74,6 +77,8 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
   heddle accounts list [--json]  registered Claude, Codex, and Cursor accounts
   heddle accounts verify         verify local credential paths and recorded Claude login state
   heddle comms init [--json]     initialize the comms database, operator token, and registered project rooms
+  heddle fleet install-hooks [--dry-run] [--json]  install vendored fleet hooks under ~/.heddle/fleet/hooks
+  heddle fleet hooks-diff [--json]  compare installed fleet hooks with the vendored canon
   heddle mode [desktop|mobile|away] [--note "<t>"] [--json]   operator mode (HED-336): no arg prints
                                  the current mode; a mode word sets it (~/.heddle/operator-mode.json —
                                  the pocket console and desktop app write the same file)
@@ -90,6 +95,7 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
   heddle ledger report-in-session <id> (--ok | --failed) [--error "<why>"] [--input-tokens N] [--cached-input-tokens N] [--output-tokens N] [--reasoning-tokens N] [--duration-ms N] [--json]  administrative path: may report any orchestrator's handoff
   heddle usage [--since <iso>] [--json]    per-provider totals
   heddle usage --remaining [--account <id>] [--json]  per-account quota headroom
+  heddle usage poll-claude [--json]  poll Claude OAuth usage and atomically write per-account sidecars
   heddle account pick [--for <letter[,letter...]>] [--json] [--explain]   healthiest addressable Claude account for a fleet relaunch
   heddle pr own <whoami|claim|check|release|mine> [<pr#>] [--json]       coordinate ownership of a GitHub PR
   heddle pr sweep <pr#> [--json]       sweep all GitHub PR review channels and report mechanical gates
@@ -133,9 +139,12 @@ const json = has('--json');
  * Skipped too for `comms` (codeant HED-409): `heddle comms init` provisions the comms broker
  * (comms.db, operator token, rooms) and likewise has no business opening or mutating the dispatch
  * ledger — a fresh-machine setup step must not incur ledger startup, migration, or SQLite locking.
+ * Skipped too for `usage poll-claude` (HED-329): a scheduled vendor-poll that only writes usage
+ * sidecars runs headless on a launchd timer (~5 min), has no ledger reads to make honest, and must
+ * not mutate the ledger — closing orphans as a side effect of a background poll — on that cadence.
  * Best-effort — a hygiene failure must never break the command the operator actually ran.
  */
-if (cmd !== 'mode' && cmd !== 'pr' && cmd !== 'comms' && !(cmd === 'ledger' && (process.argv[3] === 'sweep' || process.argv[3] === 'finish'))) {
+if (cmd !== 'mode' && cmd !== 'pr' && cmd !== 'comms' && cmd !== 'fleet' && !(cmd === 'ledger' && (process.argv[3] === 'sweep' || process.argv[3] === 'finish')) && !(cmd === 'usage' && process.argv[3] === 'poll-claude')) {
   try {
     const { closed } = new Ledger().sweepOrphans();
     if (closed > 0) console.error(`heddle: closed ${closed} orphaned in-flight dispatch row${closed === 1 ? '' : 's'} (heddle ledger --json shows outcome='orphaned')`);
@@ -653,6 +662,39 @@ try {
     }
 
     case 'usage': {
+      if (process.argv[3] === 'poll-claude') {
+        const accounts = readClaudeAccounts();
+        const result = await pollClaudeUsage(accounts);
+        const usageDir = process.env.HEDDLE_USAGE_DIR ?? DEFAULT_USAGE_DIR;
+        mkdirSync(usageDir, { recursive: true });
+        const written: string[] = [];
+        const skipped: { id: string; source: string }[] = [];
+        for (const row of result.rows) {
+          const sidecar = buildOauthUsageSidecar(row);
+          if (!sidecar) {
+            skipped.push({ id: row.id, source: row.source });
+            continue;
+          }
+          const safeId = row.id.replace(/[^A-Za-z0-9_.-]/g, '_');
+          const path = join(usageDir, `claude-${safeId}.oauth-usage.json`);
+          try {
+            const existing = JSON.parse(readFileSync(path, 'utf8')) as { capturedAt?: unknown };
+            if (typeof existing.capturedAt === 'number' && Number.isFinite(existing.capturedAt) && existing.capturedAt > sidecar.capturedAt) {
+              skipped.push({ id: row.id, source: `${row.source} (newer sidecar kept)` });
+              continue;
+            }
+          } catch { /* absent or corrupt sidecars are replaced atomically */ }
+          const tempPath = join(usageDir, `.claude-${safeId}.oauth-usage-${process.pid}-${Date.now()}.tmp`);
+          writeFileSync(tempPath, JSON.stringify(sidecar));
+          renameSync(tempPath, path);
+          written.push(path);
+        }
+        out(json, { written, skipped, warnings: result.warnings }, () => result.rows.map((row) => {
+          const path = written.find((candidate) => candidate.endsWith(`claude-${row.id.replace(/[^A-Za-z0-9_.-]/g, '_')}.oauth-usage.json`));
+          return path ? `${row.id} → written (${row.source})` : `${row.id} → skipped (${row.source})`;
+        }).join('\n'));
+        break;
+      }
       if (has('--remaining')) {
         const account = arg('--account');
         if (has('--account') && (!account || account.startsWith('--'))) {
@@ -778,6 +820,34 @@ try {
         ...result.rooms.map((room) => `room ${room.name}: ${room.created ? 'created' : 'kept'}`),
         ...result.skippedProjectRooms.map((room) => `skipped ${room.name}: ${room.reason}`),
       ].join('\n'));
+      break;
+    }
+
+    case 'fleet': {
+      const action = process.argv[3];
+      if (action === 'install-hooks') {
+        const report = installFleetHooks({ dryRun: has('--dry-run') });
+        out(json, report, () => [
+          `target: ${report.targetDir}`,
+          ...report.files.map((file) => {
+            const text = !report.dryRun ? file.action
+              : file.action === 'created' ? 'would create'
+                : file.action === 'updated' ? 'would update'
+                  : file.action === 'unchanged' ? 'would leave unchanged'
+                    : `would ${file.action}`;
+            return `${text} ${file.name}`;
+          }),
+        ].join('\n'));
+        break;
+      }
+      if (action === 'hooks-diff') {
+        const report = diffFleetHooks();
+        out(json, report, () => report.clean ? 'clean' : report.files.map((file) => `${file.action} ${file.name}`).join('\n'));
+        if (!report.clean) process.exitCode = 1;
+        break;
+      }
+      console.error('usage: heddle fleet <install-hooks|hooks-diff> [--dry-run] [--json]');
+      process.exitCode = 2;
       break;
     }
 
