@@ -108,6 +108,89 @@ describe('cap-aware routing', () => {
   });
 });
 
+describe('regression PR#HED-443 — Claude overage safeguards', () => {
+  const account = (overageEnabled?: boolean) => ({ id: 'acct1', configDir: null, overageEnabled });
+  const capped = (used: number): ProviderCaps => ({
+    ...fresh('claude', used),
+    accounts: [{ id: 'acct1', fiveHour: { usedPercentage: used, resetsAt: null }, sevenDay: { usedPercentage: null, resetsAt: null }, windows: {}, noteCodes: [], limitReached: false, stale: false, overageEnabled: null, overageSpend: null }],
+  });
+
+  it('raises a real-money alert at 100% when overage is enabled or unknown, but not when explicitly off', () => {
+    const enabled = adviseClaudeAccount(capped(100), [account(true)], {});
+    expect(enabled.overageAlert).toEqual({ accountId: 'acct1', spend: null, used: 100 });
+    expect(enabled.line).toContain('⛔ REAL MONEY — OVERAGE BILLING ACTIVE on acct1');
+
+    const disabled = adviseClaudeAccount(capped(100), [account(false)], {});
+    expect(disabled.overageAlert).toBeNull();
+    expect(disabled.line).not.toContain('⛔ REAL MONEY');
+
+    const unknown = adviseClaudeAccount(capped(100), [account()], {});
+    expect(unknown.overageAlert).toEqual({ accountId: 'acct1', spend: null, used: 100 });
+    expect(unknown.line).toContain('⛔ REAL MONEY');
+  });
+
+  it('keeps the normal warning path below the overage threshold', () => {
+    const advice = adviseClaudeAccount(capped(97), [account(true)], {});
+    expect(advice.overageAlert).toBeNull();
+    expect(advice.line).not.toContain('⛔ REAL MONEY');
+    expect(advice.line).toContain('97% used');
+  });
+
+  // Per-account row builder (mirrors capped()'s row shape).
+  const row = (id: string, used: number | null, over: boolean | null = null, opts: { stale?: boolean; spend?: number | null } = {}) =>
+    ({ id, fiveHour: { usedPercentage: used, resetsAt: null }, sevenDay: { usedPercentage: null, resetsAt: null }, windows: {}, noteCodes: [], limitReached: false, stale: opts.stale ?? false, overageEnabled: over, overageSpend: opts.spend ?? null });
+
+  it('alerts on a FRESH per-account 100% row even when the PROVIDER snapshot is stale (findings 1+4)', () => {
+    // readClaudeTap marks the provider stale when claude.json is missing while per-account rows stay
+    // fresh; the alert must key on the row's own freshness, not caps.stale, or billing goes silent.
+    const caps: ProviderCaps = { ...fresh('claude', 100), stale: true, accounts: [row('acct1', 100, null)] };
+    const advice = adviseClaudeAccount(caps, [account()], {});
+    expect(advice.overageAlert).toEqual({ accountId: 'acct1', spend: null, used: 100 });
+    expect(advice.line).toContain('⛔ REAL MONEY');
+  });
+
+  it('an overage-off account at cap does not MASK another capped account that can bill (finding 3)', () => {
+    const caps: ProviderCaps = { ...fresh('claude', 100), accounts: [row('safe', 100, false), row('billing', 100, null)] };
+    const advice = adviseClaudeAccount(caps, [
+      { id: 'safe', configDir: null, overageEnabled: false },
+      { id: 'billing', configDir: '/tmp/.claude-billing' },
+    ], {}); // no CLAUDE_CONFIG_DIR → current resolves to the null-configDir account 'safe'
+    expect(advice.overageAlert).toEqual({ accountId: 'billing', spend: null, used: 100 });
+    expect(advice.line).toContain('OVERAGE BILLING ACTIVE on billing');
+  });
+
+  it('provider-only fallback fires ONLY when the mirror binds the snapshot to this session (finding 1)', () => {
+    // activeAccount === cur and no per-account row for cur → attribute the provider-level 100% to cur.
+    const bound = adviseClaudeAccount({ ...fresh('claude', 100), accounts: [], activeAccount: 'acct1' }, [account(true)], {});
+    expect(bound.overageAlert).toEqual({ accountId: 'acct1', spend: null, used: 100 });
+    expect(bound.line).toContain('⛔ REAL MONEY');
+    // a confirmed overage-off session account stays silent even when bound.
+    const off = adviseClaudeAccount({ ...fresh('claude', 100), accounts: [], activeAccount: 'acct1' }, [account(false)], {});
+    expect(off.overageAlert).toBeNull();
+  });
+
+  it('provider-only fallback does NOT misattribute another account snapshot to this session (verify, ledger 844)', () => {
+    // The top-level 100% belongs to activeAccount 'acct2'; this session is 'acct1' → no alert for acct1.
+    const advice = adviseClaudeAccount({ ...fresh('claude', 100), accounts: [], activeAccount: 'acct2' }, [account(true)], {});
+    expect(advice.overageAlert).toBeNull();
+  });
+
+  it('provider-only fallback does NOT override this session own fresh below-cap row (verify, ledger 844)', () => {
+    // cur 'acct1' is really at 20%; the top-level 100% is an aggregate / another account → no false alert.
+    const caps: ProviderCaps = { ...fresh('claude', 100), accounts: [row('acct1', 20, true)], activeAccount: 'acct1' };
+    const advice = adviseClaudeAccount(caps, [account(true)], {});
+    expect(advice.overageAlert).toBeNull();
+    expect(advice.line).not.toContain('⛔ REAL MONEY');
+  });
+
+  it('reports overage spend when the payload carries it', () => {
+    const caps: ProviderCaps = { ...fresh('claude', 100), accounts: [row('acct1', 100, true, { spend: 4.2 })] };
+    const advice = adviseClaudeAccount(caps, [account(true)], {});
+    expect(advice.overageAlert).toEqual({ accountId: 'acct1', spend: 4.2, used: 100 });
+    expect(advice.line).toContain('spend 4.2');
+  });
+});
+
 // HED-106 / HED-264 — the tier-ladder expansion walk INSIDE decideRoute. Gated on opts.ladder, so the
 // suite above (no ladder) proves the byte-stable paths are untouched; these exercise the walk with a
 // hermetic lanes/lane_defaults fixture (independent of the live routing values).

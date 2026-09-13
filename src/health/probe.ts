@@ -4,7 +4,7 @@ export type CheckOutcome = 'ok' | 'warn' | 'fail' | 'skipped';
 
 export interface CheckResult {
   id: string;
-  kind: 'binary' | 'login' | 'catalog' | 'config' | 'freshness';
+  kind: 'binary' | 'login' | 'catalog' | 'config' | 'freshness' | 'comms';
   provider?: string;
   outcome: CheckOutcome;
   detail: string;
@@ -28,6 +28,8 @@ export interface DoctorDeps {
     projects?: string;
     accounts?: string;
     secrets?: string;
+    comms?: string;
+    operatorToken?: string;
   };
   timeouts?: {
     binaryMs?: number;

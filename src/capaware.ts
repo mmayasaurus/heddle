@@ -35,6 +35,8 @@ export interface CapAwarePolicy {
   routeAwayAtPct: number;
 }
 export const DEFAULT_CAP_AWARE_POLICY: CapAwarePolicy = { enabled: true, routeAwayAtPct: 90 };
+/** At the provider's published cap, enabled/unknown overage must be treated as paid until confirmed off. */
+export const OVERAGE_RED_PCT = 100;
 
 export function capAwarePolicy(table: RoutingTable): CapAwarePolicy {
   const node = (table.policy as any)?.cap_aware_routing ?? {};
@@ -408,6 +410,8 @@ export interface ClaudeAccount {
    * and a pin to it is refused. Absent = assumed logged in (registries predating the field).
    */
   loggedIn?: boolean;
+  /** Operator-declared extra-usage posture. Absent means unknown, which is conservative at the cap. */
+  overageEnabled?: boolean;
 }
 
 /** `~/.heddle/accounts.json` → `claude[]`. Missing/corrupt → []. Never throws. */
@@ -424,6 +428,7 @@ export function readClaudeAccounts(path: string = process.env.HEDDLE_ACCOUNTS ??
         email: typeof a.email === 'string' ? a.email : undefined,
         note: typeof a.note === 'string' ? a.note : undefined,
         loggedIn: a.loggedIn === false ? false : undefined,
+        ...(typeof a.overageEnabled === 'boolean' ? { overageEnabled: a.overageEnabled } : {}),
       }));
   } catch {
     return [];
@@ -444,8 +449,44 @@ export interface AccountAdvice {
   current: { id: string; usedPct: number | null } | null;
   /** Per-account view for the trace / UI. */
   known: { id: string; usedPct: number | null; stale: boolean }[];
+  /** Paid-overage risk at the five-hour cap. Non-null when a FRESH reading (per-account, else the
+   *  provider-level snapshot for this session's account) is at/over OVERAGE_RED_PCT and that account's
+   *  overage posture is enabled OR unknown; null when no such capped account exists or every capped
+   *  account is confirmed overage-off. */
+  overageAlert: { accountId: string; spend: number | null; used: number } | null;
   /** One line for an in-session refusal instruction / `heddle route`. */
   line: string;
+}
+
+/** Narrow provider-only fallback (HED-443 finding 1): the provider-level 5h snapshot counts for THIS
+ *  session's account ONLY when the mirror explicitly binds it (activeAccount === cur), cur has no row
+ *  of its own, the snapshot is at/over the cap, and cur can bill. Otherwise the top-level number is a
+ *  different account's, an aggregate, or claude.json's last-rendered value (HED-262) and is not cur's. */
+function providerLevelOverage(caps: ProviderCaps | undefined, cur: ClaudeAccount | null, usable: boolean):
+  { id: string; used: number; spend: number | null } | null {
+  if (!cur || !usable || !caps || caps.activeAccount !== cur.id) return null;
+  if (caps.accounts.some((a) => a.id === cur.id)) return null;
+  const used = caps.fiveHour.usedPercentage;
+  if (used === null || used < OVERAGE_RED_PCT || cur.overageEnabled === false) return null;
+  return { id: cur.id, used, spend: null };
+}
+
+/** Paid-overage RED detection for the five-hour cap (HED-443). Fresh per-account rows first, each keyed
+ *  on its OWN staleness (never the provider snapshot's), filtered to accounts that CAN bill (enabled or
+ *  unknown) BEFORE the pick so a confirmed-off account never masks a billing one; then the narrow
+ *  provider-level fallback for this session. Prefers this session's account; else the first billable. */
+function detectOverageAlert(
+  caps: ProviderCaps | undefined, accounts: ClaudeAccount[], cur: ClaudeAccount | null, usable: boolean,
+): { accountId: string; spend: number | null; used: number } | null {
+  const redRows = (caps?.accounts ?? [])
+    .filter((a) => !a.stale && a.fiveHour.usedPercentage !== null && a.fiveHour.usedPercentage >= OVERAGE_RED_PCT)
+    .map((a) => ({
+      id: a.id, used: a.fiveHour.usedPercentage as number, spend: a.overageSpend ?? null,
+      overageEnabled: a.overageEnabled ?? accounts.find((x) => x.id === a.id)?.overageEnabled ?? null, // payload → declared → unknown
+    }))
+    .filter((a) => a.overageEnabled !== false);
+  const red = redRows.find((a) => a.id === cur?.id) ?? redRows[0] ?? providerLevelOverage(caps, cur, usable);
+  return red ? { accountId: red.id, spend: red.spend, used: red.used } : null;
 }
 
 export function adviseClaudeAccount(caps: ProviderCaps | undefined, accounts: ClaudeAccount[], env: NodeJS.ProcessEnv = process.env): AccountAdvice {
@@ -459,6 +500,12 @@ export function adviseClaudeAccount(caps: ProviderCaps | undefined, accounts: Cl
   const best = bestRow ? { id: bestRow.id, usedPct: bestRow.usedPct, configDir: accounts.find((a) => a.id === bestRow.id)?.configDir ?? null } : null;
   const cur = currentClaudeAccount(accounts, env);
   const current = cur ? { id: cur.id, usedPct: known.find((r) => r.id === cur.id)?.usedPct ?? null } : null;
+  // Overage RED detection is deliberately INDEPENDENT of the provider-level `usable` gate above: a
+  // stale provider snapshot (claude.json missing → readClaudeTap marks the PROVIDER stale) must never
+  // suppress a FRESH per-account reading at/over the cap — that suppression is the exact silent-billing
+  // miss HED-443 exists to prevent, so the per-row `stale` flag is the freshness gate here, not
+  // `caps.stale` (review findings 1 + 4).
+  const overageAlert = detectOverageAlert(caps, accounts, cur, usable);
   const line = best && current && best.id === current.id
     ? `Claude accounts: this session is already on the account with the most 5h headroom (${best.id}, ${best.usedPct.toFixed(0)}% used).`
     : best
@@ -474,7 +521,9 @@ export function adviseClaudeAccount(caps: ProviderCaps | undefined, accounts: Cl
   const fableLine = fable === null ? line
     : `${line} Fable-weekly: ${fable.id} lowest at ${fmtPct(fable.pct)}%` +
       (fable.pct >= FABLE_SOFT_CAP_ADVISE_PCT ? ` — at/over the ${FABLE_SOFT_CAP_ADVISE_PCT}% act threshold (weekly cap ${FABLE_WEEKLY_CAP_PCT}); prefer Opus for delegated work or rotate accounts.` : '.');
-  return { best, current, known, line: fableLine };
+  const overageLine = overageAlert === null ? fableLine
+    : `${fableLine} ⛔ REAL MONEY — OVERAGE BILLING ACTIVE on ${overageAlert.accountId} (spend ${overageAlert.spend ?? 'unknown'}) — MINIMIZE TURNS: every token is billed; finish the in-flight step, then hold for rotation.`;
+  return { best, current, known, overageAlert, line: overageLine };
 }
 
 /**

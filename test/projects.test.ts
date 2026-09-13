@@ -20,6 +20,7 @@ const validRegistry = {
       linearTeam: 'ACM',
       defaultRoom: '#acme',
       launcher: 'resume-sessions-acme.sh',
+      tracker: 'linear',
     },
     {
       name: 'heddle',
@@ -28,6 +29,7 @@ const validRegistry = {
       linearTeam: 'HED',
       defaultRoom: '#heddle',
       launcher: 'resume-sessions-hed.sh',
+      tracker: 'linear',
     },
   ],
 };
@@ -168,13 +170,38 @@ describe('loadProjectRegistry', () => {
   });
 });
 
+describe('tracker field (HED-408)', () => {
+  const { tempDir } = useTempResources('heddle-tracker-test-');
+  const write = (extra: Record<string, unknown>): string => {
+    const path = join(tempDir(), 'projects.json');
+    writeFileSync(path, JSON.stringify({
+      schemaVersion: 1,
+      projects: [{ name: 'P', workspaceRoots: ['/p'], agentIds: ['A'], linearTeam: 'P', defaultRoom: '#p', launcher: 'p.sh', ...extra }],
+    }));
+    return path;
+  };
+
+  it('defaults to linear when tracker is absent (pre-HED-408 registries load unchanged)', () => {
+    expect(loadProjectRegistry(write({})).projects[0].tracker).toBe('linear');
+  });
+
+  it('carries an explicit tracker value', () => {
+    expect(loadProjectRegistry(write({ tracker: 'github' })).projects[0].tracker).toBe('github');
+    expect(loadProjectRegistry(write({ tracker: 'linear' })).projects[0].tracker).toBe('linear');
+  });
+
+  it('throws loudly on an unknown tracker value (hand-edit typo)', () => {
+    expect(() => loadProjectRegistry(write({ tracker: 'jira' }))).toThrow(/tracker must be one of/);
+  });
+});
+
 describe('projectForCwd', () => {
   const { tempDir } = useTempResources('heddle-projectforcwd-test-');
   const reg: ProjectRegistry = {
     schemaVersion: 1,
     projects: [
-      { name: 'Outer', workspaceRoots: ['/a'], agentIds: ['A'], linearTeam: 'OUT', defaultRoom: '#outer', launcher: 'outer.sh' },
-      { name: 'Inner', workspaceRoots: ['/a/b'], agentIds: ['B'], linearTeam: 'IN', defaultRoom: '#inner', launcher: 'inner.sh' },
+      { name: 'Outer', workspaceRoots: ['/a'], agentIds: ['A'], linearTeam: 'OUT', defaultRoom: '#outer', launcher: 'outer.sh', tracker: 'linear' },
+      { name: 'Inner', workspaceRoots: ['/a/b'], agentIds: ['B'], linearTeam: 'IN', defaultRoom: '#inner', launcher: 'inner.sh', tracker: 'linear' },
     ],
   };
 
@@ -194,7 +221,7 @@ describe('projectForCwd', () => {
     // root /a/foo must not match cwd /a/foobar — isolated registry so nothing else can match instead.
     const onlyFoo: ProjectRegistry = {
       schemaVersion: 1,
-      projects: [{ name: 'Foo', workspaceRoots: ['/a/foo'], agentIds: ['F'], linearTeam: 'FOO', defaultRoom: '#foo', launcher: 'foo.sh' }],
+      projects: [{ name: 'Foo', workspaceRoots: ['/a/foo'], agentIds: ['F'], linearTeam: 'FOO', defaultRoom: '#foo', launcher: 'foo.sh', tracker: 'linear' }],
     };
     expect(projectForCwd(onlyFoo, '/a/foobar')).toBeNull();
   });
@@ -236,8 +263,8 @@ describe('projectForAgent', () => {
   const reg: ProjectRegistry = {
     schemaVersion: 1,
     projects: [
-      { name: 'Acme', workspaceRoots: ['/x'], agentIds: ['A', 'B'], linearTeam: 'ACM', defaultRoom: '#acme', launcher: 'acme.sh' },
-      { name: 'heddle', workspaceRoots: ['/y'], agentIds: ['R', 'S'], linearTeam: 'HED', defaultRoom: '#heddle', launcher: 'hed.sh' },
+      { name: 'Acme', workspaceRoots: ['/x'], agentIds: ['A', 'B'], linearTeam: 'ACM', defaultRoom: '#acme', launcher: 'acme.sh', tracker: 'linear' },
+      { name: 'heddle', workspaceRoots: ['/y'], agentIds: ['R', 'S'], linearTeam: 'HED', defaultRoom: '#heddle', launcher: 'hed.sh', tracker: 'linear' },
     ],
   };
 

@@ -31,7 +31,8 @@ export function copyShipSet(source: string, destination: string): void {
 export function isIncluded(path: string): boolean {
   path = toPosixPath(path);
   return rootFiles.has(path) || path.startsWith('src/') || path.startsWith('test/') || path.startsWith('routing/')
-    || path.startsWith('skills/') || (path.startsWith('docs/') && !path.startsWith('docs/fleet/'))
+    || path.startsWith('skills/') || path.startsWith('assets/')
+    || (path.startsWith('docs/') && !path.startsWith('docs/fleet/'))
     || path === '.github/workflows/gate.yml';
 }
 

@@ -20,7 +20,10 @@ describe('regression PR#119 — standalone snapshot generator review findings', 
 
     expect(one.ok).toBe(true);
     expect(two.ok).toBe(true);
-    const included = ['src/cli.ts', 'docs/PROVIDER-MATRIX.md', 'skills/quality-gate.md', '.github/workflows/gate.yml'];
+    const included = [
+      'src/cli.ts', 'docs/PROVIDER-MATRIX.md', 'skills/quality-gate.md',
+      'assets/commands/startup.md', '.github/workflows/gate.yml',
+    ];
     for (const path of included) {
       expect(existsSync(join(first, path))).toBe(true);
     }
