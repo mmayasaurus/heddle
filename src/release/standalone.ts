@@ -26,9 +26,7 @@ export function releaseStandalone(options: StandaloneOptions): StandaloneResult 
 
 function generate(options: StandaloneOptions, outDir: string, tempDir: string): StandaloneResult {
   const sourceRef = options.sourceRef ?? 'HEAD';
-  const sourceDir = options.sourceDir ?? process.cwd();
-  assertMainHeadSource(sourceDir, sourceRef);
-  const extracted = extractShipSet(sourceDir, sourceRef);
+  const extracted = extractShipSet(options.sourceDir ?? process.cwd(), sourceRef);
   try {
     copyShipSet(extracted.dir, tempDir);
     writeFileSync(join(tempDir, 'README.md'), standaloneReadme(version(tempDir), extracted.sourceCommit));
@@ -42,18 +40,6 @@ function generate(options: StandaloneOptions, outDir: string, tempDir: string): 
   } finally {
     rmSync(extracted.dir, { recursive: true, force: true });
   }
-}
-
-function assertMainHeadSource(sourceDir: string, sourceRef: string): void {
-  const branch = execFileSync('git', ['branch', '--show-current'], { cwd: sourceDir, encoding: 'utf8' }).trim();
-  if (branch !== 'main') throw new Error('standalone releases must be generated from a main checkout');
-  const status = execFileSync('git', ['status', '--porcelain'], { cwd: sourceDir, encoding: 'utf8' });
-  if (status) throw new Error('standalone releases require a clean main checkout');
-  const head = execFileSync('git', ['rev-parse', 'HEAD^{commit}'], { cwd: sourceDir, encoding: 'utf8' }).trim();
-  const sourceCommit = execFileSync('git', ['rev-parse', `${sourceRef}^{commit}`], {
-    cwd: sourceDir, encoding: 'utf8',
-  }).trim();
-  if (sourceCommit !== head) throw new Error('standalone releases must be generated from main HEAD');
 }
 
 export function checkStandaloneOutput(root: string): { ok: boolean; issues: string[] } {
