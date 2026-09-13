@@ -28,6 +28,8 @@ import { runPrSweep } from './pr-sweep.js';
 import { runPrWatch } from './pr-watch.js';
 import { bootstrapComms } from './comms/bootstrap.js';
 import { loadAccountRegistry } from './accounts.js';
+import { diffFleetHooks, installFleetHooks } from './fleet.js';
+import { releaseStandalone } from './release/standalone.js';
 
 /**
  * heddle CLI — the surface orchestrators (and later the dashboard) drive.
@@ -75,12 +77,15 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
   heddle accounts list [--json]  registered Claude, Codex, and Cursor accounts
   heddle accounts verify         verify local credential paths and recorded Claude login state
   heddle comms init [--json]     initialize the comms database, operator token, and registered project rooms
+  heddle fleet install-hooks [--dry-run] [--json]  install vendored fleet hooks under ~/.heddle/fleet/hooks
+  heddle fleet hooks-diff [--json]  compare installed fleet hooks with the vendored canon
   heddle mode [desktop|mobile|away] [--note "<t>"] [--json]   operator mode (HED-336): no arg prints
                                  the current mode; a mode word sets it (~/.heddle/operator-mode.json —
                                  the pocket console and desktop app write the same file)
   heddle init-project <dir> [--canonical <path>] [--name <n>] [--team <KEY>] [--agents A,B,…] [--room <#room>] [--launcher <script>] [--enforce-memtrace] [--dry-run] [--json] [--show-content]
   heddle whoami [--json]         this process's bound identity (HEDDLE_AGENT / FLEET_AGENT / .fleet-agent) + worker context
   heddle doctor [--json] [--provider <p>]   verify harnesses/accounts/config; --provider runs only that provider's checks plus global config checks (exit 1 on any fail)
+  heddle release --standalone <outDir> [--source-ref <git ref>] [--init-git] [--verify] [--json]
   heddle workers [--stale <hours>] [--json]   dispatches still in flight (--stale: only orphans older than N hours)
   heddle ledger [--issue ABC-123] [--limit N] [--json]
   heddle ledger finish <id> --error "<why>"   close an orphaned in-flight row (ok=0)
@@ -139,7 +144,7 @@ const json = has('--json');
  * not mutate the ledger — closing orphans as a side effect of a background poll — on that cadence.
  * Best-effort — a hygiene failure must never break the command the operator actually ran.
  */
-if (cmd !== 'mode' && cmd !== 'pr' && cmd !== 'comms' && !(cmd === 'ledger' && (process.argv[3] === 'sweep' || process.argv[3] === 'finish')) && !(cmd === 'usage' && process.argv[3] === 'poll-claude')) {
+if (cmd !== 'mode' && cmd !== 'pr' && cmd !== 'comms' && cmd !== 'fleet' && !(cmd === 'ledger' && (process.argv[3] === 'sweep' || process.argv[3] === 'finish')) && !(cmd === 'usage' && process.argv[3] === 'poll-claude')) {
   try {
     const { closed } = new Ledger().sweepOrphans();
     if (closed > 0) console.error(`heddle: closed ${closed} orphaned in-flight dispatch row${closed === 1 ? '' : 's'} (heddle ledger --json shows outcome='orphaned')`);
@@ -475,6 +480,33 @@ try {
       break;
     }
 
+    case 'release': {
+      const standalone = process.argv[3] === '--standalone';
+      const outDir = process.argv[4];
+      const usageError = (error: string): void => {
+        out(json, { ok: false, error }, () => error);
+        process.exit(2);
+      };
+      if (!standalone || !outDir || outDir.startsWith('--')) {
+        usageError('usage: heddle release --standalone <outDir> [--source-ref <git ref>] [--init-git] [--verify]');
+        break;
+      }
+      const sourceRef = arg('--source-ref');
+      if (has('--source-ref') && (!sourceRef || sourceRef.startsWith('--'))) {
+        usageError('release: --source-ref needs a git ref');
+        break;
+      }
+      const result = releaseStandalone({
+        outDir, sourceRef, initGit: has('--init-git'), verify: has('--verify'),
+      });
+      const text = json ? JSON.stringify(result, null, 2) : result.ok
+        ? `Standalone snapshot generated: ${outDir}\nsource commit: ${result.sourceCommit}\nship set: ${result.shipSetHash}`
+          + '\nscrub exemption: LICENSE copyright holder line (legal ownership; operator-approved)'
+        : `heddle release: ${result.error}`;
+      process.stdout.write(text + '\n', () => process.exit(result.ok ? 0 : 1));
+      break;
+    }
+
     case 'workers': {
       const staleHours = arg('--stale');
       if (staleHours !== undefined && !(Number.isFinite(Number(staleHours)) && Number(staleHours) > 0)) {
@@ -788,6 +820,34 @@ try {
         ...result.rooms.map((room) => `room ${room.name}: ${room.created ? 'created' : 'kept'}`),
         ...result.skippedProjectRooms.map((room) => `skipped ${room.name}: ${room.reason}`),
       ].join('\n'));
+      break;
+    }
+
+    case 'fleet': {
+      const action = process.argv[3];
+      if (action === 'install-hooks') {
+        const report = installFleetHooks({ dryRun: has('--dry-run') });
+        out(json, report, () => [
+          `target: ${report.targetDir}`,
+          ...report.files.map((file) => {
+            const text = !report.dryRun ? file.action
+              : file.action === 'created' ? 'would create'
+                : file.action === 'updated' ? 'would update'
+                  : file.action === 'unchanged' ? 'would leave unchanged'
+                    : `would ${file.action}`;
+            return `${text} ${file.name}`;
+          }),
+        ].join('\n'));
+        break;
+      }
+      if (action === 'hooks-diff') {
+        const report = diffFleetHooks();
+        out(json, report, () => report.clean ? 'clean' : report.files.map((file) => `${file.action} ${file.name}`).join('\n'));
+        if (!report.clean) process.exitCode = 1;
+        break;
+      }
+      console.error('usage: heddle fleet <install-hooks|hooks-diff> [--dry-run] [--json]');
+      process.exitCode = 2;
       break;
     }
 

@@ -20,6 +20,11 @@ export interface AccountOverage {
   creditsRemaining?: number;
 }
 
+export interface AccountEnvRepoint {
+  baseUrl: string;
+  authTokenRef: string;
+}
+
 export interface Account {
   id: string;
   provider: 'claude' | 'codex' | 'cursor';
@@ -29,6 +34,7 @@ export interface Account {
   tier?: AccountTier;
   fences?: AccountFences;
   overage?: AccountOverage;
+  envRepoint?: AccountEnvRepoint;
   lastVerified?: string;
   notes?: string;
   orgId?: string;
@@ -97,6 +103,28 @@ function validateOverage(value: unknown, where: string, path: string): AccountOv
   return { posture };
 }
 
+function validateEnvRepoint(value: unknown, where: string, path: string): AccountEnvRepoint {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`accounts.json at ${path}: ${where}.envRepoint must be an object`);
+  }
+  const envRepoint = value as Record<string, unknown>;
+  if (typeof envRepoint.baseUrl !== 'string' || !envRepoint.baseUrl) {
+    throw new Error(`accounts.json at ${path}: ${where}.envRepoint.baseUrl must be an http(s) URL`);
+  }
+  try {
+    const url = new URL(envRepoint.baseUrl);
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+      throw new Error('unsupported protocol');
+    }
+  } catch {
+    throw new Error(`accounts.json at ${path}: ${where}.envRepoint.baseUrl must be an http(s) URL`);
+  }
+  if (typeof envRepoint.authTokenRef !== 'string' || !envRepoint.authTokenRef) {
+    throw new Error(`accounts.json at ${path}: ${where}.envRepoint.authTokenRef must be a non-empty string (an env-var name or keychain ref, never the token)`);
+  }
+  return { baseUrl: envRepoint.baseUrl, authTokenRef: envRepoint.authTokenRef };
+}
+
 function toAccount(value: unknown, provider: Provider, index: number, path: string): Account | null {
   if (!value || typeof value !== 'object' || typeof (value as Row).id !== 'string') {
     // Deliberately diverges from projects.ts: legacy readers silently skip id-less rows, so retain
@@ -122,6 +150,7 @@ function toAccount(value: unknown, provider: Provider, index: number, path: stri
   }
   const fences = row.fences === undefined ? undefined : validateFences(row.fences, where, path);
   const overage = row.overage === undefined ? undefined : validateOverage(row.overage, where, path);
+  const envRepoint = row.envRepoint === undefined ? undefined : validateEnvRepoint(row.envRepoint, where, path);
   const pathKey = provider === 'claude' ? 'configDir' : provider === 'codex' ? 'codexHome' : 'keyFile';
   const pathValue = normalizedPath(row, pathKey);
   const defaultHarness = provider === 'claude' ? 'claude-code' : provider === 'codex' ? 'codex-cli' : 'cursor-agent';
@@ -135,6 +164,7 @@ function toAccount(value: unknown, provider: Provider, index: number, path: stri
     ...(tier === undefined ? {} : { tier }),
     ...(fences === undefined ? {} : { fences }),
     ...(overage === undefined ? {} : { overage }),
+    ...(envRepoint === undefined ? {} : { envRepoint }),
     ...(optionalString(row, 'lastVerified') === undefined ? {} : { lastVerified: optionalString(row, 'lastVerified') }),
     ...(notes === undefined ? {} : { notes }),
     ...(optionalString(row, 'orgId') === undefined ? {} : { orgId: optionalString(row, 'orgId') }),
