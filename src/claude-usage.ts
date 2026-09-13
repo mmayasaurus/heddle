@@ -89,6 +89,8 @@ export interface ClaudeAccountUsage {
   sevenDay: ClaudeUsageWindow;
   extra: ClaudeExtraUsage | null;
   modelLimits: string[];
+  /** Per-model weekly usage percentages when exposed by the OAuth usage response. */
+  weeklyByModel: Record<string, number>;
   noteCodes: string[];
   /** Short, MASKED explanation for a non-ok source or an unresolved identity. Never contains a secret. */
   error?: string;
@@ -274,6 +276,27 @@ const parseModelLimits = (limits: unknown): string[] => {
   });
 };
 
+/** Parse safe per-model weekly percentages from an OAuth usage response. Never throws. */
+export function parseWeeklyByModel(body: unknown): Record<string, number> {
+  const root = unwrapData(body);
+  if (!root || typeof root !== 'object') return {};
+  const limits = (root as Record<string, unknown>).limits;
+  if (!Array.isArray(limits)) return {};
+  const out: Record<string, number> = {};
+  for (const limit of limits) {
+    if (!limit || typeof limit !== 'object') continue;
+    const o = limit as Record<string, unknown>;
+    const percent = asNum(o.percent);
+    const scope = o.scope;
+    const model = scope && typeof scope === 'object' ? (scope as Record<string, unknown>).model : null;
+    const displayName = model && typeof model === 'object' ? asStr((model as Record<string, unknown>).display_name) : null;
+    if (percent !== null && percent >= 0 && percent <= 100 && displayName && /^[A-Za-z][A-Za-z0-9 ._-]{0,63}$/.test(displayName)) {
+      out[displayName] = percent;
+    }
+  }
+  return out;
+}
+
 /** Parse a /api/oauth/usage body. A JSON OBJECT is `ok` even if individual windows are missing
  *  (missing field → that window unknown, never a false 0). Anything else is `parse-error`. */
 export function parseUsageResponse(body: unknown): {
@@ -283,10 +306,11 @@ export function parseUsageResponse(body: unknown): {
   extra: ClaudeExtraUsage | null;
   liveIdentity: ClaudeLiveIdentity | null;
   modelLimits: string[];
+  weeklyByModel: Record<string, number>;
 } {
   const root = unwrapData(body);
   if (!root || typeof root !== 'object') {
-    return { source: 'parse-error', fiveHour: UNKNOWN_WINDOW, sevenDay: UNKNOWN_WINDOW, extra: null, liveIdentity: null, modelLimits: [] };
+    return { source: 'parse-error', fiveHour: UNKNOWN_WINDOW, sevenDay: UNKNOWN_WINDOW, extra: null, liveIdentity: null, modelLimits: [], weeklyByModel: {} };
   }
   const o = root as Record<string, unknown>;
   return {
@@ -296,6 +320,7 @@ export function parseUsageResponse(body: unknown): {
     extra: parseExtra(o.extra_usage),
     liveIdentity: parseIdentity(root),
     modelLimits: parseModelLimits(o.limits),
+    weeklyByModel: parseWeeklyByModel(root),
   };
 }
 
@@ -345,12 +370,13 @@ async function fetchUsage(token: string, deps: ClaudePollDeps): Promise<{
   extra: ClaudeExtraUsage | null;
   liveIdentity: ClaudeLiveIdentity | null;
   modelLimits: string[];
+  weeklyByModel: Record<string, number>;
   error?: string;
 }> {
   const fetchImpl = deps.fetchImpl ?? fetch;
   const timeoutMs = deps.httpTimeoutMs ?? CLAUDE_HTTP_TIMEOUT_MS;
   const url = deps.usageUrl ?? CLAUDE_USAGE_ENDPOINT;
-  const unknown = { fiveHour: UNKNOWN_WINDOW, sevenDay: UNKNOWN_WINDOW, extra: null, liveIdentity: null, modelLimits: [] };
+  const unknown = { fiveHour: UNKNOWN_WINDOW, sevenDay: UNKNOWN_WINDOW, extra: null, liveIdentity: null, modelLimits: [], weeklyByModel: {} };
   let res: Response;
   try {
     res = await fetchImpl(url, { headers: authHeaders(token, deps.userAgent ?? CLAUDE_USAGE_USER_AGENT), signal: AbortSignal.timeout(timeoutMs) });
@@ -364,7 +390,11 @@ async function fetchUsage(token: string, deps: ClaudePollDeps): Promise<{
   } catch (err) {
     return { source: 'parse-error', ...unknown, error: shortError(err) };
   }
-  return parseUsageResponse(body);
+  const parsed = parseUsageResponse(body);
+  for (const name of Object.keys(parsed.weeklyByModel)) {
+    if (name.includes(token)) delete parsed.weeklyByModel[name];
+  }
+  return parsed;
 }
 
 /**
@@ -410,6 +440,7 @@ export async function pollClaudeAccountUsage(account: ClaudeAccount, deps: Claud
       sevenDay: UNKNOWN_WINDOW,
       extra: null,
       modelLimits: [],
+      weeklyByModel: {},
       noteCodes: [`claude.oauthPoll.${tokenRead.reason}`],
       error: tokenRead.error,
     };
@@ -432,8 +463,39 @@ export async function pollClaudeAccountUsage(account: ClaudeAccount, deps: Claud
     sevenDay: usage.sevenDay,
     extra: usage.extra,
     modelLimits: usage.modelLimits,
+    weeklyByModel: usage.weeklyByModel,
     noteCodes,
     ...(errBits.length ? { error: errBits.join('; ') } : {}),
+  };
+}
+
+export interface OauthUsageSidecar {
+  fablePct: number | null;
+  fiveHourPct: number | null;
+  sevenDayPct: number | null;
+  byModel: Record<string, number>;
+  capturedAt: number;
+  source: 'oauth-usage';
+  fiveHourResetsAt: number | null;
+  sevenDayResetsAt: number | null;
+}
+
+/** Build the disk-only OAuth sidecar without including any credential or identity data. */
+export function buildOauthUsageSidecar(row: ClaudeAccountUsage): OauthUsageSidecar | null {
+  if (row.source !== 'ok') return null;
+  const fiveHourPct = row.fiveHour.utilization;
+  const sevenDayPct = row.sevenDay.utilization;
+  const byModel = row.weeklyByModel;
+  if (fiveHourPct === null && sevenDayPct === null && Object.keys(byModel).length === 0) return null;
+  return {
+    fablePct: row.weeklyByModel.Fable ?? row.weeklyByModel['Claude Fable'] ?? null,
+    fiveHourPct,
+    sevenDayPct,
+    byModel,
+    capturedAt: Math.floor(Date.parse(row.capturedAt) / 1000),
+    source: 'oauth-usage',
+    fiveHourResetsAt: row.fiveHour.resetsAt,
+    sevenDayResetsAt: row.sevenDay.resetsAt,
   };
 }
 

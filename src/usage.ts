@@ -29,6 +29,8 @@ export const DEFAULT_USAGE_DIR = join(homedir(), '.heddle', 'usage');
 export const LIMITS_JSON_MAX_AGE_S = 900;
 /** Raw Claude tap files older than this → unknown (tap writes on every statusline render). */
 export const CLAUDE_TAP_MAX_AGE_S = 600;
+/** OAuth usage sidecars older than this are unknown and deliberately omitted. */
+export const OAUTH_SIDECAR_MAX_AGE_S = 900;
 /** Fresh billing/login failures are trusted for this long; stale failures fail open for recovery. */
 export const DISPATCH_SIGNAL_MAX_AGE_S = 6 * 60 * 60;
 
@@ -98,6 +100,11 @@ const UNKNOWN: CapWindow = { usedPercentage: null, resetsAt: null };
 
 function num(v: unknown): number | null {
   return typeof v === 'number' && Number.isFinite(v) ? v : null;
+}
+
+function pct(v: unknown): number | null {
+  const n = num(v);
+  return n !== null && n >= 0 && n <= 100 ? n : null;
 }
 
 /** A window whose reset time has passed rolled over — the provider will report ~0 on next capture. */
@@ -315,6 +322,43 @@ export function readClaudeTap(usageDir: string, nowS: number): ProviderCaps | nu
   };
 }
 
+/** Read fresh OAuth-usage sidecars written by `heddle usage poll-claude`. Invalid data is unknown. */
+export function readOauthUsageSidecars(usageDir: string, nowS: number): ClaudeAccountUsage[] {
+  const out: ClaudeAccountUsage[] = [];
+  let files: string[] = [];
+  try { files = existsSync(usageDir) ? readdirSync(usageDir) : []; } catch { return out; }
+  for (const file of files) {
+    const match = /^claude-([A-Za-z0-9_.-]+)\.oauth-usage\.json$/.exec(file);
+    if (!match) continue;
+    const raw = readJson(join(usageDir, file)) as Record<string, unknown> | null;
+    if (!raw) continue;
+    const capturedAt = num(raw.capturedAt);
+    // A future stamp is clock skew or corruption, never freshness (parity with the dashboard's
+    // claude.rs::oauth_exact guard): treating negative age as "captured moments ago" would pin a
+    // bad reading as fresh indefinitely. Omit it — same as aged/invalid.
+    if (capturedAt === null || capturedAt > nowS || nowS - capturedAt > OAUTH_SIDECAR_MAX_AGE_S) continue;
+    const fiveHourPct = pct(raw.fiveHourPct);
+    const sevenDayPct = pct(raw.sevenDayPct);
+    if (fiveHourPct === null && sevenDayPct === null) continue;
+    const byModelRaw = raw.byModel;
+    const weeklyByModel: Record<string, number> = {};
+    if (byModelRaw && typeof byModelRaw === 'object') {
+      for (const [name, percent] of Object.entries(byModelRaw as Record<string, unknown>)) {
+        const value = pct(percent);
+        if (value !== null) weeklyByModel[name] = value;
+      }
+    }
+    out.push({
+      id: match[1], configDir: null, tokenSource: null, source: 'ok', stale: false,
+      capturedAt: new Date(capturedAt * 1000).toISOString(),
+      fiveHour: { utilization: fiveHourPct, resetsAt: num(raw.fiveHourResetsAt) },
+      sevenDay: { utilization: sevenDayPct, resetsAt: num(raw.sevenDayResetsAt) },
+      weeklyByModel, liveIdentity: null, extra: null, modelLimits: [], noteCodes: ['claude.oauthSidecar'],
+    });
+  }
+  return out;
+}
+
 /**
  * HED-451 — map one live OAuth-usage poll row → an AccountCaps row. A fresh 200 (`source: 'ok'`)
  * carries real windows; EVERY other outcome is stale/unknown, NEVER a false 0% (guardrail #3). The
@@ -354,11 +398,13 @@ function readClaudePollCaps(rows: ClaudeAccountUsage[], nowS: number): ProviderC
  * FRESH incoming row fills a stale/absent one, and an unknown (stale) incoming row NEVER overwrites a
  * known-fresh row (which would drop a mirror row's fableWeeklyEstimatePct and a false 0% both).
  */
+const isKeeperAnchor = (a: AccountCaps): boolean => a.noteCodes.includes('claude.keeperAnchor');
+
 function mergeClaudeAccountRows(existing: AccountCaps[], incoming: AccountCaps[]): AccountCaps[] {
   const byId = new Map(existing.map((a) => [a.id, a]));
   for (const t of incoming) {
     const e = byId.get(t.id);
-    if (!e || (e.stale && !t.stale)) byId.set(t.id, t);
+    if (!e || (e.stale && !t.stale) || (isKeeperAnchor(e) && !isKeeperAnchor(t) && !t.stale)) byId.set(t.id, t);
   }
   return [...byId.values()];
 }
@@ -401,7 +447,7 @@ export function readProviderCaps(opts: { usageDir?: string; accountsPath?: strin
   // HED-451: fold in live OAuth-usage polls the caller fetched. Same merge as the tap: a fresh poll
   // row fills a stale/absent per-account row; an unknown poll row never overwrites a known-fresh row.
   // When neither mirror nor tap is usable, the poll ESTABLISHES the claude provider (the launch-trap fix).
-  const polls = opts.claudePolls;
+  const polls = opts.claudePolls ?? readOauthUsageSidecars(usageDir, nowS);
   if (polls && polls.length) {
     const pollCaps = readClaudePollCaps(polls, nowS);
     if (pollCaps) {
