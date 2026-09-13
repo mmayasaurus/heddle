@@ -1,4 +1,5 @@
 import type { DispatchOptions, WorkerAdapter, WorkerResult, TokenUsage } from '../types.js';
+import { failIfTruncated } from './parse.js';
 import { run } from './subprocess.js';
 
 /**
@@ -65,15 +66,16 @@ export class CodexAdapter implements WorkerAdapter {
     // envUnset MUST be forwarded (HED-268): rotation unsets CODEX_HOME for the default account, and
     // CODEX_HOME is deliberately NOT vendor-stripped by buildWorkerEnv, so a stray inherited one would
     // otherwise leak and defeat the pick. Mirrors ClaudeAdapter's CLAUDE_CONFIG_DIR unset.
-    const { stdout, stderr, exitCode } =
+    const { stdout, stderr, exitCode, stdoutTruncated } =
       await run(this.bin, args, opts.cwd, opts.timeoutMs ?? 600_000, opts.env, opts.envUnset);
     const durationMs = Date.now() - started;
 
     if (stdout.trim().length === 0) {
-      return {
+      const res: WorkerResult = {
         ok: false, output: '', exitCode, durationMs,
         error: `codex produced no stdout (exit ${exitCode}); stderr tail: ${stderr.slice(-400)}`,
       };
+      return failIfTruncated(res, stdoutTruncated, 'codex', stderr);
     }
 
     let sessionId: string | undefined;
@@ -105,7 +107,7 @@ export class CodexAdapter implements WorkerAdapter {
     }
 
     const ok = exitCode === 0 && !turnFailed && lastAgentMessage.length > 0;
-    return {
+    const res: WorkerResult = {
       ok,
       output: lastAgentMessage,
       sessionId,
@@ -115,5 +117,6 @@ export class CodexAdapter implements WorkerAdapter {
       error: ok ? undefined : (turnFailed ?? `no agent_message parsed (exit ${exitCode})`),
       raw: events,
     };
+    return failIfTruncated(res, stdoutTruncated, 'codex', stderr);
   }
 }

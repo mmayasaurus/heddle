@@ -1,4 +1,5 @@
 import type { DispatchOptions, WorkerAdapter, WorkerResult, TokenUsage } from '../types.js';
+import { failIfTruncated } from './parse.js';
 import { run } from './subprocess.js';
 
 /**
@@ -136,7 +137,7 @@ export class AgyAdapter implements WorkerAdapter {
 
     const budget = normalizedBudget(opts.timeoutMs);
     const started = Date.now();
-    let { stdout, stderr, exitCode, timedOut } = await run(this.bin, args, opts.cwd, budget, opts.env);
+    let { stdout, stderr, exitCode, timedOut, stdoutTruncated } = await run(this.bin, args, opts.cwd, budget, opts.env);
 
     // Upstream #573: agy -p can hang indefinitely with zero output when several other
     // long-running CLI agent processes are active (contention in startup/handshake; staggered
@@ -149,24 +150,26 @@ export class AgyAdapter implements WorkerAdapter {
       // Rebuild the argv for the probe: its --print-timeout must fit the PROBE's budget, not the
       // original one (amazon-q, PR #102) — a hung agy still emits nothing either way.
       const retryArgs = this.buildArgs(prompt, { ...opts, timeoutMs: retryBudget });
-      ({ stdout, stderr, exitCode, timedOut } = await run(this.bin, retryArgs, opts.cwd, retryBudget, opts.env));
+      ({ stdout, stderr, exitCode, timedOut, stdoutTruncated } = await run(this.bin, retryArgs, opts.cwd, retryBudget, opts.env));
       if (timedOut && stdout.trim().length === 0) {
-        return {
+        const res: WorkerResult = {
           ok: false, output: '', exitCode, durationMs: Date.now() - started,
           error: `agy produced no output in ${budget}ms, nor in a ${retryBudget}ms retry probe — ` +
             `matches upstream #573 concurrency-hang signature; route to a fallback provider`,
         };
+        return failIfTruncated(res, stdoutTruncated, 'agy', stderr);
       }
     }
 
     const durationMs = Date.now() - started;
 
     if (stdout.trim().length === 0) {
-      return {
+      const res: WorkerResult = {
         ok: false, output: '', exitCode, durationMs,
         error: `agy produced no stdout (exit ${exitCode}, timedOut=${timedOut}); ` +
           `stderr tail: ${stderr.slice(-400)}`,
       };
+      return failIfTruncated(res, stdoutTruncated, 'agy', stderr);
     }
 
     let reportedModel: string | undefined;
@@ -186,7 +189,7 @@ export class AgyAdapter implements WorkerAdapter {
       // Partial output + timeout = a legitimately slow task, NOT the #573 hang (which produces
       // nothing at all). Deliberately not retried — raise the budget or route elsewhere instead
       // of burning a second full timeout.
-      return {
+      const res: WorkerResult = {
         ok: false, output: '', exitCode, durationMs,
         error: timedOut
           ? `agy timed out after ${budget}ms with partial output and no result event — ` +
@@ -194,6 +197,7 @@ export class AgyAdapter implements WorkerAdapter {
           : `no result event from agy (exit ${exitCode}); stderr tail: ${stderr.slice(-400)}`,
         raw: events,
       };
+      return failIfTruncated(res, stdoutTruncated, 'agy', stderr);
     }
 
     const usage: TokenUsage | undefined = result.usage
@@ -209,7 +213,7 @@ export class AgyAdapter implements WorkerAdapter {
     const response = typeof result.response === 'string' ? result.response.trim() : '';
     const ok = exitCode === 0 && result.status === 'SUCCESS' && response.length > 0 && !modelMismatch;
 
-    return {
+    const res: WorkerResult = {
       ok,
       output: response,
       sessionId: result.conversation_id,
@@ -222,5 +226,6 @@ export class AgyAdapter implements WorkerAdapter {
           : `agy status=${result.status} (exit ${exitCode})`,
       raw: events,
     };
+    return failIfTruncated(res, stdoutTruncated, 'agy', stderr);
   }
 }
