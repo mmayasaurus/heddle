@@ -96,8 +96,12 @@ describe('subprocess run() — the shared adapter runner', () => {
 
       expect(r.timedOut).toBe(true);
       expect(r.exitCode).toBeNull();
-      // Bounded return (well under the escaped grandchild's 30s life) ⇒ grace fired: it is the only
-      // settler once the child is killed and 'close' can't fire.
+      // Grace actually WAITED (not an immediate force-settle at the deadline): run() returns at
+      // ~timeout(3000) + GRACE_MS. Sound under load — timers never fire early, so elapsed only grows;
+      // a regression that force-settled at the deadline with no grace wait would blow this lower bound.
+      expect(elapsed).toBeGreaterThan(3_000 + GRACE_MS - 200);
+      // ...and bounded well under the escaped grandchild's 30s life ⇒ no hang (grace is the only
+      // settler once the child is killed and 'close' can't fire).
       expect(elapsed).toBeLessThan(15_000);
       expect(existsSync(pidfile)).toBe(true);
       const gcPid = Number(readFileSync(pidfile, 'utf8'));
@@ -118,7 +122,10 @@ describe('subprocess run() — the shared adapter runner', () => {
 
   it.skipIf(process.platform === 'win32')('settles with the real exit status when the child exits fast but a detached grandchild holds the pipes', async () => {
     const pidfile = join(tempDir(), 'fastexit-grandchild.pid');
-    const TIMEOUT_MS = 5000;
+    // Deliberately generous: the drain settles at ~exit + GRACE_MS regardless of TIMEOUT_MS, so a large
+    // timeout keeps a huge correct-path margin (no fleet-load flake) while the pre-fix full-timeout wait
+    // (TIMEOUT_MS + GRACE_MS) still blows the `< TIMEOUT_MS` bound below.
+    const TIMEOUT_MS = 15_000;
     // The run-child spawns a DETACHED grandchild that inherits the pipes and lives 30s, records its pid,
     // then exits 0 IMMEDIATELY. 'close' can't fire (the detached grandchild holds the inherited fds),
     // but the child is already done — run() must settle with the real exit status via the drain window,

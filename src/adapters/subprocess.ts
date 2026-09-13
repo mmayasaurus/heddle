@@ -4,9 +4,11 @@ import { buildWorkerEnv } from '../env.js';
 // The largest persisted worker result is ~34 KB; raw stream-json includes tool blocks, so 32 MiB
 // leaves a >100× margin for legitimate output while bounding runaway stdout/stderr to ~64 MiB.
 export const DEFAULT_MAX_STREAM_BYTES = 32 * 1024 * 1024;
-// After the child is known dead (a timeout kill, OR a natural 'exit' whose 'close' is late because a
-// pipe-holding grandchild keeps the inherited fds open), how long to wait for the normal 'close'
-// before force-settling. Exported so the grace/drain tests can assert run() waited for this timer.
+// How long to wait for the normal 'close' before force-settling — used by two distinct paths: the
+// DRAIN path (a natural 'exit' whose 'close' is late because a pipe-holding grandchild keeps the
+// inherited fds open — the child is already dead) and the GRACE path (the timeout fired; 'close' may
+// never come, and the child may even still be alive if the kill could not reach it — which is why the
+// grace path unref()s and the drain path does not). Exported so the grace/drain tests reference it.
 export const GRACE_MS = 1000;
 
 const liveChildren = new Set<ChildProcess>();

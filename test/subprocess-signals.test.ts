@@ -72,7 +72,11 @@ describe.skipIf(process.platform === 'win32')('subprocess run() — parent-cance
       // wrapper and stay alive here.
       expect(await poll(() => !alive(childPid as number))).toBe(true);
     } finally {
-      try { if (childPid !== undefined) process.kill(childPid, 'SIGKILL'); } catch { /* already reaped */ }
+      // Read the child pid from the file (not the childPid local, which is assigned only after the
+      // poll-assert) so a failed assert cannot skip the SIGKILL and leak the detached child.
+      try {
+        if (existsSync(childPidfile)) process.kill(Number(readFileSync(childPidfile, 'utf8')), 'SIGKILL');
+      } catch { /* already reaped */ }
       try { wrapper.kill('SIGKILL'); } catch { /* already exited */ }
     }
   });
