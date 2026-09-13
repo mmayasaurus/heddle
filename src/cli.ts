@@ -759,7 +759,10 @@ try {
       const action = process.argv[3];
       if (action === 'install-hooks') {
         const report = installFleetHooks({ dryRun: has('--dry-run') });
-        out(json, report, () => report.files.map((file) => `${file.action} ${file.name}`).join('\n'));
+        out(json, report, () => [
+          `target: ${report.targetDir}`,
+          ...report.files.map((file) => `${report.dryRun ? 'would ' : ''}${file.action} ${file.name}`),
+        ].join('\n'));
         break;
       }
       if (action === 'hooks-diff') {

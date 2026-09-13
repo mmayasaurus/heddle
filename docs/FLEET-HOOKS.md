@@ -14,13 +14,33 @@ Preview file actions without writing:
 heddle fleet install-hooks --dry-run
 ```
 
+Text output always starts with the installation target, followed by one action per hook:
+
+```text
+target: ~/.heddle/fleet/hooks
+would create agent-identity.py
+```
+
+Without `--dry-run`, the action is unprefixed (for example, `created agent-identity.py`). `--json` is available for both install modes and includes the target, file actions, and `dryRun: true` or `dryRun: false`.
+
 Compare the installed copies with the vendored canon:
 
 ```sh
 heddle fleet hooks-diff
 ```
 
-`hooks-diff` prints each missing or differing file and exits with status 1 when drift exists. It exits 0 when the installed hooks match the canon.
+Use `--json` with either command when machine-readable output is needed:
+
+```sh
+heddle fleet install-hooks --json
+heddle fleet hooks-diff --json
+```
+
+`hooks-diff` prints each missing or differing file and exits with status 1 when drift exists. It exits 0 when the installed hooks match the canon. Both fleet commands exit 2 for usage errors.
+
+Drift includes permission mode differences as well as byte differences. When bytes match but a hook's permission bits differ from the vendored source, `hooks-diff` reports it as differing and `install-hooks` updates it to the source mode.
+
+`agent-identity.py` intentionally has mode `0644`, matching its source. Hooks are invoked as `python3 <path>`, so this hook does not need an executable bit.
 
 ## Cutover is separate
 
@@ -33,3 +53,7 @@ Two vendored hooks import `hook_utils` from `~/.claude/lib` via an absolute, hom
 ## `hooks-diff` scope
 
 `hooks-diff` compares only files present in the canon; an installed file that is no longer in the canon is not reported (asserted in `test/fleet.test.ts`). Inert for cutover — settings entries reference canon files by name — but worth knowing when reading its output.
+
+## Cutover blockers found in review
+
+`require-memtrace-first.py` derives `PROJECT_ROOT` from `Path(__file__).resolve().parent.parent.parent` and hardcodes workspace-relative expectations. An installed copy at `~/.heddle/fleet/hooks` therefore resolves `PROJECT_ROOT` to `~/.heddle` and misclassifies working directories. Pointing settings at the installed copy of this hook is blocked until a later phase adds an explicit project-root override to the canon at source, or cutover invokes this one hook from the repository checkout.
