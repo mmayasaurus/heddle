@@ -220,7 +220,11 @@ try {
       out(json, summary, () =>
         `${plan.route.taskClass}` +
         (summary.reviewer_pick ? `\n  reviewer: ${summary.reviewer_pick}` : '') +
-        (summary.refusal ? `\n  ✗ WOULD REFUSE (${summary.refusal.code}): ${summary.refusal.reason}`
+        (summary.refusal ? `\n  ✗ WOULD REFUSE (${summary.refusal.code}): ${summary.refusal.reason}` +
+            // The instruction names the fix (e.g. the exact billing override lever) — a preview that
+            // omits it hides how to act on the refusal (HED-395 F7). Printed when present; older
+            // refusal branches carry no instruction and skip the line.
+            (summary.refusal.instruction ? `\n    ${summary.refusal.instruction}` : '')
           : `\n  → ${summary.would_run}${summary.in_session ? '  [in-session: use your Agent tool]' : ''}` +
             (summary.routed_away_for_cap ? '  (routed away for cap)' : '')) +
         `\n  reason: ${summary.route_reason}` +

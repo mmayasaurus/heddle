@@ -152,6 +152,13 @@ export interface DispatchOutcome extends WorkerResult {
   assessment?: ResultAssessment;
   /** Set on capability-denied refusals: which check failed (`unenforceable` means a fallback may fit). */
   capabilityRefusalKind?: 'unknown-token' | 'operator-gate' | 'opt-in' | 'unenforceable';
+  /**
+   * HED-395 loud-degrade-to-ALLOW: the billing gate could not classify the bound account for spend
+   * (unregistered id, unreadable registry, or a stale bounded-prepaid caps row) and ALLOWED the run
+   * rather than refuse or silently skip. `reason` is the machine-greppable `billing-degraded:<reason>`
+   * note also written to the dispatch's ledger row — queryable/scored, never stderr-only.
+   */
+  billingDegraded?: { reason: string };
 }
 
 /** Resolves a provider name to its adapter. Injectable into dispatch() so tests can run the full
@@ -169,6 +176,10 @@ export interface DispatchContext {
   /** Set once the cap-aware decision is made; recorded on every row of this dispatch. */
   routeReason?: string;
   account?: string | null;
+  /** HED-395: the provider-caps snapshot (`req.caps ?? readProviderCaps()`), computed ONCE in
+   *  dispatch() and threaded so runTarget's billing gate reads the SAME snapshot the fallback
+   *  hard-guard uses — never a fresh per-attempt read. */
+  providerCaps?: CapsByProvider;
   /** HED-78: the Claude account (env) a headless claude worker runs under. */
   claudeAccount?: AccountPick | null;
   /** Selected non-Claude account env, resolved with the route alongside Claude account selection. */

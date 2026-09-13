@@ -9,9 +9,8 @@ import { mcpAttachable, webCapable } from '../mcp.js';
 import { pickReviewer, normalizeProvider, type ReviewerPick } from '../review.js';
 import { decideCapabilities, capabilityPolicy } from '../capabilities.js';
 import { readProviderCaps } from '../usage.js';
-import { loadAccountRegistry, type Account } from '../accounts.js';
 import {
-  decideRoute, readClaudeAccounts, adviseClaudeAccount, pickClaudeAccount, capAwarePolicy, accountAtOrOverCap,
+  decideRoute, readClaudeAccounts, adviseClaudeAccount, pickClaudeAccount, capAwarePolicy,
   type RouteDecision, type ClaudeAccount, type AccountAdvice, type AccountPick,
 } from '../capaware.js';
 import {
@@ -21,42 +20,13 @@ import {
 import { packsFor, requestedPacks } from './packs.js';
 import { overrideReasonGate } from './override-gate.js';
 import { webRefusalReason } from './refusals.js';
-import type { DispatchContext, DispatchRequest, DispatchPlan, DispatchRefusal, InSessionOrigin } from './types.js';
+import { billingVerdict } from './billing.js';
+import type { DispatchContext, DispatchRequest, DispatchPlan, InSessionOrigin } from './types.js';
 
-const PAY_PER_TOKEN_PERMIT = 'policy.cap_aware_routing.permit_pay_per_token: true';
-
-function billingDecision(account: Account | undefined, atCap: boolean, permitPayPerToken: boolean): {
-  refusal?: DispatchRefusal; advice?: string;
-} {
-  if (!account?.billingClass) return {};
-  const identity = `selected account "${account.id}" (billingClass=${account.billingClass}`;
-  if (account.billingClass === 'pay-per-token' && !permitPayPerToken) {
-    return { refusal: {
-      code: 'billing.pay-per-token',
-      reason: `${identity}) bills from token 1 and is refused by default.`,
-      instruction: `To explicitly permit this account, set ${PAY_PER_TOKEN_PERMIT}.`,
-    } };
-  }
-  const posture = account.overage?.posture;
-  if (posture === 'open-billing' && atCap) {
-    return { refusal: {
-      code: 'billing.open-billing-at-cap',
-      reason: `${identity}, overage.posture=open-billing) is at or over its five-hour cap and would enter paid overage.`,
-      instruction: `No switch overrides open-billing at cap; ${PAY_PER_TOKEN_PERMIT} is the exact pay-per-token permit lever and does not permit this posture. Select an account with headroom or change its overage posture.`,
-    } };
-  }
-  if (posture === 'bounded-prepaid') {
-    if (account.overage?.creditsRemaining === 0) {
-      return { refusal: {
-        code: 'billing.prepaid-exhausted',
-        reason: `${identity}, overage.posture=bounded-prepaid) has credits exhausted.`,
-        instruction: `No switch overrides exhausted prepaid credit; ${PAY_PER_TOKEN_PERMIT} is the exact pay-per-token permit lever and does not replenish this account. Add prepaid credit or select another account.`,
-      } };
-    }
-    if (atCap) return { advice: `burning prepaid buffer (${account.overage?.creditsRemaining} of ${account.overage?.spendLimit})` };
-  }
-  return {};
-}
+// The billing/overage decision (HED-395) lives in ./billing.ts (billingVerdict) — the SAME pure
+// function runTarget enforces with, so this preview and the authoritative spawn-time gate can never
+// disagree (F7 parity). It also guards the registry read (a corrupt accounts.json degrades-to-allow
+// rather than throwing — F4), which the old unguarded loadAccountRegistry() call here did not.
 
 export function hasNoDispatchableClaudeAccount(plan: Pick<DispatchPlan,
   'target' | 'execution' | 'notDispatchable' | 'claudeAccountCount' | 'accountPick'>,
@@ -287,6 +257,10 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
   const execution = target.provider === 'claude'
     ? (req.inSession ? 'in-session-subagent' : 'headless')
     : providerExecution(table, target.provider);
+  // An in-session route returns the claude-in-session instruction (dispatch.ts) BEFORE runTarget's
+  // gates run, so the dry run must NOT surface a runTarget-only refusal (billing, capability, web) for
+  // it — that would advertise a refusal the (spawn-less) run never makes. Shared by all three below.
+  const reachesRunTarget = execution !== 'in-session-subagent';
   // Same list the worker would actually get, family pack included — a refusal or dry run that
   // advertises a different set than runTarget materializes is a lie the operator acts on (PR #34).
   const skillsForRefusal = packsFor(target.provider, requestedPacks(route.reviewerPool, target.skills, req.skills), req.cwd);
@@ -324,15 +298,16 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
       account = accountAdvice.best?.id ?? null;
     }
   }
-  const richAccount = account === null
-    ? undefined
-    : loadAccountRegistry().accounts.find((candidate) => candidate.provider === target.provider && candidate.id === account);
-  const billing = billingDecision(
-    richAccount,
-    account !== null && accountAtOrOverCap(caps[target.provider], account),
-    capAwarePolicy(table).permitPayPerToken,
-  );
-  const billingRefusal = billing.refusal;
+  // Preview only (the runTarget gate is authoritative). Keyed on the plan's bound `account`; the
+  // registry read + corrupt-file guard live inside billingVerdict. `billingRefusal` is gated on
+  // reachesRunTarget so an in-session preview never advertises a billing refusal the run never makes.
+  const billing = billingVerdict({
+    accountId: account,
+    provider: target.provider,
+    caps: caps[target.provider],
+    permitPayPerToken: capAwarePolicy(table).permitPayPerToken,
+  });
+  const billingRefusal = reachesRunTarget ? billing.refusal : undefined;
   const billingAdvice = billing.advice;
   if (billingAdvice) {
     decision.checks.push(billingAdvice);
@@ -351,7 +326,6 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
   // Neither applies to an in-session Claude route: dispatch() returns the in-session instruction
   // (~L676) BEFORE runTarget's gates run, so surfacing one would diverge from the run (cubic #76). The
   // earlier gates (notDispatchable/override/same-provider/metered/no-account) are preempted by summarizePlan's chain.
-  const reachesRunTarget = execution !== 'in-session-subagent';
   const dryReqCaps = [...new Set([...(target.capabilities ?? []), ...(req.capabilities ?? [])])];
   const dryCaps = decideCapabilities(target.provider, dryReqCaps, req.optIn === true, capabilityPolicy(table));
   const capabilityRefusal = reachesRunTarget && dryCaps.refusal && dryCaps.refusal.kind !== 'unenforceable' ? dryCaps.refusal.reason : undefined;

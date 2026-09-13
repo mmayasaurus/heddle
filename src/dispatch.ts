@@ -11,7 +11,7 @@ import { readClaudeAccounts, pickClaudeAccount, capAwarePolicy, hardRefusal } fr
 import { classifyRotationRefusal, DEFAULT_COOLDOWN_S, DEFAULT_COOLING_PATH, readCooling, readRotationAccounts, writeCooling } from './rotation.js';
 import { basename } from 'node:path';
 import { defaultAdapterFor } from './dispatcher/adapters.js';
-import { refusalOutcome, refuseBilling, refuseDepth1, refuseNotDispatchable, refuseInSession } from './dispatcher/refusals.js';
+import { refusalOutcome, refuseDepth1, refuseNotDispatchable, refuseInSession } from './dispatcher/refusals.js';
 import { overrideReasonGate } from './dispatcher/override-gate.js';
 import { monocultureNote, formatMonocultureWarning } from './dispatcher/monoculture.js';
 import { planDispatch, resolveRotationAccount, hasNoDispatchableClaudeAccount, noDispatchableClaudeAccountReason } from './dispatcher/plan.js';
@@ -144,9 +144,11 @@ export async function dispatch(
     });
   }
 
-  if (plan.billingRefusal) {
-    return refuseBilling(ctx, req, route.taskClass, target, skillsForRefusal, plan.billingRefusal);
-  }
+  // ---- Money-safety billing/overage (HED-395) is NOT gated here anymore --------------------------
+  // The authoritative gate lives at the spawn chokepoint (runTarget), keyed on the FINAL bound account
+  // for each attempt — so it covers the primary AND every rebound path (capability-fit fallback,
+  // account-failover, class fallback), not just the plan's primary account. The plan still computes
+  // plan.billingRefusal for the DRY-RUN preview (heddle route / plan_dispatch); enforcement is runTarget.
 
   // ---- Claude-primary → structured, ledgered in-session refusal (HED-18) ----------------------
   if (plan.execution === 'in-session-subagent') {
@@ -205,6 +207,10 @@ export async function dispatch(
   }
 
   // ---- Run (capabilities + max-children are decided per target inside runTarget) --------------
+  // HED-395: snapshot provider caps ONCE, HERE — after every plan-level refusal gate above (each of
+  // which must stay a zero-disk-read no-op) and before any runTarget — then thread it via ctx so the
+  // billing gate and the fallback hard-guard below read the SAME snapshot, never a fresh per-attempt read.
+  ctx.providerCaps = req.caps ?? readProviderCaps();
   // A fully-cooled codex/cursor pool is NOT skipped preemptively: cooling is advisory (a heuristic from a
   // prior rate-limit that may already have reset), and a preemptive jump to the class fallback bypassed
   // both that fallback's own account selection and the HED-261 floor. Run the primary as usual — a real
@@ -292,8 +298,9 @@ export async function dispatch(
     );
   }
   // The never-on-demand HARD guard applies to the runtime fallback too: a below-threshold primary
-  // failing over to cursor must not bypass an on-demand stop the plan never evaluated for it.
-  const fbSnap = req.caps ?? readProviderCaps();
+  // failing over to cursor must not bypass an on-demand stop the plan never evaluated for it. Reuses
+  // the ctx snapshot threaded above (HED-395) — the same one runTarget's billing gate reads.
+  const fbSnap = ctx.providerCaps ?? readProviderCaps();
   const fbHard = hardRefusal(fallback, fbSnap);
   if (fbHard) {
     return refusalOutcome(ctx, req, route.taskClass, fallback, skillsForRefusal, {

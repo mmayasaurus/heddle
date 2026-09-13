@@ -9,12 +9,14 @@ import { assessResult, type ResultAssessment } from '../classify.js';
 import { snapshotWorktree, sameSnapshot, diffInstruction, embeddedDiff } from '../review.js';
 import { parentCheckoutOf, checkoutFingerprint, escapedPaths, destroyedWork } from '../worktree.js';
 import { decideCapabilities, capabilityPolicy } from '../capabilities.js';
+import { capAwarePolicy } from '../capaware.js';
 import { WORKER_ENV } from '../identity.js';
 import { providerExecution, type Route, type RouteTarget } from '../routing.js';
 import type { WorkerResult } from '../types.js';
 import { packsFor, requestedPacks } from './packs.js';
-import { baseRecord, refusalOutcome, webRefusalReason } from './refusals.js';
-import type { DispatchContext, DispatchRequest, DispatchOutcome } from './types.js';
+import { baseRecord, refusalOutcome, refuseBilling, webRefusalReason } from './refusals.js';
+import { billingVerdict } from './billing.js';
+import type { DispatchContext, DispatchRequest, DispatchOutcome, DispatchRefusal } from './types.js';
 
 export async function runTarget(
   target: RouteTarget, req: DispatchRequest, ctx: DispatchContext, route: Route,
@@ -51,6 +53,41 @@ export async function runTarget(
       reason: webRefusalReason(route.taskClass, target.provider),
       instruction: 'Use the class route, or select a provider with an enforceable browse grant.',
     }, { extra: { usedFallback: fellBackFrom !== null }, fellBackFrom, capabilities: requestedCapabilities });
+  }
+
+  // ---- Dispatch gate (HED-395): money-safety, evaluated BEFORE the ledger row and the spawn --------
+  // The AUTHORITATIVE billing/overage decision, keyed on the FINAL bound account for THIS attempt
+  // (ctx.account + target.provider), via the SAME billingVerdict the dry-run preview uses (F7 parity)
+  // and the caps snapshot threaded once through ctx (never a fresh per-attempt read). Because EVERY
+  // spawn path (primary, capability-fit fallback, account-failover, class fallback) enters here with
+  // ctx.account rebound, gating HERE covers all of them — the removed plan-level gate only knew the
+  // primary account. An extensible ordered sequence of typed checks: the FIRST veto wins and returns
+  // BEFORE startUnderCap, so a refusal consumes no max-children slot (mirroring the capability/web
+  // refusals just above). Billing runs FIRST; HED-404 (tier read-only) slots its check in after.
+  // Placed AFTER the capability/web gates deliberately: a pay-per-token primary that ALSO can't enforce
+  // a capability must return capability-denied so dispatch()'s capability-fit fallback runs — and that
+  // fallback's account then gets its own billing check here in turn.
+  const billing = billingVerdict({
+    accountId: ctx.account ?? null,
+    provider: target.provider,
+    caps: ctx.providerCaps?.[target.provider],
+    permitPayPerToken: capAwarePolicy(ctx.table).permitPayPerToken,
+  });
+  const gateChecks: Array<() => DispatchRefusal | null> = [
+    () => billing.refusal ?? null, // HED-395 billing/overage — money-safety, first
+    // HED-404 (tier read-only): add its typed check here — billing stays first.
+  ];
+  for (const check of gateChecks) {
+    const veto = check();
+    if (veto) return refuseBilling(ctx, req, route.taskClass, target, skills, veto, fellBackFrom);
+  }
+  // Loud-degrade-to-ALLOW (F2/F4/F6): the gate could not classify the account for spend but must NOT
+  // silently skip — warn now, and carry the machine-greppable note onto the ledger row (finish, below)
+  // AND the outcome, so it is queryable/scored, never stderr-only.
+  let billingDegraded: DispatchOutcome['billingDegraded'];
+  if (billing.degraded) {
+    billingDegraded = { reason: billing.degraded.note };
+    process.stderr.write(`heddle: ${billing.degraded.warn}\n`);
   }
 
   // HED-19: fail fast, BEFORE a ledger row exists, on anything materialization would reject —
@@ -266,8 +303,9 @@ export async function runTarget(
   ctx.ledger.finish(ledgerId, {
     ok: result.ok,
     // The escape note is appended to the LEDGER's error column so the row is durably self-describing
-    // (the outcome keeps it in its own `escape` field, so callers never mistake it for a failure).
-    error: [result.error, escapeReport?.note, destroyedReport?.note].filter(Boolean).join('; ') || undefined,
+    // (the outcome keeps it in its own `escape` field, so callers never mistake it for a failure). The
+    // HED-395 billing-degraded note rides the same column for the same reason (queryable, never silent).
+    error: [result.error, escapeReport?.note, destroyedReport?.note, billingDegraded?.reason].filter(Boolean).join('; ') || undefined,
     sessionId: result.sessionId,
     durationMs: result.durationMs,
     inputTokens: result.usage?.inputTokens,
@@ -294,6 +332,7 @@ export async function runTarget(
     account: ctx.account ?? null,
     ...(escapeReport ? { escape: escapeReport } : {}),
     ...(destroyedReport ? { destroyed: destroyedReport } : {}),
+    ...(billingDegraded ? { billingDegraded } : {}),
     ...(ctx.review ? { review: { authorProvider: ctx.review.authorProvider, reviewerProvider: target.provider, reviewerModel: target.model, mandateOk, reviewerPick: ctx.review.reviewerPick } } : {}),
     ...(assessment ? { assessment } : {}),
   };

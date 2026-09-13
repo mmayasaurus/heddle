@@ -50,11 +50,25 @@ export function capAwarePolicy(table: RoutingTable): CapAwarePolicy {
   };
 }
 
-/** Fresh per-account five-hour cap check shared by overage warnings and dispatch billing enforcement. */
+/**
+ * Tri-state per-account five-hour cap state (HED-395). The boolean `accountAtOrOverCap` collapses
+ * "known under cap" and "unknowable" both to false, but the billing gate must treat an UNKNOWABLE
+ * cap state differently per overage posture (open-billing refuses on unknown — F3; bounded-prepaid
+ * allows — F6). `caps?.accounts?.find` (both optional) so a caps object whose `accounts` is undefined
+ * cannot throw (F5). A missing row / stale row / null usedPercentage is all 'unknown'.
+ */
+export type CapState = 'over' | 'under' | 'unknown';
+export function accountCapState(caps: ProviderCaps | undefined, accountId: string): CapState {
+  const row = caps?.accounts?.find((account) => account.id === accountId);
+  if (!row || row.stale || row.fiveHour.usedPercentage === null) return 'unknown';
+  return row.fiveHour.usedPercentage >= OVERAGE_RED_PCT ? 'over' : 'under';
+}
+
+/** Fresh per-account five-hour cap check shared by overage warnings and dispatch billing enforcement.
+ *  Behavior-identical to the prior inline check (both false and unknown collapse to false), now via
+ *  the tri-state helper above so the F5 null-safety fix applies here too. */
 export function accountAtOrOverCap(caps: ProviderCaps | undefined, accountId: string): boolean {
-  const row = caps?.accounts.find((account) => account.id === accountId);
-  return row !== undefined && !row.stale && row.fiveHour.usedPercentage !== null
-    && row.fiveHour.usedPercentage >= OVERAGE_RED_PCT;
+  return accountCapState(caps, accountId) === 'over';
 }
 
 export interface RouteDecision {
