@@ -38,7 +38,6 @@ describe('subprocess run() — the shared adapter runner', () => {
       `fs.writeFileSync(${JSON.stringify(pidfile)}, String(gc.pid));`,
       'setTimeout(() => {}, 60000);',
     ].join(' ');
-    let gcPid: number | undefined;
     try {
       const started = Date.now();
       const r = await run(NODE, ['-e', parent], process.cwd(), 3000);
@@ -47,7 +46,7 @@ describe('subprocess run() — the shared adapter runner', () => {
       expect(r.exitCode).toBeNull();
       expect(Date.now() - started).toBeLessThan(15_000);
       expect(existsSync(pidfile)).toBe(true);
-      gcPid = Number(readFileSync(pidfile, 'utf8'));
+      const gcPid = Number(readFileSync(pidfile, 'utf8'));
       expect(gcPid).toBeGreaterThan(0);
 
       let reaped = false;
@@ -65,20 +64,24 @@ describe('subprocess run() — the shared adapter runner', () => {
       }
       expect(reaped).toBe(true);
     } finally {
+      // Read the pid from the file in finally (not the gcPid local, assigned only after the asserts) so
+      // a failed assert cannot skip the SIGKILL and leak the grandchild.
       try {
-        if (gcPid !== undefined) process.kill(gcPid, 'SIGKILL');
+        if (existsSync(pidfile)) process.kill(Number(readFileSync(pidfile, 'utf8')), 'SIGKILL');
       } catch {
         // The grandchild was already reaped.
       }
     }
   });
 
-  it.skipIf(process.platform === 'win32')('settles via the grace timer (not an early close) when an escaped descendant holds inherited pipes', async () => {
+  it.skipIf(process.platform === 'win32')('settles via the grace timer (not a hang) when an escaped descendant holds inherited pipes', async () => {
     const pidfile = join(tempDir(), 'escaped-grandchild.pid');
     // detached:true puts the grandchild in its own session so the group SIGKILL misses it; it keeps the
-    // inherited pipes open, so 'close' can't fire and run() must fall back to the grace timer. The
-    // PARENT writes the grandchild's pid synchronously so the proof does not race node startup.
-    const TIMEOUT_MS = 3000;
+    // inherited pipes open, so 'close' can NEVER fire. The run-child stays alive to the deadline, so it
+    // is killed by the timer (not the natural-exit drain). Grace is therefore the ONLY thing that can
+    // settle run() here — a bounded return with timedOut proves the grace net fired; a regression that
+    // dropped it would hang past the grandchild's lifetime and blow the upper bound. The PARENT writes
+    // the grandchild's pid synchronously so the proof does not race node startup.
     const parent = [
       "const { spawn } = require('node:child_process');",
       "const fs = require('node:fs');",
@@ -86,31 +89,65 @@ describe('subprocess run() — the shared adapter runner', () => {
       `fs.writeFileSync(${JSON.stringify(pidfile)}, String(gc.pid));`,
       'setTimeout(() => {}, 60000);',
     ].join(' ');
-    let gcPid: number | undefined;
+    try {
+      const started = Date.now();
+      const r = await run(NODE, ['-e', parent], process.cwd(), 3000);
+      const elapsed = Date.now() - started;
+
+      expect(r.timedOut).toBe(true);
+      expect(r.exitCode).toBeNull();
+      // Bounded return (well under the escaped grandchild's 30s life) ⇒ grace fired: it is the only
+      // settler once the child is killed and 'close' can't fire.
+      expect(elapsed).toBeLessThan(15_000);
+      expect(existsSync(pidfile)).toBe(true);
+      const gcPid = Number(readFileSync(pidfile, 'utf8'));
+      expect(gcPid).toBeGreaterThan(0);
+      // The escaped grandchild is still alive — it held the pipes open and forced the grace path.
+      // (reapAll cannot reach a session-detached double-fork; that is the documented limit.)
+      expect(() => process.kill(gcPid, 0)).not.toThrow();
+    } finally {
+      // Read the pid from the file in finally so a failed assert cannot skip the SIGKILL and leak the
+      // 30s grandchild.
+      try {
+        if (existsSync(pidfile)) process.kill(Number(readFileSync(pidfile, 'utf8')), 'SIGKILL');
+      } catch {
+        // The escaped grandchild has already exited.
+      }
+    }
+  });
+
+  it.skipIf(process.platform === 'win32')('settles with the real exit status when the child exits fast but a detached grandchild holds the pipes', async () => {
+    const pidfile = join(tempDir(), 'fastexit-grandchild.pid');
+    const TIMEOUT_MS = 5000;
+    // The run-child spawns a DETACHED grandchild that inherits the pipes and lives 30s, records its pid,
+    // then exits 0 IMMEDIATELY. 'close' can't fire (the detached grandchild holds the inherited fds),
+    // but the child is already done — run() must settle with the real exit status via the drain window,
+    // NOT wait out the whole timeout and report timedOut (the pre-fix bug).
+    const parent = [
+      "const { spawn } = require('node:child_process');",
+      "const fs = require('node:fs');",
+      "const gc = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], { detached: true, stdio: 'inherit' });",
+      `fs.writeFileSync(${JSON.stringify(pidfile)}, String(gc.pid));`,
+      'process.exit(0);',
+    ].join(' ');
     try {
       const started = Date.now();
       const r = await run(NODE, ['-e', parent], process.cwd(), TIMEOUT_MS);
       const elapsed = Date.now() - started;
 
-      expect(r.timedOut).toBe(true);
-      // The grace net fired: run() waited PAST timeout + GRACE_MS rather than settling via an early
-      // 'close'. A regression that dropped the grace net and hung would blow the upper bound; one that
-      // force-settled without waiting would blow this lower bound. (Timers never fire early, so this is
-      // safe under load.)
-      expect(elapsed).toBeGreaterThan(TIMEOUT_MS + GRACE_MS - 200);
-      expect(elapsed).toBeLessThan(15_000);
+      // Real status, promptly: the drain settles at ~exit + GRACE_MS (≥ GRACE_MS, never instant), far
+      // under the deadline. The pre-fix runner ignored 'exit', waited the full TIMEOUT_MS, then reported
+      // timedOut/exitCode null — blowing BOTH the exitCode/timedOut asserts and the upper bound.
+      expect(r.exitCode).toBe(0);
+      expect(r.timedOut).toBe(false);
+      expect(elapsed).toBeGreaterThan(GRACE_MS - 200);
+      expect(elapsed).toBeLessThan(TIMEOUT_MS);
       expect(existsSync(pidfile)).toBe(true);
-      gcPid = Number(readFileSync(pidfile, 'utf8'));
-      expect(gcPid).toBeGreaterThan(0);
-      // The escaped grandchild is still alive — it is what held the pipes open and forced the grace
-      // path. (Had it died, 'close' would have settled run() normally and this scenario would be
-      // untested.) reapAll cannot reach a session-detached double-fork; that is the documented limit.
-      expect(() => process.kill(gcPid as number, 0)).not.toThrow();
     } finally {
       try {
-        if (gcPid !== undefined) process.kill(gcPid, 'SIGKILL');
+        if (existsSync(pidfile)) process.kill(Number(readFileSync(pidfile, 'utf8')), 'SIGKILL');
       } catch {
-        // The escaped grandchild has already exited.
+        // The grandchild has already exited.
       }
     }
   });
@@ -140,6 +177,7 @@ describe('subprocess run() — the shared adapter runner', () => {
   it('caps a chatty stream while draining it through a clean exit', async () => {
     const r = await run(NODE, ['-e', "process.stdout.write('x'.repeat(100000))"], process.cwd(), 5_000, undefined, undefined, 1_024);
     expect(Buffer.byteLength(r.stdout)).toBeLessThanOrEqual(1_024);
+    expect(r.stdout).toBe('x'.repeat(1024));
     expect(r.truncated).toBe(true);
     expect(r.exitCode).toBe(0);
     expect(r.timedOut).toBe(false);
@@ -157,6 +195,8 @@ describe('subprocess run() — the shared adapter runner', () => {
     const r = await run(NODE, ['-e', "process.stdout.write('€😀'.repeat(500))"], process.cwd(), 5_000, undefined, undefined, 1_024);
     expect(r.truncated).toBe(true);
     expect(Buffer.byteLength(r.stdout)).toBeLessThanOrEqual(1_024);
+    expect(Buffer.byteLength(r.stdout)).toBe(1022);
+    expect(r.stdout).toBe('€😀'.repeat(146));
     expect(Buffer.from(r.stdout).toString('utf8')).toBe(r.stdout);
     expect(r.stdout).not.toContain('\uFFFD');
   });

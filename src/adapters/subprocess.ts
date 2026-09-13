@@ -4,24 +4,38 @@ import { buildWorkerEnv } from '../env.js';
 // The largest persisted worker result is ~34 KB; raw stream-json includes tool blocks, so 32 MiB
 // leaves a >100× margin for legitimate output while bounding runaway stdout/stderr to ~64 MiB.
 export const DEFAULT_MAX_STREAM_BYTES = 32 * 1024 * 1024;
-// After a timeout kill, how long to wait for the normal 'close' before force-settling. Exported so the
-// grace-path test can assert run() actually waited for this timer rather than settling via an early
-// 'close' — a literal there could silently drift out of sync with this value.
+// After the child is known dead (a timeout kill, OR a natural 'exit' whose 'close' is late because a
+// pipe-holding grandchild keeps the inherited fds open), how long to wait for the normal 'close'
+// before force-settling. Exported so the grace/drain tests can assert run() waited for this timer.
 export const GRACE_MS = 1000;
 
 const liveChildren = new Set<ChildProcess>();
 let exitHandlersInstalled = false;
 
-function reapAll(): void {
-  for (const child of liveChildren) {
+// SIGKILL the child's whole process group, falling back to a direct child kill on ANY failure. A
+// process.kill(-pid) failure is ambiguous: the group may be gone (child already dead — child.kill is
+// then a silent no-op) OR the child may have left its group via setpgid and still be alive under its
+// own pid (child.kill then actually kills it). So the fallback is unconditional. Windows and a missing
+// pid have no process-group semantics / no pid to negate — they can only do the direct kill.
+function killGroupOrChild(child: ChildProcess): void {
+  if (process.platform !== 'win32' && child.pid !== undefined) {
     try {
-      // Full Windows process-tree reaping (taskkill /T) is out of scope; this is child-only best effort.
-      if (process.platform !== 'win32' && child.pid !== undefined) process.kill(-child.pid, 'SIGKILL');
-      else child.kill('SIGKILL');
+      process.kill(-child.pid, 'SIGKILL');
+      return;
     } catch {
-      // The child has already exited.
+      // Group gone, or the child left its group — fall through to a direct child kill.
     }
   }
+  try {
+    child.kill('SIGKILL');
+  } catch {
+    // Already exited, or cannot be killed (best effort).
+  }
+}
+
+function reapAll(): void {
+  // Full Windows process-tree reaping (taskkill /T) is out of scope; killGroupOrChild is child-only there.
+  for (const child of liveChildren) killGroupOrChild(child);
 }
 
 function installExitHandlers(): void {
@@ -68,11 +82,6 @@ export function run(bin: string, args: string[], cwd: string, timeoutMs: number,
     const child = spawn(bin, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
     installExitHandlers();
     if (child.pid !== undefined) liveChildren.add(child);
-    // 'exit' (the process has ended) is the ONLY event that means the child is truly dead, so it is the
-    // SOLE point that removes it from reapAll's registry. Never 'close'/'error'/finish()/the grace net,
-    // any of which can fire while the process is still alive (an EPERM-unkillable child, or a grace
-    // force-settle) and would wrongly drop it from the parent-cancel sweep.
-    child.on('exit', () => { liveChildren.delete(child); });
     // Decode as UTF-8 at the stream so a multi-byte char split across two chunks is not corrupted by
     // `+= d` Buffer→string coercion (codacy/copilot #69 — a latent bug all four original runners shared).
     child.stdout.setEncoding('utf8');
@@ -86,37 +95,30 @@ export function run(bin: string, args: string[], cwd: string, timeoutMs: number,
     let settled = false;
     let killedByTimer = false;
     let graceTimer: NodeJS.Timeout | undefined;
+    let drainTimer: NodeJS.Timeout | undefined;
     const finish = (exitCode: number | null, timedOut: boolean) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       if (graceTimer !== undefined) clearTimeout(graceTimer);
+      if (drainTimer !== undefined) clearTimeout(drainTimer);
       resolve({ stdout, stderr, exitCode, timedOut, truncated });
     };
     const timer = setTimeout(() => {
       killedByTimer = true;
       try {
-        if (process.platform === 'win32' || child.pid === undefined) {
-          try { child.kill('SIGKILL'); } catch { /* already exited or unkillable */ }
-        } else {
-          try {
-            process.kill(-child.pid, 'SIGKILL');
-          } catch (err) {
-            // ESRCH = the group is already gone (child already dead) — nothing to fall back to. Any
-            // other failure (e.g. EPERM from a setuid/sandbox descendant) means the group-kill was
-            // rejected but the child may still be alive, so try a direct child kill.
-            if ((err as NodeJS.ErrnoException).code !== 'ESRCH') {
-              try { child.kill('SIGKILL'); } catch { /* already exited or unkillable */ }
-            }
-          }
-        }
+        killGroupOrChild(child);
       } finally {
-        // Arm the grace net unconditionally — even if a kill threw. If 'close' has not settled run() by
-        // GRACE_MS (an escaped setsid/double-fork grandchild still holding the inherited pipes, or a
-        // kill that could not land), unref + destroy the streams and force-settle as timedOut, so run()
-        // can never outlast timeoutMs + GRACE_MS.
+        // Arm the grace net unconditionally — even if the kill threw. If 'close' has not settled run()
+        // by GRACE_MS (an escaped setsid/double-fork grandchild still holding the inherited pipes, or a
+        // kill that could not land), destroy the streams and force-settle as timedOut, so run() can
+        // never outlast timeoutMs + GRACE_MS.
         graceTimer = setTimeout(() => {
           if (settled) return;
+          // unref so a still-alive child the kill could not reach (e.g. EPERM) does not keep the event
+          // loop open via its process handle after we force-settle — destroying the streams frees only
+          // those, not the process handle. (The natural-'exit' drain path needs no unref: the child has
+          // already exited there, so its handle is gone and unref would be a no-op.)
           child.unref();
           child.stdout.destroy();
           child.stderr.destroy();
@@ -135,6 +137,25 @@ export function run(bin: string, args: string[], cwd: string, timeoutMs: number,
       stderr = capped.acc;
       stderrBytes = capped.accBytes;
       truncated ||= capped.hit;
+    });
+    child.on('exit', (code) => {
+      // 'exit' (the process ended) is the ONLY signal that the child is truly dead, so it is the sole
+      // point that removes it from reapAll's registry — never 'close'/'error'/finish()/grace, any of
+      // which can fire while the process is still alive (an EPERM-unkillable child, or a grace
+      // force-settle) and would wrongly drop it from the parent-cancel sweep.
+      liveChildren.delete(child);
+      // If the child ended on its OWN (not our timeout kill) but a pipe-holding grandchild keeps the
+      // inherited streams open, 'close' may never fire. Cancel the now-moot deadline and arm a short
+      // drain; if 'close' has not settled by then, settle with the ACTUAL exit status rather than
+      // waiting out the whole timeout and mislabeling a finished run as timedOut.
+      if (killedByTimer || settled) return;
+      clearTimeout(timer);
+      drainTimer = setTimeout(() => {
+        if (settled) return;
+        child.stdout.destroy();
+        child.stderr.destroy();
+        finish(code, false);
+      }, GRACE_MS);
     });
     child.on('close', (code, signal) => {
       // Decide timedOut from the outcome signal, not a pre-kill guess.
