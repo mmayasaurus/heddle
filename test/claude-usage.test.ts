@@ -477,3 +477,21 @@ describe('readProviderCaps — claude-oauth poll merge', () => {
     expect(readProviderCaps({ usageDir: tempDir(), nowS }).claude).toMatchObject({ source: 'none', stale: true });
   });
 });
+
+describe('HED-490 review fixes (codeant / qodo)', () => {
+  it('keychainService for the filesystem root hashes "/" — not "" or the cwd (finding A)', () => {
+    const home = '/Users/x';
+    // '/' is a pinned (non-default) dir, so it gets a sha256(absDir) suffix computed from '/', proving
+    // the trailing-slash strip no longer collapses root to '' (which would read cwd-relative and mis-hash).
+    expect(claudeKeychainService('/', home)).toBe(
+      `Claude Code-credentials-${createHash('sha256').update('/').digest('hex').slice(0, 8)}`,
+    );
+    expect(claudeKeychainService('/', home)).not.toBe(claudeKeychainService(process.cwd(), home));
+  });
+
+  it('pollClaudeAccountUsage never throws when readToken REJECTS — yields a keychain-unavailable row (finding B)', async () => {
+    const row = await pollClaudeAccountUsage(acct('acctX'), { now, readToken: async () => { throw new Error('boom'); } });
+    expect(row).toMatchObject({ id: 'acctX', source: 'keychain-unavailable', stale: true });
+    expect(row.noteCodes).toContain('claude.oauthPoll.keychain-unavailable');
+  });
+});

@@ -180,7 +180,9 @@ export interface TokenReaderDeps {
 const resolveClaudeConfigDir = (configDir: string | null, homeDir: string): string => {
   const input = configDir ?? join(homeDir, '.claude');
   const expanded = input === '~' ? homeDir : input.startsWith('~/') ? join(homeDir, input.slice(2)) : input;
-  return resolve(expanded).replace(/\/+$/, '').normalize('NFC');
+  // Strip trailing slashes, but preserve the filesystem root: `resolve('/')` is `/`, and stripping its
+  // slash would collapse it to '' — which then reads cwd-relative and mis-hashes the keychain service.
+  return (resolve(expanded).replace(/\/+$/, '') || '/').normalize('NFC');
 };
 
 /**
@@ -438,7 +440,15 @@ export async function pollClaudeAccountUsage(account: ClaudeAccount, deps: Claud
   const capturedAt = (deps.now?.() ?? new Date()).toISOString();
   const base = { id: account.id, configDir: account.configDir, loggedIn: account.loggedIn, capturedAt };
   const readToken = deps.readToken ?? ((cd: string | null) => readClaudeAccessToken(cd, deps));
-  const tokenRead = await readToken(account.configDir);
+  // Preserve the "Never throws" contract even if readToken REJECTS. The default reader never throws
+  // (readClaudeAccessToken catches internally), but readToken is injectable and now async — a rejection
+  // must become a first-class keychain-unavailable UNKNOWN row, never a Promise.all abort in pollClaudeUsage.
+  let tokenRead: TokenRead;
+  try {
+    tokenRead = await readToken(account.configDir);
+  } catch (err) {
+    tokenRead = { ok: false, reason: 'keychain-unavailable', error: shortError(err) };
+  }
   if (!tokenRead.ok) {
     return {
       ...base,
