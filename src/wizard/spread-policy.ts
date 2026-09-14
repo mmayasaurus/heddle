@@ -12,7 +12,7 @@
  */
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { loadAccountRegistry } from '../accounts.js';
+import { loadAccountRegistry, type Account } from '../accounts.js';
 import type { Prompter } from './prompt.js';
 
 export interface SpreadPolicy {
@@ -37,9 +37,14 @@ export function evenSplit(sessions: number, accounts: number): number[] {
   return Array.from({ length: accounts }, (_, i) => base + (i < remainder ? 1 : 0));
 }
 
+// Strict: only a bare positive decimal integer is accepted. Number.parseInt would silently truncate
+// '2.5' -> 2 and '7abc' -> 7, which would save a policy that differs from what the operator typed
+// (qodo review). A blank / non-numeric / out-of-safe-range entry falls back to the caller's default.
 function parsePositiveInt(raw: string, fallback: number): number {
-  const n = Number.parseInt(raw, 10);
-  return Number.isInteger(n) && n >= 1 ? n : fallback;
+  const trimmed = raw.trim();
+  if (!/^\d+$/.test(trimmed)) return fallback;
+  const n = Number(trimmed);
+  return Number.isSafeInteger(n) && n >= 1 ? n : fallback;
 }
 
 function noop(): SpreadPolicyResult {
@@ -48,7 +53,15 @@ function noop(): SpreadPolicyResult {
 
 export async function runSpreadPolicy(opts: SpreadPolicyOptions, deps: SpreadPolicyDeps): Promise<SpreadPolicyResult> {
   const registryPath = opts.registryPath ?? process.env.HEDDLE_ACCOUNTS ?? join(homedir(), '.heddle', 'accounts.json');
-  const claudeAccounts = loadAccountRegistry(registryPath).accounts.filter((a) => a.provider === 'claude');
+  let claudeAccounts: Account[];
+  try {
+    claudeAccounts = loadAccountRegistry(registryPath).accounts.filter((a) => a.provider === 'claude');
+  } catch (error) {
+    // loadAccountRegistry throws a clear message on a corrupt/invalid registry. This step is optional,
+    // so surface it and skip rather than aborting the whole wizard mid-run.
+    deps.report?.(`⚠ Could not read the account registry (${registryPath}): ${error instanceof Error ? error.message : String(error)}. Skipping the spread policy — fix the registry and re-run.`);
+    return noop();
+  }
   if (claudeAccounts.length === 0) {
     deps.report?.('No Claude accounts registered — add them with accounts-add first; skipping spread policy.');
     return noop();
@@ -67,7 +80,9 @@ export async function runSpreadPolicy(opts: SpreadPolicyOptions, deps: SpreadPol
   );
   const split = evenSplit(sessions, participating.length);
   deps.report?.(`Even spread: ${sessions} session(s) across ${participating.length} account(s) → ${split.join('/')} (${participating.map((id, i) => `${id}:${split[i]}`).join(', ')}).`);
-  const ceiling = Math.max(...split);
+  // ceil(sessions / k) is the exact even-spread ceiling (=== Math.max(...split)), computed directly so
+  // it never depends on a non-empty spread array. sessions >= 1 and participating.length >= 1 here.
+  const ceiling = Math.ceil(sessions / participating.length);
   const capPerAccount = parsePositiveInt(await deps.prompter.text('Max concurrent sessions per account (cap)?', String(ceiling)), ceiling);
   if (sessions > participating.length * capPerAccount) {
     deps.report?.(`⚠ ${sessions} sessions cannot all fit under a cap of ${capPerAccount} across ${participating.length} account(s) (max ${participating.length * capPerAccount}); excess sessions stay queued until an account frees up.`);

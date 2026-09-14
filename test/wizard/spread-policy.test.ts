@@ -112,4 +112,27 @@ describe('runSpreadPolicy', () => {
     });
     expect(result.policy.accounts).toEqual(['acct1', 'acct2']);
   });
+
+  it('falls back to the default when a numeric entry is malformed instead of truncating it', async () => {
+    const registryPath = seedRegistry(tempDir(), threeClaudeAccounts);
+    const lines: string[] = [];
+    const result = await runSpreadPolicy({ registryPath }, {
+      prompter: new ScriptedPrompter([true, true, true, '2.5', '7abc', true]), report: (l) => lines.push(l),
+    });
+    // '2.5' and '7abc' must be REJECTED, not truncated to 2 / 7: sessions falls back to the participant
+    // count (3), and the cap falls back to the ceiling ceil(3/3) = 1. (Fails on Number.parseInt.)
+    expect(result.policy.capPerAccount).toBe(1);
+    expect(lines.some((l) => l.includes('3 session(s) across 3'))).toBe(true);
+  });
+
+  it('reports and skips without throwing when the registry file is corrupt', async () => {
+    const registryPath = join(tempDir(), 'accounts.json');
+    writeFileSync(registryPath, '{ this is not valid json');
+    const lines: string[] = [];
+    const result = await runSpreadPolicy({ registryPath }, {
+      prompter: new ScriptedPrompter([]), report: (l) => lines.push(l),
+    });
+    expect(result).toEqual({ policy: { strategy: 'even-spread', provider: 'claude', accounts: [], capPerAccount: 0 } });
+    expect(lines.some((l) => l.includes('Could not read the account registry'))).toBe(true);
+  });
 });
