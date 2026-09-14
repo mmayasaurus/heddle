@@ -121,9 +121,10 @@ async function envRepointBaseUrl(entry: ProviderMatrixEntry, deps: AccountsAddDe
     region = await deps.prompter.text('Qwen region/workspace');
     if (!region) throw new Error('Qwen region/workspace is required');
   }
-  const baseUrl = await deps.prompter.text(
-    `${entry.displayName} base URL`, entry.baseUrl,
-  );
+  // Never offer the global default once a non-global region is chosen — otherwise the saved region and
+  // endpoint can disagree (codeant #128). For a non-global region the operator must supply the URL.
+  const urlDefault = region && region !== 'global' ? undefined : entry.baseUrl;
+  const baseUrl = await deps.prompter.text(`${entry.displayName} base URL`, urlDefault);
   validateBaseUrl(baseUrl);
   return { baseUrl, ...(region === undefined ? {} : { region }) };
 }
@@ -136,6 +137,14 @@ export async function addEnvRepointOne(
   const id = await deps.prompter.text(`Account id for ${entry.displayName}`, `${entry.key}-${ordinal}`);
   validateId(id);
   const provider = envRepointHarness(entry);
+  // Never clobber a different existing account: env-repoint accounts share the provider namespace
+  // (claude/codex) with native accounts, so a colliding id would upsert-replace one and silently drop
+  // its credentials (codeant #179). Fail this account instead of overwriting.
+  if (loadAccountRegistry(registryPath).accounts.some((account) => account.provider === provider && account.id === id)) {
+    summary.failed.push(id);
+    deps.report?.(`FAIL ${entry.key} ${id} (id already used by an existing ${provider} account — choose another)`);
+    return;
+  }
   const { baseUrl, region } = await envRepointBaseUrl(entry, deps);
   const authTokenRef = await deps.prompter.text(
     `Which environment variable holds your ${entry.displayName} key? (a NAME you have exported, e.g. ZAI_API_KEY — not the key itself)`,
@@ -210,6 +219,12 @@ async function addCustomProvider(deps: AccountsAddDeps, registryPath: string, su
   const provider = style === 'anthropic-compatible' ? 'claude' : 'codex';
   const id = await deps.prompter.text(`Account id for ${displayName}`, `${service}-1`);
   validateId(id);
+  // Never clobber a different existing account through a colliding id (codeant #179; see addEnvRepointOne).
+  if (loadAccountRegistry(registryPath).accounts.some((account) => account.provider === provider && account.id === id)) {
+    summary.failed.push(id);
+    deps.report?.(`FAIL ${service} ${id} (id already used by an existing ${provider} account — choose another)`);
+    return;
+  }
   if (!process.env[authTokenRef]) {
     summary.failed.push(id);
     deps.report?.(`FAIL ${service} ${id} (export ${authTokenRef} and re-run)`);

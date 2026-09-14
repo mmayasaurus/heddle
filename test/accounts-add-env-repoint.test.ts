@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { loadAccountRegistry } from '../src/accounts.js';
@@ -187,6 +187,41 @@ describe('accounts add env-repoint wizard', () => {
       prompter: new ScriptedPrompter([]), runner: fakeRunner,
     })).rejects.toThrow(/does not yet support/i);
     expect(existsSync(path)).toBe(false);
+  });
+
+  it('keeps region and endpoint consistent (GLM china does not default to the global URL)', async () => {
+    const path = join(tempDir(), 'glm-china.json');
+    withHome(tempDir());
+    vi.stubEnv('ZAI_API_KEY', 'FAKE_GLM_SENTINEL');
+    const cnUrl = 'https://open.bigmodel.cn/api/anthropic';
+    // 'china' → the base-URL prompt has NO default, so the operator must supply the CN endpoint.
+    const summary = await runAccountsAdd({ provider: 'glm', registryPath: path }, {
+      prompter: new ScriptedPrompter([true, '', 'china', cnUrl, 'ZAI_API_KEY', 'paid', 'T2', false]),
+      runner: fakeRunner,
+    });
+    expect(summary.added).toEqual(['glm-1']);
+    expect(loadAccountRegistry(path).accounts[0]).toMatchObject({ region: 'china', envRepoint: { baseUrl: cnUrl } });
+  });
+
+  it('does not clobber an existing native account whose id collides with an env-repoint id', async () => {
+    const path = join(tempDir(), 'collide.json');
+    withHome(tempDir());
+    vi.stubEnv('ZAI_API_KEY', 'FAKE_GLM_SENTINEL');
+    // A native Claude account already owns id 'claude-1'.
+    writeFileSync(path, JSON.stringify({
+      schemaVersion: 2,
+      claude: [{ id: 'claude-1', configDir: '/tmp/native-claude-1', billingClass: 'subscription-quota', tier: 'T1', loggedIn: true }],
+    }));
+    const report: string[] = [];
+    const summary = await runAccountsAdd({ provider: 'glm', registryPath: path }, {
+      prompter: new ScriptedPrompter([true, 'claude-1', false]), runner: fakeRunner, report: (line) => report.push(line),
+    });
+    expect(summary).toMatchObject({ added: [], failed: ['claude-1'] });
+    // The native account survives untouched — not replaced by the env-repoint upsert.
+    const survivor = loadAccountRegistry(path).accounts.find((account) => account.id === 'claude-1')!;
+    expect(survivor).toMatchObject({ provider: 'claude', loggedIn: true, configDir: '/tmp/native-claude-1' });
+    expect(survivor.envRepoint).toBeUndefined();
+    expect(report.join('\n')).toContain('already used by an existing claude account');
   });
 
   it('rejects a custom provider slug that collides with a matrix key', async () => {
