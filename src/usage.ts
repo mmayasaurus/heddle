@@ -187,9 +187,14 @@ function glmQuotaCaps(quota: GlmUsageQuota, nowS: number): ProviderCaps | null {
   const fiveHour = quota.pools.find((pool) => pool.type === 'five_hour');
   const weekly = quota.pools.find((pool) => pool.type === 'weekly');
   if (!fiveHour && !weekly) return null;
-  const toWindow = (pool: typeof fiveHour): CapWindow => pool
-    ? normalizeWindow({ usedPercentage: pool.percentage, resetsAt: Math.floor(pool.resetAtMs / 1000) }, nowS)
-    : UNKNOWN;
+  // A missing pool — or malformed quota data (a non-finite or out-of-[0,100] percentage) — is UNKNOWN:
+  // never let bad data drive a GLM route-away decision (codeant/amazon-q #151). A non-finite resetAtMs
+  // is dropped to null so normalizeWindow's reset-passed shortcut cannot misfire on it.
+  const toWindow = (pool: typeof fiveHour): CapWindow => {
+    if (!pool || !Number.isFinite(pool.percentage) || pool.percentage < 0 || pool.percentage > 100) return UNKNOWN;
+    const resetsAt = Number.isFinite(pool.resetAtMs) ? Math.floor(pool.resetAtMs / 1000) : null;
+    return normalizeWindow({ usedPercentage: pool.percentage, resetsAt }, nowS);
+  };
   return {
     provider: 'glm', source: 'glm-quota', stale: false, capturedAt: nowS,
     fiveHour: toWindow(fiveHour), sevenDay: toWindow(weekly), windows: {}, noteCodes: [], accounts: [], activeAccount: null,

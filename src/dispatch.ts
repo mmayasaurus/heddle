@@ -115,7 +115,9 @@ export async function dispatch(
   // fails open on a missing key, timeout, unauthorized response, or malformed payload. (research-summarize
   // is deliberately absent — its fallback is codex/luna, not glm; see routing.v0.yaml.)
   if (!req.caps && ['second-opinion', 'quick-alt-take'].includes(req.taskClass ?? '')) {
-    const glmQuota = await fetchGlmUsageQuota();
+    // Honor a request-specific ZAI_API_KEY (req.env) over the ambient one, so a dispatch pinned to a
+    // particular GLM account reads THAT account's quota (codeant #151). req.env wins on overlap.
+    const glmQuota = await fetchGlmUsageQuota({ env: { ...process.env, ...req.env } });
     req = { ...req, caps: readProviderCaps({ glmQuota: glmQuota ?? undefined }) };
   }
 
