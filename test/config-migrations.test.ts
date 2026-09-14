@@ -84,6 +84,17 @@ describe('migrateConfigFile', () => {
     expect(JSON.parse(readFileSync(path, 'utf8'))).toEqual({ schemaVersion: 2, claude: [] });
   });
 
+  it('plans a migration without writing a backup or changing the file in dry-run mode', () => {
+    const original = '{\n  "schemaVersion": 1,\n  "value": "dry"\n}\n';
+    const path = writeFixture('dry-run.json', original);
+
+    expect(migrateConfigFile('synthetic', path, { registry: syntheticRegistry, dryRun: true })).toEqual({
+      migrated: true, from: 1, to: 3,
+    });
+    expect(readFileSync(path, 'utf8')).toBe(original);
+    expect(readdirSync(tempDir()).filter((entry) => entry.startsWith('dry-run.json.bak-'))).toEqual([]);
+  });
+
   it('throws before touching a file when the migration chain has a gap', () => {
     const original = '{"schemaVersion":1}\n';
     const path = writeFixture('gap.json', original);

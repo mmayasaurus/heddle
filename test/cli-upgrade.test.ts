@@ -1,0 +1,75 @@
+import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { describe, expect, it } from 'vitest';
+import { runCli, withTempHome } from './helpers/cli.js';
+
+const fleetBin = (home: string) => join(home, '.heddle', 'fleet', 'bin');
+
+describe('heddle upgrade', () => {
+  it('migrates a legacy accounts registry, reports an absent projects registry, and creates missing fleet assets', async () => {
+    const home = withTempHome();
+    const accounts = join(home, 'legacy-accounts.json');
+    writeFileSync(accounts, '{\n  "claude": []\n}\n');
+
+    const result = await runCli(['upgrade', '--json'], { home, env: { HEDDLE_ACCOUNTS: accounts } });
+
+    expect(result.code).toBe(0);
+    const report = JSON.parse(result.stdout);
+    expect(report).toMatchObject({ dryRun: false, forced: false });
+    expect(report.migrations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'projects', action: 'absent' }),
+      expect.objectContaining({ kind: 'accounts', action: 'migrated', from: 1, to: 2, backupPath: expect.any(String) }),
+    ]));
+    expect(JSON.parse(readFileSync(accounts, 'utf8'))).toMatchObject({ schemaVersion: 2 });
+    expect(readdirSync(home).some((name) => name.startsWith('legacy-accounts.json.bak-v1-'))).toBe(true);
+    expect(readdirSync(fleetBin(home))).toHaveLength(10);
+    expect(report.assets).toEqual(expect.arrayContaining([expect.objectContaining({ kind: 'bin', action: 'created' })]));
+  });
+
+  it('preserves differing fleet assets unless forced, then refreshes them', async () => {
+    const home = withTempHome();
+    await runCli(['upgrade'], { home });
+    const target = join(fleetBin(home), 'lin.sh');
+    writeFileSync(target, 'user edit\n');
+
+    const preserved = await runCli(['upgrade', '--json'], { home });
+    expect(preserved.code).toBe(0);
+    expect(readFileSync(target, 'utf8')).toBe('user edit\n');
+    expect(JSON.parse(preserved.stdout).assets).toContainEqual(expect.objectContaining({ kind: 'bin', name: 'lin.sh', action: 'preserved' }));
+
+    const forced = await runCli(['upgrade', '--force', '--json'], { home });
+    expect(forced.code).toBe(0);
+    expect(readFileSync(target, 'utf8')).not.toBe('user edit\n');
+    expect(JSON.parse(forced.stdout).assets).toContainEqual(expect.objectContaining({ kind: 'bin', name: 'lin.sh', action: 'updated' }));
+  });
+
+  it('is idempotent after installation', async () => {
+    const home = withTempHome();
+    await runCli(['upgrade'], { home });
+    const target = join(fleetBin(home), 'lin.sh');
+    const before = statSync(target).mtimeMs;
+
+    const result = await runCli(['upgrade', '--json'], { home });
+
+    expect(result.code).toBe(0);
+    expect(statSync(target).mtimeMs).toBe(before);
+    const report = JSON.parse(result.stdout);
+    expect(report.migrations.every((migration: { action: string }) => migration.action === 'absent' || migration.action === 'current')).toBe(true);
+    expect(report.assets.every((asset: { action: string }) => asset.action === 'unchanged')).toBe(true);
+  });
+
+  it('plans migrations and missing assets without writing in dry-run mode', async () => {
+    const home = withTempHome();
+    const accounts = join(home, 'accounts.json');
+    writeFileSync(accounts, '{"claude":[]}\n');
+
+    const result = await runCli(['upgrade', '--dry-run', '--json'], { home, env: { HEDDLE_ACCOUNTS: accounts } });
+
+    expect(result.code).toBe(0);
+    expect(JSON.parse(readFileSync(accounts, 'utf8'))).toEqual({ claude: [] });
+    expect(existsSync(fleetBin(home))).toBe(false);
+    expect(JSON.parse(result.stdout)).toMatchObject({ dryRun: true, migrations: expect.arrayContaining([
+      expect.objectContaining({ kind: 'accounts', action: 'would-migrate', from: 1, to: 2 }),
+    ]), assets: expect.arrayContaining([expect.objectContaining({ action: 'would-create' })]) });
+  });
+});

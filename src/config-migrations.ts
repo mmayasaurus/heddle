@@ -18,6 +18,8 @@ export type ConfigMigrationRegistry = Record<string, ConfigMigrationDefinition>;
 
 export interface MigrateConfigFileOptions {
   registry?: ConfigMigrationRegistry;
+  /** Validate and describe the complete migration chain without creating a backup or writing. */
+  dryRun?: boolean;
 }
 
 export interface ConfigMigrationResult {
@@ -135,6 +137,7 @@ export function migrateConfigFile(
   }
 
   const chain = migrationChain(definition, from, path);
+  if (options.dryRun) return { migrated: true, from, to };
   const backup = backupPath(path, from);
   try {
     copyFileSync(path, backup, constants.COPYFILE_EXCL);
