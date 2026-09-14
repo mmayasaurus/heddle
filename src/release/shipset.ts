@@ -33,6 +33,11 @@ export function isIncluded(path: string): boolean {
   return rootFiles.has(path) || path.startsWith('src/') || path.startsWith('test/') || path.startsWith('routing/')
     || path.startsWith('skills/') || path.startsWith('assets/')
     || (path.startsWith('docs/') && !path.startsWith('docs/fleet/'))
+    // The ratified hook-rule catalog is the bundled fallback the init-project chooser and
+    // resolveRulesRoot() read from (src/rules/lifecycle.ts); a release must carry it or the catalog is
+    // invisible in an installed heddle. Ship active rules + shared fixtures, never rules/proposed/ —
+    // un-ratified experiments that loadRules() ignores anyway.
+    || (path.startsWith('rules/') && !path.startsWith('rules/proposed/'))
     || path === '.github/workflows/gate.yml';
 }
 

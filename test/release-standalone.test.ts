@@ -23,6 +23,9 @@ describe('regression PR#119 — standalone snapshot generator review findings', 
     const included = [
       'src/cli.ts', 'docs/PROVIDER-MATRIX.md', 'skills/quality-gate.md',
       'assets/commands/startup.md', '.github/workflows/gate.yml',
+      // the ratified hook-rule catalog + its shared fixtures ship so an installed heddle's
+      // init-project chooser / resolveRulesRoot() fallback can find them (HED-535)
+      'rules/no-rm-recursive-force.yaml', 'rules/tests/no-rm-recursive-force.jsonl',
     ];
     for (const path of included) {
       expect(existsSync(join(first, path))).toBe(true);
@@ -95,6 +98,12 @@ describe('regression PR#119 — standalone snapshot generator review findings', 
   it('classifies Windows-style ship set paths using POSIX prefixes', () => {
     expect(isIncluded('src\\release\\standalone.ts')).toBe(true);
     expect(isIncluded('docs\\fleet\\dispatch.md')).toBe(false);
+  });
+
+  it('ships the ratified hook-rule catalog and its fixtures but not proposed experiments', () => {
+    expect(isIncluded('rules/no-rm-recursive-force.yaml')).toBe(true);
+    expect(isIncluded('rules/tests/no-rm-recursive-force.jsonl')).toBe(true);
+    expect(isIncluded('rules/proposed/no-rm-recursive-force.yaml')).toBe(false);
   });
 
   it('records peeled commits for lightweight and annotated tags', () => {

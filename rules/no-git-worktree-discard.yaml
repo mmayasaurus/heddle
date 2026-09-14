@@ -1,0 +1,16 @@
+id: no-git-worktree-discard
+event: PreToolUse
+match:
+  tool: Bash
+  input:
+    command: '\bgit\s+(?:-C\s+\S+\s+)?(?:checkout\b(?:[^\n;|&]*?\s(?:-[A-Za-z]*f[A-Za-z]*\b|--force\b)|\s+(?:(?!-p\b|--patch\b)[^\s;|&]+\s+)*?--(?:\s|$)|\s+\.)|clean\b(?![^\n;|&]*(?:\s-[A-Za-z]*n|\s--dry-run))[^\n;|&]*?\s(?:-[A-Za-z]*f|--force\b))'
+action: block
+enforce: false
+subagent_aware: true
+message: 'This discards uncommitted working-tree changes — git checkout -- / git
+  checkout . / git clean -f — with no undo. Anything not committed is lost. If
+  there is any chance the work matters, commit it to a wip/ branch first. (git
+  clean -n previews without deleting.)'
+fail_open: true
+provenance: HED-535
+since: 2026-09-14

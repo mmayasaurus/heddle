@@ -1,0 +1,10 @@
+{"name":"match: gh pr create","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"gh pr create"}},"expect":{"outcome":"nudge"}}
+{"name":"match: gh pr create --fill","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"gh pr create --fill"}},"expect":{"outcome":"nudge"}}
+{"name":"match: gh pr create --title \"x\" --body y","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"gh pr create --title \"x\" --body y"}},"expect":{"outcome":"nudge"}}
+{"name":"match: gh  pr  create","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"gh  pr  create"}},"expect":{"outcome":"nudge"}}
+{"name":"non-match: gh pr view 152","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"gh pr view 152"}},"expect":{"outcome":"none"}}
+{"name":"non-match: gh pr merge 152","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"gh pr merge 152"}},"expect":{"outcome":"none"}}
+{"name":"non-match: gh pr list","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"gh pr list"}},"expect":{"outcome":"none"}}
+{"name":"non-match: gh pr checks","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"gh pr checks"}},"expect":{"outcome":"none"}}
+{"name":"non-match: git push","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git push"}},"expect":{"outcome":"none"}}
+{"name":"non-match: gh issue create","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"gh issue create"}},"expect":{"outcome":"none"}}
