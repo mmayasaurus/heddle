@@ -3,7 +3,7 @@ event: PreToolUse
 match:
   tool: Bash
   input:
-    command: '^(?=[\s\S]*\b(?:psql|mysql|mariadb|sqlite3)\b)(?=[\s\S]*(?:[Dd][Rr][Oo][Pp]\s+(?:[Tt][Aa][Bb][Ll][Ee]|[Dd][Aa][Tt][Aa][Bb][Aa][Ss][Ee]|[Ss][Cc][Hh][Ee][Mm][Aa])|[Tt][Rr][Uu][Nn][Cc][Aa][Tt][Ee]\s+[Tt][Aa][Bb][Ll][Ee])\b)'
+    command: '(?:\b(?:psql|mysql|mariadb|sqlite3)\b[^;|&]*?(?:[Dd][Rr][Oo][Pp]\s+(?:[Tt][Aa][Bb][Ll][Ee]|[Dd][Aa][Tt][Aa][Bb][Aa][Ss][Ee]|[Ss][Cc][Hh][Ee][Mm][Aa])|[Tt][Rr][Uu][Nn][Cc][Aa][Tt][Ee]\s+[Tt][Aa][Bb][Ll][Ee])\b)|(?:(?:[Dd][Rr][Oo][Pp]\s+(?:[Tt][Aa][Bb][Ll][Ee]|[Dd][Aa][Tt][Aa][Bb][Aa][Ss][Ee]|[Ss][Cc][Hh][Ee][Mm][Aa])|[Tt][Rr][Uu][Nn][Cc][Aa][Tt][Ee]\s+[Tt][Aa][Bb][Ll][Ee])\b[^;&]*?\|[^;&]*?\b(?:psql|mysql|mariadb|sqlite3)\b)'
 action: block
 enforce: false
 subagent_aware: true
