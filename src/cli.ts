@@ -30,7 +30,7 @@ import { runPrSweep } from './pr-sweep.js';
 import { runPrWatch } from './pr-watch.js';
 import { bootstrapComms } from './comms/bootstrap.js';
 import { loadAccountRegistry } from './accounts.js';
-import { diffFleetHooks, diffFleetLaunchers, installFleetHooks, installFleetLaunchers } from './fleet.js';
+import { diffFleetBin, diffFleetHooks, diffFleetLaunchers, installFleetBin, installFleetHooks, installFleetLaunchers } from './fleet.js';
 import { NativeCliRunner, type NativeProvider } from './wizard/cli-runner.js';
 import { ReadlinePrompter, ScriptedPrompter, type Prompter } from './wizard/prompt.js';
 import { runAccountsAdd } from './wizard/accounts-add.js';
@@ -89,6 +89,8 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
   heddle fleet hooks-diff [--json]  compare installed fleet hooks with the vendored canon
   heddle fleet install-launchers [--dry-run] [--json]  install vendored fleet launchers under ~/.heddle/fleet/launchers
   heddle fleet launchers-diff [--json]  compare installed fleet launchers with the vendored canon
+  heddle fleet install-bin [--dry-run] [--json]  install vendored fleet bin tools under ~/.heddle/fleet/bin
+  heddle fleet bin-diff [--json]  compare installed fleet bin tools with the vendored canon
   heddle mode [desktop|mobile|away] [--note "<t>"] [--json]   operator mode (HED-336): no arg prints
                                  the current mode; a mode word sets it (~/.heddle/operator-mode.json —
                                  the pocket console and desktop app write the same file)
@@ -924,10 +926,12 @@ try {
 
     case 'fleet': {
       const action = process.argv[3];
-      if (action === 'install-hooks' || action === 'install-launchers') {
+      if (action === 'install-hooks' || action === 'install-launchers' || action === 'install-bin') {
         const report = action === 'install-hooks'
           ? installFleetHooks({ dryRun: has('--dry-run') })
-          : installFleetLaunchers({ dryRun: has('--dry-run') });
+          : action === 'install-launchers'
+            ? installFleetLaunchers({ dryRun: has('--dry-run') })
+            : installFleetBin({ dryRun: has('--dry-run') });
         out(json, report, () => [
           `target: ${report.targetDir}`,
           ...report.files.map((file) => {
@@ -941,13 +945,13 @@ try {
         ].join('\n'));
         break;
       }
-      if (action === 'hooks-diff' || action === 'launchers-diff') {
-        const report = action === 'hooks-diff' ? diffFleetHooks() : diffFleetLaunchers();
+      if (action === 'hooks-diff' || action === 'launchers-diff' || action === 'bin-diff') {
+        const report = action === 'hooks-diff' ? diffFleetHooks() : action === 'launchers-diff' ? diffFleetLaunchers() : diffFleetBin();
         out(json, report, () => report.clean ? 'clean' : report.files.map((file) => `${file.action} ${file.name}`).join('\n'));
         if (!report.clean) process.exitCode = 1;
         break;
       }
-      console.error('usage: heddle fleet <install-hooks|hooks-diff|install-launchers|launchers-diff> [--dry-run] [--json]');
+      console.error('usage: heddle fleet <install-hooks|hooks-diff|install-launchers|launchers-diff|install-bin|bin-diff> [--dry-run] [--json]');
       process.exitCode = 2;
       break;
     }

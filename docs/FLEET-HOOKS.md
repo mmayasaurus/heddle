@@ -2,6 +2,8 @@
 
 `fleet/hooks/` is the vendored, source-controlled canon-to-be for Heddle fleet-discipline hooks. It is dark in Phase 1: no repository settings consume it yet.
 
+The fleet-wide parity manifest covers hooks, launchers, and bin tools; see [Fleet bin tools](FLEET-BIN.md).
+
 For the separate vendored launcher set and its portability catalog, see [Fleet launchers](FLEET-LAUNCHERS.md). Since the launcher work landed, both sets share one engine with the same hardening: an empty canon directory or a non-regular canon entry fails loudly instead of reporting vacuous success, and a `--dry-run` partial-failure error reports planned actions as `none (dry run — planned: …)` rather than as written files.
 
 Install the canon into the current user's Heddle home directory:

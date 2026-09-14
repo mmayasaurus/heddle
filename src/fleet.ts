@@ -31,17 +31,20 @@ export interface FleetHookDiffReport {
 export type FleetLauncherOptions = FleetHookOptions;
 export type FleetLauncherInstallReport = FleetHookInstallReport;
 export type FleetLauncherDiffReport = FleetHookDiffReport;
+export type FleetBinOptions = FleetHookOptions;
+export type FleetBinInstallReport = FleetHookInstallReport;
+export type FleetBinDiffReport = FleetHookDiffReport;
 
 interface FleetAssetSet {
-  kind: 'hook' | 'launcher';
+  kind: 'hook' | 'launcher' | 'bin';
   canonicalDir: string;
   targetDir(homeDir: string): string;
   files(canonicalDir: string): string[];
 }
 
 const FLEET_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', 'fleet');
-const filesByExtension = (extension: string) => (canonicalDir: string): string[] => {
-  const entries = readdirSync(canonicalDir, { withFileTypes: true }).filter((entry) => entry.name.endsWith(extension));
+const filesByExtensions = (extensions: string[]) => (canonicalDir: string): string[] => {
+  const entries = readdirSync(canonicalDir, { withFileTypes: true }).filter((entry) => extensions.some((extension) => entry.name.endsWith(extension)));
   // Canon integrity: a *.ext entry that is not a regular file (symlink, directory) must fail
   // loudly — silently skipping it would let diff report clean against an unusable canon.
   const irregular = entries.filter((entry) => !entry.isFile()).map((entry) => entry.name).sort();
@@ -53,13 +56,19 @@ const ASSET_SETS: Record<FleetAssetSet['kind'], FleetAssetSet> = {
     kind: 'hook',
     canonicalDir: join(FLEET_ROOT, 'hooks'),
     targetDir: (homeDir) => join(homeDir, '.heddle', 'fleet', 'hooks'),
-    files: filesByExtension('.py'),
+    files: filesByExtensions(['.py']),
   },
   launcher: {
     kind: 'launcher',
     canonicalDir: join(FLEET_ROOT, 'launchers'),
     targetDir: (homeDir) => join(homeDir, '.heddle', 'fleet', 'launchers'),
-    files: filesByExtension('.sh'),
+    files: filesByExtensions(['.sh']),
+  },
+  bin: {
+    kind: 'bin',
+    canonicalDir: join(FLEET_ROOT, 'bin'),
+    targetDir: (homeDir) => join(homeDir, '.heddle', 'fleet', 'bin'),
+    files: filesByExtensions(['.sh', '.py', '.mjs']),
   },
 };
 
@@ -157,4 +166,14 @@ export function installFleetLaunchers(options: FleetLauncherOptions = {}): Fleet
 /** Compare the installed launchers to the vendored canon. */
 export function diffFleetLaunchers(options: FleetLauncherOptions = {}): FleetLauncherDiffReport {
   return diffFleetAssets(ASSET_SETS.launcher, options);
+}
+
+/** Copy the vendored fleet bin canon into a home-scoped fleet installation. */
+export function installFleetBin(options: FleetBinOptions = {}): FleetBinInstallReport {
+  return installFleetAssets(ASSET_SETS.bin, options);
+}
+
+/** Compare the installed fleet bin tools to the vendored canon. */
+export function diffFleetBin(options: FleetBinOptions = {}): FleetBinDiffReport {
+  return diffFleetAssets(ASSET_SETS.bin, options);
 }
