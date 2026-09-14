@@ -27,7 +27,7 @@
  * (round-2 code had the identical property). HED-569 tracks whether to enumerate authored
  * tool-runtime paths even when ignored.
  *
- * Known, bounded blind spot (Maya-gated, HED-550): an UNTRACKED write directly under one of these
+ * Known, bounded blind spot (operator-gated, HED-550): an UNTRACKED write directly under one of these
  * three daemon dirs is indistinguishable from daemon churn by path alone, so it is also excluded.
  * Accepted because the alternative — no exclusion — makes the guard false-fire on every consumer
  * review until it is ignored, which is strictly worse; the zone is three tool-owned dirs, a write
