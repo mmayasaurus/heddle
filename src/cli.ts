@@ -23,7 +23,7 @@ import { DEFAULT_USAGE_DIR, readProviderCaps } from './usage.js';
 import { buildOauthUsageSidecar, pollClaudeUsage } from './claude-usage.js';
 import { formatUsageRemaining, readUsageRemaining } from './usage-remaining.js';
 import { installUsagePollLaunchd } from './usage-poll-launchd.js';
-import { resolveRulesRoot, runRuleCli } from './rules/lifecycle.js';
+import { resolveCatalogRoot, runRuleCli } from './rules/lifecycle.js';
 import { loadRules } from './rules/load.js';
 import { DOCTOR_PROVIDERS, formatDoctorReport, runDoctor } from './doctor.js';
 import { readOperatorMode, writeOperatorMode, isOperatorMode, OPERATOR_MODES } from './operator-mode.js';
@@ -35,6 +35,7 @@ import { loadAccountRegistry } from './accounts.js';
 import { DEFAULT_ACCOUNTS_PATH } from './capaware.js';
 import { migrateConfigFile } from './config-migrations.js';
 import { diffFleetBin, diffFleetHooks, diffFleetLaunchers, installFleetBin, installFleetHooks, installFleetLaunchers } from './fleet.js';
+import { uninstall } from './uninstall.js';
 import { NativeCliRunner, type NativeProvider } from './wizard/cli-runner.js';
 import { ReadlinePrompter, ScriptedPrompter, type Prompter } from './wizard/prompt.js';
 import { runAccountsAdd } from './wizard/accounts-add.js';
@@ -70,6 +71,7 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
       --override-reason <r> REQUIRED with --provider/--model when no --class: why this bypasses the
                            routing table (recorded on the ledger row; HED-95)
       --no-fallback        do not try the table's fallback on failure
+      --preserve-permissions keep the worker CLI's own permission prompts (agy: omit --dangerously-skip-permissions); absent = provider default. WARNING: a headless run with no terminal to answer the prompts will hang.
       --capabilities a,b   GRANT worker capabilities: net | browse | exec-privileged (default: none)
       --in-session         claude classes: return the in-session (Agent tool) instruction instead of a headless worker
       --account <id>       claude classes: pin the registry account (default: most 5h headroom)
@@ -98,6 +100,7 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
   heddle fleet install-bin [--dry-run] [--json]  install vendored fleet bin tools under ~/.heddle/fleet/bin
   heddle fleet bin-diff [--json]  compare installed fleet bin tools with the vendored canon
   heddle upgrade [--dry-run] [--force] [--json]  migrate config schemas and refresh missing fleet assets without overwriting local edits
+  heddle uninstall [--dry-run] [--json]  remove only fleet assets still byte-identical to the shipped canon (preserves anything modified)
   heddle mode [desktop|mobile|away] [--note "<t>"] [--json]   operator mode (HED-336): no arg prints
                                  the current mode; a mode word sets it (~/.heddle/operator-mode.json —
                                  the pocket console and desktop app write the same file)
@@ -105,6 +108,7 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
   heddle whoami [--json]         this process's bound identity (HEDDLE_AGENT / FLEET_AGENT / .fleet-agent) + worker context
   heddle doctor [--json] [--provider <p>]   verify harnesses/accounts/config; --provider runs only that provider's checks plus global config checks (exit 1 on any fail)
   heddle release --standalone <outDir> [--source-ref <git ref>] [--init-git] [--verify] [--json]
+      requires a clean checkout at main's HEAD — headless-first invariant (HED-507)
   heddle workers [--stale <hours>] [--json]   dispatches still in flight (--stale: only orphans older than N hours)
   heddle ledger [--issue ABC-123] [--limit N] [--json]
   heddle ledger finish <id> --error "<why>"   close an orphaned in-flight row (ok=0)
@@ -176,7 +180,7 @@ const json = has('--json');
  * `--dry-run` preview especially must observe, not mutate.
  * Best-effort — a hygiene failure must never break the command the operator actually ran.
  */
-if (cmd !== 'mode' && cmd !== 'pr' && cmd !== 'comms' && cmd !== 'fleet' && cmd !== 'top' && cmd !== 'upgrade' && !(cmd === 'ledger' && (process.argv[3] === 'sweep' || process.argv[3] === 'finish')) && !(cmd === 'usage' && (process.argv[3] === 'poll-claude' || process.argv[3] === 'install-poll-launchd'))) {
+if (cmd !== 'mode' && cmd !== 'pr' && cmd !== 'comms' && cmd !== 'fleet' && cmd !== 'top' && cmd !== 'upgrade' && cmd !== 'uninstall' && !(cmd === 'ledger' && (process.argv[3] === 'sweep' || process.argv[3] === 'finish')) && !(cmd === 'usage' && (process.argv[3] === 'poll-claude' || process.argv[3] === 'install-poll-launchd'))) {
   try {
     const { closed } = new Ledger().sweepOrphans();
     if (closed > 0) console.error(`heddle: closed ${closed} orphaned in-flight dispatch row${closed === 1 ? '' : 's'} (heddle ledger --json shows outcome='orphaned')`);
@@ -218,6 +222,7 @@ try {
         optIn: has('--opt-in'),
         overrideReason: arg('--override-reason'),
         noFallback: has('--no-fallback'),
+        skipPermissions: has('--preserve-permissions') ? false : undefined,
         capabilities: arg('--capabilities')?.split(',').map((s) => s.trim()).filter(Boolean),
         inSession: has('--in-session'),
         accountPin: arg('--account'),
@@ -501,7 +506,7 @@ try {
     case 'classes': {
       const rows = describeTaskClasses(loadRouting(), withMandatoryPacks);
       out(json, rows, () => rows.map((r) =>
-        `${r.task_class.padEnd(22)} ${r.provider}/${r.model}` +
+        `${r.task_class.padEnd(22)} ${r.provider && r.model ? `${r.provider}/${r.model}` : '(prefer-only)'}` +
         (r.effort ? ` (${r.effort})` : '') +
         (r.fallback ? `  ↳ ${r.fallback}` : '') +
         (r.opt_in_required ? '  [opt-in required]' : '') +
@@ -1056,6 +1061,27 @@ try {
       break;
     }
 
+    case 'uninstall': {
+      // This mutates user-scoped files, so reject every unrecognized or positional argument first.
+      const unknownArgs = process.argv.slice(3).filter((arg) => !['--dry-run', '--json'].includes(arg));
+      if (unknownArgs.length > 0) {
+        const error = `heddle uninstall: unknown argument${unknownArgs.length === 1 ? '' : 's'} ${unknownArgs.join(', ')} — allowed: --dry-run, --json`;
+        // Under --json, emit a machine-readable error to stdout (draining before exit) so a --json
+        // caller never parses empty stdout; otherwise a plain message to stderr (matches heddle doctor).
+        if (json) process.stdout.write(`${JSON.stringify({ ok: false, error })}\n`, () => process.exit(2));
+        else { console.error(error); process.exit(2); }
+        break;
+      }
+      const report = uninstall({ dryRun: has('--dry-run') });
+      out(json, report, () => [
+        ...report.removed.map((path) => `${report.dryRun ? 'would remove' : 'removed'} ${path}`),
+        ...report.preserved.map((path) => `preserved (modified — not removed) ${path}`),
+        ...report.warnings.map((warning) => `warning: ${warning}`),
+        report.removed.length || report.preserved.length || report.warnings.length ? '' : '(nothing to uninstall)',
+      ].filter(Boolean).join('\n'));
+      break;
+    }
+
     case 'mode': {
       const requested = process.argv[3];
       // No mode word (absent, or the next token is a flag like --json) → report the current mode.
@@ -1093,7 +1119,7 @@ try {
         console.error('usage: heddle init-project <dir> [--canonical <path>] [--name <n>] [--team <KEY>] [--agents A,B,…] [--room <#room>] [--launcher <script>] [--preset <tier>] [--hook-rules <a,b>] [--enforce <a,b>] [--answers <file>] [--enforce-memtrace] [--dry-run] [--json] [--show-content]');
         process.exit(2);
       }
-      const catalogRoot = resolveRulesRoot([]);
+      const catalogRoot = resolveCatalogRoot();
       let hookRules: HookRuleSelection[] | undefined;
       if (has('--preset')) {
         if (has('--hook-rules')) throw new Error('--preset and --hook-rules are mutually exclusive; choose one');

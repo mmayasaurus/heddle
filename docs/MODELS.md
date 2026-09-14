@@ -286,6 +286,7 @@ src/capaware.ts), which ends the manual log-out/log-in juggling:
   `heddle dispatch --in-session` returns the structured `claude-in-session`
   instruction (run it as your own Agent-tool subagent: shared prompt cache,
   same account) plus the account advice line.
+- **Agy permission prompts**: `heddle dispatch --preserve-permissions` is agy-specific (gemini routes); GLM/HTTP and claude ignore it.
 - **Route-away stays on**: at Claude 5h ≥ `route_away_at_pct` (90) a Claude
   class runs its declared fallback (codex/…) instead — operator's default (lower
   the knob if Claude should hold).

@@ -2,24 +2,27 @@ import { execFileSync } from 'node:child_process';
 import { cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, sep } from 'node:path';
+import { gitEnv } from './git-env.js';
 
 const rootFiles = new Set([
   'package.json', 'package-lock.json', 'tsconfig.json', 'tsconfig.test.json', 'vitest.config.ts', '.gitignore',
   'LICENSE', 'SECURITY.md',
 ]);
 
-export function extractShipSet(sourceDir: string, sourceRef: string): { dir: string; sourceCommit: string } {
+// `commit` is the immutable SHA the release gate already resolved and validated (assertCleanMainHead).
+// We archive that exact object rather than a symbolic ref, and we do NOT re-derive it here: the caller
+// records the pin it passed in, so the shipped tree and the recorded commit are the same validated
+// object with no second resolution that could drift (HED-507 review: codeant/qodo TOCTOU).
+// `git archive <sha>` emits that commit's committed tree.
+export function extractShipSet(sourceDir: string, commit: string): { dir: string } {
   const dir = mkdtempSync(join(tmpdir(), 'heddle-standalone-source-'));
-  const archive = execFileSync('git', ['archive', '--format=tar', sourceRef], {
-    cwd: sourceDir, maxBuffer: 64 * 1024 * 1024,
+  const archive = execFileSync('git', ['archive', '--format=tar', commit], {
+    cwd: sourceDir, maxBuffer: 64 * 1024 * 1024, env: gitEnv(),
   });
   const tarPath = join(dir, 'source.tar');
   writeFileSync(tarPath, archive);
   execFileSync('tar', ['-xf', tarPath, '-C', dir]);
-  const sourceCommit = execFileSync('git', ['rev-parse', `${sourceRef}^{commit}`], {
-    cwd: sourceDir, encoding: 'utf8',
-  }).trim();
-  return { dir, sourceCommit };
+  return { dir };
 }
 
 export function copyShipSet(source: string, destination: string): void {

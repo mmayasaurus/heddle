@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { readClaudeAccounts } from '../capaware.js';
 import {
+  isPreferOnlyClass,
   listTaskClasses,
   loadRouting,
   resolveRoute,
@@ -99,6 +100,7 @@ export function targetModels(
   };
 
   for (const taskClass of listTaskClasses(routing)) {
+    if (isPreferOnlyClass(routing, taskClass)) continue;
     const route = resolveRoute(routing, taskClass);
 
     for (const target of [route, route.fallback].filter(Boolean) as RouteTarget[]) {

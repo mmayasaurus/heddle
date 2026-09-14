@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   type ClaudeAccountUsage,
@@ -68,6 +68,11 @@ describe('claudeKeychainService', () => {
   it('normalizes trailing slashes so a dir and its slashed form share one service', () => {
     expect(claudeKeychainService('/home/tester/.claude-acct2/', home)).toBe(claudeKeychainService('/home/tester/.claude-acct2', home));
     expect(claudeKeychainService('/home/tester/.claude/', home)).toBe('Claude Code-credentials');
+  });
+  it('resolves relative and tilde config dirs to the same absolute-path service', () => {
+    expect(claudeKeychainService('.claude-acct3', home)).toBe(claudeKeychainService(resolve('.claude-acct3'), home));
+    expect(claudeKeychainService('~/.claude-acct3', home)).toBe(claudeKeychainService('/home/tester/.claude-acct3', home));
+    expect(claudeKeychainService('~/.claude', home)).toBe('Claude Code-credentials');
   });
 });
 
@@ -175,26 +180,26 @@ describe('parseIdentity', () => {
 
 describe('readClaudeAccessToken (read-only, injected I/O)', () => {
   const tokenBlob = (t: string) => JSON.stringify({ claudeAiOauth: { accessToken: t } });
-  it('prefers a present credentials.json', () => {
-    const out = readClaudeAccessToken('/x/acct1', { readCredentialsFile: () => tokenBlob('CRED'), readKeychain: () => { throw new Error('should not reach keychain'); } });
+  it('prefers a present credentials.json', async () => {
+    const out = await readClaudeAccessToken('/x/acct1', { readCredentialsFile: () => tokenBlob('CRED'), readKeychain: async () => { throw new Error('should not reach keychain'); } });
     expect(out).toEqual({ ok: true, token: 'CRED', source: 'credentials.json' });
   });
-  it('falls back to the keychain when there is no credentials.json', () => {
-    const out = readClaudeAccessToken('/x/acct1', { readCredentialsFile: () => null, readKeychain: () => tokenBlob('KC') });
+  it('falls back to the keychain when there is no credentials.json', async () => {
+    const out = await readClaudeAccessToken('/x/acct1', { readCredentialsFile: () => null, readKeychain: async () => tokenBlob('KC') });
     expect(out).toEqual({ ok: true, token: 'KC', source: 'keychain' });
   });
-  it('a credentials.json without a token still falls through to the keychain', () => {
-    const out = readClaudeAccessToken('/x/acct1', { readCredentialsFile: () => JSON.stringify({ claudeAiOauth: {} }), readKeychain: () => tokenBlob('KC2') });
+  it('a credentials.json without a token still falls through to the keychain', async () => {
+    const out = await readClaudeAccessToken('/x/acct1', { readCredentialsFile: () => JSON.stringify({ claudeAiOauth: {} }), readKeychain: async () => tokenBlob('KC2') });
     expect(out).toEqual({ ok: true, token: 'KC2', source: 'keychain' });
   });
-  it('ANY keychain throw is keychain-unavailable, never a crash', () => {
-    const out = readClaudeAccessToken('/x/acct1', { readCredentialsFile: () => null, readKeychain: () => { const e = new Error('timed out'); (e as { code?: string }).code = 'ETIMEDOUT'; throw e; } });
+  it('ANY keychain throw is keychain-unavailable, never a crash', async () => {
+    const out = await readClaudeAccessToken('/x/acct1', { readCredentialsFile: () => null, readKeychain: async () => { const e = new Error('timed out'); (e as { code?: string }).code = 'ETIMEDOUT'; throw e; } });
     expect(out.ok).toBe(false);
     expect(out).toMatchObject({ reason: 'keychain-unavailable' });
     if (!out.ok) expect(out.error).toContain('ETIMEDOUT');
   });
-  it('a keychain item without a token is no-token', () => {
-    const out = readClaudeAccessToken('/x/acct1', { readCredentialsFile: () => null, readKeychain: () => JSON.stringify({ nope: true }) });
+  it('a keychain item without a token is no-token', async () => {
+    const out = await readClaudeAccessToken('/x/acct1', { readCredentialsFile: () => null, readKeychain: async () => JSON.stringify({ nope: true }) });
     expect(out).toMatchObject({ ok: false, reason: 'no-token' });
   });
 });
@@ -203,7 +208,7 @@ describe('pollClaudeAccountUsage (hermetic)', () => {
   const okToken: TokenRead = { ok: true, token: 'tok', source: 'keychain' };
   it('takes identity from the PROFILE endpoint, not the usage body (they are separate reads)', async () => {
     const row = await pollClaudeAccountUsage(acct('acct4'), deps({
-      readToken: () => okToken,
+      readToken: async () => okToken,
       // The usage body carries a DIFFERENT account block; identity must come from /profile, never usage
       // (verified live: /api/oauth/usage has no identity at all).
       fetchImpl: stubFetch({
@@ -217,7 +222,7 @@ describe('pollClaudeAccountUsage (hermetic)', () => {
   });
   it('happy path: 200 usage + 200 profile → ok, fresh windows, live identity', async () => {
     const row = await pollClaudeAccountUsage(acct('acct4'), deps({
-      readToken: () => okToken,
+      readToken: async () => okToken,
       fetchImpl: stubFetch({
         ...URLS,
         usageByToken: { tok: { json: { five_hour: { utilization: 15 }, seven_day: { utilization: 3 }, limits: [{ percent: 47, scope: { model: { display_name: 'Fable' } } }], account: { uuid: 'U4', email_address: 'v@x' }, organization: { uuid: 'O4' } } } },
@@ -234,7 +239,7 @@ describe('pollClaudeAccountUsage (hermetic)', () => {
   it('scrubs a weekly model display name that reflects the bearer token', async () => {
     const token: TokenRead = { ok: true, token: 'secret-token', source: 'keychain' };
     const row = await pollClaudeAccountUsage(acct('acct4'), deps({
-      readToken: () => token,
+      readToken: async () => token,
       fetchImpl: stubFetch({
         ...URLS,
         usageByToken: { 'secret-token': { json: { limits: [{ percent: 1, scope: { model: { display_name: 'secret-token' } } }] } } },
@@ -246,7 +251,7 @@ describe('pollClaudeAccountUsage (hermetic)', () => {
 
   it('non-200 usage → http-error, stale, windows unknown (NOT 0%)', async () => {
     const row = await pollClaudeAccountUsage(acct('acct1'), deps({
-      readToken: () => okToken,
+      readToken: async () => okToken,
       fetchImpl: stubFetch({ ...URLS, usageByToken: { tok: { status: 429 } }, profileByToken: { tok: { json: { account: { uuid: 'U1' } } } } }),
     }));
     expect(row).toMatchObject({ source: 'http-error', stale: true });
@@ -257,7 +262,7 @@ describe('pollClaudeAccountUsage (hermetic)', () => {
 
   it('malformed usage JSON → parse-error, stale, unknown', async () => {
     const row = await pollClaudeAccountUsage(acct('acct1'), deps({
-      readToken: () => okToken,
+      readToken: async () => okToken,
       fetchImpl: stubFetch({ ...URLS, usageByToken: { tok: { text: 'not json{' } }, profileByToken: { tok: { json: { account: { uuid: 'U1' } } } } }),
     }));
     expect(row).toMatchObject({ source: 'parse-error', stale: true });
@@ -266,7 +271,7 @@ describe('pollClaudeAccountUsage (hermetic)', () => {
 
   it('fetch throwing → network-error, stale, unknown', async () => {
     const row = await pollClaudeAccountUsage(acct('acct1'), deps({
-      readToken: () => okToken,
+      readToken: async () => okToken,
       fetchImpl: stubFetch({ ...URLS, throwFor: (url) => url === URLS.usageUrl, profileByToken: { tok: { json: { account: { uuid: 'U1' } } } } }),
     }));
     expect(row).toMatchObject({ source: 'network-error', stale: true });
@@ -275,7 +280,7 @@ describe('pollClaudeAccountUsage (hermetic)', () => {
 
   it('usage 200 but the PROFILE endpoint fails → fresh headroom, NO identity, identityUnverified + real profile error', async () => {
     const row = await pollClaudeAccountUsage(acct('acct2'), deps({
-      readToken: () => okToken,
+      readToken: async () => okToken,
       fetchImpl: stubFetch({ ...URLS, usageByToken: { tok: { json: { five_hour: { utilization: 35 } } } }, profileByToken: { tok: { status: 401 } } }),
     }));
     expect(row).toMatchObject({ source: 'ok', stale: false }); // headroom is real and usable despite no identity
@@ -287,7 +292,7 @@ describe('pollClaudeAccountUsage (hermetic)', () => {
 
   it('token absent → no-token, stale, unknown, no network calls', async () => {
     const row = await pollClaudeAccountUsage(acct('acct3'), deps({
-      readToken: () => ({ ok: false, reason: 'no-token' }),
+      readToken: async () => ({ ok: false, reason: 'no-token' }),
       fetchImpl: (() => { throw new Error('must not fetch without a token'); }) as unknown as typeof fetch,
     }));
     expect(row).toMatchObject({ source: 'no-token', stale: true, tokenSource: null, liveIdentity: null });
@@ -303,7 +308,7 @@ describe('pollClaudeUsage — grouping & loud warnings', () => {
 
   it('fires duplicate-identity when two config dirs resolve to the SAME account.uuid', async () => {
     const warns: string[] = [];
-    const readToken = (cd: string | null): TokenRead => ({ ok: true, token: `tok:${cd}`, source: 'keychain' });
+    const readToken = async (cd: string | null): Promise<TokenRead> => ({ ok: true, token: `tok:${cd}`, source: 'keychain' });
     const fetchImpl = stubFetch({
       ...URLS,
       usageByToken: { 'tok:/x/acct1': { json: usageJson(63, 'U-DUP', 'shared@x') }, 'tok:/x/acct3': { json: usageJson(86, 'U-DUP', 'shared@x') } },
@@ -320,7 +325,7 @@ describe('pollClaudeUsage — grouping & loud warnings', () => {
 
   it('fires no-live-identity for an account that resolves no identity, and keeps distinct ones un-warned', async () => {
     const warns: string[] = [];
-    const readToken = (cd: string | null): TokenRead => (cd === '/x/acct3' ? { ok: false, reason: 'keychain-unavailable', error: 'ETIMEDOUT' } : { ok: true, token: `tok:${cd}`, source: 'keychain' });
+    const readToken = async (cd: string | null): Promise<TokenRead> => (cd === '/x/acct3' ? { ok: false, reason: 'keychain-unavailable', error: 'ETIMEDOUT' } : { ok: true, token: `tok:${cd}`, source: 'keychain' });
     const fetchImpl = stubFetch({
       ...URLS,
       usageByToken: { 'tok:/x/acct1': { json: usageJson(10, 'U1', 'a@x') }, 'tok:/x/acct4': { json: usageJson(20, 'U4', 'd@x') } },
@@ -337,7 +342,7 @@ describe('pollClaudeUsage — grouping & loud warnings', () => {
   });
 
   it('four distinct identities → no warnings', async () => {
-    const readToken = (cd: string | null): TokenRead => ({ ok: true, token: `tok:${cd}`, source: 'keychain' });
+    const readToken = async (cd: string | null): Promise<TokenRead> => ({ ok: true, token: `tok:${cd}`, source: 'keychain' });
     const fetchImpl = stubFetch({
       ...URLS,
       usageByToken: Object.fromEntries(['acct1', 'acct2', 'acct3', 'acct4'].map((id) => [`tok:/x/${id}`, { json: usageJson(5, `U-${id}`, `${id}@x`) }])),
@@ -382,7 +387,7 @@ describe('usage poll-claude — account filter & sidecar writes', () => {
     const usageDir = tempDir();
     const account = 'acct1';
     const accounts = [acct('acct1'), acct('acct2')].filter((row) => row.id === account);
-    const readToken = (cd: string | null): TokenRead => ({ ok: true, token: `tok:${cd}`, source: 'keychain' });
+    const readToken = async (cd: string | null): Promise<TokenRead> => ({ ok: true, token: `tok:${cd}`, source: 'keychain' });
     const fetchImpl = stubFetch({
       ...URLS,
       usageByToken: {
@@ -470,5 +475,23 @@ describe('readProviderCaps — claude-oauth poll merge', () => {
 
   it('is a no-op when no polls are supplied (existing callers unaffected)', () => {
     expect(readProviderCaps({ usageDir: tempDir(), nowS }).claude).toMatchObject({ source: 'none', stale: true });
+  });
+});
+
+describe('HED-490 review fixes (codeant / qodo)', () => {
+  it('keychainService for the filesystem root hashes "/" — not "" or the cwd (finding A)', () => {
+    const home = '/Users/x';
+    // '/' is a pinned (non-default) dir, so it gets a sha256(absDir) suffix computed from '/', proving
+    // the trailing-slash strip no longer collapses root to '' (which would read cwd-relative and mis-hash).
+    expect(claudeKeychainService('/', home)).toBe(
+      `Claude Code-credentials-${createHash('sha256').update('/').digest('hex').slice(0, 8)}`,
+    );
+    expect(claudeKeychainService('/', home)).not.toBe(claudeKeychainService(process.cwd(), home));
+  });
+
+  it('pollClaudeAccountUsage never throws when readToken REJECTS — yields a keychain-unavailable row (finding B)', async () => {
+    const row = await pollClaudeAccountUsage(acct('acctX'), { now, readToken: async () => { throw new Error('boom'); } });
+    expect(row).toMatchObject({ id: 'acctX', source: 'keychain-unavailable', stale: true });
+    expect(row.noteCodes).toContain('claude.oauthPoll.keychain-unavailable');
   });
 });
