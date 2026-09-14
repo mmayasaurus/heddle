@@ -193,7 +193,8 @@ describe('adversarial review dispatch', () => {
     const fake = fakeAdapter(undefined, { readAgents: false }); // claude materializes no AGENTS.md
     try {
       // claude reviewer (explicit different-family route): no Bash in its tool set → diff embedded
-      const claudeOutcome = await dispatch({ taskClass: 'adversarial-review', provider: 'claude', model: 'opus', authorProvider: 'cursor', diffBase: baseSha, prompt: 'review', cwd, identity: unbound }, ledger, () => fake.adapter);
+      // sonnet: opus/fable headless reviews are refused by HED-519; sonnet (outside the predicate) exercises the embed branch, which keys on provider+readOnly not model
+      const claudeOutcome = await dispatch({ taskClass: 'adversarial-review', provider: 'claude', model: 'sonnet', authorProvider: 'cursor', diffBase: baseSha, prompt: 'review', cwd, identity: unbound }, ledger, () => fake.adapter);
       if (!fake.calls.length) throw new Error('claude reviewer never ran: ' + JSON.stringify({ refusal: claudeOutcome.refusal, error: claudeOutcome.error, execution: claudeOutcome.execution }));
       const claudePrompt = fake.calls[0].prompt;
       expect(claudePrompt).toContain('You cannot run shell commands');

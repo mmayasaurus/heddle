@@ -173,24 +173,21 @@ export async function dispatch(
     });
   }
 
-  // ---- HED-511: headless claude opus/fable is unreliable for adversarial-review ----------------
-  // claude -p --output-format json is silent until completion, so a substantial headless review that
-  // overruns SIGKILLs at its timeout with zero output (6/6 such dispatches died this way). Steer to
-  // cursor (this class's default) — a structured, ledgered refusal before any spawn (HED-448 pattern).
-  if (
-    plan.execution === 'headless' &&
-    target.provider === 'claude' &&
-    /(?:^|[-/])(opus|fable)(?:[-/]|$)/i.test(target.model) &&
-    route.taskClass === 'adversarial-review'
-  ) {
+  // ---- HED-519: headless claude opus/fable is unreliable for adversarial-review -----------------
+  // Computed in planDispatch (so `heddle route` / plan_dispatch preview and this dispatch agree).
+  if (plan.headlessClaudeReviewRefusal) {
     return refusalOutcome(ctx, req, route.taskClass, target, skillsForRefusal, {
       code: 'headless-claude-review-unreliable',
-      reason: `headless ${target.provider}/${target.model} for an adversarial-review is empirically unreliable — `
-        + `claude -p --output-format json is silent until completion, so a substantial review that overruns `
-        + `SIGKILLs at its timeout with zero output (HED-511: 6/6 such dispatches died this way).`,
-      instruction: `Route substantial adversarial reviews to cursor (this class's default cursor/grok-4.6-high `
-        + `completed the identical review in ~575s) — omit provider/model to take the class default, or name cursor. `
-        + `For claude specifically, use an in-session subagent (in_session:true), which has no headless timeout wall.`,
+      reason: plan.headlessClaudeReviewRefusal,
+      // HED-519 finding 5: don't send a cursor-authored review in a loop. "omit provider/model → cursor
+      // default" only works when a NON-cursor provider authored the change; when cursor authored it,
+      // pickReviewer re-picks a pool entry (can land back on claude) and "name cursor" is same-provider.
+      // The in-session claude path is the universal escape (no headless wall, and it isn't cursor).
+      instruction: `Route substantial adversarial reviews to cursor — this class's default cursor/grok-4.6-high `
+        + `ran the identical review in ~575s: omit provider/model to take the cursor class default (works when a `
+        + `non-cursor provider authored the change). For claude specifically, or when cursor authored the change `
+        + `under review (cursor can't review its own work), use an in-session subagent (in_session:true) — it has `
+        + `no headless timeout wall.`,
     });
   }
 
