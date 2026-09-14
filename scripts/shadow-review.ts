@@ -188,6 +188,71 @@ interface RoundContext {
   dryRun: boolean;
 }
 
+/**
+ * Gate-4 mechanical post-check (HED-568): count local-reviewer findings whose cited `file:line` is NOT
+ * present in the reviewed diff — a "hallucinated citation". Deterministic and best-effort: it NEVER throws
+ * on malformed input; a citation (or diff fragment) that fails to parse is skipped, never aborting the count.
+ *
+ * Leniency is deliberate — catch CLEAR fabrications (a cited location absent from the diff) without punishing
+ * an approximate-but-real line number inside a shown hunk: the path match is suffix/basename-lenient and the
+ * line check is an inclusive-range overlap against the diff's NEW-side hunk ranges. Known v1 limitation: a
+ * citation into a PURE-DELETION file (old-side only) may be flagged, since we validate new-side hunk ranges
+ * only — acceptable for v1.
+ */
+export function countHallucinatedCitations(candidateOutput: string, diff: string): number {
+  const hallucinated = new Set<string>();
+  try {
+    if (!candidateOutput) return 0;
+    // (a) Parse the unified diff into per-file NEW-side line ranges: path -> list of half-open [start, end).
+    const fileRanges = new Map<string, Array<[number, number]>>();
+    let current: string | null = null;
+    for (const line of (diff ?? '').split(/\r?\n/)) {
+      if (line.startsWith('+++ ')) {
+        const rest = line.slice(4).split('\t')[0]!.trim();
+        if (rest === '/dev/null') { current = null; continue; } // deleted file has no new-side; skip its hunks
+        current = rest.startsWith('b/') ? rest.slice(2) : rest;
+        if (!fileRanges.has(current)) fileRanges.set(current, []);
+        continue;
+      }
+      if (current !== null && line.startsWith('@@')) {
+        const hunk = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/.exec(line);
+        if (!hunk) continue;
+        const start = Number(hunk[1]);
+        const count = hunk[2] === undefined ? 1 : Number(hunk[2]); // `+ns` with no comma ⇒ nc=1
+        if (!Number.isFinite(start) || !Number.isFinite(count)) continue;
+        fileRanges.get(current)!.push([start, start + count]);
+      }
+    }
+    // (b) Extract every file:line[-line] citation, then (c) resolve each against the new-side ranges.
+    const basename = (path: string): string => path.slice(path.lastIndexOf('/') + 1);
+    const citationRe = /([\w./+\-]+\.[A-Za-z][A-Za-z0-9]{0,9}):(\d+)(?:\s*-\s*(\d+))?/g;
+    for (const match of candidateOutput.matchAll(citationRe)) {
+      try {
+        const citedPath = match[1]!;
+        const startLine = Number(match[2]);
+        if (!Number.isFinite(startLine)) continue;
+        const rawEnd = match[3] === undefined ? startLine : Number(match[3]);
+        const endLine = Number.isFinite(rawEnd) ? rawEnd : startLine;
+        const lo = Math.min(startLine, endLine);
+        const hi = Math.max(startLine, endLine);
+        // Lenient path match: exact, a trailing path-suffix (leading directories flexible), or same basename.
+        let resolved = false;
+        for (const [filePath, ranges] of fileRanges) {
+          if (filePath !== citedPath && !filePath.endsWith(`/${citedPath}`) && basename(filePath) !== basename(citedPath)) continue;
+          // Inclusive citation [lo, hi] overlaps a half-open hunk range [rs, re) iff lo < re && hi >= rs.
+          if (ranges.some(([rs, re]) => lo < re && hi >= rs)) { resolved = true; break; }
+        }
+        if (!resolved) hallucinated.add(`${citedPath}:${startLine}`); // (d) distinct hallucinations, deduped
+      } catch {
+        // A single unparseable citation is skipped — best-effort, never aborts the whole count.
+      }
+    }
+  } catch {
+    // Defensive: any unexpected failure yields the best-effort count so far (never throws).
+  }
+  return hallucinated.size;
+}
+
 /** Dispatch the local candidate, then the judge, then score + write the receipt for one selected round.
  *  A local/judge decline or a scoring error is recorded as a skip result — never thrown. */
 function dispatchScoreReceipt(selected: CorpusRound, ctx: RoundContext): ShadowResult {
@@ -219,6 +284,7 @@ function dispatchScoreReceipt(selected: CorpusRound, ctx: RoundContext): ShadowR
       candidateLedgerId: candidate.ledgerId, judgeLedgerId: judge.ledgerId,
       findingsTotal: selected.findingsTotal, findingsAccepted: selected.findingsAccepted,
       tp: round.tp, fp: round.fp, novel: round.novel.length, acceptedMatched: round.acceptedMatched,
+      hallucinatedCitations: countHallucinatedCitations(candidate.output ?? '', selected.diff),
       recall: report.totals.recall, precision: report.totals.precision, status: 'scored', at,
     };
     if (!dryRun) appendReceipt(receiptDir, receipt);
@@ -311,7 +377,7 @@ function promotionBarLines(scored: readonly ScoredReceipt[], totals: ReportTotal
     `  • calendar days elapsed: ${days.toFixed(1)}/${SHADOW_BAR_MIN_DAYS}${tick(days >= SHADOW_BAR_MIN_DAYS)}`,
     `  • precision (confirmed-real/raised, same diffs — the gate): local ${pct(localPrecision)} vs cloud ${pct(cloudPrecision)}${tick(precisionMeets)}`,
     `      context: local excl. NOVEL = ${pct(localPrecisionExclNovel)} (NOVEL counted as raised-but-unconfirmed; final NOVEL handling is R's call at promotion)`,
-    `  • hallucinated citations surviving file:line check: ${hallucinationKnown ? `${totals.hallucinated}${tick(totals.hallucinated === 0)}` : `pending — ${checked}/${scored.length} rounds checked (mechanical post-check not yet implemented)`}`,
+    `  • hallucinated citations surviving file:line check: ${hallucinationKnown ? `${totals.hallucinated}${tick(totals.hallucinated === 0)}` : `pending — ${checked}/${scored.length} rounds checked`}`,
   ];
 }
 
