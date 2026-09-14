@@ -110,6 +110,7 @@ export async function dispatch(
 
   const plan = planDispatch(req, table);
   ctx.routeReason = plan.decision.routeReason;
+  ctx.symbol = plan.symbol;
   ctx.account = plan.account;
   ctx.claudeAccount = plan.accountPick;
   ctx.rotationAccount = plan.rotationAccount;

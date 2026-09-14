@@ -28,6 +28,7 @@ export function baseRecord(
     sessionId: req.resume ?? null,
     fellBackFrom,
     routeReason: ctx.routeReason ?? null,
+    symbol: ctx.symbol ?? null,
     account: ctx.account ?? null,
   };
 }

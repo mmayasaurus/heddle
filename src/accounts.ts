@@ -58,6 +58,18 @@ export interface AccountRegistry {
 }
 
 type Provider = Account['provider'];
+/**
+ * The provider identities that appear DIRECTLY as an `Account.provider` — the native harness logins
+ * heddle can prove present or absent from accounts.json. Env-repoint providers (glm, groq, gemini, …)
+ * are deliberately NOT here: they ride a native harness account via `envRepoint.service`
+ * (provider-matrix.ts), so a routing target naming one is not registry-decidable and must not be gated
+ * on account presence (HED-397 C2). Runtime mirror of `Account['provider']`, `satisfies`-checked so it
+ * cannot hold a provider the type does not.
+ */
+export const ACCOUNT_PROVIDERS = ['claude', 'codex', 'cursor'] as const satisfies readonly Account['provider'][];
+const modeledProviderSet = new Set<string>(ACCOUNT_PROVIDERS);
+/** Does this routing-target provider appear directly as an `Account.provider` (a native harness login)? */
+export const isAccountModeledProvider = (provider: string): boolean => modeledProviderSet.has(provider);
 type Row = Record<string, unknown>;
 
 const billingClasses = new Set<BillingClass>([
@@ -252,11 +264,9 @@ export function loadAccountRegistry(path: string = process.env.HEDDLE_ACCOUNTS ?
   // _doc strings, unlike the strict project registry shape.
   return {
     schemaVersion: ACCOUNTS_SCHEMA_VERSION,
-    accounts: [
-      ...accountsFor(raw, 'claude', path),
-      ...accountsFor(raw, 'codex', path),
-      ...accountsFor(raw, 'cursor', path),
-    ],
+    // Single source of truth for the native provider set (shared with isAccountModeledProvider); order
+    // preserved (claude, codex, cursor) so the concatenation is byte-identical to the prior spread.
+    accounts: ACCOUNT_PROVIDERS.flatMap((provider) => accountsFor(raw, provider, path)),
   };
 }
 

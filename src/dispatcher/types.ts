@@ -10,6 +10,7 @@ import type { ReviewerPick } from '../review.js';
 import type { attributeDispatch, BoundIdentity } from '../identity.js';
 import type { CapsByProvider } from '../usage.js';
 import type { RouteDecision, ClaudeAccount, AccountAdvice, AccountPick } from '../capaware.js';
+import type { Account } from '../accounts.js';
 import type { RotationAccounts } from '../rotation.js';
 import type { WorkerAdapter, WorkerResult } from '../types.js';
 
@@ -70,6 +71,8 @@ export interface DispatchRequest {
   caps?: CapsByProvider;
   /** Claude account registry; read from ~/.heddle/accounts.json when omitted (tests inject). */
   accounts?: ClaudeAccount[];
+  /** Full registry used by tier-symbol availability; tests may supply a synthetic registry. */
+  accountRegistry?: Account[];
   /**
    * Claude-primary classes: return the structured `claude-in-session` instruction (run it as your
    * own Agent-tool subagent, shared prompt cache + same account) instead of spawning a headless
@@ -175,6 +178,8 @@ export interface DispatchContext {
   caps: StructuralCaps;
   /** Set once the cap-aware decision is made; recorded on every row of this dispatch. */
   routeReason?: string;
+  /** The preference symbol that selected the concrete route, if any. */
+  symbol?: string;
   account?: string | null;
   /** HED-395: the provider-caps snapshot (`req.caps ?? readProviderCaps()`), computed ONCE in
    *  dispatch() and threaded so runTarget's billing gate reads the SAME snapshot the fallback
@@ -205,6 +210,10 @@ export interface DispatchPlan {
   route: Route;
   /** What would run (already swapped to the fallback when the cap-aware decision routed away). */
   target: RouteTarget;
+  /** Preference symbol that selected `target`, when tier-symbol routing participated. */
+  symbol?: string;
+  /** Ordered preference/ladder narration for `heddle route` and the ledger. */
+  resolutionWalk?: string[];
   /** The class fallback still available for a failure retry (undefined once consumed). */
   fallback?: RouteTarget;
   origin: InSessionOrigin;

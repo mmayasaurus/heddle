@@ -58,6 +58,8 @@ export interface DispatchRecord {
   capabilities: string | null;
   /** Why this route was taken when a cap/policy check chose it (HED-67), e.g. `cap:claude 5h 92%>=90`. */
   routeReason: string | null;
+  /** Preference symbol that selected the concrete route (HED-397). */
+  symbol: string | null;
   /** HED-95: operator's stated reason for routing around the table (direct provider+model path). */
   overrideReason: string | null;
   /** Account selected for the worker (HED-68 / CODEX_HOME rotation), when heddle chose one. */
@@ -88,13 +90,13 @@ export interface DispatchRecord {
 export type DispatchStartRecord =
   Omit<DispatchRecord, 'id' | 'ok' | 'error' | 'inputTokens' | 'cachedInputTokens' | 'outputTokens' |
     'reasoningTokens' | 'durationMs' | 'finishedAt' | 'startedAt' | 'refusal' | 'capabilities' |
-    'routeReason' | 'account' | 'identitySource' | 'overrideReason' |
+    'routeReason' | 'symbol' | 'account' | 'identitySource' | 'overrideReason' |
     // Derived/sweep-owned, never caller-provided: the owner identity is stamped by insertStart
     // itself; `outcome` is written only by the orphan sweep (HED-90); `outputPath` is produced by
     // persistOutput when finish() records a deliverable (HED-23); and `executionMode` is decided by
     // which insert ran — 'subprocess' for start(), 'in-session' for a claude handoff (HED-99).
     'executionMode' | 'outputPath' | 'ownerPid' | 'ownerComm' | 'ownerStartedAt' | 'outcome'> &
-  Partial<Pick<DispatchRecord, 'capabilities' | 'routeReason' | 'account' | 'identitySource' | 'overrideReason'>>;
+  Partial<Pick<DispatchRecord, 'capabilities' | 'routeReason' | 'symbol' | 'account' | 'identitySource' | 'overrideReason'>>;
 
 /** Worker-facing aggregates exclude classifier rows by default (HED-25). NULL-safe: rows written
  *  before the column existed have execution_mode NULL and must still count as worker dispatches. */
@@ -124,6 +126,7 @@ CREATE TABLE IF NOT EXISTS dispatches (
   refusal TEXT,
   capabilities TEXT,
   route_reason TEXT,
+  symbol TEXT,
   account TEXT,
   identity_source TEXT,
   override_reason TEXT,
@@ -205,6 +208,7 @@ const MIGRATIONS: { column: string; ddl: string }[] = [
   // HED-2 / HED-67 / HED-68 (one migration batch, 2026-08-15):
   { column: 'capabilities', ddl: 'ALTER TABLE dispatches ADD COLUMN capabilities TEXT' },
   { column: 'route_reason', ddl: 'ALTER TABLE dispatches ADD COLUMN route_reason TEXT' },
+  { column: 'symbol', ddl: 'ALTER TABLE dispatches ADD COLUMN symbol TEXT' },
   { column: 'account', ddl: 'ALTER TABLE dispatches ADD COLUMN account TEXT' },
   { column: 'identity_source', ddl: 'ALTER TABLE dispatches ADD COLUMN identity_source TEXT' },
   // HED-95: WHY a dispatch bypassed the routing table. Nullable by design — class dispatches
@@ -325,13 +329,13 @@ export class Ledger {
     const info = this.db.prepare(`
       INSERT INTO dispatches
         (orchestrator, task_class, provider, model, skills, issue, pr, cwd, prompt_preview,
-         session_id, fell_back_from, capabilities, route_reason, account, identity_source,
+         session_id, fell_back_from, capabilities, route_reason, symbol, account, identity_source,
          override_reason, execution_mode, started_at, owner_pid, owner_comm, owner_started_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'subprocess', ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'subprocess', ?, ?, ?, ?)
     `).run(
       r.orchestrator, r.taskClass, r.provider, r.model, r.skills, r.issue, r.pr, r.cwd,
       r.promptPreview.slice(0, 500), r.sessionId, r.fellBackFrom, r.capabilities ?? null,
-      r.routeReason ?? null, r.account ?? null, r.identitySource ?? null, r.overrideReason ?? null, now,
+      r.routeReason ?? null, r.symbol ?? null, r.account ?? null, r.identitySource ?? null, r.overrideReason ?? null, now,
       process.pid, basename(process.execPath), Math.round(Date.now() - process.uptime() * 1000),
     );
     return Number(info.lastInsertRowid);
@@ -343,13 +347,13 @@ export class Ledger {
     const info = this.db.prepare(`
       INSERT INTO dispatches
         (orchestrator, task_class, provider, model, skills, issue, pr, cwd, prompt_preview,
-         session_id, fell_back_from, refusal, capabilities, route_reason, account, identity_source,
+         session_id, fell_back_from, refusal, capabilities, route_reason, symbol, account, identity_source,
          override_reason, execution_mode, ok, error, started_at, finished_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
     `).run(
       r.orchestrator, r.taskClass, r.provider, r.model, r.skills, r.issue, r.pr, r.cwd,
       r.promptPreview.slice(0, 500), r.sessionId, r.fellBackFrom, refusal, r.capabilities ?? null,
-      r.routeReason ?? null, r.account ?? null, r.identitySource ?? null, r.overrideReason ?? null,
+      r.routeReason ?? null, r.symbol ?? null, r.account ?? null, r.identitySource ?? null, r.overrideReason ?? null,
       executionMode ?? null, reason, now, now,
     );
     return Number(info.lastInsertRowid);

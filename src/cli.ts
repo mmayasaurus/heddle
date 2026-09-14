@@ -251,6 +251,8 @@ try {
           : `\n  → ${summary.would_run}${summary.in_session ? '  [in-session: use your Agent tool]' : ''}` +
             (summary.routed_away_for_cap ? '  (routed away for cap)' : '')) +
         `\n  reason: ${summary.route_reason}` +
+        (summary.symbol ? `\n  preference: ${summary.symbol}` : '') +
+        (summary.resolution_walk?.length ? `\n  resolution:\n    - ${summary.resolution_walk.join('\n    - ')}` : '') +
         (summary.remaining_fallback ? `\n  fallback if it fails: ${summary.remaining_fallback}` : '') +
         (summary.account_pick ? `\n  ${summary.account_pick.reason}` : '') +
         (summary.account_advice ? `\n  ${summary.account_advice}` : '') +
@@ -488,6 +490,7 @@ try {
         (r.edits_code ? '  [edits code]' : '') +
         (r.read_only ? '  [read-only]' : '') +
         (r.reviewer_pool.length ? `  pool: ${r.reviewer_pool.join(' → ')}` : '') +
+        (r.prefer?.length ? `  prefer: ${r.prefer.join(' → ')}` : '') +
         `\n${''.padEnd(23)}skills: ${r.skills.join(', ') || '(none)'}` +
         (r.mcp.length ? `  mcp: ${r.mcp.join(', ')}` : '') +
         (r.why ? `\n${''.padEnd(23)}why: ${r.why}` : '')).join('\n'));
