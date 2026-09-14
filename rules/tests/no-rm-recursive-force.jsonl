@@ -15,6 +15,7 @@
 {"name":"match: xargs rm -rf — recall: xargs","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"xargs rm -rf"}},"expect":{"outcome":"nudge","stdout_includes":"(would block)"}}
 {"name":"match: time rm -rf node_modules — recall: time prefix","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"time rm -rf node_modules"}},"expect":{"outcome":"nudge","stdout_includes":"(would block)"}}
 {"name":"match: rm -rf /tmp/build-cache — CARVE-OUT: scratch/cache cleanup still nudges (path-blind, nudge-only)","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"rm -rf /tmp/build-cache"}},"expect":{"outcome":"nudge","stdout_includes":"(would block)"}}
+{"name":"match: legit rm -rf x — PR#159 codeant: word-ending-in-git is NOT the git-rm carve-out — must match","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"legit rm -rf x"}},"expect":{"outcome":"nudge","stdout_includes":"(would block)"}}
 {"name":"non-match: rm file.txt","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"rm file.txt"}},"expect":{"outcome":"none"}}
 {"name":"non-match: rm -r dir — recursive only, no force","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"rm -r dir"}},"expect":{"outcome":"none"}}
 {"name":"non-match: rm -f file — force only, no recursive","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"rm -f file"}},"expect":{"outcome":"none"}}
@@ -24,3 +25,6 @@
 {"name":"non-match: git rm -rf cached/ — CARVE-OUT: git rm is recoverable + routine","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git rm -rf cached/"}},"expect":{"outcome":"none"}}
 {"name":"non-match: git rm -r --cached x — CARVE-OUT: git rm --cached","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git rm -r --cached x"}},"expect":{"outcome":"none"}}
 {"name":"non-match: trm -rf x — not the rm command","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"trm -rf x"}},"expect":{"outcome":"none"}}
+{"name":"non-match: git  rm -rf cached/ — PR#159 qodo: git-rm carve-out survives repeated whitespace","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git  rm -rf cached/"}},"expect":{"outcome":"none"}}
+{"name":"non-match: git -C /repo rm -rf cached/ — PR#159 qodo: git-rm carve-out survives a -C <path> global option","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git -C /repo rm -rf cached/"}},"expect":{"outcome":"none"}}
+{"name":"non-match: git -c core.pager=cat rm -rf x — PR#159 qodo: git-rm carve-out survives a -c <cfg> global option","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git -c core.pager=cat rm -rf x"}},"expect":{"outcome":"none"}}

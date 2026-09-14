@@ -3,8 +3,7 @@ event: PreToolUse
 match:
   tool: Bash
   input:
-    command: '(?<!git
-      )\brm\b[^\n;|&]*?(?:-[A-Za-z]*(?:[rR][A-Za-z]*f|f[A-Za-z]*[rR])|(?:-[A-Za-z]*[rR]\b|--recursive)[^\n;|&]*?(?:-[A-Za-z]*f\b|--force)|(?:-[A-Za-z]*f\b|--force)[^\n;|&]*?(?:-[A-Za-z]*[rR]\b|--recursive))'
+    command: '(?<!\bgit\s+)(?<!\bgit\s+\S+\s+)(?<!\bgit\s+\S+\s+\S+\s+)\brm\b[^\n;|&]*?(?:-[A-Za-z]*(?:[rR][A-Za-z]*f|f[A-Za-z]*[rR])|(?:-[A-Za-z]*[rR]\b|--recursive)[^\n;|&]*?(?:-[A-Za-z]*f\b|--force)|(?:-[A-Za-z]*f\b|--force)[^\n;|&]*?(?:-[A-Za-z]*[rR]\b|--recursive))'
 action: block
 enforce: false
 subagent_aware: true

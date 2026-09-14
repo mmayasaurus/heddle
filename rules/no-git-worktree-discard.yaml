@@ -3,7 +3,7 @@ event: PreToolUse
 match:
   tool: Bash
   input:
-    command: '\bgit\s+(?:-C\s+\S+\s+)?(?:checkout\s+(?:(?:[^\s;|&]+\s+)*?--(?:\s|$)|\.)|clean\b[^\n;|&]*?\s(?:-(?![A-Za-z]*n)[A-Za-z]*f|--force\b))'
+    command: '\bgit\s+(?:-C\s+\S+\s+)?(?:checkout\s+(?:(?:(?!-p\b|--patch\b)[^\s;|&]+\s+)*?--(?:\s|$)|\.)|clean\b(?![^\n;|&]*(?:\s-[A-Za-z]*n|\s--dry-run))[^\n;|&]*?\s(?:-[A-Za-z]*f|--force\b))'
 action: block
 enforce: false
 subagent_aware: true
