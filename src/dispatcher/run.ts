@@ -214,7 +214,10 @@ export async function runTarget(
     // The mandate baseline is taken AFTER materialization and compared BEFORE restore (in finally):
     // injected files are part of the baseline, so a reviewer that edits AGENTS.md/.mcp.json is
     // caught — with the old before-materialize/after-restore ordering, restore MASKED those edits.
-    before = (mandateOnly || ctx.review) ? snapshotWorktree(req.cwd) : null;
+    // Detect escapes for EVERY read-only dispatch, not only the mandate-only path: a claude `--tools`
+    // fence is not a complete worktree fence (MCP is attached via --strict-mcp-config, outside --tools),
+    // so a "fenced" worker can still write — keep the belt-and-suspenders snapshot. (HED-404 r2.)
+    before = route.readOnly ? snapshotWorktree(req.cwd) : null;
     // HTTP providers cannot run git; Claude read-only reviewers also receive an embedded diff because
     // their tool set has no Bash. Tool-less HTTP prompts must not mention Read/Grep/Glob.
     const embedDiff = (isClaude && route.readOnly) || isHttp;

@@ -18,7 +18,10 @@ describe('dispatch read-only fences (HED-404)', () => {
 
   function registry(provider: 'claude' | 'codex' | 'cursor', id: string): void {
     const path = `${tempDir()}/accounts.json`;
-    writeFileSync(path, JSON.stringify({ schemaVersion: 2, [provider]: [{ id, harness: provider, configDir: null, codexHome: null }] }));
+    // NB: no explicit `harness` — toAccount() defaults it to the PRODUCTION value (claude-code /
+    // codex-cli / cursor-agent), so this exercises the real harness-resolution path (HED-404 r2 caught
+    // that keying HARNESS_FENCES by the provider short-name silently made every real account mandate-only).
+    writeFileSync(path, JSON.stringify({ schemaVersion: 2, [provider]: [{ id, configDir: null, codexHome: null }] }));
     process.env.HEDDLE_ACCOUNTS = path;
   }
 

@@ -25,12 +25,19 @@ export const NO_FENCE: AccountFences = Object.freeze({
   cwdEnforceable: false,
 });
 
-/** Per-harness ENFORCEABILITY. Only positive, code-verified fences are `true`. */
+const CLAUDE_FENCE: AccountFences = { readOnlyEnforceable: true, networkEnforceable: false, cwdEnforceable: false };
+const CODEX_FENCE: AccountFences = { readOnlyEnforceable: true, networkEnforceable: true, cwdEnforceable: true };
+
+/** Per-harness ENFORCEABILITY, keyed by the ACTUAL `Account.harness` value. accounts.ts (toAccount)
+ *  defaults harness to `claude-code` / `codex-cli` / `cursor-agent`, so those are the PRODUCTION keys;
+ *  the provider short-names (`claude`/`codex`/`cursor`) are kept as aliases so an account that sets a
+ *  short `harness` — and the test fixtures — resolve identically. Only positive, code-verified fences
+ *  are `true`; any harness absent here falls to NO_FENCE (never over-promises). */
 export const HARNESS_FENCES: Record<string, AccountFences> = {
-  claude: { readOnlyEnforceable: true, networkEnforceable: false, cwdEnforceable: false },
-  codex: { readOnlyEnforceable: true, networkEnforceable: true, cwdEnforceable: true },
-  cursor: { readOnlyEnforceable: false, networkEnforceable: false, cwdEnforceable: false },
-  agy: { readOnlyEnforceable: false, networkEnforceable: false, cwdEnforceable: false },
+  'claude-code': CLAUDE_FENCE, claude: CLAUDE_FENCE,
+  'codex-cli': CODEX_FENCE, codex: CODEX_FENCE,
+  'cursor-agent': NO_FENCE, cursor: NO_FENCE,
+  agy: NO_FENCE,
 };
 
 /** The enforceability declared for a harness; an unknown harness enforces nothing (safe default). */

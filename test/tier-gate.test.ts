@@ -67,6 +67,14 @@ describe('effectiveFences (HED-404 per-harness fence registry, narrow-only)', ()
     expect(effectiveFences('codex')).toEqual({ readOnlyEnforceable: true, networkEnforceable: true, cwdEnforceable: true });
   });
 
+  it('resolves the PRODUCTION harness names (claude-code / codex-cli / cursor-agent), not only the short provider names', () => {
+    // accounts.ts toAccount() defaults Account.harness to these long forms; keying only by the short
+    // provider name silently made every real account mandate-only (HED-404 r2).
+    expect(effectiveFences('claude-code')).toEqual({ readOnlyEnforceable: true, networkEnforceable: false, cwdEnforceable: false });
+    expect(effectiveFences('codex-cli')).toEqual({ readOnlyEnforceable: true, networkEnforceable: true, cwdEnforceable: true });
+    expect(effectiveFences('cursor-agent')).toEqual(NO_FENCE);
+  });
+
   it.each(['cursor', 'agy'])('%s enforces nothing (no boundary heddle can rely on)', (h) => {
     expect(effectiveFences(h)).toEqual(NO_FENCE);
   });
