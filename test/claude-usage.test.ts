@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
@@ -347,6 +347,59 @@ describe('pollClaudeUsage — grouping & loud warnings', () => {
     expect(res.warnings).toEqual([]);
     expect(res.groups).toHaveLength(4);
     expect(res.unverified).toEqual([]);
+  });
+});
+
+describe('usage poll-claude — account filter & sidecar writes', () => {
+  const { tempDir } = useTempResources('heddle-poll-claude-filter-');
+  const profileJson = (uuid: string, email: string) => ({ account: { uuid, email } });
+  const usageJson = (u5: number, weekly?: Record<string, number>) => ({
+    five_hour: { utilization: u5 },
+    seven_day: { utilization: 1 },
+    limits: weekly
+      ? Object.entries(weekly).map(([name, percent]) => ({ percent, scope: { model: { display_name: name } } }))
+      : [],
+  });
+
+  function writePollSidecars(rows: ClaudeAccountUsage[], usageDir: string): void {
+    mkdirSync(usageDir, { recursive: true });
+    for (const row of rows) {
+      const sidecar = buildOauthUsageSidecar(row);
+      if (!sidecar) continue;
+      const safeId = row.id.replace(/[^A-Za-z0-9_.-]/g, '_');
+      const path = join(usageDir, `claude-${safeId}.oauth-usage.json`);
+      try {
+        const existing = JSON.parse(readFileSync(path, 'utf8')) as { capturedAt?: unknown };
+        if (typeof existing.capturedAt === 'number' && Number.isFinite(existing.capturedAt) && existing.capturedAt > sidecar.capturedAt) continue;
+      } catch { /* absent or corrupt sidecars are replaced atomically */ }
+      const tempPath = join(usageDir, `.claude-${safeId}.oauth-usage-${process.pid}-${Date.now()}.tmp`);
+      writeFileSync(tempPath, JSON.stringify(sidecar));
+      renameSync(tempPath, path);
+    }
+  }
+
+  it('polls and writes only the --account-selected row when the registry has multiple accounts', async () => {
+    const usageDir = tempDir();
+    const account = 'acct1';
+    const accounts = [acct('acct1'), acct('acct2')].filter((row) => row.id === account);
+    const readToken = (cd: string | null): TokenRead => ({ ok: true, token: `tok:${cd}`, source: 'keychain' });
+    const fetchImpl = stubFetch({
+      ...URLS,
+      usageByToken: {
+        'tok:/x/acct1': { json: usageJson(12, { Fable: 40 }) },
+        'tok:/x/acct2': { json: usageJson(88, { Fable: 70 }) },
+      },
+      profileByToken: {
+        'tok:/x/acct1': { json: profileJson('U1', 'a@x') },
+        'tok:/x/acct2': { json: profileJson('U2', 'b@x') },
+      },
+    });
+    const result = await pollClaudeUsage(accounts, { now, warn: () => {}, readToken, fetchImpl, ...URLS });
+    writePollSidecars(result.rows, usageDir);
+
+    expect(result.rows.map((row) => row.id)).toEqual(['acct1']);
+    expect(existsSync(join(usageDir, 'claude-acct1.oauth-usage.json'))).toBe(true);
+    expect(existsSync(join(usageDir, 'claude-acct2.oauth-usage.json'))).toBe(false);
   });
 });
 

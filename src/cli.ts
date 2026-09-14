@@ -96,7 +96,7 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
   heddle ledger report-in-session <id> (--ok | --failed) [--error "<why>"] [--input-tokens N] [--cached-input-tokens N] [--output-tokens N] [--reasoning-tokens N] [--duration-ms N] [--json]  administrative path: may report any orchestrator's handoff
   heddle usage [--since <iso>] [--json]    per-provider totals
   heddle usage --remaining [--account <id>] [--json]  per-account quota headroom
-  heddle usage poll-claude [--json]  poll Claude OAuth usage and atomically write per-account sidecars
+  heddle usage poll-claude [--account <id>] [--json]  poll Claude OAuth usage and atomically write per-account sidecars
   heddle top [--once] [--json]  one disk-only dashboard snapshot (watch mode is Slice 2)
   heddle account pick [--for <letter[,letter...]>] [--json] [--explain]   healthiest addressable Claude account for a fleet relaunch
   heddle pr own <whoami|claim|check|release|mine> [<pr#>] [--json]       coordinate ownership of a GitHub PR
@@ -676,7 +676,20 @@ try {
 
     case 'usage': {
       if (process.argv[3] === 'poll-claude') {
-        const accounts = readClaudeAccounts();
+        const account = arg('--account');
+        if (has('--account') && (!account || account.startsWith('--'))) {
+          console.error('usage: heddle usage poll-claude [--account <id>] [--json]');
+          process.exit(2);
+        }
+        let accounts = readClaudeAccounts();
+        if (account) {
+          const match = accounts.filter((row) => row.id === account);
+          if (match.length === 0) {
+            console.error(`heddle usage poll-claude: no registry account with id "${account}"`);
+            process.exit(1);
+          }
+          accounts = match;
+        }
         const result = await pollClaudeUsage(accounts);
         const usageDir = process.env.HEDDLE_USAGE_DIR ?? DEFAULT_USAGE_DIR;
         mkdirSync(usageDir, { recursive: true });
