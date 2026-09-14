@@ -40,10 +40,14 @@ interface FleetAssetSet {
 }
 
 const FLEET_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', 'fleet');
-const filesByExtension = (extension: string) => (canonicalDir: string): string[] => readdirSync(canonicalDir, { withFileTypes: true })
-  .filter((entry) => entry.isFile() && entry.name.endsWith(extension))
-  .map((entry) => entry.name)
-  .sort();
+const filesByExtension = (extension: string) => (canonicalDir: string): string[] => {
+  const entries = readdirSync(canonicalDir, { withFileTypes: true }).filter((entry) => entry.name.endsWith(extension));
+  // Canon integrity: a *.ext entry that is not a regular file (symlink, directory) must fail
+  // loudly — silently skipping it would let diff report clean against an unusable canon.
+  const irregular = entries.filter((entry) => !entry.isFile()).map((entry) => entry.name).sort();
+  if (irregular.length) throw new Error(`fleet canon entries at ${canonicalDir} are not regular files: ${irregular.join(', ')}`);
+  return entries.map((entry) => entry.name).sort();
+};
 const ASSET_SETS: Record<FleetAssetSet['kind'], FleetAssetSet> = {
   hook: {
     kind: 'hook',
@@ -66,7 +70,10 @@ function paths(assetSet: FleetAssetSet, options: FleetHookOptions): { canonicalD
 
 function canonicalFiles(assetSet: FleetAssetSet, canonicalDir: string): string[] {
   if (!existsSync(canonicalDir)) throw new Error(`fleet ${assetSet.kind} canon not found: ${canonicalDir}`);
-  return assetSet.files(canonicalDir);
+  const names = assetSet.files(canonicalDir);
+  // An empty canon is a broken checkout, never a vacuously clean install/diff.
+  if (names.length === 0) throw new Error(`fleet ${assetSet.kind} canon is empty: ${canonicalDir}`);
+  return names;
 }
 
 function sameContent(source: string, target: string): boolean {
@@ -111,7 +118,11 @@ function installFleetAssets(assetSet: FleetAssetSet, options: FleetHookOptions):
       const written = files.filter((file) => file.action === 'created' || file.action === 'updated').map((file) => file.name);
       const unchanged = files.filter((file) => file.action === 'unchanged').map((file) => file.name);
       const detail = error instanceof Error ? error.message : String(error);
-      throw new Error(`fleet ${assetSet.kind} installation failed for ${name}; files written this run: ${written.length ? written.join(', ') : 'none'}; unchanged: ${unchanged.length ? unchanged.join(', ') : 'none'}; ${detail}`, { cause: error });
+      // A dry run writes nothing: earlier entries are planned actions, not files on disk.
+      const writtenLabel = options.dryRun === true
+        ? `none (dry run — planned: ${written.length ? written.join(', ') : 'none'})`
+        : (written.length ? written.join(', ') : 'none');
+      throw new Error(`fleet ${assetSet.kind} installation failed for ${name}; files written this run: ${writtenLabel}; unchanged: ${unchanged.length ? unchanged.join(', ') : 'none'}; ${detail}`, { cause: error });
     }
   }
   return { targetDir, dryRun: options.dryRun === true, files };

@@ -23,7 +23,9 @@ would create resume-sessions-v2.sh
 
 Without `--dry-run`, the action is unprefixed (for example, `created resume-sessions-v2.sh`). `--json` is available for both install modes and includes the target, file actions, and `dryRun: true` or `dryRun: false`.
 
-If installation fails partway through, files handled earlier in the run remain installed. The error names the file that failed and separately lists files written in that run and files left unchanged.
+If installation fails partway through, files handled earlier in the run remain installed. The error names the file that failed and separately lists files written in that run and files left unchanged. In `--dry-run`, where nothing is written, that same error reports `files written this run: none (dry run — planned: …)` instead of claiming writes.
+
+A canon directory that exists but contains no `.sh` files fails loudly (`fleet launcher canon is empty`) rather than reporting a vacuously clean install or diff, and a `.sh` entry that is not a regular file (a directory or symlink) fails as a canon-integrity error instead of being silently skipped. The same hardening applies to the hook set.
 
 Compare the installed copies with the vendored canon:
 
