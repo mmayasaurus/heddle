@@ -36,24 +36,33 @@ export function createDoctorStep(injected: DoctorStepDeps = {}): WizardStep {
         const report = await run(
           {},
           {
-            now: () => ctx.now(),
+            // Integration seams (execFile/env/gitBehindOriginMain/...) thread through first, but the
+            // wizard owns the run clock and the home root: ctx.now and the ctx.homeDir-derived
+            // .heddle path are spread AFTER restDeps so they stay authoritative. ctx.homeDir is the
+            // wizard's source of truth for ~ (in production === homedir(), so doctor's env/default-
+            // resolved routing/accounts/... paths line up); an explicit doctorDeps.paths.heddle
+            // (integration tests) still wins over the derived default via the inner spread.
             ...restDeps,
-            // ctx.homeDir is the wizard's source of truth for ~ (in production === homedir(), so
-            // doctor's env/default-resolved routing/accounts/... paths line up); the rest of DoctorDeps
-            // fills in inside runDoctor. An explicit doctorDeps.paths (integration tests) still wins.
+            now: () => ctx.now(),
             paths: { heddle: join(ctx.homeDir, '.heddle'), ...pathsOverride },
           },
         );
         const text = formatDoctorReport(report);
-        io.report(text);
+        // WizardIO.report is a per-LINE progress sink — emit each table row, not one multi-line blob.
+        for (const line of text.split('\n')) io.report(line);
         const { ok, warn, fail, skipped } = report.summary;
+        const ran = ok + warn + fail;
         const status: WizardStepStatus = fail > 0 ? 'failed' : 'done';
         const summary =
           fail > 0
             ? `setup NOT proven — ${fail} check(s) failing (${ok} ok, ${warn} warn, ${skipped} skipped)`
-            : warn > 0
-              ? `setup verified with ${warn} warning(s) (${ok} ok, ${skipped} skipped)`
-              : `setup verified — all ${ok} checks pass`;
+            : ran === 0
+              // Nothing actually ran (all skipped, or an empty report). Never claim "verified" when
+              // nothing was proven — a hollow green finish is exactly what HED-476 exists to prevent.
+              ? `no checks ran — nothing verified${skipped > 0 ? ` (${skipped} skipped)` : ''}`
+              : warn > 0
+                ? `setup verified with ${warn} warning(s) (${ok} ok, ${skipped} skipped)`
+                : `setup verified — all ${ok} checks pass`;
         return { id: 'doctor', status, summary, detail: text };
       } catch (error) {
         // A thrown doctor run must not abort the wizard — report it as a failed verification instead.
