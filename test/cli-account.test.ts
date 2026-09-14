@@ -1,10 +1,17 @@
-import { writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { useTempResources } from './helpers.js';
-import { ensureBuilt, runCli } from './helpers/cli.js';
+import { ensureBuilt, runCli, withTempHome } from './helpers/cli.js';
 
 const { tempDir } = useTempResources('heddle-cli-account-test-');
+
+// The batch (multi-`--for`) picks census live `claude` processes for weighted residency. Without a
+// fixture that census shells out to the HOST's real `pgrep -x claude` / `ps eww` — non-hermetic, and
+// noisy under CI contention (HED-459 class). This empty-array fixture is the shared cross-consumer hook
+// (src/residents.ts, and heddle-window-keeper.py): it yields zero residents — exactly the state these
+// placement assertions assume — with no subprocess and no stderr warning.
+const HERMETIC_CENSUS = { HEDDLE_CENSUS_PS_FIXTURE: '[]' };
 
 function fixture(
   accounts: Array<{ id: string; configDir: string | null; loggedIn?: boolean }>,
@@ -39,6 +46,21 @@ describe('heddle account pick CLI', () => {
   beforeAll(async () => {
     await ensureBuilt();
   }, 120_000);
+
+  it('syncs the resolved seat-weights mirror without invoking account selection', async () => {
+    const home = withTempHome();
+    const result = await runCli(['account', 'seat-weights', 'sync'], { home });
+    expect(result).toEqual({ code: 0, stdout: '', stderr: '' });
+    expect(JSON.parse(readFileSync(join(home, '.heddle', 'seat-weights.json'), 'utf8'))).toMatchObject({
+      generatedFrom: 'routing/lanes.yaml', default: 1, byAgent: { R: 2.5, Y: 2 }, writtenAt: expect.any(Number),
+    });
+  }, 30_000);
+
+  it('rejects flags on seat-weights sync with usage exit 2', async () => {
+    const result = await runCli(['account', 'seat-weights', 'sync', '--json']);
+    expect(result.code).toBe(2);
+    expect(result.stderr).toMatch(/usage: heddle account seat-weights sync/);
+  }, 30_000);
 
   it('excludes a floored account and chooses the healthy account', async () => {
     const { accountsPath, usageDir } = fixture([
@@ -239,13 +261,13 @@ describe('heddle account pick CLI', () => {
     expect(result.stderr).toMatch(/usage: heddle account pick/);
   }, 30_000);
 
-  it('balances six batch placements across three healthy accounts instead of stacking them', async () => {
+  it('uses resolved seat weights when spreading a batch across healthy accounts', async () => {
     const { accountsPath, usageDir } = fixture([
       { id: 'a', configDir: '/tmp/a' }, { id: 'b', configDir: '/tmp/b' }, { id: 'c', configDir: '/tmp/c' },
     ], { a: 30, b: 20, c: 10 });
 
     const result = await runCli(['account', 'pick', '--for', 'R,S,T,U,V,W', '--json'], {
-      env: { HEDDLE_ACCOUNTS: accountsPath, HEDDLE_USAGE_DIR: usageDir },
+      env: { HEDDLE_ACCOUNTS: accountsPath, HEDDLE_USAGE_DIR: usageDir, ...HERMETIC_CENSUS },
     });
 
     expect(result).toMatchObject({ code: 0, stderr: '' });
@@ -253,8 +275,8 @@ describe('heddle account pick CLI', () => {
     expect(Object.values(assignments).reduce<Record<string, number>>((counts, { account }) => {
       counts[account] = (counts[account] ?? 0) + 1;
       return counts;
-    }, {})).toEqual({ a: 2, b: 2, c: 2 });
-    expect(Object.values(assignments).map(({ account }) => account)).toEqual(['c', 'b', 'a', 'c', 'b', 'a']);
+    }, {})).toEqual({ a: 2, b: 3, c: 1 });
+    expect(Object.values(assignments).map(({ account }) => account)).toEqual(['c', 'b', 'a', 'b', 'a', 'b']);
   }, 30_000);
 
   it('uses higher headroom before account id when batch residents are tied', async () => {
@@ -263,7 +285,7 @@ describe('heddle account pick CLI', () => {
     ], { 'a-first': 30, 'z-healthier': 10 });
 
     const result = await runCli(['account', 'pick', '--for', 'R,S', '--json'], {
-      env: { HEDDLE_ACCOUNTS: accountsPath, HEDDLE_USAGE_DIR: usageDir },
+      env: { HEDDLE_ACCOUNTS: accountsPath, HEDDLE_USAGE_DIR: usageDir, ...HERMETIC_CENSUS },
     });
 
     expect(result).toMatchObject({ code: 0, stderr: '' });
@@ -277,7 +299,7 @@ describe('heddle account pick CLI', () => {
     ], { freshest: 10, other: 30 });
 
     const result = await runCli(['account', 'pick', '--for', 'R,S', '--json'], {
-      env: { HEDDLE_ACCOUNTS: accountsPath, HEDDLE_USAGE_DIR: usageDir },
+      env: { HEDDLE_ACCOUNTS: accountsPath, HEDDLE_USAGE_DIR: usageDir, ...HERMETIC_CENSUS },
     });
 
     expect(result).toMatchObject({ code: 0, stderr: '' });
@@ -292,7 +314,7 @@ describe('heddle account pick CLI', () => {
     ], { 'near-cap': 95, floored: 98 });
 
     const result = await runCli(['account', 'pick', '--for', 'R,S,U', '--json', '--explain'], {
-      env: { HEDDLE_ACCOUNTS: accountsPath, HEDDLE_USAGE_DIR: usageDir },
+      env: { HEDDLE_ACCOUNTS: accountsPath, HEDDLE_USAGE_DIR: usageDir, ...HERMETIC_CENSUS },
     });
 
     expect(result.code).toBe(1);
@@ -315,7 +337,7 @@ describe('heddle account pick CLI', () => {
     const { accountsPath, usageDir } = fixture([{ id: 'edge', configDir: '/tmp/edge' }], { edge: 90 });
 
     const result = await runCli(['account', 'pick', '--for', 'R,S,U', '--json'], {
-      env: { HEDDLE_ACCOUNTS: accountsPath, HEDDLE_USAGE_DIR: usageDir },
+      env: { HEDDLE_ACCOUNTS: accountsPath, HEDDLE_USAGE_DIR: usageDir, ...HERMETIC_CENSUS },
     });
 
     expect(result.code).toBe(1);
@@ -331,7 +353,7 @@ describe('heddle account pick CLI', () => {
     );
 
     const result = await runCli(['account', 'pick', '--for', 'R,S,U', '--json'], {
-      env: { HEDDLE_ACCOUNTS: accountsPath, HEDDLE_USAGE_DIR: usageDir },
+      env: { HEDDLE_ACCOUNTS: accountsPath, HEDDLE_USAGE_DIR: usageDir, ...HERMETIC_CENSUS },
     });
 
     expect(result.code).toBe(1);
@@ -341,22 +363,19 @@ describe('heddle account pick CLI', () => {
     expect(assignments.U).toMatchObject({ refused: true, reason: expect.stringMatching(/residency cap/) });
   }, 30_000);
 
-  it('never assigns a 7d-floored account in batch mode', async () => {
+  it('never assigns a 7d-floored account in batch mode and retires the spread ceiling', async () => {
     const { accountsPath, usageDir } = fixture([
       { id: 'weekly-wall', configDir: '/tmp/weekly-wall' }, { id: 'healthy', configDir: '/tmp/healthy' },
     ], { 'weekly-wall': 10, healthy: 40 }, { used7d: { 'weekly-wall': 98, healthy: 40 } });
 
     const result = await runCli(['account', 'pick', '--for', 'R,S', '--json'], {
-      env: { HEDDLE_ACCOUNTS: accountsPath, HEDDLE_USAGE_DIR: usageDir },
+      env: { HEDDLE_ACCOUNTS: accountsPath, HEDDLE_USAGE_DIR: usageDir, ...HERMETIC_CENSUS },
     });
 
-    expect(result.code).toBe(1);
+    expect(result).toMatchObject({ code: 0, stderr: '' });
     const assignments = JSON.parse(result.stdout).assignments as Record<string, { account: string } | { refused: true; reason: string }>;
     expect(assignments.R).toMatchObject({ account: 'healthy' });
-    // healthy is the at-ceiling usable account; naming ITS reset would promise an unblock that never
-    // comes. weekly-wall is 7d-floored — its reset re-adds an eligible account, so it is the unblocker
-    // the refusal names (its reset time is unknown here) (cursor HED-446).
-    expect(assignments.S).toMatchObject({ refused: true, reason: 'only 1 of 2 agents placeable until weekly-wall resets unknown' });
+    expect(assignments.S).toMatchObject({ account: 'healthy' });
   }, 30_000);
 
   it('regression PR#88 — never places a batch agent on an unmetered registered account', async () => {
@@ -365,16 +384,13 @@ describe('heddle account pick CLI', () => {
     ], { healthy: 60, ghost: 0 }, { includedAccountIds: ['healthy'] });
 
     const result = await runCli(['account', 'pick', '--for', 'R,S', '--json'], {
-      env: { HEDDLE_ACCOUNTS: accountsPath, HEDDLE_USAGE_DIR: usageDir },
+      env: { HEDDLE_ACCOUNTS: accountsPath, HEDDLE_USAGE_DIR: usageDir, ...HERMETIC_CENSUS },
     });
 
-    expect(result).toMatchObject({ code: 1, stderr: '' });
+    expect(result).toMatchObject({ code: 0, stderr: '' });
     const assignments = JSON.parse(result.stdout).assignments as Record<string, { account: string } | { refused: true; reason: string }>;
     expect(assignments.R).toMatchObject({ account: 'healthy' });
-    // ghost is unmetered (never a placement target) and there is NO floored account whose reset could
-    // free a slot — the batch simply exceeds the spread ceiling, so the refusal says exactly that with
-    // no reset named (cursor HED-446).
-    expect(assignments.S).toMatchObject({ refused: true, reason: 'only 1 of 2 agents placeable: every usable account is at the spread ceiling (1 per account) and no reset frees a slot' });
+    expect(assignments.S).toMatchObject({ account: 'healthy' });
     expect(Object.values(assignments).flatMap((assignment) => 'account' in assignment ? [assignment.account] : [])).not.toContain('ghost');
   }, 30_000);
 
@@ -384,7 +400,7 @@ describe('heddle account pick CLI', () => {
     );
 
     const result = await runCli(['account', 'pick', '--for', 'R,S', '--json'], {
-      env: { HEDDLE_ACCOUNTS: accountsPath, HEDDLE_USAGE_DIR: usageDir },
+      env: { HEDDLE_ACCOUNTS: accountsPath, HEDDLE_USAGE_DIR: usageDir, ...HERMETIC_CENSUS },
     });
 
     expect(result.code).toBe(1);
@@ -399,7 +415,7 @@ describe('heddle account pick CLI', () => {
     );
 
     const result = await runCli(['account', 'pick', '--for', 'R,S', '--json'], {
-      env: { HEDDLE_ACCOUNTS: accountsPath, HEDDLE_USAGE_DIR: usageDir },
+      env: { HEDDLE_ACCOUNTS: accountsPath, HEDDLE_USAGE_DIR: usageDir, ...HERMETIC_CENSUS },
     });
 
     expect(result.code).toBe(1);

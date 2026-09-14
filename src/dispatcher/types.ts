@@ -98,7 +98,7 @@ export interface DispatchRequest {
  * `refusal` column.
  */
 export interface DispatchRefusal {
-  code: 'claude-in-session' | 'no-dispatchable-account' | 'not-dispatchable' | 'depth-1' | 'max-children' | 'capability-denied' | 'metered-pool-exhausted' | 'same-provider-review' | 'override-reason-required' | 'fleet-paused';
+  code: 'claude-in-session' | 'no-dispatchable-account' | 'not-dispatchable' | 'depth-1' | 'max-children' | 'capability-denied' | 'metered-pool-exhausted' | 'same-provider-review' | 'override-reason-required' | 'fleet-paused' | 'headless-claude-review-unreliable';
   reason: string;
   /** What to do instead, when there is a clear alternative. */
   instruction?: string;
@@ -227,6 +227,10 @@ export interface DispatchPlan {
   /** HED-239: set when a requiresWeb class's effective target can't web — the dry run mirrors the
    *  runtime guard so plan_dispatch never advertises a web-research route the real dispatch refuses. */
   requiresWebRefusal?: string;
+  /** HED-519: set when a HEADLESS claude opus/fable adversarial-review would be refused (empirically
+   *  unreliable — json-mode is silent till completion, so it SIGKILLs at timeout with zero output).
+   *  Computed in planDispatch so summarizePlan (preview) and dispatch() agree. Holds the reason string. */
+  headlessClaudeReviewRefusal?: string;
 }
 
 /** How the in-session route was chosen — the refusal reason must not misstate the YAML policy. */
