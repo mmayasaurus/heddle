@@ -1,4 +1,4 @@
-import { lastResultJson } from './parse.js';
+import { failIfTruncated, lastResultJson } from './parse.js';
 import { run } from './subprocess.js';
 import type { DispatchOptions, WorkerAdapter, WorkerResult, TokenUsage } from '../types.js';
 
@@ -185,7 +185,7 @@ export class ClaudeAdapter implements WorkerAdapter {
     }
     const started = Date.now();
     const timeoutMs = opts.timeoutMs ?? 600_000;
-    const { stdout, stderr, exitCode, timedOut } = await run(this.bin, args, opts.cwd, timeoutMs, opts.env, opts.envUnset);
+    const { stdout, stderr, exitCode, timedOut, stdoutTruncated } = await run(this.bin, args, opts.cwd, timeoutMs, opts.env, opts.envUnset);
     const parsed = parseClaudeResult(stdout, exitCode);
     // A timeout must be tellable apart from a crash: SIGKILL alone reports only a null exit.
     if (timedOut) parsed.error = `claude timed out after ${timeoutMs}ms (SIGKILL)` + (parsed.error ? `; ${parsed.error}` : '');
@@ -194,6 +194,7 @@ export class ClaudeAdapter implements WorkerAdapter {
     if (!parsed.ok && parsed.error && stderr.trim().length) {
       parsed.error += `; stderr tail: ${stderr.slice(-400)}`;
     }
-    return { ...parsed, durationMs: parsed.durationMs ?? Date.now() - started };
+    const final = failIfTruncated(parsed, stdoutTruncated, 'claude', stderr);
+    return { ...final, durationMs: final.durationMs ?? Date.now() - started };
   }
 }

@@ -340,7 +340,18 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
   const requiresWebRefusal = reachesRunTarget && !dryCaps.refusal && route.requiresWeb && !webCapable(target.provider, dryCaps.granted)
     ? webRefusalReason(route.taskClass, target.provider)
     : undefined;
-  return { route, target, fallback, origin, execution, decision, skillsForRefusal, account, accountAdvice, accountPick, rotationAccount, claudeAccountCount, notDispatchable, reviewerPick, sameProviderReview, pinnedExcludedAccount, overrideReasonRequired, billingRefusal, billingAdvice, capabilityRefusal, requiresWebRefusal, primaryCapabilityUnenforceable };
+  // HED-519: a HEADLESS claude opus/fable adversarial-review is empirically unreliable (json-mode is
+  // silent till completion → SIGKILL at timeout with zero output). Compute here so the preview and the
+  // real dispatch agree. Explicit `=== 'headless'` (NOT reachesRunTarget): in-session preempts everything.
+  const headlessClaudeReviewRefusal = execution === 'headless'
+    && target.provider === 'claude'
+    && /(?:^|[-/])(opus|fable)(?:[-/]|$)/i.test(target.model)
+    && route.taskClass === 'adversarial-review'
+    ? `headless ${target.provider}/${target.model} for an adversarial-review is empirically unreliable — `
+      + `claude -p --output-format json is silent until completion, so a substantial review that overruns `
+      + `SIGKILLs at its timeout with zero output (HED-511: 6/6 such dispatches died this way).`
+    : undefined;
+  return { route, target, fallback, origin, execution, decision, skillsForRefusal, account, accountAdvice, accountPick, rotationAccount, claudeAccountCount, notDispatchable, reviewerPick, sameProviderReview, pinnedExcludedAccount, overrideReasonRequired, billingRefusal, billingAdvice, capabilityRefusal, requiresWebRefusal, primaryCapabilityUnenforceable, headlessClaudeReviewRefusal };
 }
 
 /** One shared dry-run summary for `heddle route` and the `plan_dispatch` MCP tool (identical fields). */
@@ -349,7 +360,7 @@ export function summarizePlan(plan: DispatchPlan): Record<string, unknown> {
   const noDispatchableAccount = hasNoDispatchableClaudeAccount(plan);
   return {
     task_class: plan.route.taskClass,
-    would_run: notDispatchable || plan.decision.refusal || plan.billingRefusal || plan.sameProviderReview || plan.pinnedExcludedAccount || noDispatchableAccount || plan.overrideReasonRequired || plan.capabilityRefusal || plan.requiresWebRefusal ? null : `${plan.target.provider}/${plan.target.model}`,
+    would_run: notDispatchable || plan.decision.refusal || plan.billingRefusal || plan.sameProviderReview || plan.pinnedExcludedAccount || noDispatchableAccount || plan.headlessClaudeReviewRefusal || plan.overrideReasonRequired || plan.capabilityRefusal || plan.requiresWebRefusal ? null : `${plan.target.provider}/${plan.target.model}`,
     execution: plan.execution ?? null,
     in_session: plan.execution === 'in-session-subagent',
     routed_away_for_cap: plan.decision.routedAwayForCap,
@@ -369,6 +380,8 @@ export function summarizePlan(plan: DispatchPlan): Record<string, unknown> {
       ? { code: 'no-dispatchable-account', reason: plan.pinnedExcludedAccount.reason }
       : noDispatchableAccount
       ? { code: 'no-dispatchable-account', reason: noDispatchableClaudeAccountReason(plan.claudeAccountCount) }
+      : plan.headlessClaudeReviewRefusal
+      ? { code: 'headless-claude-review-unreliable', reason: plan.headlessClaudeReviewRefusal }
       : plan.capabilityRefusal
       ? { code: 'capability-denied', reason: plan.capabilityRefusal }
       : plan.requiresWebRefusal
