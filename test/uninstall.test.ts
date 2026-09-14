@@ -28,27 +28,7 @@ describe('uninstall', () => {
 
     const second = await runCli(['uninstall', '--json'], { home });
     expect(second.code).toBe(0);
-    expect(JSON.parse(second.stdout)).toEqual({ removed: [], preserved: [modified], purged: [], dryRun: false, purge: false });
-  });
-
-  it('leaves registries by default and only purges them with --yes', async () => {
-    const home = withTempHome();
-    const heddleDir = join(home, '.heddle');
-    mkdirSync(heddleDir, { recursive: true });
-    const projects = join(heddleDir, 'projects.json');
-    const accounts = join(heddleDir, 'accounts.json');
-    writeFileSync(projects, '{"projects":[]}\n');
-    writeFileSync(accounts, '{"accounts":[]}\n');
-
-    expect((await runCli(['uninstall'], { home })).code).toBe(0);
-    expect(existsSync(projects)).toBe(true);
-    expect(existsSync(accounts)).toBe(true);
-    const purged = await runCli(['uninstall', '--purge', '--yes', '--json'], { home });
-    expect(purged.code).toBe(0);
-    expect(JSON.parse(purged.stdout).purged).toEqual([projects, accounts]);
-    expect(existsSync(projects)).toBe(false);
-    expect(existsSync(accounts)).toBe(false);
-    expect((await runCli(['uninstall', '--purge', '--json'], { home })).code).toBe(2);
+    expect(JSON.parse(second.stdout)).toEqual({ removed: [], preserved: [modified], dryRun: false });
   });
 
   it('reports a dry-run plan, rejects typos before writes, and cleans only empty fleet directories', async () => {

@@ -98,7 +98,7 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
   heddle fleet install-bin [--dry-run] [--json]  install vendored fleet bin tools under ~/.heddle/fleet/bin
   heddle fleet bin-diff [--json]  compare installed fleet bin tools with the vendored canon
   heddle upgrade [--dry-run] [--force] [--json]  migrate config schemas and refresh missing fleet assets without overwriting local edits
-  heddle uninstall [--purge] [--dry-run] [--json] [--yes]  remove only unmodified fleet assets; --purge removes registries after confirmation
+  heddle uninstall [--dry-run] [--json]  remove only fleet assets still byte-identical to the shipped canon (preserves anything modified)
   heddle mode [desktop|mobile|away] [--note "<t>"] [--json]   operator mode (HED-336): no arg prints
                                  the current mode; a mode word sets it (~/.heddle/operator-mode.json —
                                  the pocket console and desktop app write the same file)
@@ -1044,36 +1044,17 @@ try {
 
     case 'uninstall': {
       // This mutates user-scoped files, so reject every unrecognized or positional argument first.
-      const unknownArgs = process.argv.slice(3).filter((arg) => !['--purge', '--dry-run', '--json', '--yes'].includes(arg));
-      if (unknownArgs.length > 0 || (has('--yes') && !has('--purge'))) {
-        console.error(`heddle uninstall: unknown or invalid argument${unknownArgs.length === 1 ? '' : 's'} ${unknownArgs.length ? unknownArgs.join(', ') : '--yes'} — allowed: --purge, --dry-run, --json, --yes (with --purge)`);
+      const unknownArgs = process.argv.slice(3).filter((arg) => !['--dry-run', '--json'].includes(arg));
+      if (unknownArgs.length > 0) {
+        console.error(`heddle uninstall: unknown argument${unknownArgs.length === 1 ? '' : 's'} ${unknownArgs.join(', ')} — allowed: --dry-run, --json`);
         process.exitCode = 2;
         break;
       }
-      const purge = has('--purge');
-      if (purge && !has('--yes')) {
-        // JSON is a machine contract; it must never open a prompt or silently purge.
-        if (json || !process.stdin.isTTY) {
-          console.error('heddle uninstall --purge requires --yes in non-interactive or --json mode');
-          process.exitCode = 2;
-          break;
-        }
-        const prompter = new ReadlinePrompter();
-        try {
-          if (!(await prompter.confirm('Purge only projects.json and accounts.json? This cannot be undone.', false))) {
-            out(json, { removed: [], preserved: [], purged: [], dryRun: has('--dry-run'), purge: false }, () => 'Purge cancelled.');
-            break;
-          }
-        } finally {
-          prompter.close();
-        }
-      }
-      const report = uninstall({ dryRun: has('--dry-run'), purge });
+      const report = uninstall({ dryRun: has('--dry-run') });
       out(json, report, () => [
         ...report.removed.map((path) => `${report.dryRun ? 'would remove' : 'removed'} ${path}`),
         ...report.preserved.map((path) => `preserved (modified — not removed) ${path}`),
-        ...report.purged.map((path) => `${report.dryRun ? 'would purge' : 'purged'} ${path}`),
-        report.removed.length || report.preserved.length || report.purged.length ? '' : '(nothing to uninstall)',
+        report.removed.length || report.preserved.length ? '' : '(nothing to uninstall)',
       ].filter(Boolean).join('\n'));
       break;
     }
