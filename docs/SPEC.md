@@ -14,6 +14,9 @@
 
 For a CLI-only distribution snapshot, use `heddle release --standalone <outDir>`.
 
+**Headless-first invariant:** standalone artifacts are generated from clean `main` HEAD and remain
+CLI-only; see [ARCHITECTURE.md](ARCHITECTURE.md#headless-first-invariant) (HED-394).
+
 A **cross-provider agent orchestration layer** for subscription coding CLIs. Claude (Fable 5)
 orchestrator sessions — the operator's own interactive terminal tabs — claim Linear ABC issues,
 decompose them, and dispatch sub-tasks to the best-fit model per task, each worker loaded with only

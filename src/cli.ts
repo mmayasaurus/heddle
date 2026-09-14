@@ -33,6 +33,7 @@ import { NativeCliRunner, type NativeProvider } from './wizard/cli-runner.js';
 import { ReadlinePrompter, ScriptedPrompter, type Prompter } from './wizard/prompt.js';
 import { runAccountsAdd } from './wizard/accounts-add.js';
 import { releaseStandalone } from './release/standalone.js';
+import { assembleTop, renderTopText } from './top.js';
 
 /**
  * heddle CLI — the surface orchestrators (and later the dashboard) drive.
@@ -100,6 +101,7 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
   heddle usage [--since <iso>] [--json]    per-provider totals
   heddle usage --remaining [--account <id>] [--json]  per-account quota headroom
   heddle usage poll-claude [--json]  poll Claude OAuth usage and atomically write per-account sidecars
+  heddle top [--once] [--json]  one disk-only dashboard snapshot (watch mode is Slice 2)
   heddle account pick [--for <letter[,letter...]>] [--json] [--explain]   healthiest addressable Claude account for a fleet relaunch
   heddle pr own <whoami|claim|check|release|mine> [<pr#>] [--json]       coordinate ownership of a GitHub PR
   heddle pr sweep <pr#> [--json]       sweep all GitHub PR review channels and report mechanical gates
@@ -148,7 +150,7 @@ const json = has('--json');
  * not mutate the ledger — closing orphans as a side effect of a background poll — on that cadence.
  * Best-effort — a hygiene failure must never break the command the operator actually ran.
  */
-if (cmd !== 'mode' && cmd !== 'pr' && cmd !== 'comms' && cmd !== 'fleet' && !(cmd === 'ledger' && (process.argv[3] === 'sweep' || process.argv[3] === 'finish')) && !(cmd === 'usage' && process.argv[3] === 'poll-claude')) {
+if (cmd !== 'mode' && cmd !== 'pr' && cmd !== 'comms' && cmd !== 'fleet' && cmd !== 'top' && !(cmd === 'ledger' && (process.argv[3] === 'sweep' || process.argv[3] === 'finish')) && !(cmd === 'usage' && process.argv[3] === 'poll-claude')) {
   try {
     const { closed } = new Ledger().sweepOrphans();
     if (closed > 0) console.error(`heddle: closed ${closed} orphaned in-flight dispatch row${closed === 1 ? '' : 's'} (heddle ledger --json shows outcome='orphaned')`);
@@ -352,6 +354,17 @@ try {
         }).join('\n');
         return `${selected}\n${details}`;
       });
+      break;
+    }
+
+    case 'top': {
+      if (!process.argv.slice(3).every((value) => value === '--once' || value === '--json')) {
+        console.error('usage: heddle top [--once] [--json]');
+        process.exit(2);
+      }
+      // TODO(HED-430 slice 2): replace this one-shot seam with TTY watch-mode.
+      const view = assembleTop();
+      out(json, view, () => renderTopText(view));
       break;
     }
 

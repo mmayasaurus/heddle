@@ -77,7 +77,7 @@ function capAppend(acc: string, accBytes: number, chunk: string, cap: number):
 export function run(bin: string, args: string[], cwd: string, timeoutMs: number,
                     envOverrides?: Record<string, string>, envUnset?: string[],
                     maxStreamBytes = DEFAULT_MAX_STREAM_BYTES):
-  Promise<{ stdout: string; stderr: string; exitCode: number | null; timedOut: boolean; truncated: boolean }> {
+  Promise<{ stdout: string; stderr: string; exitCode: number | null; timedOut: boolean; stdoutTruncated: boolean; stderrTruncated: boolean }> {
   return new Promise((resolve) => {
     // stdin 'ignore' is load-bearing — every subprocess adapter must close stdin.
     const { env } = buildWorkerEnv({ overrides: envOverrides, unset: envUnset });
@@ -92,7 +92,8 @@ export function run(bin: string, args: string[], cwd: string, timeoutMs: number,
     let stderr = '';
     let stdoutBytes = 0;
     let stderrBytes = 0;
-    let truncated = false;
+    let stdoutTruncated = false;
+    let stderrTruncated = false;
     // 'error' and 'close' can BOTH fire (e.g. spawn failure then close) — settle exactly once.
     let settled = false;
     let killedByTimer = false;
@@ -104,7 +105,7 @@ export function run(bin: string, args: string[], cwd: string, timeoutMs: number,
       clearTimeout(timer);
       if (graceTimer !== undefined) clearTimeout(graceTimer);
       if (drainTimer !== undefined) clearTimeout(drainTimer);
-      resolve({ stdout, stderr, exitCode, timedOut, truncated });
+      resolve({ stdout, stderr, exitCode, timedOut, stdoutTruncated, stderrTruncated });
     };
     const timer = setTimeout(() => {
       killedByTimer = true;
@@ -132,13 +133,13 @@ export function run(bin: string, args: string[], cwd: string, timeoutMs: number,
       const capped = capAppend(stdout, stdoutBytes, d, maxStreamBytes);
       stdout = capped.acc;
       stdoutBytes = capped.accBytes;
-      truncated ||= capped.hit;
+      stdoutTruncated ||= capped.hit;
     });
     child.stderr.on('data', (d: string) => {
       const capped = capAppend(stderr, stderrBytes, d, maxStreamBytes);
       stderr = capped.acc;
       stderrBytes = capped.accBytes;
-      truncated ||= capped.hit;
+      stderrTruncated ||= capped.hit;
     });
     child.on('exit', (code) => {
       // 'exit' (the process ended) is the ONLY signal that the child is truly dead, so it is the sole

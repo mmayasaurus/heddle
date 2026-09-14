@@ -12,7 +12,7 @@ describe('subprocess run() — the shared adapter runner', () => {
   const { tempDir } = useTempResources('heddle-subprocess-');
   it('captures stdout, stderr, and the exit code on a clean exit', async () => {
     const r = await run(NODE, ['-e', 'process.stdout.write("out"); process.stderr.write("err")'], process.cwd(), 10_000);
-    expect(r).toEqual({ stdout: 'out', stderr: 'err', exitCode: 0, timedOut: false, truncated: false });
+    expect(r).toEqual({ stdout: 'out', stderr: 'err', exitCode: 0, timedOut: false, stdoutTruncated: false, stderrTruncated: false });
   });
 
   it('reports a non-zero exit code', async () => {
@@ -185,7 +185,7 @@ describe('subprocess run() — the shared adapter runner', () => {
     const r = await run(NODE, ['-e', "process.stdout.write('x'.repeat(100000))"], process.cwd(), 5_000, undefined, undefined, 1_024);
     expect(Buffer.byteLength(r.stdout)).toBeLessThanOrEqual(1_024);
     expect(r.stdout).toBe('x'.repeat(1024));
-    expect(r.truncated).toBe(true);
+    expect(r.stdoutTruncated).toBe(true);
     expect(r.exitCode).toBe(0);
     expect(r.timedOut).toBe(false);
   });
@@ -193,19 +193,25 @@ describe('subprocess run() — the shared adapter runner', () => {
   it('does not mark an under-cap stream as truncated', async () => {
     const r = await run(NODE, ['-e', "process.stdout.write('small output')"], process.cwd(), 5_000, undefined, undefined, 1_024);
     expect(r.stdout).toBe('small output');
-    expect(r.truncated).toBe(false);
+    expect(r.stdoutTruncated).toBe(false);
   });
 
   it('caps multi-byte output on whole code-point boundaries', async () => {
     // cap 1024 lands 2 bytes short of a 3-byte '€' (1022 = 146 whole '€😀' pairs, then '€' needs 3 > 2
     // left) — a naive byte-slicer would emit a split char (U+FFFD); the code-point loop rejects '€' whole.
     const r = await run(NODE, ['-e', "process.stdout.write('€😀'.repeat(500))"], process.cwd(), 5_000, undefined, undefined, 1_024);
-    expect(r.truncated).toBe(true);
+    expect(r.stdoutTruncated).toBe(true);
     expect(Buffer.byteLength(r.stdout)).toBeLessThanOrEqual(1_024);
     expect(Buffer.byteLength(r.stdout)).toBe(1022);
     expect(r.stdout).toBe('€😀'.repeat(146));
     expect(Buffer.from(r.stdout).toString('utf8')).toBe(r.stdout);
     expect(r.stdout).not.toContain('\uFFFD');
+  });
+
+  it('caps a chatty STDERR stream independently', async () => {
+    const r = await run(NODE, ['-e', "process.stderr.write('x'.repeat(100000))"], process.cwd(), 5_000, undefined, undefined, 1_024);
+    expect(r.stderrTruncated).toBe(true);
+    expect(r.stdoutTruncated).toBe(false);
   });
 
 });
