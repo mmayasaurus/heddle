@@ -22,6 +22,7 @@ import { censusClaudeResidents } from './residents.js';
 import { DEFAULT_USAGE_DIR, readProviderCaps } from './usage.js';
 import { buildOauthUsageSidecar, pollClaudeUsage } from './claude-usage.js';
 import { formatUsageRemaining, readUsageRemaining } from './usage-remaining.js';
+import { installUsagePollLaunchd } from './usage-poll-launchd.js';
 import { resolveRulesRoot, runRuleCli } from './rules/lifecycle.js';
 import { loadRules } from './rules/load.js';
 import { DOCTOR_PROVIDERS, formatDoctorReport, runDoctor } from './doctor.js';
@@ -31,6 +32,8 @@ import { runPrSweep } from './pr-sweep.js';
 import { runPrWatch } from './pr-watch.js';
 import { bootstrapComms } from './comms/bootstrap.js';
 import { loadAccountRegistry } from './accounts.js';
+import { DEFAULT_ACCOUNTS_PATH } from './capaware.js';
+import { migrateConfigFile } from './config-migrations.js';
 import { diffFleetBin, diffFleetHooks, diffFleetLaunchers, installFleetBin, installFleetHooks, installFleetLaunchers } from './fleet.js';
 import { NativeCliRunner, type NativeProvider } from './wizard/cli-runner.js';
 import { ReadlinePrompter, ScriptedPrompter, type Prompter } from './wizard/prompt.js';
@@ -94,6 +97,7 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
   heddle fleet launchers-diff [--json]  compare installed fleet launchers with the vendored canon
   heddle fleet install-bin [--dry-run] [--json]  install vendored fleet bin tools under ~/.heddle/fleet/bin
   heddle fleet bin-diff [--json]  compare installed fleet bin tools with the vendored canon
+  heddle upgrade [--dry-run] [--force] [--json]  migrate config schemas and refresh missing fleet assets without overwriting local edits
   heddle mode [desktop|mobile|away] [--note "<t>"] [--json]   operator mode (HED-336): no arg prints
                                  the current mode; a mode word sets it (~/.heddle/operator-mode.json —
                                  the pocket console and desktop app write the same file)
@@ -111,6 +115,7 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
   heddle usage [--since <iso>] [--json]    per-provider totals
   heddle usage --remaining [--account <id>] [--json]  per-account quota headroom
   heddle usage poll-claude [--account <id>] [--json]  poll Claude OAuth usage and atomically write per-account sidecars
+  heddle usage install-poll-launchd [--start-interval <secs>] [--dry-run] [--json]  install + load the keeper-less launchd usage-poll producer (running this yourself is the activation step — the pack never loads it; refuses if the window-keeper is loaded)
   heddle top [--once] [--json]  one disk-only dashboard snapshot (watch mode is Slice 2)
   heddle account pick [--for <letter[,letter...]>] [--json] [--explain]   healthiest addressable Claude account for a fleet relaunch
   heddle account seat-weights sync   atomically refresh ~/.heddle/seat-weights.json from routing/lanes.yaml
@@ -166,9 +171,12 @@ const json = has('--json');
  * Skipped too for `usage poll-claude` (HED-329): a scheduled vendor-poll that only writes usage
  * sidecars runs headless on a launchd timer (~5 min), has no ledger reads to make honest, and must
  * not mutate the ledger — closing orphans as a side effect of a background poll — on that cadence.
+ * Skipped too for `usage install-poll-launchd` (HED-517): a local launchd installer that only writes
+ * a plist and calls launchctl has no ledger reads to make honest and must not sweep orphans — a
+ * `--dry-run` preview especially must observe, not mutate.
  * Best-effort — a hygiene failure must never break the command the operator actually ran.
  */
-if (cmd !== 'mode' && cmd !== 'pr' && cmd !== 'comms' && cmd !== 'fleet' && cmd !== 'top' && !(cmd === 'ledger' && (process.argv[3] === 'sweep' || process.argv[3] === 'finish')) && !(cmd === 'usage' && process.argv[3] === 'poll-claude')) {
+if (cmd !== 'mode' && cmd !== 'pr' && cmd !== 'comms' && cmd !== 'fleet' && cmd !== 'top' && cmd !== 'upgrade' && !(cmd === 'ledger' && (process.argv[3] === 'sweep' || process.argv[3] === 'finish')) && !(cmd === 'usage' && (process.argv[3] === 'poll-claude' || process.argv[3] === 'install-poll-launchd'))) {
   try {
     const { closed } = new Ledger().sweepOrphans();
     if (closed > 0) console.error(`heddle: closed ${closed} orphaned in-flight dispatch row${closed === 1 ? '' : 's'} (heddle ledger --json shows outcome='orphaned')`);
@@ -493,7 +501,7 @@ try {
     case 'classes': {
       const rows = describeTaskClasses(loadRouting(), withMandatoryPacks);
       out(json, rows, () => rows.map((r) =>
-        `${r.task_class.padEnd(22)} ${r.provider}/${r.model}` +
+        `${r.task_class.padEnd(22)} ${r.provider && r.model ? `${r.provider}/${r.model}` : '(prefer-only)'}` +
         (r.effort ? ` (${r.effort})` : '') +
         (r.fallback ? `  ↳ ${r.fallback}` : '') +
         (r.opt_in_required ? '  [opt-in required]' : '') +
@@ -781,6 +789,17 @@ try {
         }).join('\n'));
         break;
       }
+      if (process.argv[3] === 'install-poll-launchd') {
+        const raw = arg('--start-interval');
+        if (has('--start-interval') && (!raw || raw.startsWith('--') || !/^[0-9]+$/.test(raw) || Number(raw) <= 0)) {
+          console.error('usage: heddle usage install-poll-launchd [--start-interval <positive-int-secs>] [--dry-run] [--json]');
+          process.exit(2);
+        }
+        const report = installUsagePollLaunchd({ dryRun: has('--dry-run'), startIntervalSecs: raw ? Number(raw) : undefined });
+        out(json, report, () => report.message);
+        if (report.action === 'refused') process.exitCode = 1;
+        break;
+      }
       if (has('--remaining')) {
         const account = arg('--account');
         if (has('--account') && (!account || account.startsWith('--'))) {
@@ -963,6 +982,77 @@ try {
       }
       console.error('usage: heddle fleet <install-hooks|hooks-diff|install-launchers|launchers-diff|install-bin|bin-diff> [--dry-run] [--json]');
       process.exitCode = 2;
+      break;
+    }
+
+    case 'upgrade': {
+      // A mutating command must reject a mistyped flag rather than proceed with real writes: e.g.
+      // `heddle upgrade --dryrun` (missing the hyphen) would otherwise leave dryRun false and mutate.
+      const unknownArgs = process.argv.slice(3).filter((arg) => arg !== '--dry-run' && arg !== '--force' && arg !== '--json');
+      if (unknownArgs.length > 0) {
+        console.error(`heddle upgrade: unknown argument${unknownArgs.length === 1 ? '' : 's'} ${unknownArgs.join(', ')} — allowed: --dry-run, --force, --json`);
+        process.exitCode = 2;
+        break;
+      }
+      const dryRun = has('--dry-run');
+      const forced = has('--force');
+      const accountsPath = process.env.HEDDLE_ACCOUNTS ?? DEFAULT_ACCOUNTS_PATH;
+      const migrations = [
+        // Honor HEDDLE_PROJECTS like doctor.ts / loadGateMaps (skillpacks.ts) do — else a custom
+        // projects registry is left unmigrated while upgrade touches only the default path.
+        { kind: 'projects', path: process.env.HEDDLE_PROJECTS?.trim() || DEFAULT_PROJECTS_PATH },
+        { kind: 'accounts', path: accountsPath },
+      ].map(({ kind, path }) => {
+        if (!existsSync(path)) return { kind, path, action: 'absent' as const };
+        const result = migrateConfigFile(kind, path, { dryRun });
+        return {
+          kind,
+          path,
+          action: result.migrated ? (dryRun ? 'would-migrate' as const : 'migrated' as const) : 'current' as const,
+          from: result.from,
+          to: result.to,
+          ...(result.backupPath ? { backupPath: result.backupPath } : {}),
+        };
+      });
+
+      const assetGroups = [
+        { kind: 'bin', diff: diffFleetBin, install: installFleetBin },
+        { kind: 'hooks', diff: diffFleetHooks, install: installFleetHooks },
+        { kind: 'launchers', diff: diffFleetLaunchers, install: installFleetLaunchers },
+      ] as const;
+      const assets = assetGroups.flatMap(({ kind, diff, install }) => {
+        const differences = new Map(diff().files.map((file) => [file.name, file.action]));
+        const installed = install({ dryRun, skipDiffering: !forced });
+        return installed.files.map((file) => {
+          const difference = differences.get(file.name);
+          const action = difference === 'differing' && !forced
+            ? 'preserved'
+            : dryRun && file.action === 'created'
+              ? 'would-create'
+              : dryRun && file.action === 'updated'
+                ? 'would-update'
+                : file.action;
+          return { kind, name: file.name, action };
+        });
+      });
+      const report = { migrations, assets, dryRun, forced };
+      out(json, report, () => [
+        'Migrations:',
+        ...migrations.map((migration) => migration.action === 'absent'
+          ? `  ${migration.kind}: absent — nothing to migrate (${migration.path})`
+          : migration.action === 'current'
+            ? `  ${migration.kind}: already current (v${migration.to})`
+            : migration.action === 'would-migrate'
+              ? `  ${migration.kind}: would migrate v${migration.from}→v${migration.to}`
+              : `  ${migration.kind}: migrated v${migration.from}→v${migration.to} (backup: ${migration.backupPath})`),
+        'Assets:',
+        ...assets.map((asset) => asset.action === 'preserved'
+          ? `  ${asset.kind}/${asset.name}: differs from canonical — preserved (use --force to overwrite)`
+          : `  ${asset.kind}/${asset.name}: ${asset.action}`),
+        // Without prior-version shipped hashes, stale shipped files and user edits are indistinguishable.
+        // Both remain preserved by default; --force refreshes the canonical shipset.
+        'Note: stale shipped assets and user edits are both preserved by default; use --force to refresh canonical assets.',
+      ].join('\n'));
       break;
     }
 

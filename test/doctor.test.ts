@@ -427,6 +427,21 @@ describe('runDoctor', () => {
     expect(check(report, 'config:routing').outcome).toBe('ok');
   });
 
+  test('HED-545: config:routing skips a genuine prefer-only class', async () => {
+    const paths = config();
+    writeFileSync(paths.routing, [
+      'version: 0',
+      'providers:',
+      '  claude: { models: [haiku] }',
+      'task_classes:',
+      '  orchestration: { prefer: [T2], dispatchable: false }',
+      '  implementation: { provider: claude, model: haiku }',
+      '',
+    ].join('\n'));
+    const report = await runDoctor({ provider: 'cursor' }, fakeDeps(paths));
+    expect(check(report, 'config:routing').outcome).toBe('ok');
+  });
+
   test('regression: blank HEDDLE_LANES falls through to the default lanes configuration', async () => {
     const paths = config();
     const report = await runDoctor(

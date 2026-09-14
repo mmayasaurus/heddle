@@ -73,6 +73,7 @@ export async function runTarget(
     provider: target.provider,
     caps: ctx.providerCaps?.[target.provider],
     permitPayPerToken: capAwarePolicy(ctx.table).permitPayPerToken,
+    table: ctx.table,
   });
   const gateChecks: Array<() => DispatchRefusal | null> = [
     () => billing.refusal ?? null, // HED-395 billing/overage — money-safety, first
