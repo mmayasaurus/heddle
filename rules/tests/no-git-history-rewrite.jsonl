@@ -10,6 +10,8 @@
 {"name":"match: git branch -D feature","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git branch -D feature"}},"expect":{"outcome":"nudge","stdout_includes":"(would block)"}}
 {"name":"match: git branch --delete --force old","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git branch --delete --force old"}},"expect":{"outcome":"nudge","stdout_includes":"(would block)"}}
 {"name":"match: git branch --force --delete old","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git branch --force --delete old"}},"expect":{"outcome":"nudge","stdout_includes":"(would block)"}}
+{"name":"match: git push origin +main — B2: force via + refspec","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git push origin +main"}},"expect":{"outcome":"nudge","stdout_includes":"(would block)"}}
+{"name":"match: git push origin +feature:feature — B2: + refspec force","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git push origin +feature:feature"}},"expect":{"outcome":"nudge","stdout_includes":"(would block)"}}
 {"name":"non-match: git reset --soft HEAD~1","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git reset --soft HEAD~1"}},"expect":{"outcome":"none"}}
 {"name":"non-match: git reset HEAD","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git reset HEAD"}},"expect":{"outcome":"none"}}
 {"name":"non-match: git reset","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git reset"}},"expect":{"outcome":"none"}}
@@ -23,3 +25,4 @@
 {"name":"non-match: git status","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git status"}},"expect":{"outcome":"none"}}
 {"name":"non-match: git stash drop — CARVE-OUT: sanctioned stash flow","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git stash drop"}},"expect":{"outcome":"none"}}
 {"name":"non-match: git worktree remove .worktrees/Y-x — CARVE-OUT: lossless removal","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git worktree remove .worktrees/Y-x"}},"expect":{"outcome":"none"}}
+{"name":"non-match: git push origin HEAD:refs/for/main — gerrit refspec, not a force push","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git push origin HEAD:refs/for/main"}},"expect":{"outcome":"none"}}

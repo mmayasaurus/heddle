@@ -3,7 +3,7 @@ event: PreToolUse
 match:
   tool: Bash
   input:
-    command: '\bgit\s+(?:-C\s+\S+\s+)?(?:reset\b[^\n;|&]*?\s--hard\b|push\b[^\n;|&]*?\s(?:--force\b|-f\b)|branch\b[^\n;|&]*?\s(?:-[A-Za-z]*D\b|--delete\b[^\n;|&]*?--force\b|--force\b[^\n;|&]*?--delete\b))'
+    command: '\bgit\s+(?:-C\s+\S+\s+)?(?:reset\b[^\n;|&]*?\s--hard\b|push\b[^\n;|&]*?\s(?:--force\b|-f\b|\+[^\s;|&])|branch\b[^\n;|&]*?\s(?:-[A-Za-z]*D\b|--delete\b[^\n;|&]*?--force\b|--force\b[^\n;|&]*?--delete\b))'
 action: block
 enforce: false
 subagent_aware: true

@@ -8,6 +8,9 @@
 {"name":"match: git clean -xdf","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git clean -xdf"}},"expect":{"outcome":"nudge","stdout_includes":"(would block)"}}
 {"name":"match: git clean --force","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git clean --force"}},"expect":{"outcome":"nudge","stdout_includes":"(would block)"}}
 {"name":"match: git -C /r checkout -- x — git -C form","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git -C /r checkout -- x"}},"expect":{"outcome":"nudge","stdout_includes":"(would block)"}}
+{"name":"match: git checkout HEAD -- file.txt — B1: ref-then-- discard","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git checkout HEAD -- file.txt"}},"expect":{"outcome":"nudge","stdout_includes":"(would block)"}}
+{"name":"match: git checkout main -- . — B1: ref-then-- discard","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git checkout main -- ."}},"expect":{"outcome":"nudge","stdout_includes":"(would block)"}}
+{"name":"match: git checkout origin/main -- src/ — B1: ref-then-- discard","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git checkout origin/main -- src/"}},"expect":{"outcome":"nudge","stdout_includes":"(would block)"}}
 {"name":"non-match: git checkout main — branch switch","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git checkout main"}},"expect":{"outcome":"none"}}
 {"name":"non-match: git checkout -b feature","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git checkout -b feature"}},"expect":{"outcome":"none"}}
 {"name":"non-match: git checkout feature-branch","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git checkout feature-branch"}},"expect":{"outcome":"none"}}
@@ -18,3 +21,4 @@
 {"name":"non-match: git status","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git status"}},"expect":{"outcome":"none"}}
 {"name":"non-match: git stash drop — CARVE-OUT","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git stash drop"}},"expect":{"outcome":"none"}}
 {"name":"non-match: git worktree remove .worktrees/Y-x — CARVE-OUT: lossless removal","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git worktree remove .worktrees/Y-x"}},"expect":{"outcome":"none"}}
+{"name":"non-match: git checkout -B rel origin/main — reset-branch, no -- discard","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git checkout -B rel origin/main"}},"expect":{"outcome":"none"}}
