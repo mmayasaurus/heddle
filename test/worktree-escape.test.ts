@@ -209,6 +209,19 @@ describe('worktree escape detection', () => {
     expect(escapedPaths(before, checkoutFingerprint(root))).toEqual(['?? dirty.txt']);
   });
 
+  it('does not report tool-runtime writes as escapes but still reports ordinary content', () => {
+    const { root } = linkedWorktree(tempDir);
+    const before = checkoutFingerprint(root)!;
+    for (const [dir, file] of [['.memdb', 'daemon-state.json'], ['.memtrace', 'fts'], ['.serena', 'cache']]) {
+      mkdirSync(join(root, dir));
+      writeFileSync(join(root, dir, file), 'machine-local');
+    }
+    expect(escapedPaths(before, checkoutFingerprint(root))).toEqual([]);
+
+    writeFileSync(join(root, 'escaped.txt'), 'real content');
+    expect(escapedPaths(before, checkoutFingerprint(root))).toEqual(['?? escaped.txt']);
+  });
+
   it('reports parent paths that disappear between fingerprints', () => {
     const { root } = linkedWorktree(tempDir);
     const path = join(root, 'gone.txt');

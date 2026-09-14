@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { isToolRuntimePath } from './tool-runtime.js';
 
 /**
  * Worktree confinement (HED-98).
@@ -166,9 +167,11 @@ export function checkoutFingerprint(root: string): CheckoutFingerprint | null {
       if (status[0] === 'R' || status[0] === 'C') {
         const from = records[i + 1];
         i += 1;
+        if (isToolRuntimePath(path)) continue;
         entries.set(path, `${status}:from=${from ?? '?'}`);
         continue;
       }
+      if (isToolRuntimePath(path)) continue;
       let digest = '<missing>';
       try { digest = createHash('sha256').update(readFileSync(join(root, path))).digest('hex').slice(0, 16); }
       catch { /* deleted, or a directory — the status letters still carry the change */ }

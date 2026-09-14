@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { appendFileSync, rmSync, writeFileSync, chmodSync } from 'node:fs';
+import { appendFileSync, mkdirSync, rmSync, writeFileSync, chmodSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { diffInstruction, embeddedDiff, pickReviewer, sameSnapshot, snapshotWorktree } from '../src/review.js';
@@ -148,6 +148,31 @@ describe('adversarial review helpers', () => {
   }, 90_000); // snapshot-heavy: ~6 REAL git spawns/call × ~10 calls; ~9s standalone but a loaded
   //            parallel-fork CI runner can exceed 45s (HED-211). It hangs on nothing — a generous
   //            ceiling beats a tight bound that intermittently reds CI; not masking a hang.
+
+  it('excludes tool-runtime directories but still hashes ordinary and similarly named files', () => {
+    const cwd = tempDir();
+    git(cwd, 'init', '-q');
+    mkdirSync(join(cwd, 'src'));
+    writeFileSync(join(cwd, 'src', 'x.ts'), 'export const x = 1;\n');
+    git(cwd, 'add', 'src/x.ts');
+    commit(cwd, 'init');
+
+    const baseline = snapshotWorktree(cwd);
+    for (const [dir, file] of [['.memdb', 'daemon-state.json'], ['.memtrace', 'fts'], ['.serena', 'cache']]) {
+      mkdirSync(join(cwd, dir));
+      writeFileSync(join(cwd, dir, file), 'machine-local');
+    }
+    expect(sameSnapshot(baseline, snapshotWorktree(cwd))).toBe(true);
+
+    writeFileSync(join(cwd, '.memtraceignore'), 'tracked configuration');
+    expect(sameSnapshot(baseline, snapshotWorktree(cwd))).toBe(false);
+
+    const withConfig = snapshotWorktree(cwd);
+    writeFileSync(join(cwd, 'src', 'x.ts'), 'export const x = 2;\n');
+    expect(sameSnapshot(withConfig, snapshotWorktree(cwd))).toBe(false);
+    writeFileSync(join(cwd, 'note.txt'), 'ordinary untracked content');
+    expect(sameSnapshot(withConfig, snapshotWorktree(cwd))).toBe(false);
+  });
 
   it('prepends an actionable diff instruction and leaves a blank line before the task', () => {
     const instruction = diffInstruction('main');

@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Route } from './routing.js';
+import { isToolRuntimePath } from './tool-runtime.js';
 
 /**
  * heddle-transient paths and spans are EXCLUDED from the mandate digest (HED-56 × HED-3): a peer
@@ -154,7 +155,7 @@ export function snapshotWorktree(cwd: string): WorktreeSnapshot {
     const transformed: Array<{ rel: string; mode: number }> = [];
     for (const rel of paths) {
       const base = rel.split('/').pop() ?? rel;
-      if (isTransientBasename(base)) continue; // heddle bookkeeping churn — outside the mandate
+      if (isTransientBasename(base) || isToolRuntimePath(rel)) continue; // heddle/tool-runtime churn — outside the mandate
       let st;
       try { st = statSync(join(cwd, rel)); } catch { h.update(rel).update('=<missing>\n'); continue; } // deleted tracked file
       if (st.isDirectory()) continue; // submodule dir etc.
