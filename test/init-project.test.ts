@@ -410,6 +410,49 @@ describe('init-project', () => {
     expect(bridgeGroups[0].hooks).toHaveLength(1);
   });
 
+  it('HED-536 round-2: a re-run with NO selection preserves an existing bridge (no silent strip)', () => {
+    const opts = options(tempDir());
+    const catalog = tempDir();
+    const { id } = seedHookCatalog(catalog);
+    applyInstall(planInstall({ ...opts, hookRules: [{ id, enforce: false }], hookCatalogRoot: catalog }));
+    const withBridge = readFileSync(join(opts.dir, '.claude', 'settings.json'), 'utf8');
+    expect(withBridge).toContain('heddle hook-rules bridge');
+    // re-run WITHOUT hookRules must NOT strip the operator's earlier opt-in
+    applyInstall(planInstall(opts));
+    expect(readFileSync(join(opts.dir, '.claude', 'settings.json'), 'utf8')).toBe(withBridge);
+  });
+
+  it('HED-536 round-2: the bridge matcher follows the consumer seeded rule after catalog drift', () => {
+    const opts = options(tempDir());
+    const id = 'drift-rule';
+    const catalogV1 = tempDir();
+    writeFileSync(join(catalogV1, `${id}.yaml`), `id: ${id}\nevent: PreToolUse\nmatch:\n  tool: ConsumerTool\naction: block\nenforce: false\nmessage: drift\nfail_open: true\n`);
+    // first install seeds the consumer's rule (tool ConsumerTool) + wires the bridge
+    applyInstall(planInstall({ ...opts, hookRules: [{ id, enforce: false }], hookCatalogRoot: catalogV1 }));
+    // catalog "drifts" — same id now says a different tool; renderHookRulesSteps is skip-if-exists so the
+    // consumer's seeded rule stays ConsumerTool, which is what actually gets evaluated
+    const catalogV2 = tempDir();
+    writeFileSync(join(catalogV2, `${id}.yaml`), `id: ${id}\nevent: PreToolUse\nmatch:\n  tool: CatalogTool\naction: block\nenforce: false\nmessage: drift\nfail_open: true\n`);
+    applyInstall(planInstall({ ...opts, hookRules: [{ id, enforce: false }], hookCatalogRoot: catalogV2 }));
+    const settings = JSON.parse(readFileSync(join(opts.dir, '.claude', 'settings.json'), 'utf8'));
+    const bridge = settings.hooks.PreToolUse.filter((group: any) => group.hooks.some((hook: any) => hook.command.includes('heddle hook-rules bridge')));
+    expect(bridge).toHaveLength(1);
+    expect(bridge[0].matcher).toBe('ConsumerTool'); // the evaluated seeded rule wins, not the drifted catalog
+  });
+
+  it('HED-536 round-2: a user command with the marker phrase but no /hook.js invocation is not stripped', () => {
+    const opts = options(tempDir());
+    const catalog = tempDir();
+    const { id } = seedHookCatalog(catalog);
+    mkdirSync(join(opts.dir, '.claude'), { recursive: true });
+    writeFileSync(join(opts.dir, '.claude', 'settings.json'), JSON.stringify({ hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [
+      { type: 'command', command: 'echo running the heddle hook-rules bridge check' },
+    ] }] } }));
+    applyInstall(planInstall({ ...opts, hookRules: [{ id, enforce: false }], hookCatalogRoot: catalog }));
+    const text = readFileSync(join(opts.dir, '.claude', 'settings.json'), 'utf8');
+    expect(text).toContain('echo running the heddle hook-rules bridge check'); // no /hook.js → not a bridge → survives strip
+  });
+
   it('redacts only heddle configuration contents unless show-content is selected', () => {
     const opts = options(tempDir());
     const report = applyInstall(planInstall(opts));

@@ -158,7 +158,10 @@ function hookBridgePath(): string { return join(here, 'hook.js'); }
 // replaces a prior bridge entry (stripHookBridge) instead of duplicating it.
 const HOOK_BRIDGE_MARKER = 'heddle hook-rules bridge';
 function hookBridgeEntry(entry: any): boolean {
-  return typeof entry?.command === 'string' && entry.command.includes(HOOK_BRIDGE_MARKER);
+  // Recognise a heddle-generated bridge by BOTH its marker and the actual bridge invocation, so a
+  // user's own command that merely contains the marker phrase (but not the /hook.js invocation) is
+  // never stripped as if it were generated (codeant review).
+  return typeof entry?.command === 'string' && entry.command.includes(HOOK_BRIDGE_MARKER) && entry.command.includes('/hook.js');
 }
 
 // Bake the absolute node binary (process.execPath — the fnm/nvm-safe HEDDLE_BIN discipline: a hook
@@ -179,16 +182,23 @@ function hookBridgeCommand(rulesDir: string): string {
 
 // The (event, matcher) registrations the SELECTED rules need. The bridge self-filters by event and
 // re-checks match.tool internally, so we register exactly one entry per distinct event, with matcher =
-// the union of that event's tools ("*" when any selected rule for the event matches every tool). Rules
-// are read from the catalog (their canonical definition), not the consumer copy, which may not be
-// seeded yet on a fresh install; a selected id absent from the catalog is a hard error, not a silent
-// no-op.
-function hookBridgeWiring(selection: HookRuleSelection[], catalogRoot: string): Array<{ event: string; matcher: string }> {
+// the union of that event's tools ("*" when any selected rule for the event matches every tool).
+// Build the matcher from the rules that will ACTUALLY be evaluated: the consumer's already-seeded
+// <dir>/rules (what the bridge reads via --rules), falling back to the catalog for ids not yet seeded
+// on a fresh install. Reading the catalog alone would drift the wired matcher from a stale seeded rule
+// whose event/tool the catalog later changed (renderHookRulesSteps is skip-if-exists), silently
+// narrowing the matcher so the rule never fires (qodo/codeant review). A selected id in neither is a
+// hard error, not a silent no-op.
+function hookBridgeWiring(selection: HookRuleSelection[], catalogRoot: string, rulesDir: string): Array<{ event: string; matcher: string }> {
   if (!selection.length) return [];
-  const byId = new Map(loadRules(catalogRoot).map((rule) => [rule.id, rule]));
+  // existsSync guard: on a fresh install the consumer rules dir is not seeded yet — skip loadRules so it
+  // does not emit an ENOENT "rule ignored" note to stderr (installer stderr must stay clean); fall back
+  // to the catalog, which is exactly what renderHookRulesSteps will seed.
+  const consumer = new Map((existsSync(rulesDir) ? loadRules(rulesDir) : []).map((rule) => [rule.id, rule]));
+  const catalog = new Map(loadRules(catalogRoot).map((rule) => [rule.id, rule]));
   const toolsByEvent = new Map<string, Set<string>>();
   for (const { id } of selection) {
-    const rule = byId.get(id);
+    const rule = consumer.get(id) ?? catalog.get(id);
     if (!rule) throw new Error(`hook rule '${id}' not found in catalog ${catalogRoot}`);
     const tools = rule.match.tool === undefined ? ['*'] : (Array.isArray(rule.match.tool) ? rule.match.tool : [rule.match.tool]);
     const forEvent = toolsByEvent.get(rule.event) ?? new Set<string>();
@@ -218,7 +228,7 @@ function stripHookBridge(hooks: Record<string, any[]>): void {
 // machinery; Claude Code allows duplicate matchers). Always appended last, so strip+rewire is
 // byte-stable across runs.
 function wireHookBridge(hooks: Record<string, any[]>, selection: HookRuleSelection[], catalogRoot: string, rulesDir: string): void {
-  const wiring = hookBridgeWiring(selection, catalogRoot);
+  const wiring = hookBridgeWiring(selection, catalogRoot, rulesDir);
   if (!wiring.length) return;
   const command = hookBridgeCommand(rulesDir);
   for (const { event, matcher } of wiring) {
@@ -235,8 +245,14 @@ function renderedSettings(path: string, canonical: string, selection: HookRuleSe
   const targets = new Map<string, { group: any; index?: number }>();
   const hooks = preservedHookGroups(source, path, misplaced, targets);
   wireDisciplineHooks(hooks, targets, canonical);
-  stripHookBridge(hooks);
-  wireHookBridge(hooks, selection, catalogRoot, rulesDir);
+  // Only touch the bridge when a selection is provided: a re-run WITHOUT selected rules leaves any
+  // existing bridge intact (consistent with seeded rule YAML persisting across re-runs), rather than
+  // silently stripping the operator's earlier opt-in (qodo/cursor/codeant review). A fresh install
+  // with no selection stays inert (nothing to strip, nothing wired).
+  if (selection.length) {
+    stripHookBridge(hooks);
+    wireHookBridge(hooks, selection, catalogRoot, rulesDir);
+  }
   const { hooks: _oldHooks, ...rest } = source;
   return { content: json({ ...rest, hooks }), misplaced, raw };
 }
