@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { loadRules } from '../../src/rules/load.js';
+import { resolveCatalogRoot, resolveRulesRoot } from '../../src/rules/lifecycle.js';
 import { useTempResources } from '../helpers.js';
 import { ensureBuilt, PROJECT_ROOT, runCli } from '../helpers/cli.js';
 
@@ -33,6 +34,28 @@ describe('heddle rule lifecycle CLI', () => {
   const { tempDir } = useTempResources('heddle-rule-lifecycle-');
 
   beforeAll(async () => { await ensureBuilt(); }, 120_000);
+
+  it('resolves the shipped catalog independently from the consumer project rules directory', () => {
+    const projectDir = tempDir();
+    const priorProjectDir = process.env.CLAUDE_PROJECT_DIR;
+    const priorRulesDir = process.env.HEDDLE_RULES_DIR;
+    try {
+      process.env.CLAUDE_PROJECT_DIR = projectDir;
+      delete process.env.HEDDLE_RULES_DIR;
+      expect(existsSync(join(resolveCatalogRoot(), 'no-rm-recursive-force.yaml'))).toBe(true);
+      expect(resolveCatalogRoot()).not.toBe(join(projectDir, 'rules'));
+      expect(resolveRulesRoot([])).toBe(join(projectDir, 'rules'));
+
+      const override = join(projectDir, 'catalog-override');
+      process.env.HEDDLE_RULES_DIR = override;
+      expect(resolveCatalogRoot()).toBe(override);
+    } finally {
+      if (priorProjectDir === undefined) delete process.env.CLAUDE_PROJECT_DIR;
+      else process.env.CLAUDE_PROJECT_DIR = priorProjectDir;
+      if (priorRulesDir === undefined) delete process.env.HEDDLE_RULES_DIR;
+      else process.env.HEDDLE_RULES_DIR = priorRulesDir;
+    }
+  });
 
   it('proposes a valid, fixture-backed rule without making it active', async () => {
     const root = tempDir(); const source = candidatePath(root);
