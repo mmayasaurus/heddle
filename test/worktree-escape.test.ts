@@ -254,6 +254,23 @@ describe('worktree escape detection', () => {
     expect(escapedPaths(after, checkoutFingerprint(root))).toEqual(['M .serena/tracked.txt']);
   });
 
+  it('does NOT report a reviewer write to a gitignored .serena/ parent path — the pre-existing ignored-path boundary (HED-569)', () => {
+    // Boundary DOC, not a HED-550 regression: checkoutFingerprint reads `git status --porcelain`,
+    // which omits gitignored paths — so when the parent gitignores .serena/, a write under it
+    // (agent-authored .serena/memories/x included) never reaches isToolRuntimePath and is invisible
+    // to the escape fingerprint, like any ignored artifact. HED-569 tracks whether to enumerate
+    // authored tool-runtime paths even when ignored; this pins the current behavior.
+    const { root } = linkedWorktree(tempDir);
+    writeFileSync(join(root, '.gitignore'), '.serena/\n');
+    git(root, 'add', '.gitignore');
+    git(root, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '-m', 'gitignore serena');
+    const before = checkoutFingerprint(root)!;
+    mkdirSync(join(root, '.serena', 'memories'), { recursive: true });
+    writeFileSync(join(root, '.serena', 'memories', 'note.md'), 'reviewer write_memory');
+    writeFileSync(join(root, '.serena', 'project.yml'), 'name: proj\n');
+    expect(escapedPaths(before, checkoutFingerprint(root))).toEqual([]);
+  });
+
   it('reports parent paths that disappear between fingerprints', () => {
     const { root } = linkedWorktree(tempDir);
     const path = join(root, 'gone.txt');

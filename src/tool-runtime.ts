@@ -11,10 +11,21 @@
  *     to both guards (matching by prefix, not any-segment);
  *   - `.serena/` is NOT homogeneous: `.serena/project.yml` and `.serena/memories/` are agent/user
  *     -authored (a reviewer can call serena's write_memory), so only `.serena/cache/` is excluded —
- *     a reviewer write to serena config or memories is still caught;
+ *     a reviewer write to serena config or memories is caught WHERE `.serena/` is not gitignored
+ *     (see the enumeration boundary below);
  *   - the trailing slash means a bare file literally named `.serena`/`.memdb`/`.memtrace` is NOT
  *     excluded, and `.memdbextra/…` cannot collide with `.memdb/`.
  * `.memtraceignore` is tracked configuration, never matched here.
+ *
+ * Enumeration boundary (pre-existing, tracked as HED-569): both guards enumerate the worktree with
+ * commands that skip gitignored paths — snapshotWorktree via `git ls-files --others --exclude-standard`
+ * (review.ts) and checkoutFingerprint via `git status --porcelain` (worktree.ts). So in a repo that
+ * gitignores `.serena/` (heddle itself does), a write under it — including agent-authored
+ * `.serena/memories/` / `.serena/project.yml` — never reaches this predicate and is invisible to
+ * BOTH guards, like any ignored artifact (node_modules/, dist/, .env). This predicate only NARROWS
+ * exclusions among already-enumerated paths; it neither introduces nor closes that ignored-path gap
+ * (round-2 code had the identical property). HED-569 tracks whether to enumerate authored
+ * tool-runtime paths even when ignored.
  *
  * Known, bounded blind spot (Maya-gated, HED-550): an UNTRACKED write directly under one of these
  * three daemon dirs is indistinguishable from daemon churn by path alone, so it is also excluded.

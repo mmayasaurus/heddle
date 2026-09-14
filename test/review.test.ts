@@ -204,6 +204,28 @@ describe('adversarial review helpers', () => {
     expect(sameSnapshot(withEdit, snapshotWorktree(cwd))).toBe(true);
   });
 
+  it('does NOT see a reviewer write to a gitignored .serena/ path — the pre-existing ignored-path boundary (HED-569)', () => {
+    // Boundary DOC, not a HED-550 regression: snapshotWorktree enumerates via
+    // `git ls-files --others --exclude-standard`, which omits gitignored paths — so in a repo that
+    // gitignores .serena/ (heddle itself does), a reviewer write_memory to .serena/memories/x, or an
+    // edit to .serena/project.yml, is invisible to the mandate digest before isToolRuntimePath is ever
+    // consulted. Same boundary the mandate already accepts for node_modules/, dist/, .env. Whether to
+    // enumerate authored tool-runtime paths even when ignored is HED-569; this pins current behavior so
+    // any future change is deliberate. (Round-2 code had the identical property — the gap predates 550.)
+    const cwd = tempDir();
+    git(cwd, 'init', '-q');
+    writeFileSync(join(cwd, '.gitignore'), '.serena/\n');
+    git(cwd, 'add', '.gitignore');
+    commit(cwd, 'gitignore serena');
+
+    const baseline = snapshotWorktree(cwd);
+    mkdirSync(join(cwd, '.serena', 'memories'), { recursive: true });
+    writeFileSync(join(cwd, '.serena', 'memories', 'note.md'), 'reviewer write_memory');
+    writeFileSync(join(cwd, '.serena', 'project.yml'), 'name: proj\n');
+    // Both writes sit under a gitignored dir → outside the enumeration → digest unchanged.
+    expect(sameSnapshot(baseline, snapshotWorktree(cwd))).toBe(true);
+  });
+
   it('prepends an actionable diff instruction and leaves a blank line before the task', () => {
     const instruction = diffInstruction('main');
     expect(instruction).toContain('git diff main...HEAD');
