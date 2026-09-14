@@ -2,6 +2,7 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { ClaudeAccountUsage } from './claude-usage.js';
+import type { GlmUsageQuota } from './glm-usage.js';
 
 /**
  * Provider cap reader — what the router (HED-67) and account picker (HED-68) consult at dispatch.
@@ -80,7 +81,7 @@ export interface ProviderCaps {
   /** Where the numbers came from; `none` = nothing usable (treat every window as unknown).
    *  `claude-oauth` (HED-451) = live per-account OAuth-usage polls injected into readProviderCaps — like
    *  `claude-tap`, it names NO authoritative active account (activeAccount stays null). */
-  source: 'limits.json' | 'claude-tap' | 'claude-oauth' | 'none';
+  source: 'limits.json' | 'claude-tap' | 'claude-oauth' | 'glm-quota' | 'none';
   /** True when the snapshot must not drive routing (missing, too old, or flagged stale upstream). */
   stale: boolean;
   capturedAt: number | null;
@@ -179,6 +180,19 @@ function unknownCaps(provider: string): ProviderCaps {
   return {
     provider, source: 'none', stale: true, capturedAt: null, fiveHour: UNKNOWN, sevenDay: UNKNOWN,
     windows: {}, noteCodes: [], accounts: [], activeAccount: null,
+  };
+}
+
+function glmQuotaCaps(quota: GlmUsageQuota, nowS: number): ProviderCaps | null {
+  const fiveHour = quota.pools.find((pool) => pool.type === 'five_hour');
+  const weekly = quota.pools.find((pool) => pool.type === 'weekly');
+  if (!fiveHour && !weekly) return null;
+  const toWindow = (pool: typeof fiveHour): CapWindow => pool
+    ? normalizeWindow({ usedPercentage: pool.percentage, resetsAt: Math.floor(pool.resetAtMs / 1000) }, nowS)
+    : UNKNOWN;
+  return {
+    provider: 'glm', source: 'glm-quota', stale: false, capturedAt: nowS,
+    fiveHour: toWindow(fiveHour), sevenDay: toWindow(weekly), windows: {}, noteCodes: [], accounts: [], activeAccount: null,
   };
 }
 
@@ -417,13 +431,15 @@ function mergeClaudeAccountRows(existing: AccountCaps[], incoming: AccountCaps[]
  * itself never queries a vendor — that would add network latency to every dispatch); merged per-account
  * by id with the tap discipline, and establishing the claude provider when mirror+tap are absent/stale.
  */
-export function readProviderCaps(opts: { usageDir?: string; accountsPath?: string; nowS?: number; claudePolls?: ClaudeAccountUsage[] } = {}): CapsByProvider {
+export function readProviderCaps(opts: { usageDir?: string; accountsPath?: string; nowS?: number; claudePolls?: ClaudeAccountUsage[]; glmQuota?: GlmUsageQuota } = {}): CapsByProvider {
   const usageDir = opts.usageDir ?? process.env.HEDDLE_USAGE_DIR ?? DEFAULT_USAGE_DIR;
   const accountsPath = opts.accountsPath ?? process.env.HEDDLE_ACCOUNTS ?? join(homedir(), '.heddle', 'accounts.json');
   const nowS = opts.nowS ?? Math.floor(Date.now() / 1000);
   const out: CapsByProvider = {};
   const mirror = readLimitsMirror(usageDir, nowS);
   if (mirror) Object.assign(out, mirror);
+  const glm = opts.glmQuota ? glmQuotaCaps(opts.glmQuota, nowS) : null;
+  if (glm) out.glm = glm;
   // Claude: the raw tap is fresher/independent of the app — prefer it when the mirror is missing or
   // stale for claude, and always merge per-account rows the tap knows about.
   const tap = readClaudeTap(usageDir, nowS);
@@ -464,7 +480,7 @@ export function readProviderCaps(opts: { usageDir?: string; accountsPath?: strin
       // else: nothing usable anywhere (poll all-unknown too) → leave out.claude, so it stays source:'none'.
     }
   }
-  for (const p of ['claude', 'codex', 'cursor', 'gemini']) if (!out[p]) out[p] = unknownCaps(p);
+  for (const p of ['claude', 'codex', 'cursor', 'gemini', 'glm']) if (!out[p]) out[p] = unknownCaps(p);
   // HED-178 is independent of cap freshness: decorate the final merged Claude rows after choosing
   // mirror/tap data. Signal-only accounts get a stale unknown row so a fresh failure can exclude a
   // registry account even when no cap producer has ever emitted a row for it.

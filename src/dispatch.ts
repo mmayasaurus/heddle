@@ -7,6 +7,7 @@ import { fleetPauseStatus } from './fleet-pause.js';
 import { decideCapabilities, capabilityPolicy } from './capabilities.js';
 import { resolveIdentity, attributeDispatch } from './identity.js';
 import { readProviderCaps } from './usage.js';
+import { fetchGlmUsageQuota } from './glm-usage.js';
 import { readClaudeAccounts, pickClaudeAccount, capAwarePolicy, hardRefusal } from './capaware.js';
 import { classifyRotationRefusal, DEFAULT_COOLDOWN_S, DEFAULT_COOLING_PATH, readCooling, readRotationAccounts, writeCooling } from './rotation.js';
 import { basename } from 'node:path';
@@ -107,6 +108,15 @@ export async function dispatch(
   if (req.resume && !req.accountPin) {
     const prior = ledger.sessionAccount(req.resume);
     if (prior) req = { ...req, accountPin: prior };
+  }
+
+  // GLM has no disk meter producer. Only the cursor-primary advisory classes whose FALLBACK is glm can
+  // reach it automatically, so fetch its quota just before planning those dispatches; fetchGlmUsageQuota
+  // fails open on a missing key, timeout, unauthorized response, or malformed payload. (research-summarize
+  // is deliberately absent — its fallback is codex/luna, not glm; see routing.v0.yaml.)
+  if (!req.caps && ['second-opinion', 'quick-alt-take'].includes(req.taskClass ?? '')) {
+    const glmQuota = await fetchGlmUsageQuota();
+    req = { ...req, caps: readProviderCaps({ glmQuota: glmQuota ?? undefined }) };
   }
 
   const plan = planDispatch(req, table);

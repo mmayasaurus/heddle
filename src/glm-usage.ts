@@ -11,7 +11,17 @@ export interface GlmUsageQuota {
   pools: GlmUsagePool[];
 }
 
-/** Pure parser for Z.ai Coding Plan's quota response; Stage 1 deliberately does not fetch or wire limits.json. */
+export interface GlmQuotaFetchDeps {
+  env?: NodeJS.ProcessEnv;
+  fetchImpl?: typeof fetch;
+  httpTimeoutMs?: number;
+  quotaUrl?: string;
+}
+
+export const GLM_QUOTA_ENDPOINT = 'https://api.z.ai/api/monitor/usage/quota/limit';
+export const GLM_QUOTA_TIMEOUT_MS = 5_000;
+
+/** Pure parser for Z.ai Coding Plan's quota response. */
 export function parseGlmUsageQuota(input: unknown): GlmUsageQuota | null {
   if (!input || typeof input !== 'object') return null;
   const data = (input as { data?: unknown }).data;
@@ -26,4 +36,25 @@ export function parseGlmUsageQuota(input: unknown): GlmUsageQuota | null {
     pools.push({ type, usage, remaining, percentage, resetAtMs: nextResetTime });
   }
   return { level, pools };
+}
+
+/** Read the Z.ai Coding Plan quota without letting a missing key or failed HTTP call block dispatch. */
+export async function fetchGlmUsageQuota(deps: GlmQuotaFetchDeps = {}): Promise<GlmUsageQuota | null> {
+  const key = (deps.env ?? process.env).ZAI_API_KEY;
+  if (!key) return null;
+  let response: Response;
+  try {
+    response = await (deps.fetchImpl ?? fetch)(deps.quotaUrl ?? GLM_QUOTA_ENDPOINT, {
+      headers: { Authorization: `Bearer ${key}` },
+      signal: AbortSignal.timeout(deps.httpTimeoutMs ?? GLM_QUOTA_TIMEOUT_MS),
+    });
+  } catch {
+    return null;
+  }
+  if (!response.ok) return null;
+  try {
+    return parseGlmUsageQuota(await response.json());
+  } catch {
+    return null;
+  }
 }

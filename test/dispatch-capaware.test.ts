@@ -1,7 +1,11 @@
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { dispatch, planDispatch } from '../src/dispatch.js';
+import { decideRoute } from '../src/capaware.js';
 import { Ledger } from '../src/ledger.js';
+import { loadRouting } from '../src/routing.js';
+import { parseGlmUsageQuota } from '../src/glm-usage.js';
+import { readProviderCaps } from '../src/usage.js';
 import type { CapsByProvider, ProviderCaps } from '../src/usage.js';
 import { fakeAdapter, IDENTITIES, useTempResources } from './helpers.js';
 
@@ -48,6 +52,18 @@ describe('dispatch cap-aware decisions', () => {
   it('keeps planning side-effect free while returning the cap-aware target and trace', () => {
     const ledger = trackLedger(new Ledger(join(tempDir(), 'ledger.db'))); const plan = planDispatch({ taskClass: 'bulk-mechanical', prompt: '(dry run)', cwd: tempDir(), identity: unbound, caps: { ...caps({ codex: 95 }), ...cursorCaps({ total: 10, api: 10 }) } });
     expect(plan.target.model).toBe('composer-2.5-fast'); expect(plan.decision).toMatchObject({ routedAwayForCap: true }); expect(plan.decision.checks.length).toBeGreaterThan(0); expect(ledger.recent(1)).toEqual([]);
+  });
+
+  it('routes away from an exhausted GLM quota instead of leaving its dispatch on a depleted HTTP pool', () => {
+    const quota = parseGlmUsageQuota({ data: { level: 'coding-pro', limits: [
+      { type: 'five_hour', usage: 1000, remaining: 0, percentage: 100, nextResetTime: 1_788_000_000_000 },
+    ] } });
+    const glmCaps = readProviderCaps({ nowS: 1_787_000_000, glmQuota: quota ?? undefined });
+    const decision = decideRoute(loadRouting(),
+      { provider: 'glm', model: 'glm-5.3' }, { provider: 'codex', model: 'gpt-5.6-luna' },
+      { ...glmCaps, ...caps({ codex: 5 }) }, { explicit: false });
+    expect(decision).toMatchObject({ target: { provider: 'codex', model: 'gpt-5.6-luna' }, routedAwayForCap: true });
+    expect(decision.routeReason).toContain('cap:route-away glm 5h 100%');
   });
 
   it('records the selected Codex account using the CODEX_HOME basename', async () => {

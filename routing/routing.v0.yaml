@@ -204,8 +204,8 @@ task_classes:
   second-opinion:           # independent diagnosis/review of a diff or plan (diversity valuable)
     provider: cursor
     model: cursor-grok-4.6-high   # Cursor-Models pool — does NOT touch the PR-review dollar pool
-    fallback: {provider: gemini, model: gemini-3.1-pro-high}
-    why: independent diagnosis/review of a diff or plan — diversity of model FAMILY is the point; Grok sits on the generous Cursor-Models pool. Give it a SELF-CONTAINED brief (no memtrace); expect 5-8 min (grok ran ~374-520s in the 2026-08-18 ledger), so pick it deliberately — for a SMALL diff use quick-alt-take (grok-medium) instead.
+    fallback: {provider: glm, model: glm-5.3}
+    why: independent diagnosis/review of a diff or plan — diversity of model FAMILY is the point; Grok sits on the generous Cursor-Models pool, with glm-5.3 as the cheap cross-family fallback. Give it a SELF-CONTAINED brief (no memtrace); expect 5-8 min (grok ran ~374-520s in the 2026-08-18 ledger), so pick it deliberately — for a SMALL diff use quick-alt-take (grok-medium) instead.
     skills: [worker-role]
     edits_code: false
   second-opinion-hard:      # opt-in only: costs the metered pool PR review needs
@@ -247,7 +247,7 @@ task_classes:
     model: haiku
     min_tier: T0            # HED-106: menial reading — the ladder may descend to the read-only T0 lanes
     fallback: {provider: codex, model: gpt-5.6-luna}
-    why: doc reading, log triage, summarization — Haiku is the cheap Claude; never spend Sonnet/Opus reading logs
+    why: doc reading, log triage, summarization — Haiku is the cheap Claude. The fallback stays codex/gpt-5.6-luna (NOT glm — HED-465 weighed it and kept codex) because it is load-bearing on two axes — (1) HED-264 dead-claude walk, a logged-out/billing-dead claude PRIMARY must walk to an ALWAYS-ADDRESSABLE non-claude lane, and codex is a reliable CLI whereas glm is key-gated (ZAI_API_KEY unset → unaddressable → refusal); (2) capability-fit — claude cannot enforce net/exec (no sandbox) but codex can, so a request carrying a capability routes to codex instead of a terminal refusal (test/dispatch-claude.test.ts). A capability-AWARE split (glm normally, codex only when a capability is requested) is HED-501. HED-79 rejected the same class of swap for scaffold. glm ships on the two CURSOR-primary advisory classes instead (second-opinion, quick-alt-take), which have neither a dead-claude walk nor a capability hatch to lose.
     skills: [worker-role]
     edits_code: false
   documentation:            # READMEs, comments, changelogs, docstrings — minimal reasoning need
@@ -261,7 +261,8 @@ task_classes:
   quick-alt-take:           # cheap fast alternative draft to compare against primary
     provider: cursor
     model: cursor-grok-4.6-medium
-    why: cheap second draft, and the cheap REVIEW variant for SMALL diffs — same Grok family as second-opinion at lower effort (grok-medium); prefer this over second-opinion when the diff is small (HED-79 retune 2026-08-18)
+    fallback: {provider: glm, model: glm-5.3}
+    why: cheap second draft, and the cheap REVIEW variant for SMALL diffs — same Grok family as second-opinion at lower effort (grok-medium), with glm-5.3 as the cheap cross-family fallback; prefer this over second-opinion when the diff is small (HED-79 retune 2026-08-18)
     skills: [worker-role]
     edits_code: false
   adversarial-review:       # HED-3 (operator decision: "super important") — a DIFFERENT model family reviews a diff/
@@ -269,6 +270,7 @@ task_classes:
     model: cursor-grok-4.6-high   # author→reviewer provider pair by accepted-finding rate.
     fallback: {provider: codex, model: gpt-5.6-sol}   # HED-249: MUST be mcp-attachable (see mcp: below). Codex is memtrace-capable AND a different family from cursor + claude authors, so review diversity holds. NOT gemini: agy has no worker-MCP path, so a gemini fallback HARD-FAILED the whole dispatch on a transient cursor blip — cursor was a SPOF (ledger 254).
     mcp: [memtrace]         # HED-205 default so a reviewer gets code discovery (else it trips the memtrace-first hook and returns a complaint instead of findings, ledger 206). HED-249 HARD CONSTRAINT: every provider this class can resolve to — primary, fallback, AND every reviewer_pool entry — MUST be worker-MCP-attachable. gemini/agy is NOT, so it is kept OUT of this class entirely (refusing loudly beats a silent discovery-less review). A CI invariant test (routing.test.ts) enforces this for all mcp-carrying classes.
+    # glm-5.3 + agy adversarial reviewer_pool seats DEFERRED to HED-524 (quality bench): mcp:[] + HED-464 inline delivery clears the ledger-254 operational bar; review QUALITY is bench-gated.
     reviewer_pool:          # first entry whose provider differs from `author_provider` is used. HED-249: no gemini — this class carries mcp and gemini can't attach it (pickReviewer's usable() gate does not check mcp, so a gemini pick would hard-fail the dispatch).
       - {provider: cursor, model: cursor-grok-4.6-high}
       - {provider: codex, model: gpt-5.6-sol}
