@@ -364,6 +364,7 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
     provider: target.provider,
     caps: caps[target.provider],
     permitPayPerToken: capAwarePolicy(table).permitPayPerToken,
+    table,
   });
   const billingRefusal = reachesRunTarget ? billing.refusal : undefined;
   const billingAdvice = billing.advice;

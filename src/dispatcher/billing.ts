@@ -12,8 +12,10 @@
  * billingClass/overage). Strict-refusing at an un-verifiable edge (resume 'default', a stale/missing
  * meter, one JSON typo → fleet-wide dispatch outage) is FORBIDDEN.
  */
-import { loadAccountRegistry, type Account, type AccountRegistry } from '../accounts.js';
+import { loadAccountRegistry, type Account, type AccountRegistry, type BillingClass, isBillingClass } from '../accounts.js';
+import { isOpenAICompatProvider } from '../adapters/openai-compat.js';
 import { accountCapState, type CapState } from '../capaware.js';
+import type { RoutingTable } from '../routing.js';
 import type { ProviderCaps } from '../usage.js';
 import type { DispatchRefusal } from './types.js';
 
@@ -63,6 +65,9 @@ export interface BillingGateInput {
   caps: ProviderCaps | undefined;
   /** policy.cap_aware_routing.permit_pay_per_token (default false). */
   permitPayPerToken: boolean;
+  /** The routing table both call sites already hold — carried so the provider-class lookup happens INSIDE
+   *  billingVerdict, giving preview and gate one shared resolution that cannot drift. */
+  table: RoutingTable;
   /** Registry loader — a THUNK so a corrupt-registry throw degrades-to-allow here instead of crashing
    *  every dispatch (F4). Defaults to loadAccountRegistry(); the try/catch lives here so BOTH call
    *  sites (runTarget gate, planDispatch preview) are protected by the one shared path and can never
@@ -80,6 +85,28 @@ function unregistered(accountId: string | null): BillingVerdict {
       warn: `billing gate cannot classify account '${label}' (${why}) — allowing; register it in accounts.json to enable the guard`,
     },
   };
+}
+
+/** The provider-level billing class declared in routing.v0.yaml (providers.<p>.billing_class), or
+ *  undefined when absent/invalid. Enum-guarded so a hand-built RoutingTable that bypassed loadRouting
+ *  can never inject a bad class. */
+function providerBillingClass(table: RoutingTable, provider: string): BillingClass | undefined {
+  const bc = (table.providers?.[provider] as Record<string, unknown> | undefined)?.billing_class;
+  return isBillingClass(bc) ? bc : undefined;
+}
+
+/** Billing verdict for a keyed openai-compat pool (no registry account, no per-account meter/overage):
+ *  refuse a pay-per-token pool unless the operator permits it; every other class is no-overage → clean
+ *  allow. Mirrors classify()'s pay-per-token branch (same code + lever) with provider-appropriate text. */
+function classifyProvider(billingClass: BillingClass, permitPayPerToken: boolean, provider: string): BillingVerdict {
+  if (billingClass === 'pay-per-token' && !permitPayPerToken) {
+    return { refusal: {
+      code: 'billing.pay-per-token',
+      reason: `provider "${provider}" (billing_class=pay-per-token) bills from token 1 and is refused by default.`,
+      instruction: `To explicitly permit this provider, set ${PAY_PER_TOKEN_PERMIT}. (Declared at providers.${provider}.billing_class in routing.v0.yaml.)`,
+    } };
+  }
+  return {}; // no-overage class → clean allow (no degrade note)
 }
 
 /** The billing/overage classification for a REGISTERED account that declares a billingClass. Pure. */
@@ -156,8 +183,14 @@ function classify(account: Account, caps: ProviderCaps | undefined, permitPayPer
 export function billingVerdict(input: BillingGateInput): BillingVerdict {
   const { accountId, caps, provider, permitPayPerToken } = input;
 
-  // F2: no bound account id → can't classify → loud-degrade-to-allow.
-  if (accountId === null) return unregistered(null);
+  // Keyed openai-compat pools have no registry account; provider-level classification is their spend input.
+  if (accountId === null) {
+    if (isOpenAICompatProvider(provider)) {
+      const pc = providerBillingClass(input.table, provider);
+      if (pc) return classifyProvider(pc, permitPayPerToken, provider);
+    }
+    return unregistered(null);
+  }
 
   // F4: a corrupt/unreadable registry must NEVER crash all dispatch. loadAccountRegistry throws loud
   // by design; catch it HERE (the shared path) so both call sites degrade-to-allow identically.
