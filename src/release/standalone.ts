@@ -22,7 +22,7 @@ export function releaseStandalone(options: StandaloneOptions): StandaloneResult 
   const tempDir = `${outDir}.tmp-${process.pid}`;
   if (existsSync(tempDir)) return { ok: false, error: `temporary destination already exists: ${tempDir}` };
   try {
-    return generate(options, outDir, tempDir);
+    return generate(options, outDir, tempDir, invariant.commit);
   } catch (error) {
     rmSync(tempDir, { recursive: true, force: true });
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
@@ -33,7 +33,10 @@ export function releaseStandalone(options: StandaloneOptions): StandaloneResult 
 // artifact must be cut from a clean checkout whose source ref is main's current HEAD — not merely an
 // ancestor of main. An ancestor (e.g. `--source-ref main~3` or a merged side branch) would ship a tree
 // that diverges from the source of truth while looking legitimate, which is exactly what this prevents.
-export function assertCleanMainHead(sourceDir: string, sourceRef: string): { ok: boolean; error?: string } {
+export function assertCleanMainHead(
+  sourceDir: string,
+  sourceRef: string,
+): { ok: true; commit: string } | { ok: false; error: string } {
   const git = (args: string[]) => spawnSync('git', args, { cwd: sourceDir, encoding: 'utf8', env: gitEnv() });
   const mainRef = git(['rev-parse', '--verify', '--quiet', 'refs/heads/main']);
   if (mainRef.status !== 0) {
@@ -55,12 +58,17 @@ export function assertCleanMainHead(sourceDir: string, sourceRef: string): { ok:
   if (commit !== mainHead) {
     return { ok: false, error: `release: source commit ${commit.slice(0, 12)} is not main's HEAD ${mainHead.slice(0, 12)} — check out main and pull (headless-first invariant, HED-507)` };
   }
-  return { ok: true };
+  return { ok: true, commit };
 }
 
-function generate(options: StandaloneOptions, outDir: string, tempDir: string): StandaloneResult {
+function generate(options: StandaloneOptions, outDir: string, tempDir: string, sourceCommit: string): StandaloneResult {
+  // Cut from the exact commit the invariant gate verified, NOT a re-resolution of the (mutable) source
+  // ref. assertCleanMainHead already resolved sourceRef -> this SHA and proved it is main's tip; archiving
+  // the pinned SHA closes the window where the ref could move between validation and the cut, and makes
+  // the archived tree and the recorded commit provably the same immutable object (HED-507 review:
+  // codeant/qodo TOCTOU). sourceRef is kept only as the human-facing label in RELEASE.json.
   const sourceRef = options.sourceRef ?? 'HEAD';
-  const extracted = extractShipSet(options.sourceDir ?? process.cwd(), sourceRef);
+  const extracted = extractShipSet(options.sourceDir ?? process.cwd(), sourceCommit);
   try {
     copyShipSet(extracted.dir, tempDir);
     writeFileSync(join(tempDir, 'README.md'), standaloneReadme(version(tempDir), extracted.sourceCommit));

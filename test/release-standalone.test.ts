@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { delimiter, dirname, join, relative, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { checkStandaloneOutput, releaseStandalone } from '../src/release/standalone.js';
+import { assertCleanMainHead, checkStandaloneOutput, releaseStandalone } from '../src/release/standalone.js';
 import { isIncluded } from '../src/release/shipset.js';
 import { useTempResources } from './helpers.js';
 
@@ -65,7 +65,9 @@ describe('regression PR#119 — standalone snapshot generator review findings', 
     expect(readFileSync(join(root, 'keep'), 'utf8')).toBe('keep');
     expect(existsSync(destination)).toBe(false);
     expect(existsSync(`${destination}.tmp-${process.pid}`)).toBe(false);
-  });
+    // Two snapshotSource builds (each archives the whole repo) — same heavy git work as the 120s
+    // siblings above/below; the default 30s timeout flakes this one under parallel-suite load. — HED-507
+  }, 120_000);
 
   it('rejects credential-shaped file names without touching the destination', () => {
     const root = tempDir();
@@ -338,6 +340,22 @@ describe('HED-507 — headless-first main-HEAD invariant', () => {
     } finally {
       if (savedGitDir === undefined) delete process.env.GIT_DIR;
       else process.env.GIT_DIR = savedGitDir;
+    }
+  });
+
+  it('returns the validated commit as an immutable SHA so the cut pins it (no re-resolution)', () => {
+    // The gate resolves sourceRef -> a commit and proves it is main's tip; it now RETURNS that SHA so
+    // generate archives the pinned object instead of re-resolving the mutable ref (the codeant/qodo
+    // TOCTOU). This locks that contract: the returned commit is main's tip, as a full 40-hex SHA.
+    const source = snapshotSource(tempDir());
+    const mainTip = execFileSync('git', ['rev-parse', 'refs/heads/main'], { cwd: source, encoding: 'utf8' }).trim();
+
+    const result = assertCleanMainHead(source, 'HEAD');
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.commit).toBe(mainTip);
+      expect(result.commit).toMatch(/^[0-9a-f]{40}$/);
     }
   });
 });
