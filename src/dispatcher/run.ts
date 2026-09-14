@@ -5,6 +5,7 @@
  */
 import { materializeAgentsMd, readPack, composePacks } from '../skillpacks.js';
 import { materializeWorkerMcp, validateWorkerMcp, codexMcpFlags, claudeMcpConfigFile, webCapable } from '../mcp.js';
+import { isOpenAICompatProvider } from '../adapters/openai-compat.js';
 import { assessResult, type ResultAssessment } from '../classify.js';
 import { snapshotWorktree, sameSnapshot, diffInstruction, embeddedDiff } from '../review.js';
 import { parentCheckoutOf, checkoutFingerprint, escapedPaths, destroyedWork } from '../worktree.js';
@@ -105,6 +106,7 @@ export async function runTarget(
   // --mcp-config file — nothing is written into the worktree — and run under the chosen account's
   // CLAUDE_CONFIG_DIR (unset for the default login).
   const isClaude = target.provider === 'claude';
+  const isHttp = isOpenAICompatProvider(target.provider);
   const acct = isClaude ? ctx.claudeAccount ?? null : null;
   const rotation = (target.provider === 'codex' || target.provider === 'cursor') ? ctx.rotationAccount ?? null : null;
   let restoreSkills: () => void = () => {};
@@ -135,6 +137,10 @@ export async function runTarget(
       systemPromptAppend = (packText + discovery) || undefined;
       const mcpFile = claudeMcpConfigFile(mcp); // always a file (possibly empty) → --strict-mcp-config
       mcpConfigPath = mcpFile.path; restoreMcp = mcpFile.cleanup;
+    } else if (isHttp) {
+      // HTTP/in-process providers have no filesystem: embed packs as their system prompt. MCP is
+      // empty here because validateWorkerMcp rejects every non-empty HTTP-provider attachment.
+      systemPromptAppend = skills.length ? composePacks(skills) : undefined;
     } else {
       // Per-dispatch blocks + liveness GC (HED-56): concurrent dispatches into one cwd each own
       // their block/ref; blocks left by crashed dispatches are collected on the next dispatch.
@@ -150,15 +156,16 @@ export async function runTarget(
     // injected files are part of the baseline, so a reviewer that edits AGENTS.md/.mcp.json is
     // caught — with the old before-materialize/after-restore ordering, restore MASKED those edits.
     before = route.readOnly ? snapshotWorktree(req.cwd) : null;
-    // diff_base delivery is PER TARGET: a claude read-only reviewer has no Bash (its --tools set),
-    // so it gets the diff embedded; every other reviewer is told to run git itself.
+    // HTTP providers cannot run git; Claude read-only reviewers also receive an embedded diff because
+    // their tool set has no Bash. Tool-less HTTP prompts must not mention Read/Grep/Glob.
+    const embedDiff = (isClaude && route.readOnly) || isHttp;
     const basePrompt = req.diffBase
-      ? (isClaude && route.readOnly ? embeddedDiff(req.cwd, req.diffBase) : diffInstruction(req.diffBase)) + req.prompt
+      ? (embedDiff ? embeddedDiff(req.cwd, req.diffBase, undefined, !isHttp) : diffInstruction(req.diffBase)) + req.prompt
       : req.prompt;
     // Best-effort PREVENTION to pair with the detection above: state the boundary explicitly, since
     // a worker that walks up to find "the project root" lands in the parent checkout and has no
     // other way to know it is inside a linked worktree.
-    const prompt = wt
+    const prompt = wt && !isHttp
       ? `Your project root is the git WORKTREE ${wt.worktreeRoot} (your working directory is ` +
         `${req.cwd}). Create and edit files ONLY under that worktree. Do NOT walk up to ` +
         `${wt.parentRoot} — that is a different checkout shared with other agents, and writing ` +
