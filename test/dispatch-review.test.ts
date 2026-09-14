@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { dispatch } from '../src/dispatch.js';
@@ -7,7 +7,7 @@ import { CodexAdapter } from '../src/adapters/codex.js';
 import { ClaudeAdapter } from '../src/adapters/claude.js';
 import type { CapsByProvider } from '../src/usage.js';
 import type { WorkerAdapter } from '../src/types.js';
-import { fakeAdapter, IDENTITIES, useTempResources } from './helpers.js';
+import { fakeAdapter, IDENTITIES, initRepoFixture, useTempResources } from './helpers.js';
 
 function gitRepo(cwd: string): void {
   execFileSync('git', ['init', '-q'], { cwd });
@@ -204,6 +204,35 @@ describe('adversarial review dispatch', () => {
       const cursorPrompt = fake.calls[1].prompt;
       expect(cursorPrompt).toContain('run `git diff ' + baseSha + '...HEAD`');
       expect(cursorPrompt).not.toContain('```diff');
+    } finally { restore(); }
+  });
+
+  it('embeds packs and diffs for glm without materializing files, while codex keeps CLI delivery', async () => {
+    const restore = reviewRouting(tempDir); const root = tempDir(); const cwd = initRepoFixture(root, 'worker', { linkedWorktree: true }); const ledger = tempLedger();
+    const baseSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd, encoding: 'utf8' }).trim();
+    writeFileSync(join(cwd, 'feature.txt'), 'HTTP-DIFF-MARKER');
+    execFileSync('git', ['add', 'feature.txt'], { cwd });
+    execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '-m', 'feat'], { cwd });
+    let agentsPresentDuringGlm = true;
+    let glmPrompt = ''; let glmSystemPrompt: string | undefined;
+    const glm: WorkerAdapter = { name: 'fake-glm', provider: 'glm', dispatch: async (prompt, opts) => {
+      agentsPresentDuringGlm = existsSync(join(opts.cwd, 'AGENTS.md'));
+      glmPrompt = prompt; glmSystemPrompt = opts.systemPromptAppend;
+      return { ok: true, output: 'done', exitCode: 0 };
+    } };
+    const codex = fakeAdapter();
+    try {
+      await dispatch({ taskClass: 'adversarial-review', provider: 'glm', model: 'glm-5.3', authorProvider: 'cursor', mcp: [], diffBase: baseSha, prompt: 'review', cwd, identity: unbound }, ledger, () => glm);
+      expect(agentsPresentDuringGlm).toBe(false); expect(existsSync(join(cwd, 'AGENTS.md'))).toBe(false);
+      expect(glmSystemPrompt).toContain('### adversarial-review');
+      expect(glmPrompt).toContain('You have no tools and no filesystem access — everything you can review is embedded below');
+      expect(glmPrompt).toContain('```diff'); expect(glmPrompt).toContain('HTTP-DIFF-MARKER');
+      expect(glmPrompt).not.toContain('Read/Grep'); expect(glmPrompt).not.toContain('Read/Grep/Glob');
+      expect(glmPrompt).not.toContain('Your project root is the git WORKTREE');
+      await dispatch({ taskClass: 'adversarial-review', provider: 'codex', model: 'gpt-5.6-sol', authorProvider: 'cursor', mcp: [], diffBase: baseSha, prompt: 'review', cwd, identity: unbound }, ledger, () => codex.adapter);
+      expect(codex.calls[0].agents).toContain('### adversarial-review');
+      expect(codex.calls[0].prompt).toContain('run `git diff ' + baseSha + '...HEAD`');
+      expect(codex.calls[0].prompt).not.toContain('```diff');
     } finally { restore(); }
   });
 
