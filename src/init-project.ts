@@ -4,7 +4,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseDocument } from 'yaml';
 import { isAncestorOrEqual, PROJECTS_SCHEMA_VERSION, validateRegistry } from './projects.js';
-import { resolveRulesRoot } from './rules/lifecycle.js';
+import { resolveCatalogRoot } from './rules/lifecycle.js';
 import { loadRules } from './rules/load.js';
 import { RuleIdPattern } from './rules/schema.js';
 import type { HookRuleSelection } from './wizard/hooks-choose.js';
@@ -453,7 +453,7 @@ export function planInstall(input: InstallOptions): InstallPlan {
   const state = registryState(homeDir);
   const details = registrationDetails(input, dir, state.registry, state.raw);
   const dryRun = input.dryRun === true;
-  const hookCatalogRoot = input.hookCatalogRoot ?? resolveRulesRoot([]);
+  const hookCatalogRoot = input.hookCatalogRoot ?? resolveCatalogRoot();
   const steps = [canonicalStep(canonical), renderSettingsStep(dir, canonical, input.hookRules ?? [], hookCatalogRoot, dryRun), ...renderRulesSteps(dir, canonical, dryRun), ...renderHookRulesSteps(dir, input.hookRules ?? [], hookCatalogRoot, dryRun), renderMcpStep(dir, dryRun), renderIgnoreStep(dir, dryRun), renderGateStep(dir, dryRun), ...renderLifecycleCommandSteps(dir, dryRun), registryStep(input, dir, state, details, dryRun), enforceMarkerStep(input, dir, homeDir, dryRun)];
   return { options: { ...input, dir, canonical, name: details.name, homeDir }, steps };
 }

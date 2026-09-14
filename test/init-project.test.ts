@@ -200,6 +200,26 @@ describe('init-project', () => {
     expect(`${result.stdout}${result.stderr}`).not.toContain('ENFORCEMENT');
   }, 30_000);
 
+  it('uses the bundled catalog for a strict preset when the consumer project has no rules directory', async () => {
+    const base = tempDir();
+    const { canonical, target } = fixture(base);
+    const consumerProject = tempDir();
+    const result = await runCli(['init-project', target, '--canonical', canonical, '--name', 'toy', '--team', 'NEW', '--agents', 'Z', '--room', '#toy', '--launcher', 'resume-toy.sh', '--preset', 'strict', '--dry-run', '--json'], {
+      home: join(base, 'cli-home'),
+      env: { CLAUDE_PROJECT_DIR: consumerProject },
+    });
+
+    expect(result).toMatchObject({ code: 0, stderr: '' });
+    const report = JSON.parse(result.stdout);
+    expect(report.steps.filter((step: { step: string }) => step.step.startsWith('hook-rule:')).map((step: { step: string; action: string }) => [step.step, step.action])).toEqual([
+      ['hook-rule:no-rm-recursive-force', 'would-create'],
+      ['hook-rule:no-git-history-rewrite', 'would-create'],
+      ['hook-rule:no-git-worktree-discard', 'would-create'],
+      ['hook-rule:no-destructive-sql', 'would-create'],
+      ['hook-rule:pr-flow-reminder', 'would-create'],
+    ]);
+  }, 30_000);
+
   it('rejects combining a preset with hook-rule or enforcement flags', async () => {
     const base = tempDir();
     const { canonical, target } = fixture(base);

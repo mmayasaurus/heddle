@@ -119,10 +119,18 @@ export class AgyAdapter implements WorkerAdapter {
     }
     const lvl = opts.effort?.toLowerCase();
     if (lvl && GEMINI_LEVELS.has(lvl) && !GEMINI_SUFFIX.test(model)) args.push('--effort', lvl);
-    if (this.skipPermissions) args.push('--dangerously-skip-permissions');
+    // HED-539: a per-dispatch opts.skipPermissions overrides the constructed default — undefined
+    // falls through to the ctor default (heddle's own workers keep skipping; the fleet is unchanged),
+    // false KEEPS agy's interactive permission prompts for a permission-preserving consumer.
+    const skipPermissions = opts.skipPermissions ?? this.skipPermissions;
+    if (skipPermissions) args.push('--dangerously-skip-permissions');
     if (opts.resume) args.push('--conversation', opts.resume);
     args.push(...(opts.extraFlags ?? []));
-    return args;
+    // HED-539 (qodo, #157): the opt-out is AUTHORITATIVE. extraFlags is appended last, so a caller
+    // or route that carries --dangerously-skip-permissions there could otherwise defeat a false
+    // skipPermissions and launch agy without prompts anyway. When the consumer opted OUT of skipping,
+    // the flag must not survive in the final argv, wherever it came from.
+    return skipPermissions ? args : args.filter((a) => a !== '--dangerously-skip-permissions');
   }
 
   private async execute(prompt: string, opts: DispatchOptions): Promise<WorkerResult> {

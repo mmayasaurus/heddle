@@ -45,8 +45,32 @@ export interface DispatchOptions {
   mcpConfigPath?: string;
   /** HED-3: the worker must not change the worktree — adapters pass a read-only sandbox where the CLI has one. */
   readOnly?: boolean;
+  /**
+   * HED-539: per-dispatch override for skipping the CLI's own permission prompts. Undefined = the
+   * adapter's constructed default (heddle's own workers keep skipping, so the fleet is unchanged);
+   * `false` KEEPS the CLI's interactive prompts (for a permission-preserving consumer such as an
+   * external orchestrator whose policy forbids --dangerously-skip-permissions); `true` forces skipping.
+   * Honored today by the agy adapter (maps to --dangerously-skip-permissions); other adapters express
+   * their permission posture differently (claude uses --tools / --strict-mcp-config) and ignore it.
+   * This is a permission-PROMPT toggle ONLY — it never widens heddle's capability caps or refusal
+   * semantics, which stay default-deny regardless of this flag. NOTE: with `false`, an agy run that has
+   * no interactive terminal to answer the prompts will hang (see AgyAdapter LANDMINES); the opt-out is
+   * for consumers that run agy interactively.
+   */
+  skipPermissions?: boolean;
   /** Names of the MCP servers in mcpConfigPath — claude allowlists them as `mcp__<name>`. */
   mcpServers?: string[];
+  /** Optional OpenAI-compatible structured-output contract for adapters that support JSON Schema. */
+  responseSchema?: ResponseSchema;
+}
+
+export interface ResponseSchema {
+  /** OpenAI JSON-schema response format name. */
+  name: string;
+  /** JSON Schema object sent to the provider and checked against the returned JSON. */
+  schema: Record<string, unknown>;
+  /** Passed through to OpenAI-compatible servers that support strict schema enforcement. */
+  strict?: boolean;
 }
 
 export interface TokenUsage {
@@ -73,6 +97,6 @@ export interface WorkerResult {
 
 export interface WorkerAdapter {
   readonly name: string;
-  readonly provider: 'codex' | 'cursor' | 'claude' | 'gemini' | 'groq' | 'cerebras' | 'openrouter' | 'glm';
+  readonly provider: 'codex' | 'cursor' | 'claude' | 'gemini' | 'groq' | 'cerebras' | 'openrouter' | 'glm' | 'local';
   dispatch(prompt: string, opts: DispatchOptions): Promise<WorkerResult>;
 }
