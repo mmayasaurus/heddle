@@ -61,7 +61,7 @@ describe('dispatch read-only fences (HED-404)', () => {
 
     const outcome = await dispatch({
       taskClass: 'adversarial-review', authorProvider: 'claude', prompt: 'review', cwd: tempDir(), identity: unbound,
-      caps: caps('cursor', id), rotationAccounts: { codex: [], cursor: [{ id, configDir: null }] },
+      caps: caps('cursor', id), rotationAccounts: { codex: [], cursor: [{ id, keyFile: null }] },
     }, ledger, () => fake.adapter);
 
     expect(outcome.ok).toBe(true);
