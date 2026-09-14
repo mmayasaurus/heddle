@@ -60,9 +60,21 @@ describe('cap-aware routing', () => {
   });
 
   it('uses Cursor included-total for native models and identifies native model names', () => {
-    const away = decision('second-opinion', { ...cursorCaps({ total: 95, api: 100 }), ...caps({ glm: 4 }) });
+    const away = decision('second-opinion', cursorCaps({ total: 95, api: 100 }));
     expect(away).toMatchObject({ target: { provider: 'glm', model: 'glm-5.3' }, routedAwayForCap: true }); expect(decision('second-opinion', cursorCaps({ total: 20, api: 100 })).routeReason).toBe('cap:ok cursor included-total 20%');
     expect(['cursor-grok-4.6-high', 'composer-2.5-fast', 'auto'].map(isCursorNativeModel)).toEqual([true, true, true]); expect(['kimi-k3-high', 'gpt-5.6-luna'].map(isCursorNativeModel)).toEqual([false, false]);
+  });
+
+  it('HED-465: routes an over-cap Cursor primary to its glm fallback with no glm cap producer present', () => {
+    // Production ships no glm cap producer (split to HED-540), so caps never carries a glm entry.
+    // decideRoute must still route an at/over-cap cursor primary to its glm fallback: an UNKNOWN
+    // fallback does not pin us to a primary known to be over the route-away threshold (capaware.ts,
+    // "an unknown fallback does NOT keep us on the primary"). The ledger records "caps unknown" so the
+    // missing glm snapshot stays visible.
+    const away = decision('second-opinion', cursorCaps({ total: 95, api: 100 }));
+    expect(away).toMatchObject({ target: { provider: 'glm', model: 'glm-5.3' }, routedAwayForCap: true });
+    expect(away.routeReason).toContain('caps unknown');
+    expect(away.checks.some((x) => x.startsWith('ROUTE AWAY'))).toBe(true);
   });
 
   it('uses the billing account row for Cursor refusals unless that row is stale', () => {
