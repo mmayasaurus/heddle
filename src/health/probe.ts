@@ -62,9 +62,11 @@ export function defaultSha256(bytes: Uint8Array): string {
 
 export async function defaultGitBehindOriginMain(repoPath: string): Promise<number | undefined> {
   try {
+    // Apply repoPath ONCE, via the subprocess cwd — not also as `-C repoPath`, which for a relative
+    // path would resolve twice (cwd, then -C from inside it) and probe the wrong directory.
     const probe = await run(
       'git',
-      ['-C', repoPath, 'rev-list', '--count', 'HEAD..origin/main'],
+      ['rev-list', '--count', 'HEAD..origin/main'],
       repoPath,
       5_000,
     );

@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import { formatDoctorReport, runDoctor } from '../src/doctor.js';
 import { defaultGitBehindOriginMain } from '../src/health/probe.js';
@@ -33,7 +33,7 @@ describe('runDoctor', () => {
     expect(check(report, 'artifacts:drift')).toMatchObject({
       outcome: 'warn',
       detail: '2 artifacts in sync; ~/.heddle/usage-tap.mjs drifted',
-      hint: '~/.heddle/usage-tap.mjs: re-run bash scripts/install-usage-tap.sh',
+      hint: "~/.heddle/usage-tap.mjs: re-run (cd '/workspace/heddle-dashboard' && bash scripts/install-usage-tap.sh)",
     });
   });
 
@@ -50,7 +50,7 @@ describe('runDoctor', () => {
     expect(check(report, 'artifacts:drift')).toMatchObject({
       outcome: 'warn',
       detail: expect.stringContaining('2 commits behind origin/main'),
-      hint: 'git -C /workspace/heddle-dashboard fetch && git merge --ff-only origin/main before redeploying',
+      hint: 'dashboard checkout is behind origin/main — update it before relying on the in-sync result',
     });
   });
 
@@ -80,7 +80,7 @@ describe('runDoctor', () => {
     expect(check(report, 'artifacts:drift')).toMatchObject({
       outcome: 'warn',
       detail: '1 artifacts in sync; heddle-rotation-post.py source missing in dashboard; ~/.heddle/usage-tap.mjs drifted',
-      hint: '~/.heddle/usage-tap.mjs: re-run bash scripts/install-usage-tap.sh',
+      hint: "~/.heddle/usage-tap.mjs: re-run (cd '/workspace/heddle-dashboard' && bash scripts/install-usage-tap.sh)",
     });
   });
 
@@ -100,6 +100,27 @@ describe('runDoctor', () => {
     git('checkout', '--detach', 'HEAD~1');
 
     expect(await defaultGitBehindOriginMain(repo)).toBe(1);
+  });
+
+  test('resolves a relative repo path without double-applying it', async () => {
+    const repo = resources.tempDir();
+    const git = (...args: string[]) => execFileSync('git', ['-C', repo, ...args], { stdio: 'pipe' });
+    git('init', '--initial-branch=main');
+    git('config', 'user.email', 'doctor@example.test');
+    git('config', 'user.name', 'Doctor Test');
+    writeFileSync(join(repo, 'artifact.txt'), 'base');
+    git('add', 'artifact.txt');
+    git('commit', '-m', 'base');
+    writeFileSync(join(repo, 'artifact.txt'), 'upstream');
+    git('commit', '-am', 'upstream');
+    git('update-ref', 'refs/remotes/origin/main', 'HEAD');
+    git('checkout', '--detach', 'HEAD~1');
+
+    // A relative path must resolve ONCE (via cwd), not twice (cwd + -C) — the double-apply bug would
+    // probe a nonexistent directory and return undefined instead of the real behind-count.
+    const rel = relative(process.cwd(), repo);
+    expect(rel).not.toBe(repo);
+    expect(await defaultGitBehindOriginMain(rel)).toBe(1);
   });
 
   test('regression: healthy harnesses and configuration produce matching text and JSON summary counts', async () => {

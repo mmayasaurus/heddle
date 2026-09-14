@@ -1,5 +1,5 @@
 import { existsSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { PROVIDER_REGISTRY, readSecretsEnvValue } from '../adapters/openai-compat.js';
 import { CommsLog, DEFAULT_ROOM } from '../comms/log.js';
 import { loadLanes, type LanesConfig } from '../lanes.js';
@@ -378,8 +378,11 @@ export function artifactDriftCheck(ctx: DoctorContext): Definition {
     id: 'artifacts:drift',
     kind: 'artifact',
     run: async () => {
-      const dashboardDir = ctx.deps.env.HEDDLE_DASHBOARD_DIR
-        || join(ctx.coreRoot, '..', 'heddle-dashboard');
+      // Resolve to absolute ONCE so a relative HEDDLE_DASHBOARD_DIR is not re-applied downstream
+      // (git -C + cwd) and so the recovery hints below can reference the checkout unambiguously.
+      const dashboardDir = resolve(
+        ctx.deps.env.HEDDLE_DASHBOARD_DIR || join(ctx.coreRoot, '..', 'heddle-dashboard'),
+      );
       const sourceBytes = await Promise.all(
         dashboardArtifacts.map(({ source }) => ctx.deps.readFileBytes(join(dashboardDir, source))),
       );
@@ -418,9 +421,13 @@ export function artifactDriftCheck(ctx: DoctorContext): Definition {
         ...(behind && behind > 0 ? [`${behind} commits behind origin/main`] : []),
       ];
       const hints = [
-        ...drifted.map((artifact) => `~/.heddle/${artifact.installed}: re-run ${artifact.installer}`),
+        // Installer hints run FROM the dashboard checkout (cd), not the caller's cwd; the dir is
+        // single-quoted for spaces. The behind note is deliberately non-prescriptive — a checkout on a
+        // feature branch or fork cannot blindly `merge --ff-only origin/main`, so we never emit a
+        // command that could fail or fast-forward the wrong repository.
+        ...drifted.map((artifact) => `~/.heddle/${artifact.installed}: re-run (cd '${dashboardDir}' && ${artifact.installer})`),
         ...(behind && behind > 0
-          ? [`git -C ${dashboardDir} fetch && git merge --ff-only origin/main before redeploying`]
+          ? ['dashboard checkout is behind origin/main — update it before relying on the in-sync result']
           : []),
       ];
 
