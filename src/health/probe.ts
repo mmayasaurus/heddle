@@ -1,10 +1,12 @@
+import { createHash } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 import { run } from '../adapters/subprocess.js';
 
 export type CheckOutcome = 'ok' | 'warn' | 'fail' | 'skipped';
 
 export interface CheckResult {
   id: string;
-  kind: 'binary' | 'login' | 'catalog' | 'config' | 'freshness' | 'comms';
+  kind: 'binary' | 'login' | 'catalog' | 'config' | 'freshness' | 'comms' | 'artifact';
   provider?: string;
   outcome: CheckOutcome;
   detail: string;
@@ -21,6 +23,9 @@ export interface ProbeResult {
 export interface DoctorDeps {
   env: NodeJS.ProcessEnv;
   execFile: (cmd: string, args: string[], opts: { timeoutMs: number }) => Promise<ProbeResult>;
+  readFileBytes: (path: string) => Promise<Uint8Array | undefined>;
+  sha256: (bytes: Uint8Array) => string;
+  gitBehindOriginMain: (repoPath: string) => Promise<number | undefined>;
   now: () => Date;
   paths: {
     routing?: string;
@@ -30,6 +35,8 @@ export interface DoctorDeps {
     secrets?: string;
     comms?: string;
     operatorToken?: string;
+    repoRoot?: string;
+    heddle?: string;
   };
   timeouts?: {
     binaryMs?: number;
@@ -37,6 +44,39 @@ export interface DoctorDeps {
     catalogMs?: number;
     graceMs?: number;
   };
+}
+
+export async function defaultReadFileBytes(path: string): Promise<Uint8Array | undefined> {
+  try {
+    return await readFile(path);
+  } catch {
+    // This intentionally collapses unreadable paths and ENOENT to absent; the doctor check reports
+    // an informational missing-artifact/source note rather than treating a read failure as drift.
+    return undefined;
+  }
+}
+
+export function defaultSha256(bytes: Uint8Array): string {
+  return createHash('sha256').update(bytes).digest('hex');
+}
+
+export async function defaultGitBehindOriginMain(repoPath: string): Promise<number | undefined> {
+  try {
+    const probe = await run(
+      'git',
+      ['-C', repoPath, 'rev-list', '--count', 'HEAD..origin/main'],
+      repoPath,
+      5_000,
+    );
+    const behind = Number(probe.stdout.trim());
+
+    return probe.exitCode === 0 && Number.isInteger(behind) && behind >= 0
+      ? behind
+      : undefined;
+  } catch {
+    // A missing origin/main ref or non-Git directory is indeterminate, not evidence of source drift.
+    return undefined;
+  }
 }
 
 // This bounds retained output; bounding peak memory while reading belongs in the shared runner (HED-420).

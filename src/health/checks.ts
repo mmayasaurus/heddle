@@ -1,4 +1,5 @@
 import { existsSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 import { PROVIDER_REGISTRY, readSecretsEnvValue } from '../adapters/openai-compat.js';
 import { CommsLog, DEFAULT_ROOM } from '../comms/log.js';
 import { loadLanes, type LanesConfig } from '../lanes.js';
@@ -46,9 +47,29 @@ export interface DoctorContext {
   deps: DoctorDeps;
   budgets: DoctorBudgets;
   routingPath: string;
+  coreRoot: string;
+  heddleDir: string;
   lanes: LanesLoad;
   missing: Set<HarnessProvider>;
 }
+
+export const dashboardArtifacts = [
+  {
+    installed: 'window-keeper.py',
+    source: 'scripts/heddle-window-keeper.py',
+    installer: 'bash scripts/install-window-keeper-launchd.sh',
+  },
+  {
+    installed: 'heddle-rotation-post.py',
+    source: 'scripts/heddle-rotation-post.py',
+    installer: 'bash scripts/install-window-keeper-launchd.sh',
+  },
+  {
+    installed: 'usage-tap.mjs',
+    source: 'scripts/heddle-usage-tap.mjs',
+    installer: 'bash scripts/install-usage-tap.sh',
+  },
+] as const;
 
 export const harnesses: readonly Harness[] = [
   // Verified 2026-08-28: `claude auth status --help` lists `--json` and describes authentication status.
@@ -348,6 +369,68 @@ export function commsCheck(commsDbPath: string, operatorTokenPath: string): Defi
       return tokenPresent
         ? result('ok', `comms.db, operator token, ${DEFAULT_ROOM} present`)
         : result('warn', `comms.db + ${DEFAULT_ROOM} present, operator token missing`, 'run `heddle comms init` to enable the operator role');
+    },
+  };
+}
+
+export function artifactDriftCheck(ctx: DoctorContext): Definition {
+  return {
+    id: 'artifacts:drift',
+    kind: 'artifact',
+    run: async () => {
+      const dashboardDir = ctx.deps.env.HEDDLE_DASHBOARD_DIR
+        || join(ctx.coreRoot, '..', 'heddle-dashboard');
+      const sourceBytes = await Promise.all(
+        dashboardArtifacts.map(({ source }) => ctx.deps.readFileBytes(join(dashboardDir, source))),
+      );
+
+      if (sourceBytes.every((bytes) => bytes === undefined)) {
+        return result('skipped', 'dashboard source not found — set HEDDLE_DASHBOARD_DIR');
+      }
+
+      const drifted: typeof dashboardArtifacts[number][] = [];
+      const missing: typeof dashboardArtifacts[number][] = [];
+      const sourceMissing: typeof dashboardArtifacts[number][] = [];
+
+      for (const [index, artifact] of dashboardArtifacts.entries()) {
+        const source = sourceBytes[index];
+
+        if (source === undefined) {
+          sourceMissing.push(artifact);
+          continue;
+        }
+
+        const installedBytes = await ctx.deps.readFileBytes(join(ctx.heddleDir, artifact.installed));
+
+        if (installedBytes === undefined) {
+          missing.push(artifact);
+        } else if (ctx.deps.sha256(installedBytes) !== ctx.deps.sha256(source)) {
+          drifted.push(artifact);
+        }
+      }
+
+      const behind = await ctx.deps.gitBehindOriginMain(dashboardDir);
+      const details = [
+        `${dashboardArtifacts.length - missing.length - sourceMissing.length - drifted.length} artifacts in sync`,
+        ...missing.map((artifact) => `~/.heddle/${artifact.installed} not installed`),
+        ...sourceMissing.map((artifact) => `${artifact.installed} source missing in dashboard`),
+        ...drifted.map((artifact) => `~/.heddle/${artifact.installed} drifted`),
+        ...(behind && behind > 0 ? [`${behind} commits behind origin/main`] : []),
+      ];
+      const hints = [
+        ...drifted.map((artifact) => `~/.heddle/${artifact.installed}: re-run ${artifact.installer}`),
+        ...(behind && behind > 0
+          ? [`git -C ${dashboardDir} fetch && git merge --ff-only origin/main before redeploying`]
+          : []),
+      ];
+
+      // Launchd plists substitute __HOME__, __COMMS_POST__, and __HEDDLE_BIN__ at install time,
+      // so they cannot be compared byte-for-byte with their dashboard templates in this v1 check.
+      return result(
+        drifted.length || (behind !== undefined && behind > 0) ? 'warn' : 'ok',
+        details.join('; '),
+        hints.length ? hints.join('; ') : undefined,
+      );
     },
   };
 }

@@ -1,7 +1,9 @@
+import { execFileSync } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import { formatDoctorReport, runDoctor } from '../src/doctor.js';
+import { defaultGitBehindOriginMain } from '../src/health/probe.js';
 import {
   AGY_CATALOG,
   check,
@@ -12,6 +14,94 @@ import {
 } from './doctor-fixtures.js';
 
 describe('runDoctor', () => {
+  test('reports canonical dashboard artifacts in sync', async () => {
+    const report = await runDoctor({}, fakeDeps());
+    expect(check(report, 'artifacts:drift')).toMatchObject({
+      outcome: 'ok',
+      detail: '3 artifacts in sync',
+    });
+  });
+
+  test('warns with the matching installer when an installed artifact has drifted', async () => {
+    const report = await runDoctor(
+      {},
+      fakeDeps(undefined, {}, {
+        source: { 'usage-tap.mjs': 'source-content' },
+        installed: { 'usage-tap.mjs': 'stale-content!' },
+      }),
+    );
+    expect(check(report, 'artifacts:drift')).toMatchObject({
+      outcome: 'warn',
+      detail: '2 artifacts in sync; ~/.heddle/usage-tap.mjs drifted',
+      hint: '~/.heddle/usage-tap.mjs: re-run bash scripts/install-usage-tap.sh',
+    });
+  });
+
+  test('skips artifact drift when the dashboard source checkout cannot be found', async () => {
+    const report = await runDoctor({}, fakeDeps(undefined, {}, { sourceAvailable: false }));
+    expect(check(report, 'artifacts:drift')).toMatchObject({
+      outcome: 'skipped',
+      detail: 'dashboard source not found — set HEDDLE_DASHBOARD_DIR',
+    });
+  });
+
+  test('warns when the dashboard source checkout is behind origin/main without fetching', async () => {
+    const report = await runDoctor({}, fakeDeps(undefined, {}, { behindOriginMain: 2 }));
+    expect(check(report, 'artifacts:drift')).toMatchObject({
+      outcome: 'warn',
+      detail: expect.stringContaining('2 commits behind origin/main'),
+      hint: 'git -C /workspace/heddle-dashboard fetch && git merge --ff-only origin/main before redeploying',
+    });
+  });
+
+  test('notes an artifact that has not yet been installed without failing the doctor run', async () => {
+    const report = await runDoctor(
+      {},
+      fakeDeps(undefined, {}, { installed: { 'window-keeper.py': undefined } }),
+    );
+    expect(check(report, 'artifacts:drift')).toMatchObject({
+      outcome: 'ok',
+      detail: '2 artifacts in sync; ~/.heddle/window-keeper.py not installed',
+    });
+    expect(report.exitCode).toBe(0);
+  });
+
+  test('continues checking present dashboard sources when another source is missing', async () => {
+    const report = await runDoctor(
+      {},
+      fakeDeps(undefined, {}, {
+        source: {
+          'heddle-rotation-post.py': undefined,
+          'usage-tap.mjs': 'source-content',
+        },
+        installed: { 'usage-tap.mjs': 'stale-content!' },
+      }),
+    );
+    expect(check(report, 'artifacts:drift')).toMatchObject({
+      outcome: 'warn',
+      detail: '1 artifacts in sync; heddle-rotation-post.py source missing in dashboard; ~/.heddle/usage-tap.mjs drifted',
+      hint: '~/.heddle/usage-tap.mjs: re-run bash scripts/install-usage-tap.sh',
+    });
+  });
+
+  test('counts HEAD behind the local origin/main ref without network access', async () => {
+    const repo = resources.tempDir();
+    const git = (...args: string[]) => execFileSync('git', ['-C', repo, ...args], { stdio: 'pipe' });
+
+    git('init', '--initial-branch=main');
+    git('config', 'user.email', 'doctor@example.test');
+    git('config', 'user.name', 'Doctor Test');
+    writeFileSync(join(repo, 'artifact.txt'), 'base');
+    git('add', 'artifact.txt');
+    git('commit', '-m', 'base');
+    writeFileSync(join(repo, 'artifact.txt'), 'upstream');
+    git('commit', '-am', 'upstream');
+    git('update-ref', 'refs/remotes/origin/main', 'HEAD');
+    git('checkout', '--detach', 'HEAD~1');
+
+    expect(await defaultGitBehindOriginMain(repo)).toBe(1);
+  });
+
   test('regression: healthy harnesses and configuration produce matching text and JSON summary counts', async () => {
     const report = await runDoctor({}, fakeDeps());
     expect(report.exitCode).toBe(0);
