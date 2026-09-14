@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { delimiter, dirname, join, relative, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { checkStandaloneOutput, releaseStandalone } from '../src/release/standalone.js';
+import { assertCleanMainHead, checkStandaloneOutput, releaseStandalone } from '../src/release/standalone.js';
 import { isIncluded } from '../src/release/shipset.js';
 import { useTempResources } from './helpers.js';
 
@@ -23,6 +23,9 @@ describe('regression PR#119 — standalone snapshot generator review findings', 
     const included = [
       'src/cli.ts', 'docs/PROVIDER-MATRIX.md', 'skills/quality-gate.md',
       'assets/commands/startup.md', '.github/workflows/gate.yml',
+      // the ratified hook-rule catalog + its shared fixtures ship so an installed heddle's
+      // init-project chooser / resolveRulesRoot() fallback can find them (HED-535)
+      'rules/no-rm-recursive-force.yaml', 'rules/tests/no-rm-recursive-force.jsonl',
     ];
     for (const path of included) {
       expect(existsSync(join(first, path))).toBe(true);
@@ -62,7 +65,9 @@ describe('regression PR#119 — standalone snapshot generator review findings', 
     expect(readFileSync(join(root, 'keep'), 'utf8')).toBe('keep');
     expect(existsSync(destination)).toBe(false);
     expect(existsSync(`${destination}.tmp-${process.pid}`)).toBe(false);
-  });
+    // Two snapshotSource builds (each archives the whole repo) — same heavy git work as the 120s
+    // siblings above/below; the default 30s timeout flakes this one under parallel-suite load. — HED-507
+  }, 120_000);
 
   it('rejects credential-shaped file names without touching the destination', () => {
     const root = tempDir();
@@ -95,6 +100,12 @@ describe('regression PR#119 — standalone snapshot generator review findings', 
   it('classifies Windows-style ship set paths using POSIX prefixes', () => {
     expect(isIncluded('src\\release\\standalone.ts')).toBe(true);
     expect(isIncluded('docs\\fleet\\dispatch.md')).toBe(false);
+  });
+
+  it('ships the ratified hook-rule catalog and its fixtures but not proposed experiments', () => {
+    expect(isIncluded('rules/no-rm-recursive-force.yaml')).toBe(true);
+    expect(isIncluded('rules/tests/no-rm-recursive-force.jsonl')).toBe(true);
+    expect(isIncluded('rules/proposed/no-rm-recursive-force.yaml')).toBe(false);
   });
 
   it('records peeled commits for lightweight and annotated tags', () => {
@@ -188,6 +199,202 @@ describe('regression PR#119 — standalone snapshot generator review findings', 
   }, 120_000);
 });
 
+describe('HED-507 — headless-first main-HEAD invariant', () => {
+  const { tempDir } = useTempResources('heddle-standalone-invariant-');
+
+  it("passes on a clean main HEAD and ships exactly main's tip commit", () => {
+    const root = tempDir();
+    const source = snapshotSource(root);
+    const outDir = join(root, 'output');
+    const mainTip = execFileSync('git', ['rev-parse', 'refs/heads/main'], { cwd: source, encoding: 'utf8' }).trim();
+
+    const result = releaseStandalone({ outDir, sourceDir: source });
+
+    expect(result.ok).toBe(true);
+    expect(existsSync(outDir)).toBe(true);
+    expect(result.sourceCommit).toBe(mainTip);
+  });
+
+  it('rejects a dirty working tree without touching the destination', () => {
+    const root = tempDir();
+    const source = snapshotSource(root);
+    const outDir = join(root, 'output');
+    writeFileSync(join(source, 'LICENSE'), `${readFileSync(join(source, 'LICENSE'), 'utf8')}\ndirty\n`);
+
+    const result = releaseStandalone({ outDir, sourceDir: source });
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/working tree is not clean/i);
+    expect(existsSync(outDir)).toBe(false);
+  });
+
+  it("rejects an ancestor of main (HEAD~1) — proves the gate is main's tip, not merely on main's history", () => {
+    const root = tempDir();
+    const source = snapshotSource(root);
+    const outDir = join(root, 'output');
+    // second commit on main, so HEAD~1 is a real ancestor that IS on main's history but is not the tip
+    writeFileSync(join(source, 'second.txt'), 'second\n');
+    execFileSync('git', ['add', '.'], { cwd: source });
+    execFileSync('git', [
+      '-c', 'user.name=test', '-c', 'user.email=test@example.com', 'commit', '-qm', 'second',
+    ], { cwd: source });
+
+    const result = releaseStandalone({ outDir, sourceDir: source, sourceRef: 'HEAD~1' });
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/not main's HEAD/i);
+    expect(existsSync(outDir)).toBe(false);
+  });
+
+  it('rejects the default HEAD when checked out off main (a feature branch)', () => {
+    const root = tempDir();
+    const source = snapshotSource(root);
+    const outDir = join(root, 'output');
+    execFileSync('git', ['checkout', '-q', '-b', 'feature'], { cwd: source });
+    writeFileSync(join(source, 'feature.txt'), 'feature\n');
+    execFileSync('git', ['add', '.'], { cwd: source });
+    execFileSync('git', [
+      '-c', 'user.name=test', '-c', 'user.email=test@example.com', 'commit', '-qm', 'feature commit',
+    ], { cwd: source });
+
+    // no sourceRef → defaults to HEAD, which is now the feature tip, not main's tip
+    const result = releaseStandalone({ outDir, sourceDir: source });
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/not main's HEAD/i);
+    expect(existsSync(outDir)).toBe(false);
+  });
+
+  it('reports the dirty tree before the off-tip ref when a source is both', () => {
+    const root = tempDir();
+    const source = snapshotSource(root);
+    const outDir = join(root, 'output');
+    execFileSync('git', ['checkout', '-q', '-b', 'feature'], { cwd: source });
+    writeFileSync(join(source, 'feature.txt'), 'feature\n');
+    execFileSync('git', ['add', '.'], { cwd: source });
+    execFileSync('git', [
+      '-c', 'user.name=test', '-c', 'user.email=test@example.com', 'commit', '-qm', 'feature commit',
+    ], { cwd: source });
+    // now also dirty the tree; both the dirty-tree and off-tip conditions hold
+    writeFileSync(join(source, 'LICENSE'), `${readFileSync(join(source, 'LICENSE'), 'utf8')}\ndirty\n`);
+
+    const result = releaseStandalone({ outDir, sourceDir: source });
+
+    expect(result.ok).toBe(false);
+    // dirty is checked before the ref/tip comparison — the operator-friendly order
+    expect(result.error).toMatch(/working tree is not clean/i);
+    expect(existsSync(outDir)).toBe(false);
+  });
+
+  it('rejects a source with no local main branch', () => {
+    const root = tempDir();
+    const source = join(root, 'source');
+    const outDir = join(root, 'output');
+    mkdirSync(source);
+    execFileSync('git', ['init', '-q', '-b', 'other'], { cwd: source });
+    execFileSync('git', ['config', 'maintenance.auto', 'false'], { cwd: source });
+    execFileSync('git', ['config', 'gc.auto', '0'], { cwd: source });
+    writeFileSync(join(source, 'file.txt'), 'content\n');
+    execFileSync('git', ['add', '.'], { cwd: source });
+    execFileSync('git', [
+      '-c', 'user.name=test', '-c', 'user.email=test@example.com', 'commit', '-qm', 'initial',
+    ], { cwd: source });
+
+    const result = releaseStandalone({ outDir, sourceDir: source });
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/no local 'main'/i);
+    expect(existsSync(outDir)).toBe(false);
+  });
+
+  it('cuts the artifact from sourceDir even when GIT_DIR points at another repo (hermetic git env)', () => {
+    const root = tempDir();
+    const source = snapshotSource(root);
+    const outDir = join(root, 'output');
+    const sourceTip = execFileSync('git', ['rev-parse', 'refs/heads/main'], { cwd: source, encoding: 'utf8' }).trim();
+
+    // a second, unrelated repo whose HEAD differs from sourceDir's tip
+    const other = join(root, 'other');
+    mkdirSync(other);
+    execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: other });
+    execFileSync('git', ['config', 'maintenance.auto', 'false'], { cwd: other });
+    execFileSync('git', ['config', 'gc.auto', '0'], { cwd: other });
+    writeFileSync(join(other, 'other.txt'), 'other\n');
+    execFileSync('git', ['add', '.'], { cwd: other });
+    execFileSync('git', [
+      '-c', 'user.name=test', '-c', 'user.email=test@example.com', 'commit', '-qm', 'other',
+    ], { cwd: other });
+    const otherTip = execFileSync('git', ['rev-parse', 'refs/heads/main'], { cwd: other, encoding: 'utf8' }).trim();
+    expect(otherTip).not.toBe(sourceTip);
+
+    const savedGitDir = process.env.GIT_DIR;
+    process.env.GIT_DIR = join(other, '.git');
+    try {
+      const result = releaseStandalone({ outDir, sourceDir: source });
+      expect(result.ok).toBe(true);
+      // both the gate and the ship-set cut must honor sourceDir, not GIT_DIR
+      expect(result.sourceCommit).toBe(sourceTip);
+      expect(result.sourceCommit).not.toBe(otherTip);
+      expect(existsSync(join(outDir, 'other.txt'))).toBe(false);
+      expect(existsSync(join(outDir, 'src/cli.ts'))).toBe(true);
+    } finally {
+      if (savedGitDir === undefined) delete process.env.GIT_DIR;
+      else process.env.GIT_DIR = savedGitDir;
+    }
+  });
+
+  it('returns the validated commit as an immutable SHA so the cut pins it (no re-resolution)', () => {
+    // The gate resolves sourceRef -> a commit and proves it is main's tip; it now RETURNS that SHA so
+    // generate archives the pinned object instead of re-resolving the mutable ref (the codeant/qodo
+    // TOCTOU). This locks that contract: the returned commit is main's tip, as a full 40-hex SHA.
+    const source = snapshotSource(tempDir());
+    const mainTip = execFileSync('git', ['rev-parse', 'refs/heads/main'], { cwd: source, encoding: 'utf8' }).trim();
+
+    const result = assertCleanMainHead(source, 'HEAD');
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.commit).toBe(mainTip);
+      expect(result.commit).toMatch(/^[0-9a-f]{40}$/);
+    }
+  });
+
+  it('archives the gate-pinned SHA, not a re-resolution of the source ref', () => {
+    // Discriminating test (grok round 3): shim `git` on PATH to record every invocation, then assert the
+    // ship-set cut ran `git archive <40-hex>` — the SHA the gate validated — not `git archive HEAD`. A
+    // silent revert of generate to re-resolving the mutable ref would archive the symbolic ref and fail
+    // here, even though the gate-contract and positive tests would stay green.
+    const root = tempDir();
+    const source = snapshotSource(root);
+    const outDir = join(root, 'output');
+    const mainTip = execFileSync('git', ['rev-parse', 'refs/heads/main'], { cwd: source, encoding: 'utf8' }).trim();
+
+    // capture the real git path BEFORE shimming, then a proxy shim that logs argv and execs real git
+    const realGit = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
+    const bin = join(root, 'bin');
+    const argvLog = join(root, 'git-argv.log');
+    mkdirSync(bin);
+    const shim = join(bin, 'git');
+    writeFileSync(shim, `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(argvLog)}\nexec ${JSON.stringify(realGit)} "$@"\n`);
+    chmodSync(shim, 0o755);
+
+    const originalPath = process.env.PATH;
+    process.env.PATH = `${bin}${delimiter}${originalPath ?? ''}`;
+    try {
+      const result = releaseStandalone({ outDir, sourceDir: source });
+      expect(result.ok).toBe(true);
+      const archiveCalls = readFileSync(argvLog, 'utf8').split('\n').filter((line) => line.startsWith('archive '));
+      expect(archiveCalls).toHaveLength(1);
+      // the cut archived the pinned SHA (main's tip), never a symbolic ref like HEAD
+      expect(archiveCalls[0]).toContain(mainTip);
+      expect(archiveCalls[0]).not.toContain('HEAD');
+    } finally {
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+    }
+  }, 120_000);
+});
+
 function fileList(root: string, prefix = ''): string[] {
   return readdirSync(join(root, prefix), { withFileTypes: true }).flatMap((entry) => {
     const path = join(prefix, entry.name);
@@ -216,7 +423,7 @@ function snapshotSource(root: string, additions: Record<string, string> = {}): s
     mkdirSync(dirname(join(source, path)), { recursive: true });
     writeFileSync(join(source, path), contents);
   }
-  execFileSync('git', ['init', '-q'], { cwd: source });
+  execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: source });
   // Disable the detached `git maintenance run --auto` that `git commit` forks: it writes into .git
   // after the command returns and races the fixture's recursive teardown rm → ENOTEMPTY on
   // source/.git under CI load. maintenance.auto=false is the lever (gc.auto=0 alone does not stop the

@@ -26,10 +26,20 @@ function flag(argv: string[], name: string): string | undefined {
   return index < 0 ? undefined : argv[index + 1];
 }
 
-function resolveRulesRoot(argv: string[]): string {
+function bundledRulesRoot(): string {
+  return fileURLToPath(new URL('../../rules', import.meta.url));
+}
+
+export function resolveRulesRoot(argv: string[]): string {
   return flag(argv, '--rules') ?? process.env.HEDDLE_RULES_DIR ?? (process.env.CLAUDE_PROJECT_DIR
     ? `${process.env.CLAUDE_PROJECT_DIR}/rules`
-    : fileURLToPath(new URL('../../rules', import.meta.url)));
+    : bundledRulesRoot());
+}
+
+// The catalog is the ratified rule set this heddle binary ships. Seeded copies land in the target
+// project and are resolved separately at runtime by the hook bridge's resolveRulesRoot path.
+export function resolveCatalogRoot(): string {
+  return process.env.HEDDLE_RULES_DIR ?? bundledRulesRoot();
 }
 
 function yamlFiles(dir: string): string[] {

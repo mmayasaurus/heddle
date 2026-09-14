@@ -3,8 +3,11 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSy
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { applyInstall, DISCIPLINE_WIRING, planInstall, redactReport } from '../src/init-project.js';
+import { parse as parseYaml } from 'yaml';
+import { applyInstall, DISCIPLINE_WIRING, planInstall, redactReport, renderHookRulesSteps } from '../src/init-project.js';
+import { loadRules } from '../src/rules/load.js';
 import { useTempResources } from './helpers.js';
+import { runCli } from './helpers/cli.js';
 
 const WIRED_HOOKS = [
   'agent-identity.py', 'agent-preflight.py', 'remind-owned-prs.py',
@@ -33,6 +36,30 @@ function sha(path: string): string {
 function entryShape(event: string, matcher: string, entry: any) {
   const match = entry.command.match(/python3 "([^"]+)\/hooks\/([^"]+)"(?: ([^;]+))?;/);
   return { event, matcher, hook: match?.[2], ...(match?.[3] ? { args: match[3] } : {}), timeout: entry.timeout };
+}
+
+function seedHookCatalog(root: string, id = 'synthetic-install-rule'): { id: string; fixture: string } {
+  const fixture = `${JSON.stringify({ name: 'synthetic match', payload: { hook_event_name: 'PreToolUse', tool_name: 'SyntheticShell' }, expect: { outcome: 'nudge' } })}\n`;
+  mkdirSync(join(root, 'tests'), { recursive: true });
+  writeFileSync(join(root, `${id}.yaml`), `# preserved synthetic comment\nid: ${id}\nevent: PreToolUse\nmatch:\n  tool: SyntheticShell\naction: block\nenforce: false\nsubagent_aware: false\nmessage: synthetic installer guidance\nfail_open: true\n`);
+  writeFileSync(join(root, 'tests', `${id}.jsonl`), fixture);
+  return { id, fixture };
+}
+
+const PRESET_RULE_IDS = [
+  'no-rm-recursive-force',
+  'no-git-history-rewrite',
+  'no-git-worktree-discard',
+  'no-destructive-sql',
+  'pr-flow-reminder',
+];
+
+function seedPresetCatalog(root: string): void {
+  mkdirSync(join(root, 'tests'), { recursive: true });
+  for (const id of PRESET_RULE_IDS) {
+    writeFileSync(join(root, `${id}.yaml`), `id: ${id}\nevent: PreToolUse\nmatch: {}\naction: nudge\nenforce: false\nsubagent_aware: false\nmessage: ${id}\nfail_open: true\n`);
+    writeFileSync(join(root, 'tests', `${id}.jsonl`), '');
+  }
 }
 
 describe('init-project', () => {
@@ -101,6 +128,156 @@ describe('init-project', () => {
     expect(existsSync(join(opts.homeDir, '.heddle'))).toBe(false);
     expect(plan.steps.some((step) => step.action === 'would-create')).toBe(true);
   });
+
+  it('plans and applies selected hook rules as create-only catalog copies', () => {
+    const opts = options(tempDir());
+    const catalog = tempDir();
+    const { id, fixture: catalogFixture } = seedHookCatalog(catalog);
+    const steps = renderHookRulesSteps(opts.dir, [{ id, enforce: true }], catalog, false);
+    expect(steps.map((step) => step.path)).toEqual([join(opts.dir, 'rules', `${id}.yaml`), join(opts.dir, 'rules', 'tests', `${id}.jsonl`)]);
+    expect(steps.map((step) => step.action)).toEqual(['create', 'create']);
+    expect(steps[0]?.content).toContain('# preserved synthetic comment');
+    expect(parseYaml(steps[0]?.content ?? '')).toMatchObject({ enforce: true });
+    expect(steps[1]?.content).toBe(catalogFixture);
+
+    const plan = planInstall({ ...opts, hookRules: [{ id, enforce: true }], hookCatalogRoot: catalog });
+    applyInstall(plan);
+    expect(readFileSync(join(opts.dir, 'rules', 'tests', `${id}.jsonl`), 'utf8')).toBe(catalogFixture);
+    expect(loadRules(join(opts.dir, 'rules')).find((rule) => rule.id === id)).toMatchObject({ enforce: true });
+    expect(renderHookRulesSteps(opts.dir, [{ id, enforce: false }], catalog, false).map((step) => step.action)).toEqual(['skip', 'skip']);
+  });
+
+  it('keeps hook-rule selection empty and dry-run hook seeds non-mutating', () => {
+    const opts = options(tempDir());
+    const catalog = tempDir();
+    const { id } = seedHookCatalog(catalog);
+    expect(renderHookRulesSteps(opts.dir, [], catalog, false)).toEqual([]);
+    const steps = renderHookRulesSteps(opts.dir, [{ id, enforce: false }], catalog, true);
+    expect(steps.map((step) => step.action)).toEqual(['would-create', 'would-create']);
+    expect(existsSync(join(opts.dir, 'rules', `${id}.yaml`))).toBe(false);
+  });
+
+  it('selects and enforces catalog ids from init-project flags, rejecting unknown ids', async () => {
+    const base = tempDir();
+    const { canonical, target } = fixture(base);
+    const catalog = tempDir();
+    const first = seedHookCatalog(catalog, 'synthetic-first').id;
+    const second = seedHookCatalog(catalog, 'synthetic-second').id;
+    const args = ['init-project', target, '--canonical', canonical, '--name', 'toy', '--team', 'NEW', '--agents', 'Z', '--room', '#toy', '--launcher', 'resume-toy.sh', '--hook-rules', `${first},${second}`, '--enforce', second, '--json'];
+    const result = await runCli(args, { home: join(base, 'cli-home'), env: { HEDDLE_RULES_DIR: catalog } });
+
+    expect(result).toMatchObject({ code: 0, stderr: '' });
+    expect(loadRules(join(target, 'rules')).map((rule) => ({ id: rule.id, enforce: rule.enforce }))).toEqual(expect.arrayContaining([
+      { id: first, enforce: false },
+      { id: second, enforce: true },
+    ]));
+    const unknownArgs = [...args];
+    unknownArgs[unknownArgs.indexOf('--hook-rules') + 1] = 'synthetic-missing';
+    const unknown = await runCli(unknownArgs, { home: join(base, 'cli-unknown-home'), env: { HEDDLE_RULES_DIR: catalog } });
+    expect(unknown.code).toBe(1);
+    expect(JSON.parse(unknown.stdout)).toMatchObject({ error: "unknown hook rule 'synthetic-missing'" });
+  }, 30_000);
+
+  it('uses an unenforced strict preset through the hook-rule installer without writing settings during dry-run', async () => {
+    const base = tempDir();
+    const { canonical, target } = fixture(base);
+    const catalog = tempDir();
+    seedPresetCatalog(catalog);
+
+    const result = await runCli(['init-project', target, '--canonical', canonical, '--name', 'toy', '--team', 'NEW', '--agents', 'Z', '--room', '#toy', '--launcher', 'resume-toy.sh', '--preset', 'strict', '--dry-run', '--json'], { home: join(base, 'cli-home'), env: { HEDDLE_RULES_DIR: catalog } });
+
+    expect(result).toMatchObject({ code: 0, stderr: '' });
+    const report = JSON.parse(result.stdout);
+    expect(report.steps.filter((step: { step: string }) => step.step.startsWith('hook-rule:')).map((step: { step: string; action: string }) => [step.step, step.action])).toEqual([
+      ['hook-rule:no-rm-recursive-force', 'would-create'],
+      ['hook-rule:no-git-history-rewrite', 'would-create'],
+      ['hook-rule:no-git-worktree-discard', 'would-create'],
+      ['hook-rule:no-destructive-sql', 'would-create'],
+      ['hook-rule:pr-flow-reminder', 'would-create'],
+    ]);
+    expect(report.steps.filter((step: { step: string }) => step.step.startsWith('hook-rule:')).every((step: { content?: string }) => step.content?.includes('enforce: false'))).toBe(true);
+    expect(existsSync(join(target, '.claude', 'settings.json'))).toBe(false);
+    expect(`${result.stdout}${result.stderr}`).not.toContain('ENFORCEMENT');
+  }, 30_000);
+
+  it('uses the bundled catalog for a strict preset when the consumer project has no rules directory', async () => {
+    const base = tempDir();
+    const { canonical, target } = fixture(base);
+    const consumerProject = tempDir();
+    const result = await runCli(['init-project', target, '--canonical', canonical, '--name', 'toy', '--team', 'NEW', '--agents', 'Z', '--room', '#toy', '--launcher', 'resume-toy.sh', '--preset', 'strict', '--dry-run', '--json'], {
+      home: join(base, 'cli-home'),
+      env: { CLAUDE_PROJECT_DIR: consumerProject },
+    });
+
+    expect(result).toMatchObject({ code: 0, stderr: '' });
+    const report = JSON.parse(result.stdout);
+    expect(report.steps.filter((step: { step: string }) => step.step.startsWith('hook-rule:')).map((step: { step: string; action: string }) => [step.step, step.action])).toEqual([
+      ['hook-rule:no-rm-recursive-force', 'would-create'],
+      ['hook-rule:no-git-history-rewrite', 'would-create'],
+      ['hook-rule:no-git-worktree-discard', 'would-create'],
+      ['hook-rule:no-destructive-sql', 'would-create'],
+      ['hook-rule:pr-flow-reminder', 'would-create'],
+    ]);
+  }, 30_000);
+
+  it('rejects combining a preset with hook-rule or enforcement flags', async () => {
+    const base = tempDir();
+    const { canonical, target } = fixture(base);
+    const catalog = tempDir();
+    seedPresetCatalog(catalog);
+    const shared = ['init-project', target, '--canonical', canonical, '--name', 'toy', '--team', 'NEW', '--agents', 'Z', '--room', '#toy', '--launcher', 'resume-toy.sh', '--preset', 'strict', '--json'];
+
+    const withRules = await runCli([...shared, '--hook-rules', 'no-rm-recursive-force'], { home: join(base, 'rules-home'), env: { HEDDLE_RULES_DIR: catalog } });
+    expect(withRules.code).toBe(1);
+    expect(JSON.parse(withRules.stdout)).toMatchObject({ error: expect.stringContaining('--preset and --hook-rules are mutually exclusive') });
+    const withEnforce = await runCli([...shared, '--enforce', 'no-rm-recursive-force'], { home: join(base, 'enforce-home'), env: { HEDDLE_RULES_DIR: catalog } });
+    expect(withEnforce.code).toBe(1);
+    expect(JSON.parse(withEnforce.stdout)).toMatchObject({ error: expect.stringContaining('--preset cannot be used with --enforce') });
+  }, 30_000);
+
+  it('routes scripted preset and custom selections through the existing prompter flows', async () => {
+    const base = tempDir();
+    const catalog = tempDir();
+    seedPresetCatalog(catalog);
+    const presetAnswers = join(base, 'preset-answers.json');
+    writeFileSync(presetAnswers, JSON.stringify(['standard']));
+    const presetFixture = fixture(base);
+    const args = (target: string, canonical: string, answers: string) => ['init-project', target, '--canonical', canonical, '--name', 'toy', '--team', 'NEW', '--agents', 'Z', '--room', '#toy', '--launcher', 'resume-toy.sh', '--answers', answers, '--dry-run', '--json'];
+
+    const preset = await runCli(args(presetFixture.target, presetFixture.canonical, presetAnswers), { home: join(base, 'preset-home'), env: { HEDDLE_RULES_DIR: catalog } });
+    expect(preset.code).toBe(0);
+    expect(JSON.parse(preset.stdout).steps.filter((step: { step: string }) => step.step.startsWith('hook-rule:')).map((step: { step: string }) => step.step)).toEqual([
+      'hook-rule:no-rm-recursive-force', 'hook-rule:no-git-history-rewrite', 'hook-rule:no-git-worktree-discard', 'hook-rule:pr-flow-reminder',
+    ]);
+
+    const customCatalog = tempDir();
+    seedHookCatalog(customCatalog, 'synthetic-custom');
+    const customAnswers = join(base, 'custom-answers.json');
+    writeFileSync(customAnswers, JSON.stringify(['custom', true, false]));
+    const customFixture = fixture(tempDir());
+    const custom = await runCli(args(customFixture.target, customFixture.canonical, customAnswers), { home: join(base, 'custom-home'), env: { HEDDLE_RULES_DIR: customCatalog } });
+    expect(custom.code).toBe(0);
+    expect(custom.stderr).toContain('synthetic-custom synthetic match: WOULD MATCH → NUDGE');
+    expect(custom.stderr).toContain('synthetic-custom synthetic match: ENFORCED WOULD MATCH → BLOCK');
+    expect(JSON.parse(custom.stdout).steps.some((step: { step: string }) => step.step === 'hook-rule:synthetic-custom')).toBe(true);
+  }, 30_000);
+
+  it('skips the preset step (and does not consume answers) when the catalog has no rules', async () => {
+    const base = tempDir();
+    const emptyCatalog = tempDir();
+    mkdirSync(emptyCatalog, { recursive: true });
+    const { canonical, target } = fixture(base);
+    // An old-style custom-chooser --answers script leading with a boolean: without the empty-catalog gate
+    // the new preset select would consume the leading `true` and reject it ('invalid scripted choice').
+    // With no catalog there is no preset step, so the flow (and the script) is unchanged and nothing installs.
+    const answers = join(base, 'legacy-answers.json');
+    writeFileSync(answers, JSON.stringify([true, false]));
+    const result = await runCli(['init-project', target, '--canonical', canonical, '--name', 'toy', '--team', 'NEW', '--agents', 'Z', '--room', '#toy', '--launcher', 'resume-toy.sh', '--answers', answers, '--dry-run', '--json'], { home: join(base, 'empty-home'), env: { HEDDLE_RULES_DIR: emptyCatalog } });
+    expect(result.code).toBe(0);
+    expect(`${result.stdout}${result.stderr}`).not.toContain('invalid scripted choice');
+    expect(`${result.stdout}${result.stderr}`).not.toContain('Choose hook safety preset');
+    expect(JSON.parse(result.stdout).steps.some((step: { step: string }) => step.step.startsWith('hook-rule:'))).toBe(false);
+  }, 30_000);
 
   it('renders discipline wiring in the first matching group while preserving user hooks and groups', () => {
     const opts = options(tempDir());

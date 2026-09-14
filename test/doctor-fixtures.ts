@@ -2,6 +2,8 @@ import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { expect } from 'vitest';
 import { runDoctor, type DoctorDeps } from '../src/doctor.js';
+import { dashboardArtifacts } from '../src/health/checks.js';
+import { defaultSha256 } from '../src/health/probe.js';
 import { useTempResources } from './helpers.js';
 
 export const resources = useTempResources('heddle-doctor-');
@@ -57,6 +59,13 @@ caps: {openrouter_credits_weekly_usd: 1}
 guards: {never_via_cursor: []}
 `;
 
+export interface ArtifactFixture {
+  sourceAvailable?: boolean;
+  installed?: Partial<Record<(typeof dashboardArtifacts)[number]['installed'], string | undefined>>;
+  source?: Partial<Record<(typeof dashboardArtifacts)[number]['installed'], string | undefined>>;
+  behindOriginMain?: number | undefined;
+}
+
 export function config(
   models = { cursor: 'cursor-grok-4.6-high-fast', gemini: 'gemini-3.7-flash-high' },
   options: { cursorFallback?: string; laneDefaults?: string } = {},
@@ -87,6 +96,7 @@ export function config(
 export function fakeDeps(
   paths = config(),
   overrides: Partial<DoctorDeps> = {},
+  artifacts: ArtifactFixture = {},
 ): Partial<DoctorDeps> {
   const { paths: overridePaths, ...restOverrides } = overrides;
   const dir = resources.tempDir();
@@ -99,10 +109,38 @@ export function fakeDeps(
     paths: {
       comms: join(dir, 'comms.db'),
       operatorToken: join(dir, 'operator.token'),
+      repoRoot: '/workspace/heddle-core',
+      heddle: '/home/heddle/.heddle',
       ...(overridePaths ?? paths),
     },
     now: () => new Date('2026-09-10T12:00:00Z'),
     env: {},
+    readFileBytes: async (path) => {
+      const installed = dashboardArtifacts.find(
+        (artifact) => path.endsWith(`/.heddle/${artifact.installed}`),
+      );
+      if (installed) {
+        return artifacts.installed?.[installed.installed] === undefined
+          && installed.installed in (artifacts.installed ?? {})
+          ? undefined
+          : Buffer.from(artifacts.installed?.[installed.installed] ?? `installed:${installed.installed}`);
+      }
+
+      const source = dashboardArtifacts.find(
+        (artifact) => path.endsWith(`/${artifact.source}`),
+      );
+      if (source) {
+        return artifacts.sourceAvailable === false
+          || (artifacts.source?.[source.installed] === undefined
+            && source.installed in (artifacts.source ?? {}))
+          ? undefined
+          : Buffer.from(artifacts.source?.[source.installed] ?? `installed:${source.installed}`);
+      }
+
+      return undefined;
+    },
+    sha256: defaultSha256,
+    gitBehindOriginMain: async () => artifacts.behindOriginMain,
     execFile: async (cmd, args) => {
       const key = `${cmd} ${args.join(' ')}`;
       if (args[0] === '--version') {

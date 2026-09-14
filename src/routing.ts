@@ -2,6 +2,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
+import { isBillingClass, BILLING_CLASSES } from './accounts.js';
 
 /**
  * Routing table loader — task class → provider/model/effort/skills, with fallbacks and the
@@ -109,6 +110,12 @@ export function loadRouting(path = defaultRoutingPath()): RoutingTable {
     taskClasses: raw.task_classes,
     laneDefaults: parseLaneDefaults(raw.lane_defaults),
   };
+  for (const [name, cfg] of Object.entries(table.providers)) {
+    const bc = (cfg as Record<string, unknown>)?.billing_class;
+    if (bc !== undefined && !isBillingClass(bc)) {
+      throw new Error(`routing table: providers.${name}.billing_class must be one of ${BILLING_CLASSES.join(', ')} (got ${JSON.stringify(bc)})`);
+    }
+  }
   // HED-106 (qodo/codex review): a lane_default is a ROUTE the ladder can auto-select, so it passes the
   // SAME policy fences as a class primary/fallback — known + non-excluded + non-held provider, and no
   // `never_via_cursor` family through Cursor. Without this a config edit could make the walk auto-select
@@ -367,6 +374,24 @@ export function listTaskClasses(table: RoutingTable): string[] {
 }
 
 /**
+ * True ONLY for a non-dispatchable prefer-only class whose preference has no leading concrete route,
+ * so enumeration/config may tolerate it without resolution. HED-397 introduced that shape; HED-545
+ * reviewer findings require every other resolution failure (including malformed, held, and
+ * dispatchable tier-only classes) to surface normally.
+ */
+export function isPreferOnlyClass(table: RoutingTable, taskClass: string): boolean {
+  const node = table.taskClasses[taskClass] as Record<string, unknown> | undefined;
+  if (!node || node.dispatchable !== false) return false;
+  if (node.provider || node.model) return false;
+  try {
+    const prefer = parsePrefer(table, node, `task_classes.${taskClass}`);
+    return Array.isArray(prefer) && prefer.length > 0 && !('provider' in prefer[0]);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * The "code-editing class" classifier: does a dispatch of `taskClass` change files? Data-driven
  * from the table's `edits_code:` field — never inferred from the class name. Unknown classes and
  * direct routes (`direct:<provider>/<model>`) are NOT code-editing as far as the table knows.
@@ -379,8 +404,10 @@ export function isCodeEditingClass(table: RoutingTable, taskClass: string): bool
 /** One row per task class — the shared shape behind `list_task_classes` (MCP) and `heddle classes`. */
 export interface TaskClassDescription {
   task_class: string;
-  provider: string;
-  model: string;
+  /** Null when a prefer-only/non-dispatchable class has no leading concrete literal; `prefer` conveys its in-session preference. */
+  provider: string | null;
+  /** Null when a prefer-only/non-dispatchable class has no leading concrete literal; `prefer` conveys its in-session preference. */
+  model: string | null;
   /** How the provider runs workers (`in-session-subagent` means: use your own Agent tool). */
   execution: string | null;
   effort: string | null;
@@ -412,7 +439,38 @@ export interface TaskClassDescription {
 export function describeTaskClasses(
   table: RoutingTable, withMandatory: (skills: string[]) => string[] = (s) => s,
 ): TaskClassDescription[] {
+  const describeUnresolved = (taskClass: string): TaskClassDescription => {
+    const node = table.taskClasses[taskClass] as Record<string, unknown> | undefined;
+    const where = `task_classes.${taskClass}`;
+    const prefer = parsePrefer(table, node, where)
+      ?.map((entry) => 'tier' in entry ? entry.tier : `${entry.provider}/${entry.model}`);
+    return {
+      task_class: taskClass,
+      provider: null,
+      model: null,
+      execution: null,
+      effort: null,
+      fallback: null,
+      opt_in_required: false,
+      note: typeof node?.note === 'string' ? node.note : null,
+      why: typeof node?.why === 'string' ? node.why : null,
+      skills: listField(node, 'skills', where) ?? [],
+      mcp: listField(node, 'mcp', where) ?? [],
+      edits_code: node?.edits_code === true,
+      dispatchable: node?.dispatchable !== false,
+      read_only: node?.read_only === true,
+      auto_assess: node?.auto_assess === true,
+      reviewer_pool: Array.isArray(node?.reviewer_pool)
+        ? (node.reviewer_pool as any[])
+          .filter((entry) => entry && typeof entry.provider === 'string' && typeof entry.model === 'string')
+          .map((entry) => `${entry.provider}/${entry.model}`)
+        : [],
+      prefer,
+    };
+  };
+
   return listTaskClasses(table).map((c) => {
+    if (isPreferOnlyClass(table, c)) return describeUnresolved(c);
     const r = resolveRoute(table, c);
     const execution = table.providers[r.provider]?.execution;
     return {

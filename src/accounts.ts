@@ -5,7 +5,14 @@ import { DEFAULT_ACCOUNTS_PATH } from './capaware.js';
 export const ACCOUNTS_SCHEMA_VERSION = 2;
 
 // A1/HED-395 owns this taxonomy and env.ts allow-by-class enforcement; it will import this type when it lands.
-export type BillingClass = 'subscription-flat' | 'subscription-quota' | 'free-tier' | 'prepaid-credit' | 'pay-per-token';
+// BILLING_CLASSES is the SINGLE source of truth: the BillingClass type, isBillingClass, and every runtime
+// validator (the billingClasses Set below, loadRouting) derive from this one tuple, so a class added in one
+// place can never compile-pass for a typed Account while the runtime validators still reject it (qodo #165).
+export const BILLING_CLASSES = ['subscription-flat', 'subscription-quota', 'free-tier', 'prepaid-credit', 'pay-per-token'] as const;
+export type BillingClass = (typeof BILLING_CLASSES)[number];
+export function isBillingClass(v: unknown): v is BillingClass {
+  return typeof v === 'string' && (BILLING_CLASSES as readonly string[]).includes(v);
+}
 export type AccountTier = 'T0' | 'T1' | 'T2' | 'T3';
 export type OveragePosture = 'hard-stop' | 'bounded-prepaid' | 'open-billing';
 
@@ -72,16 +79,14 @@ const modeledProviderSet = new Set<string>(ACCOUNT_PROVIDERS);
 export const isAccountModeledProvider = (provider: string): boolean => modeledProviderSet.has(provider);
 type Row = Record<string, unknown>;
 
-const billingClasses = new Set<BillingClass>([
-  'subscription-flat', 'subscription-quota', 'free-tier', 'prepaid-credit', 'pay-per-token',
-]);
+const billingClasses = new Set<BillingClass>(BILLING_CLASSES);
 const tiers = new Set<AccountTier>(['T0', 'T1', 'T2', 'T3']);
 const overagePostures = new Set<OveragePosture>(['hard-stop', 'bounded-prepaid', 'open-billing']);
 
 let atomicWriteSequence = 0;
 
 // Mirrors init-project's temp-in-the-same-directory write so a registry is never half-written.
-function atomicWriteFile(path: string, content: string): void {
+export function atomicWriteFile(path: string, content: string): void {
   mkdirSync(dirname(path), { recursive: true });
   const temporary = join(dirname(path), `.${basename(path)}.${process.pid}.${atomicWriteSequence++}.tmp`);
   try {

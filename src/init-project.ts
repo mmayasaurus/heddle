@@ -2,7 +2,11 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSyn
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parseDocument } from 'yaml';
 import { isAncestorOrEqual, PROJECTS_SCHEMA_VERSION, validateRegistry } from './projects.js';
+import { resolveCatalogRoot } from './rules/lifecycle.js';
+import { RuleIdPattern } from './rules/schema.js';
+import type { HookRuleSelection } from './wizard/hooks-choose.js';
 
 const WIRED_HOOKS = ['agent-identity.py', 'agent-preflight.py', 'remind-owned-prs.py', 'require-memtrace-first.py', 'delegation-nudge.py', 'require-pr-sweep.py'] as const;
 const OPTIONAL_HOOKS = ['protect-workspace.py', 'require-vault-search.py', 'auto-reindex-vault.py'] as const;
@@ -12,6 +16,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 export interface InstallOptions {
   dir: string; canonical?: string; name?: string; team?: string; agents?: string; room?: string; launcher?: string;
   enforceMemtrace?: boolean; dryRun?: boolean; homeDir?: string; showContent?: boolean;
+  hookRules?: HookRuleSelection[]; hookCatalogRoot?: string;
 }
 export interface InstallStep {
   step: string; path: string; action: 'ok' | 'create' | 'update' | 'skip' | 'would-create' | 'would-update'; reason?: string; content?: string; bytes?: number; expectedContent?: string | null;
@@ -271,6 +276,26 @@ function renderRulesSteps(dir: string, canonical: string, dryRun: boolean): Inst
     return existsSync(path) ? { step: `rule:${file}`, path, action: 'skip', reason: 'exists' } : stepFor(path, `rule:${file}`, rulesContent(canonical, file), dryRun, false);
   });
 }
+export function renderHookRulesSteps(dir: string, selection: HookRuleSelection[], catalogRoot: string, dryRun: boolean): InstallStep[] {
+  return selection.flatMap(({ id, enforce }) => {
+    if (!RuleIdPattern.test(id)) throw new Error(`invalid hook rule id '${id}'`);
+    const catalogRule = join(catalogRoot, `${id}.yaml`);
+    const rulePath = join(dir, 'rules', `${id}.yaml`);
+    const source = readFileSync(catalogRule, 'utf8');
+    const document = parseDocument(source);
+    document.set('enforce', enforce);
+    const ruleStep = existsSync(rulePath)
+      ? { step: `hook-rule:${id}`, path: rulePath, action: 'skip' as const, reason: 'exists' }
+      : stepFor(rulePath, `hook-rule:${id}`, document.toString(), dryRun, false);
+    const catalogFixture = join(catalogRoot, 'tests', `${id}.jsonl`);
+    if (!existsSync(catalogFixture)) return [ruleStep];
+    const fixturePath = join(dir, 'rules', 'tests', `${id}.jsonl`);
+    const fixtureStep = existsSync(fixturePath)
+      ? { step: `hook-rule-test:${id}`, path: fixturePath, action: 'skip' as const, reason: 'exists' }
+      : stepFor(fixturePath, `hook-rule-test:${id}`, readFileSync(catalogFixture, 'utf8'), dryRun, false);
+    return [ruleStep, fixtureStep];
+  });
+}
 function renderMcpStep(dir: string, dryRun: boolean): InstallStep {
   const path = join(dir, '.mcp.json');
   const template = mcpTemplate();
@@ -338,7 +363,8 @@ export function planInstall(input: InstallOptions): InstallPlan {
   const state = registryState(homeDir);
   const details = registrationDetails(input, dir, state.registry, state.raw);
   const dryRun = input.dryRun === true;
-  const steps = [canonicalStep(canonical), renderSettingsStep(dir, canonical, dryRun), ...renderRulesSteps(dir, canonical, dryRun), renderMcpStep(dir, dryRun), renderIgnoreStep(dir, dryRun), renderGateStep(dir, dryRun), ...renderLifecycleCommandSteps(dir, dryRun), registryStep(input, dir, state, details, dryRun), enforceMarkerStep(input, dir, homeDir, dryRun)];
+  const hookCatalogRoot = input.hookCatalogRoot ?? resolveCatalogRoot();
+  const steps = [canonicalStep(canonical), renderSettingsStep(dir, canonical, dryRun), ...renderRulesSteps(dir, canonical, dryRun), ...renderHookRulesSteps(dir, input.hookRules ?? [], hookCatalogRoot, dryRun), renderMcpStep(dir, dryRun), renderIgnoreStep(dir, dryRun), renderGateStep(dir, dryRun), ...renderLifecycleCommandSteps(dir, dryRun), registryStep(input, dir, state, details, dryRun), enforceMarkerStep(input, dir, homeDir, dryRun)];
   return { options: { ...input, dir, canonical, name: details.name, homeDir }, steps };
 }
 

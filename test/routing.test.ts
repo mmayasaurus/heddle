@@ -3,7 +3,8 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { loadRouting, listTaskClasses, resolveRoute, directRoute, neverViaCursorPrefixes, isNeverViaCursor, providerExecution, type Route } from '../src/routing.js';
+import { describeTaskClasses, loadRouting, listTaskClasses, resolveRoute, directRoute, neverViaCursorPrefixes, isNeverViaCursor, providerExecution, type Route } from '../src/routing.js';
+import { targetModels } from '../src/health/parse.js';
 import { mcpAttachable, webCapable } from '../src/mcp.js';
 import { ENFORCEABLE } from '../src/capabilities.js';
 import { normalizeProvider, pickReviewer } from '../src/review.js';
@@ -162,19 +163,18 @@ describe('resolveRoute / directRoute — policy fences', () => {
     expect(resolveRoute(table, 'adversarial-review').mcp).toEqual(['memtrace']);
   });
 
-  it('Stage 1: GLM is a known, directly-dispatchable provider but is wired into NO class auto-routing', () => {
-    // HED-422 Stage 1 ships GLM as provider plumbing only. An HTTP worker never receives materialized
-    // AGENTS.md packs or a "run git yourself" diff (runTarget inlines those for CLI providers), so a
-    // diff/doc review auto-routed to GLM would run without its brief — worse than refusing. It is
-    // therefore absent from every primary / fallback / reviewer_pool slot; Stage 1b adds HTTP-aware
-    // delivery + exhaustion routing before GLM re-enters the pool (cursor #111 finding, follow-up).
-    for (const taskClass of listTaskClasses(table)) {
-      const route = resolveRoute(table, taskClass);
-      const providers = [route.provider, route.fallback?.provider, ...(route.reviewerPool ?? []).map((e) => e.provider)]
-        .filter((p): p is string => Boolean(p)).map((p) => normalizeProvider(p));
-      expect(providers, `class "${taskClass}" must not auto-route to glm in Stage 1`).not.toContain('glm');
+  it('HED-465: GLM is the cursor-primary advisory fallback only, never an adversarial-review target', () => {
+    // glm ships on the two CURSOR-primary advisory classes (no dead-claude walk, no capability hatch).
+    for (const taskClass of ['second-opinion', 'quick-alt-take']) {
+      expect(resolveRoute(table, taskClass).fallback).toMatchObject({ provider: 'glm', model: 'glm-5.3' });
     }
-    // …but it stays reachable for an explicit, self-contained brief.
+    // research-summarize's fallback stays codex/luna, NOT glm: its claude PRIMARY needs an always-addressable
+    // non-claude walk (HED-264) and a capability-enforcing fallback (net/exec → codex). See routing.v0.yaml.
+    expect(resolveRoute(table, 'research-summarize').fallback).toMatchObject({ provider: 'codex', model: 'gpt-5.6-luna' });
+    const adversarial = resolveRoute(table, 'adversarial-review');
+    const adversarialProviders = [adversarial.provider, adversarial.fallback?.provider, ...(adversarial.reviewerPool ?? []).map((entry) => entry.provider)]
+      .filter((provider): provider is string => Boolean(provider)).map((provider) => normalizeProvider(provider));
+    expect(adversarialProviders).not.toContain('glm');
     expect(() => directRoute(table, 'glm', 'glm-5.3')).not.toThrow();
   });
 
@@ -287,6 +287,111 @@ describe('resolveRoute / directRoute — policy fences', () => {
     expect(r.skills).toEqual(['worker-role']);
     expect(r.mcp).toEqual(['memtrace']);
     expect(r.fallback).toBeUndefined();
+  });
+});
+
+describe('HED-545 — prefer-only classes during enumeration', () => {
+  const dirs: string[] = [];
+
+  afterEach(() => {
+    for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
+    dirs.length = 0;
+  });
+
+  function tierOnlyTable() {
+    return {
+      version: 0,
+      policy: {},
+      providers: { claude: { models: ['haiku'] } },
+      taskClasses: {
+        orchestration: { prefer: ['T2'], dispatchable: false, edits_code: false },
+        implementation: { provider: 'claude', model: 'haiku', edits_code: true },
+      },
+    };
+  }
+
+  it('describes a tier-only prefer-only class without resolving it and preserves its guidance', () => {
+    const table = tierOnlyTable();
+    (table.taskClasses as Record<string, unknown>).orchestration = {
+      prefer: ['T2'],
+      dispatchable: false,
+      edits_code: false,
+      skills: ['orchestrator-guide'],
+      mcp: ['memtrace'],
+      reviewer_pool: [{ provider: 'claude', model: 'haiku' }],
+    };
+    expect(() => resolveRoute(table, 'orchestration')).toThrow(/missing provider or model/);
+    expect(() => describeTaskClasses(table)).not.toThrow();
+    expect(describeTaskClasses(table).find((row) => row.task_class === 'orchestration')).toMatchObject({
+      provider: null,
+      model: null,
+      prefer: ['T2'],
+      dispatchable: false,
+      skills: ['orchestrator-guide'],
+      mcp: ['memtrace'],
+      reviewer_pool: ['claude/haiku'],
+    });
+    expect(describeTaskClasses(table).find((row) => row.task_class === 'implementation')).toMatchObject({
+      provider: 'claude', model: 'haiku',
+    });
+  });
+
+  it('re-throws for a CONCRETE class that fails to resolve — never masks a misconfig as prefer-only', () => {
+    const table = tierOnlyTable();
+    (table.taskClasses as Record<string, unknown>).broken = { provider: 'nonexistent', model: 'x' };
+    // The tolerance is ONLY for prefer-only classes; a concrete provider+model that resolveRoute
+    // rejects (here: unknown provider) must still throw from enumeration, not be masked as prefer-only.
+    expect(() => describeTaskClasses(table)).toThrow(/unknown provider/);
+  });
+
+  it('re-throws for a dispatchable tier-only class', () => {
+    const table = tierOnlyTable();
+    (table.taskClasses as Record<string, unknown>).dispatchableTierOnly = { prefer: ['T2'] };
+    expect(() => describeTaskClasses(table)).toThrow(/missing provider or model/);
+  });
+
+  it('re-throws for a malformed prefer-only-shaped class', () => {
+    const table = tierOnlyTable();
+    (table.taskClasses as Record<string, unknown>).malformed = { prefer: 'T2', dispatchable: false };
+    expect(() => describeTaskClasses(table)).toThrow(/prefer must be a non-empty list/);
+  });
+
+  it('keeps shipped orchestration on its concrete Fable route', () => {
+    const orchestration = describeTaskClasses(loadRouting(TABLE_PATH))
+      .find((row) => row.task_class === 'orchestration');
+    expect(orchestration).toMatchObject({ provider: 'claude', model: 'fable' });
+  });
+
+  it('skips a tier-only prefer-only class while enumerating catalog targets', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'heddle-545-'));
+    dirs.push(dir);
+    const path = join(dir, 'routing.yaml');
+    writeFileSync(path, [
+      'version: 0',
+      'providers:',
+      '  claude: { models: [haiku] }',
+      'task_classes:',
+      '  orchestration: { prefer: [T2], dispatchable: false, edits_code: false }',
+      '  implementation: { provider: claude, model: haiku }',
+      '',
+    ].join('\n'));
+    expect(() => targetModels('claude', path)).not.toThrow();
+  });
+
+  it('surfaces a real routing error while enumerating catalog targets', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'heddle-545-'));
+    dirs.push(dir);
+    const path = join(dir, 'routing.yaml');
+    writeFileSync(path, [
+      'version: 0',
+      'providers:',
+      '  claude: { models: [haiku] }',
+      'task_classes:',
+      '  orchestration: { prefer: [T2], dispatchable: false }',
+      '  broken: { provider: unknown, model: m1 }',
+      '',
+    ].join('\n'));
+    expect(() => targetModels('claude', path)).toThrow(/unknown provider/);
   });
 });
 

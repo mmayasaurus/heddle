@@ -22,7 +22,9 @@ import { censusClaudeResidents } from './residents.js';
 import { DEFAULT_USAGE_DIR, readProviderCaps } from './usage.js';
 import { buildOauthUsageSidecar, pollClaudeUsage } from './claude-usage.js';
 import { formatUsageRemaining, readUsageRemaining } from './usage-remaining.js';
-import { runRuleCli } from './rules/lifecycle.js';
+import { installUsagePollLaunchd } from './usage-poll-launchd.js';
+import { resolveCatalogRoot, runRuleCli } from './rules/lifecycle.js';
+import { loadRules } from './rules/load.js';
 import { DOCTOR_PROVIDERS, formatDoctorReport, runDoctor } from './doctor.js';
 import { readOperatorMode, writeOperatorMode, isOperatorMode, OPERATOR_MODES } from './operator-mode.js';
 import { runPrOwn } from './pr-own.js';
@@ -30,10 +32,15 @@ import { runPrSweep } from './pr-sweep.js';
 import { runPrWatch } from './pr-watch.js';
 import { bootstrapComms } from './comms/bootstrap.js';
 import { loadAccountRegistry } from './accounts.js';
-import { diffFleetHooks, diffFleetLaunchers, installFleetHooks, installFleetLaunchers } from './fleet.js';
+import { DEFAULT_ACCOUNTS_PATH } from './capaware.js';
+import { migrateConfigFile } from './config-migrations.js';
+import { diffFleetBin, diffFleetHooks, diffFleetLaunchers, installFleetBin, installFleetHooks, installFleetLaunchers } from './fleet.js';
+import { uninstall } from './uninstall.js';
 import { NativeCliRunner, type NativeProvider } from './wizard/cli-runner.js';
 import { ReadlinePrompter, ScriptedPrompter, type Prompter } from './wizard/prompt.js';
 import { runAccountsAdd } from './wizard/accounts-add.js';
+import { runHooksChoose, type HookRuleSelection } from './wizard/hooks-choose.js';
+import { PRESET_TIERS, resolvePreset, type SafetyPreset } from './wizard/presets.js';
 import { getProvider } from './provider-matrix.js';
 import { releaseStandalone } from './release/standalone.js';
 import { assembleTop, renderTopText } from './top.js';
@@ -64,6 +71,7 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
       --override-reason <r> REQUIRED with --provider/--model when no --class: why this bypasses the
                            routing table (recorded on the ledger row; HED-95)
       --no-fallback        do not try the table's fallback on failure
+      --preserve-permissions keep the worker CLI's own permission prompts (agy: omit --dangerously-skip-permissions); absent = provider default. WARNING: a headless run with no terminal to answer the prompts will hang.
       --capabilities a,b   GRANT worker capabilities: net | browse | exec-privileged (default: none)
       --in-session         claude classes: return the in-session (Agent tool) instruction instead of a headless worker
       --account <id>       claude classes: pin the registry account (default: most 5h headroom)
@@ -89,13 +97,18 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
   heddle fleet hooks-diff [--json]  compare installed fleet hooks with the vendored canon
   heddle fleet install-launchers [--dry-run] [--json]  install vendored fleet launchers under ~/.heddle/fleet/launchers
   heddle fleet launchers-diff [--json]  compare installed fleet launchers with the vendored canon
+  heddle fleet install-bin [--dry-run] [--json]  install vendored fleet bin tools under ~/.heddle/fleet/bin
+  heddle fleet bin-diff [--json]  compare installed fleet bin tools with the vendored canon
+  heddle upgrade [--dry-run] [--force] [--json]  migrate config schemas and refresh missing fleet assets without overwriting local edits
+  heddle uninstall [--dry-run] [--json]  remove only fleet assets still byte-identical to the shipped canon (preserves anything modified)
   heddle mode [desktop|mobile|away] [--note "<t>"] [--json]   operator mode (HED-336): no arg prints
                                  the current mode; a mode word sets it (~/.heddle/operator-mode.json —
                                  the pocket console and desktop app write the same file)
-  heddle init-project <dir> [--canonical <path>] [--name <n>] [--team <KEY>] [--agents A,B,…] [--room <#room>] [--launcher <script>] [--enforce-memtrace] [--dry-run] [--json] [--show-content]
+  heddle init-project <dir> [--canonical <path>] [--name <n>] [--team <KEY>] [--agents A,B,…] [--room <#room>] [--launcher <script>] [--preset <tier>] [--hook-rules <a,b>] [--enforce <a,b>] [--answers <file>] [--enforce-memtrace] [--dry-run] [--json] [--show-content]
   heddle whoami [--json]         this process's bound identity (HEDDLE_AGENT / FLEET_AGENT / .fleet-agent) + worker context
   heddle doctor [--json] [--provider <p>]   verify harnesses/accounts/config; --provider runs only that provider's checks plus global config checks (exit 1 on any fail)
   heddle release --standalone <outDir> [--source-ref <git ref>] [--init-git] [--verify] [--json]
+      requires a clean checkout at main's HEAD — headless-first invariant (HED-507)
   heddle workers [--stale <hours>] [--json]   dispatches still in flight (--stale: only orphans older than N hours)
   heddle ledger [--issue ABC-123] [--limit N] [--json]
   heddle ledger finish <id> --error "<why>"   close an orphaned in-flight row (ok=0)
@@ -106,6 +119,7 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
   heddle usage [--since <iso>] [--json]    per-provider totals
   heddle usage --remaining [--account <id>] [--json]  per-account quota headroom
   heddle usage poll-claude [--account <id>] [--json]  poll Claude OAuth usage and atomically write per-account sidecars
+  heddle usage install-poll-launchd [--start-interval <secs>] [--dry-run] [--json]  install + load the keeper-less launchd usage-poll producer (running this yourself is the activation step — the pack never loads it; refuses if the window-keeper is loaded)
   heddle top [--once] [--json]  one disk-only dashboard snapshot (watch mode is Slice 2)
   heddle account pick [--for <letter[,letter...]>] [--json] [--explain]   healthiest addressable Claude account for a fleet relaunch
   heddle account seat-weights sync   atomically refresh ~/.heddle/seat-weights.json from routing/lanes.yaml
@@ -124,6 +138,13 @@ function arg(flag: string): string | undefined {
 }
 function has(flag: string): boolean {
   return process.argv.includes(flag);
+}
+function commaIds(flag: string): string[] {
+  const value = arg(flag);
+  if (!value || value.startsWith('--')) throw new Error(`${flag} needs a comma-separated list of rule ids`);
+  const ids = value.split(',').map((id) => id.trim()).filter(Boolean);
+  if (!ids.length || new Set(ids).size !== ids.length) throw new Error(`${flag} must name one or more unique rule ids`);
+  return ids;
 }
 function out(json: boolean, obj: unknown, text: () => string): void {
   console.log(json ? JSON.stringify(obj, null, 2) : text());
@@ -154,9 +175,12 @@ const json = has('--json');
  * Skipped too for `usage poll-claude` (HED-329): a scheduled vendor-poll that only writes usage
  * sidecars runs headless on a launchd timer (~5 min), has no ledger reads to make honest, and must
  * not mutate the ledger — closing orphans as a side effect of a background poll — on that cadence.
+ * Skipped too for `usage install-poll-launchd` (HED-517): a local launchd installer that only writes
+ * a plist and calls launchctl has no ledger reads to make honest and must not sweep orphans — a
+ * `--dry-run` preview especially must observe, not mutate.
  * Best-effort — a hygiene failure must never break the command the operator actually ran.
  */
-if (cmd !== 'mode' && cmd !== 'pr' && cmd !== 'comms' && cmd !== 'fleet' && cmd !== 'top' && !(cmd === 'ledger' && (process.argv[3] === 'sweep' || process.argv[3] === 'finish')) && !(cmd === 'usage' && process.argv[3] === 'poll-claude')) {
+if (cmd !== 'mode' && cmd !== 'pr' && cmd !== 'comms' && cmd !== 'fleet' && cmd !== 'top' && cmd !== 'upgrade' && cmd !== 'uninstall' && !(cmd === 'ledger' && (process.argv[3] === 'sweep' || process.argv[3] === 'finish')) && !(cmd === 'usage' && (process.argv[3] === 'poll-claude' || process.argv[3] === 'install-poll-launchd'))) {
   try {
     const { closed } = new Ledger().sweepOrphans();
     if (closed > 0) console.error(`heddle: closed ${closed} orphaned in-flight dispatch row${closed === 1 ? '' : 's'} (heddle ledger --json shows outcome='orphaned')`);
@@ -198,6 +222,7 @@ try {
         optIn: has('--opt-in'),
         overrideReason: arg('--override-reason'),
         noFallback: has('--no-fallback'),
+        skipPermissions: has('--preserve-permissions') ? false : undefined,
         capabilities: arg('--capabilities')?.split(',').map((s) => s.trim()).filter(Boolean),
         inSession: has('--in-session'),
         accountPin: arg('--account'),
@@ -481,7 +506,7 @@ try {
     case 'classes': {
       const rows = describeTaskClasses(loadRouting(), withMandatoryPacks);
       out(json, rows, () => rows.map((r) =>
-        `${r.task_class.padEnd(22)} ${r.provider}/${r.model}` +
+        `${r.task_class.padEnd(22)} ${r.provider && r.model ? `${r.provider}/${r.model}` : '(prefer-only)'}` +
         (r.effort ? ` (${r.effort})` : '') +
         (r.fallback ? `  ↳ ${r.fallback}` : '') +
         (r.opt_in_required ? '  [opt-in required]' : '') +
@@ -769,6 +794,17 @@ try {
         }).join('\n'));
         break;
       }
+      if (process.argv[3] === 'install-poll-launchd') {
+        const raw = arg('--start-interval');
+        if (has('--start-interval') && (!raw || raw.startsWith('--') || !/^[0-9]+$/.test(raw) || Number(raw) <= 0)) {
+          console.error('usage: heddle usage install-poll-launchd [--start-interval <positive-int-secs>] [--dry-run] [--json]');
+          process.exit(2);
+        }
+        const report = installUsagePollLaunchd({ dryRun: has('--dry-run'), startIntervalSecs: raw ? Number(raw) : undefined });
+        out(json, report, () => report.message);
+        if (report.action === 'refused') process.exitCode = 1;
+        break;
+      }
       if (has('--remaining')) {
         const account = arg('--account');
         if (has('--account') && (!account || account.startsWith('--'))) {
@@ -924,10 +960,12 @@ try {
 
     case 'fleet': {
       const action = process.argv[3];
-      if (action === 'install-hooks' || action === 'install-launchers') {
+      if (action === 'install-hooks' || action === 'install-launchers' || action === 'install-bin') {
         const report = action === 'install-hooks'
           ? installFleetHooks({ dryRun: has('--dry-run') })
-          : installFleetLaunchers({ dryRun: has('--dry-run') });
+          : action === 'install-launchers'
+            ? installFleetLaunchers({ dryRun: has('--dry-run') })
+            : installFleetBin({ dryRun: has('--dry-run') });
         out(json, report, () => [
           `target: ${report.targetDir}`,
           ...report.files.map((file) => {
@@ -941,14 +979,106 @@ try {
         ].join('\n'));
         break;
       }
-      if (action === 'hooks-diff' || action === 'launchers-diff') {
-        const report = action === 'hooks-diff' ? diffFleetHooks() : diffFleetLaunchers();
+      if (action === 'hooks-diff' || action === 'launchers-diff' || action === 'bin-diff') {
+        const report = action === 'hooks-diff' ? diffFleetHooks() : action === 'launchers-diff' ? diffFleetLaunchers() : diffFleetBin();
         out(json, report, () => report.clean ? 'clean' : report.files.map((file) => `${file.action} ${file.name}`).join('\n'));
         if (!report.clean) process.exitCode = 1;
         break;
       }
-      console.error('usage: heddle fleet <install-hooks|hooks-diff|install-launchers|launchers-diff> [--dry-run] [--json]');
+      console.error('usage: heddle fleet <install-hooks|hooks-diff|install-launchers|launchers-diff|install-bin|bin-diff> [--dry-run] [--json]');
       process.exitCode = 2;
+      break;
+    }
+
+    case 'upgrade': {
+      // A mutating command must reject a mistyped flag rather than proceed with real writes: e.g.
+      // `heddle upgrade --dryrun` (missing the hyphen) would otherwise leave dryRun false and mutate.
+      const unknownArgs = process.argv.slice(3).filter((arg) => arg !== '--dry-run' && arg !== '--force' && arg !== '--json');
+      if (unknownArgs.length > 0) {
+        console.error(`heddle upgrade: unknown argument${unknownArgs.length === 1 ? '' : 's'} ${unknownArgs.join(', ')} — allowed: --dry-run, --force, --json`);
+        process.exitCode = 2;
+        break;
+      }
+      const dryRun = has('--dry-run');
+      const forced = has('--force');
+      const accountsPath = process.env.HEDDLE_ACCOUNTS ?? DEFAULT_ACCOUNTS_PATH;
+      const migrations = [
+        // Honor HEDDLE_PROJECTS like doctor.ts / loadGateMaps (skillpacks.ts) do — else a custom
+        // projects registry is left unmigrated while upgrade touches only the default path.
+        { kind: 'projects', path: process.env.HEDDLE_PROJECTS?.trim() || DEFAULT_PROJECTS_PATH },
+        { kind: 'accounts', path: accountsPath },
+      ].map(({ kind, path }) => {
+        if (!existsSync(path)) return { kind, path, action: 'absent' as const };
+        const result = migrateConfigFile(kind, path, { dryRun });
+        return {
+          kind,
+          path,
+          action: result.migrated ? (dryRun ? 'would-migrate' as const : 'migrated' as const) : 'current' as const,
+          from: result.from,
+          to: result.to,
+          ...(result.backupPath ? { backupPath: result.backupPath } : {}),
+        };
+      });
+
+      const assetGroups = [
+        { kind: 'bin', diff: diffFleetBin, install: installFleetBin },
+        { kind: 'hooks', diff: diffFleetHooks, install: installFleetHooks },
+        { kind: 'launchers', diff: diffFleetLaunchers, install: installFleetLaunchers },
+      ] as const;
+      const assets = assetGroups.flatMap(({ kind, diff, install }) => {
+        const differences = new Map(diff().files.map((file) => [file.name, file.action]));
+        const installed = install({ dryRun, skipDiffering: !forced });
+        return installed.files.map((file) => {
+          const difference = differences.get(file.name);
+          const action = difference === 'differing' && !forced
+            ? 'preserved'
+            : dryRun && file.action === 'created'
+              ? 'would-create'
+              : dryRun && file.action === 'updated'
+                ? 'would-update'
+                : file.action;
+          return { kind, name: file.name, action };
+        });
+      });
+      const report = { migrations, assets, dryRun, forced };
+      out(json, report, () => [
+        'Migrations:',
+        ...migrations.map((migration) => migration.action === 'absent'
+          ? `  ${migration.kind}: absent — nothing to migrate (${migration.path})`
+          : migration.action === 'current'
+            ? `  ${migration.kind}: already current (v${migration.to})`
+            : migration.action === 'would-migrate'
+              ? `  ${migration.kind}: would migrate v${migration.from}→v${migration.to}`
+              : `  ${migration.kind}: migrated v${migration.from}→v${migration.to} (backup: ${migration.backupPath})`),
+        'Assets:',
+        ...assets.map((asset) => asset.action === 'preserved'
+          ? `  ${asset.kind}/${asset.name}: differs from canonical — preserved (use --force to overwrite)`
+          : `  ${asset.kind}/${asset.name}: ${asset.action}`),
+        // Without prior-version shipped hashes, stale shipped files and user edits are indistinguishable.
+        // Both remain preserved by default; --force refreshes the canonical shipset.
+        'Note: stale shipped assets and user edits are both preserved by default; use --force to refresh canonical assets.',
+      ].join('\n'));
+      break;
+    }
+
+    case 'uninstall': {
+      // This mutates user-scoped files, so reject every unrecognized or positional argument first.
+      const unknownArgs = process.argv.slice(3).filter((arg) => !['--dry-run', '--json'].includes(arg));
+      if (unknownArgs.length > 0) {
+        const error = `heddle uninstall: unknown argument${unknownArgs.length === 1 ? '' : 's'} ${unknownArgs.join(', ')} — allowed: --dry-run, --json`;
+        // Under --json, emit a machine-readable error to stdout (draining before exit) so a --json
+        // caller never parses empty stdout; otherwise a plain message to stderr (matches heddle doctor).
+        if (json) process.stdout.write(`${JSON.stringify({ ok: false, error })}\n`, () => process.exit(2));
+        else { console.error(error); process.exit(2); }
+        break;
+      }
+      const report = uninstall({ dryRun: has('--dry-run') });
+      out(json, report, () => [
+        ...report.removed.map((path) => `${report.dryRun ? 'would remove' : 'removed'} ${path}`),
+        ...report.preserved.map((path) => `preserved (modified — not removed) ${path}`),
+        ...report.warnings.map((warning) => `warning: ${warning}`),
+        report.removed.length || report.preserved.length || report.warnings.length ? '' : '(nothing to uninstall)',
+      ].filter(Boolean).join('\n'));
       break;
     }
 
@@ -986,10 +1116,55 @@ try {
     case 'init-project': {
       const dir = process.argv[3];
       if (!dir || dir.startsWith('--')) {
-        console.error('usage: heddle init-project <dir> [--canonical <path>] [--name <n>] [--team <KEY>] [--agents A,B,…] [--room <#room>] [--launcher <script>] [--enforce-memtrace] [--dry-run] [--json] [--show-content]');
+        console.error('usage: heddle init-project <dir> [--canonical <path>] [--name <n>] [--team <KEY>] [--agents A,B,…] [--room <#room>] [--launcher <script>] [--preset <tier>] [--hook-rules <a,b>] [--enforce <a,b>] [--answers <file>] [--enforce-memtrace] [--dry-run] [--json] [--show-content]');
         process.exit(2);
       }
-      const plan = planInstall({ dir, canonical: arg('--canonical'), name: arg('--name'), team: arg('--team'), agents: arg('--agents'), room: arg('--room'), launcher: arg('--launcher'), enforceMemtrace: has('--enforce-memtrace'), dryRun: has('--dry-run'), showContent: has('--show-content') });
+      const catalogRoot = resolveCatalogRoot();
+      let hookRules: HookRuleSelection[] | undefined;
+      if (has('--preset')) {
+        if (has('--hook-rules')) throw new Error('--preset and --hook-rules are mutually exclusive; choose one');
+        if (has('--enforce')) throw new Error('--preset cannot be used with --enforce; presets never enforce');
+        const tier = arg('--preset');
+        if (tier === undefined || tier.startsWith('-')) throw new Error(`--preset needs one of: ${PRESET_TIERS.join(', ')}`);
+        if (!PRESET_TIERS.includes(tier as SafetyPreset)) throw new Error(`unknown safety preset '${tier}' (choose ${PRESET_TIERS.join(', ')})`);
+        hookRules = resolvePreset(tier as SafetyPreset, catalogRoot);
+      } else if (has('--hook-rules')) {
+        const requested = commaIds('--hook-rules');
+        const enforced = has('--enforce') ? commaIds('--enforce') : [];
+        const catalog = new Map(loadRules(catalogRoot).map((rule) => [rule.id, rule]));
+        for (const id of [...requested, ...enforced]) if (!catalog.has(id)) throw new Error(`unknown hook rule '${id}'`);
+        if (enforced.some((id) => !requested.includes(id))) throw new Error('--enforce may name only selected hook rules');
+        hookRules = requested.map((id) => ({ id, enforce: enforced.includes(id) }));
+      } else {
+        if (has('--enforce')) throw new Error('--enforce requires --hook-rules');
+        const answersPath = arg('--answers');
+        if (has('--answers') && (answersPath === undefined || answersPath.startsWith('--'))) throw new Error('--answers needs a path to a JSON answer file');
+        if (answersPath !== undefined || process.stdin.isTTY) {
+          let prompter: Prompter;
+          if (answersPath !== undefined) {
+            const parsed: unknown = JSON.parse(readFileSync(answersPath, 'utf8'));
+            if (!Array.isArray(parsed)) throw new Error(`--answers file must contain a JSON array of answers (got ${parsed === null ? 'null' : typeof parsed})`);
+            prompter = new ScriptedPrompter(parsed);
+          } else {
+            prompter = new ReadlinePrompter();
+          }
+          try {
+            // Only offer the preset step when a rule catalog actually exists. Before a catalog is present
+            // (e.g. the starter rule pack is not installed yet) there is nothing for a preset to resolve, so
+            // fall straight to the chooser — leaving the flow, and any existing --answers script, unchanged
+            // until a catalog exists. This keeps the preset feature dormant rather than failing by default.
+            const choice = loadRules(catalogRoot).length
+              ? await prompter.select('Choose hook safety preset:', [...PRESET_TIERS, 'custom'])
+              : 'custom';
+            hookRules = choice === 'custom'
+              ? (await runHooksChoose({ catalogRoot }, { prompter, report: (line) => process.stderr.write(`${line}\n`) })).selected
+              : resolvePreset(choice as SafetyPreset, catalogRoot);
+          } finally {
+            prompter.close();
+          }
+        }
+      }
+      const plan = planInstall({ dir, canonical: arg('--canonical'), name: arg('--name'), team: arg('--team'), agents: arg('--agents'), room: arg('--room'), launcher: arg('--launcher'), hookRules, hookCatalogRoot: catalogRoot, enforceMemtrace: has('--enforce-memtrace'), dryRun: has('--dry-run'), showContent: has('--show-content') });
       const report = applyInstall(plan, has('--dry-run'));
       const output = redactReport(report, has('--show-content'), plan.options.homeDir);
       out(json, output, () => [...report.steps.map((step) => `${step.action} ${step.step}: ${step.path}${step.reason ? ` (${step.reason})` : ''}`), ...report.humanSteps.map((step) => `- ${step}`)].join('\n'));

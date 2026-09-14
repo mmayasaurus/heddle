@@ -18,7 +18,8 @@ vi.mock('../src/adapters/codex.js', async (importOriginal) => {
 import { dispatch, planDispatch } from '../src/dispatch.js';
 import type { DispatchRequest } from '../src/dispatch.js';
 import { summarizePlan } from '../src/dispatcher/plan.js';
-import { loadRouting } from '../src/routing.js';
+import { billingVerdict } from '../src/dispatcher/billing.js';
+import { loadRouting, type RoutingTable } from '../src/routing.js';
 import { accountCapState, accountAtOrOverCap } from '../src/capaware.js';
 import { readLimitsMirror } from '../src/usage.js';
 import type { Account } from '../src/accounts.js';
@@ -115,6 +116,26 @@ describe('dispatch billing enforcement (HED-395)', () => {
     process.env.HEDDLE_ROUTING = yaml;
   }
 
+  function providerTable(provider: string, billingClass?: string, permitPayPerToken = false): RoutingTable {
+    return {
+      version: 0,
+      policy: { cap_aware_routing: { permit_pay_per_token: permitPayPerToken } },
+      providers: { [provider]: billingClass === undefined ? {} : { billing_class: billingClass } },
+      taskClasses: {},
+    };
+  }
+
+  function openAICompatRouting(billingClass: 'free-tier' | 'pay-per-token', permitPayPerToken = false): void {
+    const yaml = `${tempDir()}/openai-compat.yaml`;
+    writeFileSync(yaml, [
+      'version: 0', 'policy:', '  cap_aware_routing:', `    permit_pay_per_token: ${permitPayPerToken}`,
+      'providers:', '  groq:', '    auth: true-free', `    billing_class: ${billingClass}`,
+      '    execution: headless', '    models: [openai/gpt-oss-120b]',
+      'task_classes:', '  provider-billing:', '    provider: groq', '    model: openai/gpt-oss-120b', '',
+    ].join('\n'));
+    process.env.HEDDLE_ROUTING = yaml;
+  }
+
   // A fresh, under-cap claude provider snapshot with one row for `id` (so pickClaudeAccount selects it).
   function claudeCapsFor(id: string): ProviderCaps {
     return {
@@ -153,6 +174,93 @@ describe('dispatch billing enforcement (HED-395)', () => {
     // (it spawns either way), and dispatch() loads its own routing table (no permit injection). The
     // gate-deletion-sensitive direction — permit-OFF pay-per-token REFUSES with NO spawn — is proven at
     // spawn level by 'refuses pay-per-token by default' (fake.calls===0) and the REV-1 auto-effort test.
+  });
+
+  it('cleanly allows declared no-overage OpenAI-compatible pools without a registry account', () => {
+    for (const [provider, billingClass] of [['groq', 'free-tier'], ['glm', 'subscription-quota']] as const) {
+      const verdict = billingVerdict({
+        accountId: null, provider, caps: undefined, permitPayPerToken: false,
+        table: providerTable(provider, billingClass),
+      });
+      expect(verdict.refusal).toBeUndefined();
+      expect(verdict.degraded).toBeUndefined();
+    }
+  });
+
+  it('refuses a pay-per-token OpenAI-compatible pool unless policy permits it', () => {
+    const refused = billingVerdict({
+      accountId: null, provider: 'groq', caps: undefined, permitPayPerToken: false,
+      table: providerTable('groq', 'pay-per-token'),
+    });
+    expect(refused.refusal?.code).toBe('billing.pay-per-token');
+
+    const permitted = billingVerdict({
+      accountId: null, provider: 'groq', caps: undefined, permitPayPerToken: true,
+      table: providerTable('groq', 'pay-per-token', true),
+    });
+    expect(permitted.refusal).toBeUndefined();
+    expect(permitted.degraded).toBeUndefined();
+  });
+
+  it('keeps unclassified OpenAI-compatible and non-compatible null-account providers degraded', () => {
+    const unclassifiedPool = billingVerdict({
+      accountId: null, provider: 'groq', caps: undefined, permitPayPerToken: false,
+      table: providerTable('groq'),
+    });
+    const nativeProvider = billingVerdict({
+      accountId: null, provider: 'codex', caps: undefined, permitPayPerToken: false,
+      table: providerTable('codex', 'free-tier'),
+    });
+    expect(unclassifiedPool.degraded?.note).toBe('billing-degraded:account-unregistered(unset)');
+    expect(nativeProvider.degraded?.note).toBe('billing-degraded:account-unregistered(unset)');
+  });
+
+  it('keeps provider and account pay-per-token refusals on the same code', () => {
+    const providerRefusal = billingVerdict({
+      accountId: null, provider: 'groq', caps: undefined, permitPayPerToken: false,
+      table: providerTable('groq', 'pay-per-token'),
+    });
+    const accountRefusal = billingVerdict({
+      accountId: 'metered', provider: 'codex', caps: undefined, permitPayPerToken: false,
+      table: providerTable('codex'),
+      loadRegistry: () => ({ schemaVersion: 2, accounts: [{
+        id: 'metered', provider: 'codex', harness: 'codex-cli', credentialRef: 'codex:default', billingClass: 'pay-per-token',
+      }] }),
+    });
+    expect(providerRefusal.refusal?.code).toBe(accountRefusal.refusal?.code);
+    expect(providerRefusal.refusal?.code).toBe('billing.pay-per-token');
+  });
+
+  it('keeps OpenAI-compatible pool billing parity between preview and runtime enforcement', async () => {
+    openAICompatRouting('free-tier');
+    const cleanRequest: DispatchRequest = { taskClass: 'provider-billing', prompt: 'x', cwd: tempDir(), identity: unbound };
+    const cleanPlan = planDispatch(cleanRequest);
+    const cleanFake = fakeAdapter(undefined, { readAgents: false });
+    const cleanOutcome = await dispatch(cleanRequest, tempLedger(), () => cleanFake.adapter);
+    expect(cleanPlan.billingRefusal).toBeUndefined();
+    expect(summarizePlan(cleanPlan).refusal).toBeNull();
+    expect(cleanOutcome.refusal).toBeUndefined();
+    expect(cleanOutcome.billingDegraded).toBeUndefined();
+    expect(cleanFake.calls).toHaveLength(1);
+
+    openAICompatRouting('pay-per-token');
+    const refusedRequest: DispatchRequest = { taskClass: 'provider-billing', prompt: 'x', cwd: tempDir(), identity: unbound };
+    const refusedPlan = planDispatch(refusedRequest);
+    const refusedFake = fakeAdapter(undefined, { readAgents: false });
+    const refusedOutcome = await dispatch(refusedRequest, tempLedger(), () => refusedFake.adapter);
+    expect(refusedPlan.billingRefusal?.code).toBe('billing.pay-per-token');
+    expect((summarizePlan(refusedPlan).refusal as { code: string }).code).toBe('billing.pay-per-token');
+    expect(refusedOutcome.refusal?.code).toBe('billing.pay-per-token');
+    expect(refusedFake.calls).toHaveLength(0);
+  });
+
+  it('rejects an invalid provider billing class while loading routing', () => {
+    const yaml = `${tempDir()}/invalid-provider-billing.yaml`;
+    writeFileSync(yaml, [
+      'version: 0', 'providers:', '  groq:', '    billing_class: pay-per-tokn',
+      'task_classes:', '  provider-billing:', '    provider: groq', '    model: openai/gpt-oss-120b', '',
+    ].join('\n'));
+    expect(() => loadRouting(yaml)).toThrow('routing table: providers.groq.billing_class must be one of');
   });
 
   it('allows open-billing under cap and refuses it at cap (preview + spawn)', async () => {
