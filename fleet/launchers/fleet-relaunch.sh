@@ -19,15 +19,17 @@
 #   * Does NOT kill the agent's old process/tab. The caller (rotator supervisor, or a human)
 #     owns quiesce-then-kill; this script only launches. That split is deliberate: launching
 #     is idempotent-safe to retry, killing is not.
-#   * A-Q resolve through the SPI wrapper and R-Z through the HED wrapper — EXCEPT X, the SPI-side
-#     CI/infra agent, which routes to SPI too. Per-fleet model policy stays in the wrappers, not here.
+#   * A-Q resolve through the SPI wrapper, R-Z through the HED wrapper, and numbered agents through
+#     the GPT/claudex wrapper. Per-fleet model policy stays in the wrappers, not here.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
 usage() { sed -n '3,20p' "${BASH_SOURCE[0]}"; exit 2; }
 [ $# -ge 1 ] || usage
 LETTER=$(printf '%s' "$1" | tr '[:lower:]' '[:upper:]'); shift
-case "$LETTER" in [A-Z]|[1-9]) ;; *) echo "fleet-relaunch: first arg must be an agent letter/digit, got '$LETTER'" >&2; exit 2;; esac
+if ! [[ "$LETTER" =~ ^([A-Z]|[0-9]+)$ ]]; then
+  echo "fleet-relaunch: first arg must be an agent letter (A-Z) or number, got '$LETTER'" >&2; exit 2
+fi
 
 ACCOUNT=""; MODEL=""; EFFORT=""; LIST_MODE=""
 while [ $# -gt 0 ]; do
@@ -42,10 +44,19 @@ while [ $# -gt 0 ]; do
 done
 
 # Route to the owning fleet wrapper so per-fleet model defaults apply.
-case "$LETTER" in
-  [A-Q]|[1-9]) WRAPPER=./resume-sessions-spi.sh;;   # X is heddle-fleet since 2026-08-23 (fleet-scope.md, HED-355) → hed wrapper below
-  *)             WRAPPER=./resume-sessions-hed.sh;;
-esac
+if [[ "$LETTER" =~ ^[0-9]+$ ]]; then
+  # numbered/claudex fleet (resume-sessions-gpt.sh): default store, proxy-picked model
+  if [ -n "$ACCOUNT" ] || [ -n "$MODEL" ] || [ -n "$EFFORT" ]; then
+    echo "fleet-relaunch: --account/--model/--effort are not supported for numbered (claudex) agents — the proxy fleet uses the default store and the proxy picks the model." >&2
+    exit 2
+  fi
+  WRAPPER=./resume-sessions-gpt.sh
+else
+  case "$LETTER" in
+    [A-Q]) WRAPPER=./resume-sessions-spi.sh;;   # X (>Q) falls through to hed — heddle fleet
+    *)     WRAPPER=./resume-sessions-hed.sh;;
+  esac
+fi
 
 export LABEL_FILTER="$LETTER"
 export EXPECTED_AGENTS=1

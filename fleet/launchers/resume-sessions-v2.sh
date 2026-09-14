@@ -53,6 +53,11 @@
 # HEDDLE_CLI_OVERRIDE=<executable> is test-only: it replaces the default CLI path so picker
 # refusal handling can be exercised without changing real account meters.
 #
+# PLACEMENT TELEMETRY: after each successful Claude letter-fleet tab open, the launcher merge-writes
+# ~/.heddle/placement.json (override with PLACEMENT_FILE). It feeds the heddle `account pick`
+# census (HED-514 contract; the reader lands with the heddle-side picker work). It is best-effort
+# and merge-by-agent-letter, so telemetry failures never affect launching the fleet.
+#
 # FLEET COMMS: set --comms push|pull|off or FLEET_COMMS=push|pull|off (the flag wins).
 # Push is the default: every tab joins heddle-comms and receives live broadcast injection;
 # Claude Code shows one development-channels consent screen per tab (one keypress each).
@@ -116,6 +121,7 @@ FLEET_BIN="${FLEET_BIN:-claude}"   # override to `claudex` for the numbered/prox
 CLAUDE_BIN="$(command -v "$FLEET_BIN" || echo "$HOME/.local/bin/$FLEET_BIN")"
 PROJECTS="$HOME/.claude/projects"
 ACCOUNTS_FILE="$HOME/.heddle/accounts.json"
+PLACEMENT_FILE="${PLACEMENT_FILE:-$HOME/.heddle/placement.json}"
 HEDDLE_CLI_PATH="${HEDDLE_CLI_OVERRIDE:-$HOME/Developer/heddle/dist/cli.js}"
 # ACCOUNT_MODE — how tabs are assigned to accounts when NO --account pin is given (a pin always wins):
 #   picker (default) — ask the heddle CLI headroom router (`heddle account pick`). Best when meters are
@@ -225,9 +231,12 @@ case "$TAIL_MODEL_MATCH" in
   *opus-5*|*opus5*) die "TAIL_MODEL='$TAIL_MODEL' is forbidden; unset TAIL_MODEL or use claude-fable-5 for the explicit TAIL_AGENTS set." ;;
 esac
 
+LIST_MODE=0
+SKIP_CONFIRM=0
 for arg in ${ARGS[@]+"${ARGS[@]}"}; do
   case "$arg" in
-    --list|-y) ;;
+    --list) LIST_MODE=1 ;;
+    -y)     SKIP_CONFIRM=1 ;;
     *) die "unexpected positional argument '$arg'; --only accepts one quoted comma/space-separated label list (for example: --only \"S T\")." ;;
   esac
 done
@@ -235,13 +244,14 @@ done
 cleanup_batch_account_files() {
   [[ -n "$BATCH_ACCOUNT_MAP" && -f "$BATCH_ACCOUNT_MAP" ]] && rm -f "$BATCH_ACCOUNT_MAP"
   [[ -n "$BATCH_ACCOUNT_JSON" && -f "$BATCH_ACCOUNT_JSON" ]] && rm -f "$BATCH_ACCOUNT_JSON"
+  return 0
 }
 trap cleanup_batch_account_files EXIT
 trap 'cleanup_batch_account_files; trap - EXIT; exit 129' HUP
 trap 'cleanup_batch_account_files; trap - EXIT; exit 130' INT
 trap 'cleanup_batch_account_files; trap - EXIT; exit 143' TERM
 
-is_list_mode() { [[ "${1:-}" == "--list" ]]; }
+is_list_mode() { [[ "$LIST_MODE" == 1 ]]; }
 
 case "$FLEET_COMMS" in
   push|pull|off) ;;
@@ -273,6 +283,7 @@ print_comms_banner() {
 }
 
 resolve_selected_account() {
+  local soft="${1:-}"
   [[ -n "$FLEET_ACCOUNT_ID" ]] || return 0
   [[ -f "$ACCOUNTS_FILE" ]] || die "account registry not found: $ACCOUNTS_FILE"
   local row
@@ -298,6 +309,13 @@ PY
   fi
   local logged_in note
   IFS=$'\t' read -r ACCOUNT_LABEL ACCOUNT_CONFIG_DIR ACCOUNT_EMAIL logged_in note <<< "$row"
+  # --soft (used by --list for the command preview): ACCOUNT_* is now populated for an accurate
+  # display, but skip the loggedIn / share-symlink / claude-auth-status validation below, which
+  # would die when inspecting an account you are not currently logged into. The launch path
+  # (no --soft) falls through unchanged. Registry-not-found and UNKNOWN-account dies above are
+  # kept — a lookup failure is not a login-state check, and returning empty here would reproduce
+  # the very "unset CLAUDE_CONFIG_DIR" misdisplay this fixes.
+  [[ "$soft" == "--soft" ]] && return 0
   [[ "$logged_in" == "true" ]] || die "fleet account '$ACCOUNT_LABEL' is marked loggedIn:false. ${note:-Log into that config directory first.}"
   if [[ -n "$ACCOUNT_CONFIG_DIR" ]]; then
     local name target link auth_json auth_fields auth_email auth_logged_in
@@ -502,9 +520,103 @@ lookup_batch_account() { # $1=label -> account<TAB>configDir<TAB>unsetConfigDir
   awk -F '\t' -v label="$1" '$1 == label { print $2 "\t" $3 "\t" $4; found=1; exit } END { exit(found ? 0 : 1) }' "$BATCH_ACCOUNT_MAP"
 }
 
+write_placement() { # $1=launched label; best-effort caller handles failures
+  local label="$1" label_upper account config_dir unset_config_dir row
+  label_upper="$(printf '%s' "$label" | tr '[:lower:]' '[:upper:]')"
+  if [[ -n "$BATCH_ACCOUNT_MAP" ]]; then
+    row="$(lookup_batch_account "$label")" || return 1
+    account="$(printf '%s\n' "$row" | awk -F'\t' '{print $1}')"
+    config_dir="$(printf '%s\n' "$row" | awk -F'\t' '{print $2}')"
+    unset_config_dir="$(printf '%s\n' "$row" | awk -F'\t' '{print $3}')"
+    [[ "$unset_config_dir" == "true" || -z "$config_dir" ]] && config_dir=""
+  elif [[ -n "$FLEET_ACCOUNT_ID" ]]; then
+    account="$FLEET_ACCOUNT_ID"
+    config_dir="$ACCOUNT_CONFIG_DIR"
+  else
+    account="<default>"
+    config_dir=""
+  fi
+
+  PLACEMENT_FILE="$PLACEMENT_FILE" PLACEMENT_AGENT="$label_upper" \
+    PLACEMENT_ACCOUNT="$account" PLACEMENT_CONFIG_DIR="$config_dir" python3 - <<'PY'
+import json
+import os
+import sys
+import tempfile
+import time
+import fcntl
+
+path = os.environ['PLACEMENT_FILE']
+agent = os.environ['PLACEMENT_AGENT']
+account = os.environ['PLACEMENT_ACCOUNT']
+config_dir = os.environ['PLACEMENT_CONFIG_DIR'] or None
+
+try:
+    directory = os.path.dirname(path) or '.'
+    os.makedirs(directory, exist_ok=True)
+    lock_fd = os.open(path + '.lock', os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(lock_fd, fcntl.LOCK_EX)
+except OSError:
+    raise SystemExit(1)
+
+try:
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            raise ValueError('top-level JSON value is not an object')
+        entries = data.get('entries', [])
+        if not isinstance(entries, list):
+            raise ValueError('entries is not an array')
+    except FileNotFoundError:
+        data = {}
+        entries = []
+    except (json.JSONDecodeError, ValueError) as exc:
+        print('warn: placement.json unreadable or corrupt (%s); starting fresh' % exc, file=sys.stderr)
+        data = {}
+        entries = []
+    except OSError as exc:
+        print('warn: placement.json unreadable (%s); leaving it untouched' % exc, file=sys.stderr)
+        raise SystemExit(1)
+
+    def is_same_agent(entry):
+        return isinstance(entry, dict) and isinstance(entry.get('agent'), str) and entry['agent'].upper() == agent
+
+    data['entries'] = [entry for entry in entries if not is_same_agent(entry)]
+    data['entries'].append({
+        'agent': agent,
+        'account': account,
+        'configDir': config_dir,
+        'startedAtMs': int(time.time() * 1000),
+    })
+    data['writtenAt'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+
+    # Concurrent launchers serialize read-merge-replace via this sidecar flock.
+    tmp_path = None
+    try:
+        fd, tmp_path = tempfile.mkstemp(prefix='.placement.', dir=directory)
+        with os.fdopen(fd, 'w') as f:
+            json.dump(data, f, separators=(',', ':'))
+            f.write('\n')
+        os.replace(tmp_path, path)
+    except OSError:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+        raise SystemExit(1)
+finally:
+    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+    os.close(lock_fd)
+PY
+}
+
 # --list intentionally bypasses explicit-account registry validation; no-account list runs still
 # batch-pick so the table/commands expose the account assignment without opening tabs.
-if ! is_list_mode "$@"; then
+if is_list_mode; then
+  resolve_selected_account --soft
+else
   resolve_selected_account
   print_account_banner
 fi
@@ -731,7 +843,18 @@ build_cmd() { # $1=id  $2=cwd  $3=label
   [[ "${RESUME_SHELL:-bash}" == "zsh" ]] || printf 'export CLAUDE_CODE_SHELL=/bin/bash && '
   # EXTRA_ENV still applies to the whole session. Pin/unset CLAUDE_CONFIG_DIR after it
   # so a caller cannot accidentally override the selected account (or leak one into default).
-  [[ -n "$EXTRA_ENV" ]] && printf 'export %s && ' "$EXTRA_ENV"
+  if [[ -n "$EXTRA_ENV" ]]; then
+    local _envs _a _name
+    read -r -a _envs <<< "$EXTRA_ENV"
+    for _a in ${_envs[@]+"${_envs[@]}"}; do
+      _name="${_a%%=*}"
+      if [[ "$_a" != *=* || ! "$_name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+        echo "WARNING: ignoring malformed EXTRA_ENV token (need NAME=value): $_a" >&2
+        continue
+      fi
+      printf 'export %s=%q && ' "$_name" "${_a#*=}"
+    done
+  fi
   if [[ -n "$BATCH_ACCOUNT_MAP" ]]; then
     local batch_account batch_config_dir batch_unset_config_dir batch_row
     batch_row="$(lookup_batch_account "$3")" || die "batch account picker returned no assignment for agent $3"
@@ -791,7 +914,7 @@ print_table() {
 }
 
 # ---- --list mode: print and exit, launch nothing --------------------------------
-if [[ "${1:-}" == "--list" ]]; then
+if is_list_mode; then
   print_comms_banner
   print_table
   echo
@@ -859,7 +982,7 @@ if [[ -z "$ONLY" && -z "$LABEL_FILTER" ]]; then
     fi
   fi
 fi
-if [[ "${1:-}" != "-y" ]]; then
+if [[ "$SKIP_CONFIRM" != 1 ]]; then
   if [[ "$MODEL_PINS" == "off" ]]; then
     echo "About to open $COUNT tabs, each running:  cd <dir> && $(basename "$CLAUDE_BIN") $SKIP_PERMS --resume <id>"
     echo "(Auth is the launcher's own login — e.g. the claudex proxy's ChatGPT session, not Anthropic.)"
@@ -967,6 +1090,9 @@ while IFS=$'\t' read -r label id cwd branch; do
     open_terminal_window "$cmd"
   fi
   opened=$((opened+1))
+  if [[ "$LABEL_MODE" == "letters" && "$FLEET_BIN" == "claude" ]]; then
+    write_placement "$label" || echo "warn: placement.json write failed for $label (launch unaffected)" >&2
+  fi
   sleep 0.6   # let the terminal settle so tabs land in order
 done <<< "$TABLE"
 
