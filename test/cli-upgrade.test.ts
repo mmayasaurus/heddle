@@ -1,10 +1,19 @@
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { runCli, withTempHome } from './helpers/cli.js';
 import { PROJECTS_SCHEMA_VERSION } from '../src/projects.js';
 
 const fleetBin = (home: string) => join(home, '.heddle', 'fleet', 'bin');
+const canonBinDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'fleet', 'bin');
+// The canonical bin set `heddle upgrade` installs from, enumerated the SAME way installFleetBin does
+// (fleet/bin, filtered to the shipped extensions). Deriving the expectation from the canon keeps this
+// test from re-staling whenever a bin tool is vendored — it hardcoded 10 and broke when HED-549 shipped 21.
+// Read lazily (inside the test), never at import: the standalone ship set includes this test file but
+// omits fleet/, so a module-top-level readdirSync would throw ENOENT at collection time there.
+const canonBinFiles = (): string[] =>
+  readdirSync(canonBinDir).filter((name) => /\.(sh|py|mjs)$/.test(name)).sort();
 
 describe('heddle upgrade', () => {
   it('migrates a legacy accounts registry, reports an absent projects registry, and creates missing fleet assets', async () => {
@@ -23,7 +32,7 @@ describe('heddle upgrade', () => {
     ]));
     expect(JSON.parse(readFileSync(accounts, 'utf8'))).toMatchObject({ schemaVersion: 2 });
     expect(readdirSync(home).some((name) => name.startsWith('legacy-accounts.json.bak-v1-'))).toBe(true);
-    expect(readdirSync(fleetBin(home))).toHaveLength(10);
+    expect(readdirSync(fleetBin(home)).sort()).toEqual(canonBinFiles());
     expect(report.assets).toEqual(expect.arrayContaining([expect.objectContaining({ kind: 'bin', action: 'created' })]));
   });
 
