@@ -116,4 +116,18 @@ describe('uninstall', () => {
     expect(report.warnings.join('\n')).toContain(link);
     expect(report.removed).toContain(join(targetDir, 'two.py')); // the untouched identical file is still removed
   });
+
+  it('emits a structured JSON error to stdout on an unknown argument under --json, without removing anything', async () => {
+    const home = withTempHome();
+    expect((await runCli(['fleet', 'install-hooks'], { home })).code).toBe(0);
+    const target = join(home, '.heddle', 'fleet', 'hooks', 'agent-identity.py');
+
+    const bad = await runCli(['uninstall', '--json', '--bogus'], { home });
+
+    expect(bad.code).toBe(2);
+    // --json callers must get parseable stdout, not an empty stream (the plain message goes to stderr
+    // without --json). This also proves the drain-before-exit path yields exit 2, not a racing exit 0.
+    expect(JSON.parse(bad.stdout)).toMatchObject({ ok: false, error: expect.stringContaining('--bogus') });
+    expect(existsSync(target)).toBe(true); // rejected before any removal
+  });
 });
