@@ -1,4 +1,4 @@
-import { cpSync, mkdtempSync, readFileSync, readdirSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdtempSync, readFileSync, readdirSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join, relative, sep } from 'node:path';
@@ -49,12 +49,23 @@ describe('fleet parity manifest', () => {
     expect(generator.stderr).toContain('fleet manifest: non-regular entry at bin/smuggle');
   });
 
-  it('script no-op output matches the test renderer and committed manifest', () => {
+  it('script regenerates the committed manifest from a clean tree (deleted first, so a no-op cannot pass)', () => {
     const copiedFleet = join(mkdtempSync(join(tmpdir(), 'heddle-fleet-manifest-test-')), 'fleet');
     cpSync(join(PROJECT_ROOT, 'fleet'), copiedFleet, { recursive: true });
+    unlinkSync(join(copiedFleet, 'MANIFEST.sha256'));
     execFileSync(process.execPath, [join(PROJECT_ROOT, 'scripts', 'fleet-manifest.mjs'), copiedFleet]);
     const generated = readFileSync(join(copiedFleet, 'MANIFEST.sha256'), 'utf8');
     expect(generated).toBe(renderedManifest(copiedFleet));
     expect(generated).toBe(readFileSync(join(PROJECT_ROOT, 'fleet', 'MANIFEST.sha256'), 'utf8'));
+  });
+
+  it('script output tracks tree content, diverging from the committed manifest on a tampered copy', () => {
+    const copiedFleet = join(mkdtempSync(join(tmpdir(), 'heddle-fleet-manifest-test-')), 'fleet');
+    cpSync(join(PROJECT_ROOT, 'fleet'), copiedFleet, { recursive: true });
+    writeFileSync(join(copiedFleet, 'bin', 'lin.sh'), 'tampered\n');
+    execFileSync(process.execPath, [join(PROJECT_ROOT, 'scripts', 'fleet-manifest.mjs'), copiedFleet]);
+    const generated = readFileSync(join(copiedFleet, 'MANIFEST.sha256'), 'utf8');
+    expect(generated).toBe(renderedManifest(copiedFleet));
+    expect(generated).not.toBe(readFileSync(join(PROJECT_ROOT, 'fleet', 'MANIFEST.sha256'), 'utf8'));
   });
 });
