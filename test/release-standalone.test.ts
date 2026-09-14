@@ -197,6 +197,115 @@ describe('regression PR#119 — standalone snapshot generator review findings', 
   }, 120_000);
 });
 
+describe('HED-507 — headless-first main-HEAD invariant', () => {
+  const { tempDir } = useTempResources('heddle-standalone-invariant-');
+
+  it("passes on a clean main HEAD and ships exactly main's tip commit", () => {
+    const root = tempDir();
+    const source = snapshotSource(root);
+    const outDir = join(root, 'output');
+    const mainTip = execFileSync('git', ['rev-parse', 'refs/heads/main'], { cwd: source, encoding: 'utf8' }).trim();
+
+    const result = releaseStandalone({ outDir, sourceDir: source });
+
+    expect(result.ok).toBe(true);
+    expect(existsSync(outDir)).toBe(true);
+    expect(result.sourceCommit).toBe(mainTip);
+  });
+
+  it('rejects a dirty working tree without touching the destination', () => {
+    const root = tempDir();
+    const source = snapshotSource(root);
+    const outDir = join(root, 'output');
+    writeFileSync(join(source, 'LICENSE'), `${readFileSync(join(source, 'LICENSE'), 'utf8')}\ndirty\n`);
+
+    const result = releaseStandalone({ outDir, sourceDir: source });
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/working tree is not clean/i);
+    expect(existsSync(outDir)).toBe(false);
+  });
+
+  it("rejects an ancestor of main (HEAD~1) — proves the gate is main's tip, not merely on main's history", () => {
+    const root = tempDir();
+    const source = snapshotSource(root);
+    const outDir = join(root, 'output');
+    // second commit on main, so HEAD~1 is a real ancestor that IS on main's history but is not the tip
+    writeFileSync(join(source, 'second.txt'), 'second\n');
+    execFileSync('git', ['add', '.'], { cwd: source });
+    execFileSync('git', [
+      '-c', 'user.name=test', '-c', 'user.email=test@example.com', 'commit', '-qm', 'second',
+    ], { cwd: source });
+
+    const result = releaseStandalone({ outDir, sourceDir: source, sourceRef: 'HEAD~1' });
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/not main's HEAD/i);
+    expect(existsSync(outDir)).toBe(false);
+  });
+
+  it('rejects the default HEAD when checked out off main (a feature branch)', () => {
+    const root = tempDir();
+    const source = snapshotSource(root);
+    const outDir = join(root, 'output');
+    execFileSync('git', ['checkout', '-q', '-b', 'feature'], { cwd: source });
+    writeFileSync(join(source, 'feature.txt'), 'feature\n');
+    execFileSync('git', ['add', '.'], { cwd: source });
+    execFileSync('git', [
+      '-c', 'user.name=test', '-c', 'user.email=test@example.com', 'commit', '-qm', 'feature commit',
+    ], { cwd: source });
+
+    // no sourceRef → defaults to HEAD, which is now the feature tip, not main's tip
+    const result = releaseStandalone({ outDir, sourceDir: source });
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/not main's HEAD/i);
+    expect(existsSync(outDir)).toBe(false);
+  });
+
+  it('reports the dirty tree before the off-tip ref when a source is both', () => {
+    const root = tempDir();
+    const source = snapshotSource(root);
+    const outDir = join(root, 'output');
+    execFileSync('git', ['checkout', '-q', '-b', 'feature'], { cwd: source });
+    writeFileSync(join(source, 'feature.txt'), 'feature\n');
+    execFileSync('git', ['add', '.'], { cwd: source });
+    execFileSync('git', [
+      '-c', 'user.name=test', '-c', 'user.email=test@example.com', 'commit', '-qm', 'feature commit',
+    ], { cwd: source });
+    // now also dirty the tree; both the dirty-tree and off-tip conditions hold
+    writeFileSync(join(source, 'LICENSE'), `${readFileSync(join(source, 'LICENSE'), 'utf8')}\ndirty\n`);
+
+    const result = releaseStandalone({ outDir, sourceDir: source });
+
+    expect(result.ok).toBe(false);
+    // dirty is checked before the ref/tip comparison — the operator-friendly order
+    expect(result.error).toMatch(/working tree is not clean/i);
+    expect(existsSync(outDir)).toBe(false);
+  });
+
+  it('rejects a source with no local main branch', () => {
+    const root = tempDir();
+    const source = join(root, 'source');
+    const outDir = join(root, 'output');
+    mkdirSync(source);
+    execFileSync('git', ['init', '-q', '-b', 'other'], { cwd: source });
+    execFileSync('git', ['config', 'maintenance.auto', 'false'], { cwd: source });
+    execFileSync('git', ['config', 'gc.auto', '0'], { cwd: source });
+    writeFileSync(join(source, 'file.txt'), 'content\n');
+    execFileSync('git', ['add', '.'], { cwd: source });
+    execFileSync('git', [
+      '-c', 'user.name=test', '-c', 'user.email=test@example.com', 'commit', '-qm', 'initial',
+    ], { cwd: source });
+
+    const result = releaseStandalone({ outDir, sourceDir: source });
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/no local 'main'|main checkout/i);
+    expect(existsSync(outDir)).toBe(false);
+  });
+});
+
 function fileList(root: string, prefix = ''): string[] {
   return readdirSync(join(root, prefix), { withFileTypes: true }).flatMap((entry) => {
     const path = join(prefix, entry.name);
@@ -225,7 +334,7 @@ function snapshotSource(root: string, additions: Record<string, string> = {}): s
     mkdirSync(dirname(join(source, path)), { recursive: true });
     writeFileSync(join(source, path), contents);
   }
-  execFileSync('git', ['init', '-q'], { cwd: source });
+  execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: source });
   // Disable the detached `git maintenance run --auto` that `git commit` forks: it writes into .git
   // after the command returns and races the fixture's recursive teardown rm → ENOTEMPTY on
   // source/.git under CI load. maintenance.auto=false is the lever (gc.auto=0 alone does not stop the

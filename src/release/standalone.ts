@@ -12,6 +12,10 @@ export type StandaloneOptions = {
 export type StandaloneResult = { ok: boolean; error?: string; sourceCommit?: string; shipSetHash?: string };
 
 export function releaseStandalone(options: StandaloneOptions): StandaloneResult {
+  // The invariant is about the SOURCE, so it gates first: a stale outDir/tempDir must not mask an
+  // off-main or dirty source (HED-507 review F5). Nothing below depends on this order.
+  const invariant = assertCleanMainHead(options.sourceDir ?? process.cwd(), options.sourceRef ?? 'HEAD');
+  if (!invariant.ok) return { ok: false, error: invariant.error };
   const outDir = resolve(options.outDir);
   if (existsSync(outDir)) return { ok: false, error: `destination already exists: ${outDir}` };
   const tempDir = `${outDir}.tmp-${process.pid}`;
@@ -22,6 +26,55 @@ export function releaseStandalone(options: StandaloneOptions): StandaloneResult 
     rmSync(tempDir, { recursive: true, force: true });
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
+}
+
+// Git honors a family of environment variables that silently redirect it to a different repository
+// (GIT_DIR / GIT_WORK_TREE / GIT_COMMON_DIR / GIT_INDEX_FILE / GIT_OBJECT_DIRECTORY) or inject config
+// without touching a file (GIT_CONFIG* / GIT_CONFIG_KEY_n / VALUE_n). This gate must reason about the
+// operator's checkout at `sourceDir`, so every git call here runs with those stripped. Mirrors
+// src/worktree.ts's GIT_ENV_OVERRIDES — that is the canonical list; keep the two in sync. (HED-507 review F3)
+const GIT_ENV_OVERRIDES = new Set([
+  'GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY',
+  'GIT_CONFIG', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM', 'GIT_CONFIG_COUNT', 'GIT_CONFIG_PARAMETERS',
+  'GIT_CEILING_DIRECTORIES', 'GIT_DISCOVERY_ACROSS_FILESYSTEM',
+]);
+const GIT_ENV_OVERRIDE_RE = /^GIT_CONFIG_(?:KEY|VALUE)_\d+$/;
+
+function gitEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [name, value] of Object.entries(process.env)) {
+    if (!GIT_ENV_OVERRIDES.has(name) && !GIT_ENV_OVERRIDE_RE.test(name)) env[name] = value;
+  }
+  return env;
+}
+
+// The headless-first invariant (HED-507, docs/ARCHITECTURE.md#headless-first-invariant): a standalone
+// artifact must be cut from a clean checkout whose source ref is main's current HEAD — not merely an
+// ancestor of main. An ancestor (e.g. `--source-ref main~3` or a merged side branch) would ship a tree
+// that diverges from the source of truth while looking legitimate, which is exactly what this prevents.
+export function assertCleanMainHead(sourceDir: string, sourceRef: string): { ok: boolean; error?: string } {
+  const git = (args: string[]) => spawnSync('git', args, { cwd: sourceDir, encoding: 'utf8', env: gitEnv() });
+  const mainRef = git(['rev-parse', '--verify', '--quiet', 'refs/heads/main']);
+  if (mainRef.status !== 0) {
+    return { ok: false, error: "release: the source has no local 'main' branch — the standalone must be cut from a clean main checkout (headless-first invariant, HED-507; docs/ARCHITECTURE.md#headless-first-invariant)" };
+  }
+  const mainHead = (mainRef.stdout ?? '').trim();
+  const porcelain = git(['status', '--porcelain']);
+  if (porcelain.status !== 0) {
+    return { ok: false, error: 'release: could not read the source working-tree status (not a git checkout?) — the standalone must be cut from a clean main checkout (headless-first invariant, HED-507)' };
+  }
+  if ((porcelain.stdout ?? '').trim() !== '') {
+    return { ok: false, error: 'release: the source working tree is not clean — commit or stash changes; the standalone must be cut from a clean main checkout (headless-first invariant, HED-507)' };
+  }
+  const rev = git(['rev-parse', '--verify', `${sourceRef}^{commit}`]);
+  if (rev.status !== 0) {
+    return { ok: false, error: `release: could not resolve source ref '${sourceRef}' (headless-first invariant, HED-507)` };
+  }
+  const commit = (rev.stdout ?? '').trim();
+  if (commit !== mainHead) {
+    return { ok: false, error: `release: source commit ${commit.slice(0, 12)} is not main's HEAD ${mainHead.slice(0, 12)} — check out main and pull (headless-first invariant, HED-507)` };
+  }
+  return { ok: true };
 }
 
 function generate(options: StandaloneOptions, outDir: string, tempDir: string): StandaloneResult {

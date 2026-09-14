@@ -101,6 +101,7 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
   heddle whoami [--json]         this process's bound identity (HEDDLE_AGENT / FLEET_AGENT / .fleet-agent) + worker context
   heddle doctor [--json] [--provider <p>]   verify harnesses/accounts/config; --provider runs only that provider's checks plus global config checks (exit 1 on any fail)
   heddle release --standalone <outDir> [--source-ref <git ref>] [--init-git] [--verify] [--json]
+      requires a clean checkout at main's HEAD — headless-first invariant (HED-507)
   heddle workers [--stale <hours>] [--json]   dispatches still in flight (--stale: only orphans older than N hours)
   heddle ledger [--issue ABC-123] [--limit N] [--json]
   heddle ledger finish <id> --error "<why>"   close an orphaned in-flight row (ok=0)
