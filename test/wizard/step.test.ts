@@ -52,4 +52,18 @@ describe('wizard step contract (HED-564)', () => {
     const result = await step.run(context({ results: new Map([['accounts', prior]]) }), { prompter: noopPrompter, report: () => {} });
     expect(result).toMatchObject({ id: 'reader', status: 'done', summary: '2 accounts' });
   });
+
+  it('the contract forbids mutating a prior result or the results map (compile-time)', () => {
+    // Never invoked: its body exists purely so `tsc` validates the readonly guarantees. If a
+    // readonly modifier regresses, the summary-line @ts-expect-error goes unused and the build fails.
+    const assertImmutable = (ctx: WizardContext): void => {
+      const prior = ctx.results.get('accounts');
+      if (!prior) return;
+      // @ts-expect-error — WizardStepResult.summary is readonly: a later step cannot rewrite a prior result.
+      prior.summary = 'tampered';
+      // @ts-expect-error — results is a ReadonlyMap: a step cannot inject or replace entries.
+      ctx.results.set('injected', prior);
+    };
+    expect(typeof assertImmutable).toBe('function');
+  });
 });

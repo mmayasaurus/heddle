@@ -18,14 +18,18 @@ export interface WizardIO {
 
 export type WizardStepStatus = 'done' | 'skipped' | 'failed';
 
-/** What a step reports back to the orchestrator for the finish screen and for later steps to read. */
+/**
+ * What a step reports back to the orchestrator for the finish screen and for later steps to read.
+ * Immutable: fields are `readonly` and prior results reach later steps through a `ReadonlyMap`
+ * (see `WizardContext.results`), so a step can never rewrite an earlier step's reported result.
+ */
 export interface WizardStepResult {
-  id: string;
-  status: WizardStepStatus;
+  readonly id: string;
+  readonly status: WizardStepStatus;
   /** One-line, human-readable summary — always echo the chosen value (never a silent default). */
-  summary: string;
+  readonly summary: string;
   /** Optional multi-line detail. */
-  detail?: string;
+  readonly detail?: string;
 }
 
 /** Shared, read-only context passed to every step. A step writes its own config; it does not mutate this. */
@@ -36,8 +40,11 @@ export interface WizardContext {
   targetDir?: string;
   /** Injectable clock so steps are deterministic under test. */
   now(): Date;
-  /** Prior steps' results, keyed by step id — for pre-fill and conditional skip. */
-  results: ReadonlyMap<string, WizardStepResult>;
+  /**
+   * Prior steps' results, keyed by step id — for pre-fill and conditional skip. Values are
+   * immutable: a step reads a prior result but never rewrites it.
+   */
+  results: ReadonlyMap<string, Readonly<WizardStepResult>>;
 }
 
 /** One step in the setup walkthrough. Exported by each step module; wired into the orchestrator by HED-564. */
