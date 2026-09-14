@@ -92,6 +92,14 @@ providers:
     quality_tier: workhorse
     last_verified: 2026-09-05
     notes: subscription class; 5-hour + weekly credit pools
+  # INERT (HED-560/S2); activation is a later slice, human-gated.
+  local:
+    auth: none
+    execution: headless
+    base_url: http://localhost:1234/v1
+    models: []
+    quality_tier: local-review
+    last_verified: 2026-09-14
   cursor:
     auth: cursor-subscription         # Max plan
     # ⚠️ TWO POOLS, and they are NOT interchangeable:
