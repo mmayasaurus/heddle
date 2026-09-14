@@ -17,6 +17,7 @@ import type { WorkerResult } from '../types.js';
 import { packsFor, requestedPacks } from './packs.js';
 import { baseRecord, refusalOutcome, refuseBilling, webRefusalReason } from './refusals.js';
 import { billingVerdict } from './billing.js';
+import { tierReadOnlyVerdict } from './tier-gate.js';
 import type { DispatchContext, DispatchRequest, DispatchOutcome, DispatchRefusal } from './types.js';
 
 export async function runTarget(
@@ -75,9 +76,14 @@ export async function runTarget(
     permitPayPerToken: capAwarePolicy(ctx.table).permitPayPerToken,
     table: ctx.table,
   });
+  const tierGate = tierReadOnlyVerdict({
+    accountId: ctx.account ?? null,
+    provider: target.provider,
+    readOnly: route.readOnly,
+  });
   const gateChecks: Array<() => DispatchRefusal | null> = [
     () => billing.refusal ?? null, // HED-395 billing/overage — money-safety, first
-    // HED-404 (tier read-only): add its typed check here — billing stays first.
+    () => tierGate.refusal ?? null, // HED-404 structural read-only tier eligibility — after billing
   ];
   for (const check of gateChecks) {
     const veto = check();
