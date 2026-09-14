@@ -26,6 +26,7 @@ with createAsUser "PR Sync" so the list is visibly machine-maintained.
 
 Run it directly (any instance, Maya, or a future cron): .claude/bin/pr-linear-sync.sh
 """
+import hashlib
 import json
 import os
 import pathlib
@@ -39,13 +40,67 @@ import urllib.request
 
 FLEET = pathlib.Path(os.path.expanduser("~/.claude/spinventory-fleet"))
 # State is per-repo: the default Spinventory repo keeps the legacy filename; other repos get
-# pr-sync-state.<repo-basename>.json so their PR-<n> tracking never collides.
+# pr-sync-state.<repo-basename>.<hash>.json. The basename alone is NOT unique — two different repos
+# that share a basename (…/a/heddle and …/b/heddle) would collide on one state file and clobber each
+# other's PR-<n> tracking — so an 8-char hash of the resolved realpath disambiguates them. Pure: no
+# side effects (this runs at import, before the state lock exists), so a migration must NOT live here.
 def _state_path():
     d = os.environ.get("SYNC_REPO_DIR", "").strip()
     if not d:
         return FLEET / "pr-sync-state.json"
-    return FLEET / f"pr-sync-state.{pathlib.Path(d).name}.json"
+    # Derive BOTH the basename and the hash from the RESOLVED realpath, so a symlink alias whose
+    # basename differs from its target still maps to one state file (not a duplicate namespace).
+    rp = os.path.realpath(os.path.expanduser(d))
+    h = hashlib.sha256(rp.encode()).hexdigest()[:8]
+    return FLEET / f"pr-sync-state.{pathlib.Path(rp).name}.{h}.json"
 STATE_PATH = _state_path()
+
+
+# The pre-hash filename a non-default repo used before the collision fix; None for the default repo
+# (its path never changed). Used once, UNDER THE LOCK in main(), to migrate an existing state file
+# onto the new hashed name so 100+ tracked PRs aren't orphaned (which would double-create PR issues).
+def _legacy_state_path():
+    d = os.environ.get("SYNC_REPO_DIR", "").strip()
+    if not d:
+        return None
+    return FLEET / f"pr-sync-state.{pathlib.Path(d).name}.json"
+
+
+# Serialize concurrent syncs: two runs that both read the same baseline state and then save() would
+# clobber each other (last-writer-wins) and double-create PR issues. An exclusive flock on a sidecar
+# lock file, acquired before the state read and held for the life of this one-shot process (the OS
+# releases it at exit), makes the read-modify-write of the shared state file mutually exclusive.
+def _lock_state_file():
+    import fcntl  # POSIX-only; imported lazily so the pure state-path helpers import on any platform
+    lock_path = str(STATE_PATH) + ".lock"
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    return fd
+
+
+def _migrate_legacy_state():
+    """One-time: MOVE a pre-hash legacy state file onto the collision-proof hashed name (finding 2),
+    RETIRING the legacy in one atomic rename. Retiring it (rather than copying and leaving it in place)
+    is the point: a later SYNC_REPO_DIR that shares this basename then finds no legacy and correctly
+    starts fresh, instead of ingesting these mappings and updating another repo's Linear issues. The
+    move preserves every mapping (content lives on at the new path — this is a rename, not a deletion).
+    Idempotent; call under the state lock. A corrupt legacy is fatal — same as the pre-existing direct
+    read would be — since silently starting empty would double-create every PR issue."""
+    legacy = _legacy_state_path()
+    if legacy is None or STATE_PATH.exists() or not legacy.exists():
+        return
+    try:
+        with open(legacy) as f:
+            json.load(f)
+    except (OSError, ValueError) as e:
+        sys.exit(f"pr-linear-sync: cannot read legacy state {legacy} for migration: {e}")
+    try:
+        os.replace(legacy, STATE_PATH)
+    except FileNotFoundError:
+        return  # a concurrent same-basename migration already moved it; start fresh (correct)
+    os.chmod(STATE_PATH, 0o600)
+
+
 TOKEN_KEY = "A"  # acts via Agent A's app token; display attribution is "PR Sync"
 # Repo to sync. Default = the Spinventory app repo; the heddle repos pass their own path via
 # SYNC_REPO_DIR (added 2026-08-15 for the HED team). Each repo keeps its own state namespace.
@@ -181,11 +236,20 @@ def pr_state_name(pr):
 
 
 def main():
+    # Hold the state lock for the whole run (finding 3): acquired before any state read and released
+    # by the OS at process exit. Keep the fd referenced so it isn't garbage-collected (which would
+    # close it and drop the lock).
+    _state_lock_fd = _lock_state_file()  # noqa: F841 — intentionally held until process exit
+
     states = gql('{ workflowStates(filter:{team:{key:{eq:"%s"}}}) '
                  '{ nodes { id name } } }' % PR_TEAM_KEY)["workflowStates"]["nodes"]
     state_id = {s["name"]: s["id"] for s in states}
     team_id = gql('{ teams(filter:{key:{eq:"%s"}}) { nodes { id } } }'
                   % PR_TEAM_KEY)["teams"]["nodes"][0]["id"]
+
+    # One-time migration to the collision-proof hashed state filename (finding 2), UNDER THE LOCK so
+    # two concurrent first-runs can't both migrate. Moves + retires the legacy — see _migrate_legacy_state.
+    _migrate_legacy_state()
 
     state = {"prs": {}}
     if STATE_PATH.exists():

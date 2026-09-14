@@ -61,10 +61,12 @@ latest_marker_id() {
 }
 field() { printf '%s' "$1" | grep -oE "$2=[^ ]+" | head -1 | cut -d= -f2; }
 
-# Parse latest marker → sets M_OWNER, M_SINCE, M_HB, M_AGE_H (hours, integer). Returns 1 if no marker.
+# Parse latest marker → sets M_OWNER, M_SINCE, M_HB, M_AGE_H (hours, integer).
+# Returns: 0 marker parsed · 1 read OK but no marker · 2 the gh/API read FAILED (unreadable).
 parse_marker() {
-  local body; body=$(latest_marker_body "$1")
-  [ -z "$body" ] && return 1
+  local body rc; body=$(latest_marker_body "$1"); rc=$?
+  [ "$rc" -ne 0 ] && return 2       # gh/API read FAILED — caller must NOT treat this as "no marker"
+  [ -z "$body" ] && return 1        # read OK, genuinely no marker
   M_OWNER=$(field "$body" owner); M_SINCE=$(field "$body" since); M_HB=$(field "$body" heartbeat)
   [ -z "$M_OWNER" ] && return 1
   local hb_e now_e; hb_e=$(iso_to_epoch "$M_HB"); now_e=$(date -u +%s)
@@ -125,6 +127,17 @@ case "$cmd" in
 
   release)
     [ -n "$pr" ] || die_open "usage: pr-own.sh release <pr#>"
+    # Guard against releasing a PR another instance FRESHLY owns: dropping its `claimed` label and
+    # posting a released marker would strand its active owner (the exact clobber pr-ownership is meant
+    # to prevent). parse_marker distinguishes a FAILED read (rc 2) from a genuinely-absent marker
+    # (rc 1) — so a partial gh outage that fails the comments read fails-OPEN here (die_open, mutate
+    # nothing) instead of masquerading as "unowned" and stripping a live claim. Refuse (exit 3) only
+    # on a successfully-read marker owned, fresh, by someone else. Predicate mirrors `claim` above.
+    parse_marker "$pr"; pm=$?
+    [ "$pm" -eq 2 ] && die_open "cannot read ownership marker for PR #$pr (gh/API) — not releasing"
+    if [ "$pm" -eq 0 ] && [ "$M_OWNER" != "$me" ] && [ "$M_OWNER" != "released" ] && [ "$M_AGE_H" -lt "$STALE_HOURS" ]; then
+      echo "REFUSED — PR #$pr is owned by '$M_OWNER' (fresh, heartbeat ${M_AGE_H}h ago) — not yours to release. STAND DOWN or coordinate with Maya." >&2; exit 3
+    fi
     gh pr edit "$pr" --remove-label claimed >/dev/null 2>&1 || true
     gh pr comment "$pr" --body "$MARK_PREFIX owner=released since=- heartbeat=$(now_iso) --> · '$me' is releasing PR #$pr — free for another instance to adopt (pr-own.sh claim $pr)." >/dev/null 2>&1 \
       && echo "OK — PR #$pr released by '$me'" || die_open "could not post release note" ;;

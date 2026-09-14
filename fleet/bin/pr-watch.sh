@@ -50,16 +50,36 @@ fi
 OWNER="${REPO%%/*}"; NAME="${REPO##*/}"
 
 STATE_DIR="${PR_WATCH_STATE_DIR:-$HOME/.claude/spinventory-fleet/pr-watch}"
-mkdir -p "$STATE_DIR"
+# A watcher that cannot persist its dedup state is WORSE than useless: emit() silently no-ops and
+# every poll re-emits every item, which reads to the agent as "everything is new" on every wake. So
+# fail loud and refuse to run if the state dir/file can't be established. This is all BEFORE the
+# first gh call below, so a broken state area is caught with no network cost. (set -uo pipefail has
+# no -e, so these outcomes must be checked explicitly.)
+if ! mkdir -p "$STATE_DIR" 2>/dev/null; then
+  echo "[watch-error] cannot create state dir '$STATE_DIR' — dedup impossible; refusing to run so a broken watcher never masquerades as 'everything is new'" >&2
+  exit 3
+fi
 STATE="$STATE_DIR/$(printf '%s' "$REPO" | tr '/:' '__')-$PR.seen"
-[ "$RESET" -eq 1 ] && : > "$STATE"
-[ -f "$STATE" ] || : > "$STATE"
+[ "$RESET" -eq 1 ] && : > "$STATE" 2>/dev/null
+[ -f "$STATE" ] || : > "$STATE" 2>/dev/null
+# Prove STATE is a regular, APPENDABLE file. `[ -w ]` alone is not enough: it is true for a writable
+# DIRECTORY, and the `: >` creations above are unchecked. emit() appends to STATE on every new item;
+# if that append silently fails, the watcher re-emits every item on every poll.
+if [ ! -f "$STATE" ] || ! { : >> "$STATE"; } 2>/dev/null; then
+  echo "[watch-error] state file '$STATE' is not an appendable regular file — dedup impossible; refusing to run" >&2
+  exit 3
+fi
 
 # emit KEY DISPLAY... : if KEY is new, print DISPLAY (unless seeding) and record KEY. READ-ONLY.
 emit() {
   local key="$1"; shift
   grep -qxF "$key" "$STATE" 2>/dev/null && return 0
-  printf '%s\n' "$key" >> "$STATE"
+  # Print the item only AFTER its dedup key is persisted; a silently-failing append would otherwise
+  # re-emit the same item every poll. Surface an append failure as [watch-error], never a phantom item.
+  if ! printf '%s\n' "$key" >> "$STATE" 2>/dev/null; then
+    printf '[watch-error] cannot persist dedup key to %s — item may re-emit next poll\n' "$STATE" >&2
+    return 0
+  fi
   [ "$SEED" -eq 1 ] || printf '%s\n' "$*"
 }
 

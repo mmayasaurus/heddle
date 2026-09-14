@@ -265,7 +265,8 @@ server.tool(
     'execution, effort, fallback, opt-in), WHY to pick it, the default skill packs a dispatch gets ' +
     'when you omit `skills`, its default MCP servers, and whether its workers edit code. Consult ' +
     'this to pick the right class — fit and cost, not a favorite model — before dispatching. ' +
-    '`execution: in-session-subagent` means use your own Agent tool with the routed model.',
+    '`execution: in-session-subagent` means use your own Agent tool with the routed model. A ' +
+    'prefer-only class without a concrete literal reports null provider/model; consult its prefer list.',
   {},
   async () => {
     try {
