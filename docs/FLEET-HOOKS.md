@@ -2,6 +2,8 @@
 
 `fleet/hooks/` is the vendored, source-controlled canon-to-be for Heddle fleet-discipline hooks. It is dark in Phase 1: no repository settings consume it yet.
 
+For the separate vendored launcher set and its portability catalog, see [Fleet launchers](FLEET-LAUNCHERS.md).
+
 Install the canon into the current user's Heddle home directory:
 
 ```sh

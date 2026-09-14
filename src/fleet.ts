@@ -28,19 +28,45 @@ export interface FleetHookDiffReport {
   files: FleetHookFileResult[];
 }
 
-const DEFAULT_CANONICAL_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'fleet', 'hooks');
+export type FleetLauncherOptions = FleetHookOptions;
+export type FleetLauncherInstallReport = FleetHookInstallReport;
+export type FleetLauncherDiffReport = FleetHookDiffReport;
 
-function paths(options: FleetHookOptions): { canonicalDir: string; targetDir: string } {
-  const canonicalDir = options.canonicalDir ?? DEFAULT_CANONICAL_DIR;
-  return { canonicalDir, targetDir: options.targetDir ?? join(options.homeDir ?? homedir(), '.heddle', 'fleet', 'hooks') };
+interface FleetAssetSet {
+  kind: 'hook' | 'launcher';
+  canonicalDir: string;
+  targetDir(homeDir: string): string;
+  files(canonicalDir: string): string[];
 }
 
-function canonicalFiles(canonicalDir: string): string[] {
-  if (!existsSync(canonicalDir)) throw new Error(`fleet hook canon not found: ${canonicalDir}`);
-  return readdirSync(canonicalDir, { withFileTypes: true })
-    .filter((entry) => entry.isFile() && entry.name.endsWith('.py'))
-    .map((entry) => entry.name)
-    .sort();
+const FLEET_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', 'fleet');
+const filesByExtension = (extension: string) => (canonicalDir: string): string[] => readdirSync(canonicalDir, { withFileTypes: true })
+  .filter((entry) => entry.isFile() && entry.name.endsWith(extension))
+  .map((entry) => entry.name)
+  .sort();
+const ASSET_SETS: Record<FleetAssetSet['kind'], FleetAssetSet> = {
+  hook: {
+    kind: 'hook',
+    canonicalDir: join(FLEET_ROOT, 'hooks'),
+    targetDir: (homeDir) => join(homeDir, '.heddle', 'fleet', 'hooks'),
+    files: filesByExtension('.py'),
+  },
+  launcher: {
+    kind: 'launcher',
+    canonicalDir: join(FLEET_ROOT, 'launchers'),
+    targetDir: (homeDir) => join(homeDir, '.heddle', 'fleet', 'launchers'),
+    files: filesByExtension('.sh'),
+  },
+};
+
+function paths(assetSet: FleetAssetSet, options: FleetHookOptions): { canonicalDir: string; targetDir: string } {
+  const canonicalDir = options.canonicalDir ?? assetSet.canonicalDir;
+  return { canonicalDir, targetDir: options.targetDir ?? assetSet.targetDir(options.homeDir ?? homedir()) };
+}
+
+function canonicalFiles(assetSet: FleetAssetSet, canonicalDir: string): string[] {
+  if (!existsSync(canonicalDir)) throw new Error(`fleet ${assetSet.kind} canon not found: ${canonicalDir}`);
+  return assetSet.files(canonicalDir);
 }
 
 function sameContent(source: string, target: string): boolean {
@@ -68,11 +94,10 @@ function atomicCopy(source: string, target: string): void {
   }
 }
 
-/** Copy the vendored Python canon into a home-scoped fleet installation. */
-export function installFleetHooks(options: FleetHookOptions = {}): FleetHookInstallReport {
-  const { canonicalDir, targetDir } = paths(options);
+function installFleetAssets(assetSet: FleetAssetSet, options: FleetHookOptions): FleetHookInstallReport {
+  const { canonicalDir, targetDir } = paths(assetSet, options);
   const files: FleetHookFileResult[] = [];
-  for (const name of canonicalFiles(canonicalDir)) {
+  for (const name of canonicalFiles(assetSet, canonicalDir)) {
     const source = join(canonicalDir, name);
     const target = join(targetDir, name);
     try {
@@ -86,20 +111,39 @@ export function installFleetHooks(options: FleetHookOptions = {}): FleetHookInst
       const written = files.filter((file) => file.action === 'created' || file.action === 'updated').map((file) => file.name);
       const unchanged = files.filter((file) => file.action === 'unchanged').map((file) => file.name);
       const detail = error instanceof Error ? error.message : String(error);
-      throw new Error(`fleet hook installation failed for ${name}; files written this run: ${written.length ? written.join(', ') : 'none'}; unchanged: ${unchanged.length ? unchanged.join(', ') : 'none'}; ${detail}`, { cause: error });
+      throw new Error(`fleet ${assetSet.kind} installation failed for ${name}; files written this run: ${written.length ? written.join(', ') : 'none'}; unchanged: ${unchanged.length ? unchanged.join(', ') : 'none'}; ${detail}`, { cause: error });
     }
   }
   return { targetDir, dryRun: options.dryRun === true, files };
 }
 
-/** Compare the installed Python hooks to the vendored canon. */
-export function diffFleetHooks(options: FleetHookOptions = {}): FleetHookDiffReport {
-  const { canonicalDir, targetDir } = paths(options);
-  const files = canonicalFiles(canonicalDir).flatMap((name): FleetHookFileResult[] => {
+function diffFleetAssets(assetSet: FleetAssetSet, options: FleetHookOptions): FleetHookDiffReport {
+  const { canonicalDir, targetDir } = paths(assetSet, options);
+  const files = canonicalFiles(assetSet, canonicalDir).flatMap((name): FleetHookFileResult[] => {
     const source = join(canonicalDir, name);
     const target = join(targetDir, name);
     if (!existsSync(target)) return [{ name, action: 'missing' }];
     return sameContent(source, target) && sameMode(source, target) ? [] : [{ name, action: 'differing' }];
   });
   return { clean: files.length === 0, files };
+}
+
+/** Copy the vendored Python canon into a home-scoped fleet installation. */
+export function installFleetHooks(options: FleetHookOptions = {}): FleetHookInstallReport {
+  return installFleetAssets(ASSET_SETS.hook, options);
+}
+
+/** Compare the installed Python hooks to the vendored canon. */
+export function diffFleetHooks(options: FleetHookOptions = {}): FleetHookDiffReport {
+  return diffFleetAssets(ASSET_SETS.hook, options);
+}
+
+/** Copy the vendored launcher canon into a home-scoped fleet installation. */
+export function installFleetLaunchers(options: FleetLauncherOptions = {}): FleetLauncherInstallReport {
+  return installFleetAssets(ASSET_SETS.launcher, options);
+}
+
+/** Compare the installed launchers to the vendored canon. */
+export function diffFleetLaunchers(options: FleetLauncherOptions = {}): FleetLauncherDiffReport {
+  return diffFleetAssets(ASSET_SETS.launcher, options);
 }

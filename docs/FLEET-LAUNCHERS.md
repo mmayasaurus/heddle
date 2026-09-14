@@ -1,0 +1,76 @@
+# Fleet launchers
+
+`fleet/launchers/` is the vendored, source-controlled canon-to-be for Heddle fleet launchers. It is dark in this phase: installing the copies does not change any invocation path.
+
+Install the complete launcher set into the current user's Heddle home directory:
+
+```sh
+heddle fleet install-launchers
+```
+
+Preview file actions without writing:
+
+```sh
+heddle fleet install-launchers --dry-run
+```
+
+Text output always starts with the installation target, followed by one action per launcher:
+
+```text
+target: ~/.heddle/fleet/launchers
+would create resume-sessions-v2.sh
+```
+
+Without `--dry-run`, the action is unprefixed (for example, `created resume-sessions-v2.sh`). `--json` is available for both install modes and includes the target, file actions, and `dryRun: true` or `dryRun: false`.
+
+If installation fails partway through, files handled earlier in the run remain installed. The error names the file that failed and separately lists files written in that run and files left unchanged.
+
+Compare the installed copies with the vendored canon:
+
+```sh
+heddle fleet launchers-diff
+```
+
+Use `--json` with either command when machine-readable output is needed:
+
+```sh
+heddle fleet install-launchers --json
+heddle fleet launchers-diff --json
+```
+
+`launchers-diff` prints each missing or differing file and exits with status 1 when drift exists. It exits 0 when the installed launchers match the canon. Both fleet commands exit 2 for usage errors.
+
+Drift includes permission mode differences as well as byte differences. When bytes match but a launcher's permission bits differ from the vendored source, `launchers-diff` reports it as differing and `install-launchers` updates it to the source mode.
+
+## `launchers-diff` scope
+
+`launchers-diff` compares only the `.sh` files present in the canon directory (discovered dynamically, like the hook set's `.py` discovery — the canon directory is git-controlled, so additions arrive only via reviewed commits); installed extras are ignored. No launcher filename appears in shipped source: the ship-set scrub rejects tenant fragments, and dynamic discovery keeps `src/fleet.ts` name-free.
+
+## Cutover is separate
+
+CUTOVER — invoking installed launcher copies — is a separate, operator-gated change. Nothing currently invokes these installed copies. Workspace shims and any `--project` / `projects.json` genericization are later phases.
+
+## Standalone snapshot: deliberately excluded
+
+`fleet/` is structurally outside `isIncluded` in `src/release/shipset.ts`; no ship-set probe is needed. The launcher canon is therefore not present in a standalone snapshot. Shipping it requires a genericized canon in a later phase.
+
+## Why `resume-sessions.sh` is not vendored
+
+The v1 `resume-sessions.sh` was a 2026-06-29 crash-recovery one-off with hardcoded session IDs. The v2 launcher discovers sessions at runtime, so only the v2 set and its wrappers are vendored.
+
+## PORTABILITY BLOCKER CATALOG
+
+Catalog only: do not fix these in the installed-copy phase. Canon bugs route upstream and are then re-vendored, following the HED-499 pattern.
+
+- `resume-sessions-v2.sh:113-114` hardcodes the Maya Spinventory workspace root and its inner repository/worktree location.
+- `resume-sessions-v2.sh:117-119` assumes the local Claude session store, `~/.heddle/accounts.json`, and a Heddle CLI build at `~/Developer/heddle/dist/cli.js`.
+- `resume-sessions-v2.sh:160`, `resume-sessions-v2.sh:261-264`, and `resume-sessions-v2.sh:756-759` hardcode the Heddle comms server at `/Users/mayatobi/Developer/heddle/dist/comms/channel-server.js` and disable comms when that file is absent.
+- `resume-sessions-v2.sh:177` and `resume-sessions-v2.sh:194-205` couple optional settings overlays to a caller-provided, readable `FLEET_SETTINGS_FILE`, canonicalized to the current filesystem and constrained for tab-shell emission.
+- `resume-sessions-v2.sh:304-310` assumes the user's `~/.claude` store is shared into each configured account directory and invokes the workspace-local `.claude/bin/heddle-account-share.sh` remediation path.
+- `resume-sessions-v2.sh:689-703` defaults Heddle-fleet sessions to `~/Developer/heddle` and forces R–Z into that cwd; `resume-sessions-v2.sh:926-950` recreates missing session/worktree directories and uses the hardcoded inner repository for `git worktree add`.
+- `resume-sessions-v2.sh:762-769` launches every resumed session from the session-derived or forced project cwd, so successful resume depends on those workspace paths existing and matching Claude's cwd-scoped session storage.
+- `resume-sessions-v2.sh:877-923` requires macOS `osascript` automation for iTerm2 or Terminal.app and defaults unrecognized terminal environments to iTerm2.
+- `resume-sessions-spi.sh:23` and `fleet-relaunch.sh:79` hardcode the Spinventory consumer-pack path in `HEDDLE_PACKS`.
+- `resume-sessions-gpt.sh:23-27` requires the local `claudex` proxy harness/default store and fixes the numbered-fleet launch policy around it.
+
+The wrapper `cd` calls (`resume-sessions-hed.sh:17`, `resume-sessions-spi.sh:16`, `resume-sessions-gpt.sh:13`, and `fleet-relaunch.sh:25`) intentionally resolve their shared files relative to the installed launcher directory. They require the five-file set to be installed together, but do not themselves assume the original workspace checkout path.
