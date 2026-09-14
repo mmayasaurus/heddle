@@ -329,10 +329,18 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
   const dryReqCaps = [...new Set([...(target.capabilities ?? []), ...(req.capabilities ?? [])])];
   const dryCaps = decideCapabilities(target.provider, dryReqCaps, req.optIn === true, capabilityPolicy(table));
   const capabilityRefusal = reachesRunTarget && dryCaps.refusal && dryCaps.refusal.kind !== 'unenforceable' ? dryCaps.refusal.reason : undefined;
+  // HED-395 F1: the PRIMARY cannot enforce a requested capability ('unenforceable' — NOT a terminal
+  // refusal). runTarget will deny it and dispatch()'s capability-fit fallback (~L712) rebinds to a
+  // provider that CAN enforce, billing the REBOUND account. Surfaced so dispatch()'s plan-level billing
+  // gate does NOT preempt that safe fallback: a pay-per-token primary that would capability-fail must
+  // REACH runTarget (which bills the rebound account), not be refused billing.* here before the fallback
+  // can run. dispatch() still fires the gate when there is no fallback to rebind to (an enforceable
+  // primary leaves this false, so the gate fires there too).
+  const primaryCapabilityUnenforceable = reachesRunTarget && dryCaps.refusal?.kind === 'unenforceable';
   const requiresWebRefusal = reachesRunTarget && !dryCaps.refusal && route.requiresWeb && !webCapable(target.provider, dryCaps.granted)
     ? webRefusalReason(route.taskClass, target.provider)
     : undefined;
-  return { route, target, fallback, origin, execution, decision, skillsForRefusal, account, accountAdvice, accountPick, rotationAccount, claudeAccountCount, notDispatchable, reviewerPick, sameProviderReview, pinnedExcludedAccount, overrideReasonRequired, billingRefusal, billingAdvice, capabilityRefusal, requiresWebRefusal };
+  return { route, target, fallback, origin, execution, decision, skillsForRefusal, account, accountAdvice, accountPick, rotationAccount, claudeAccountCount, notDispatchable, reviewerPick, sameProviderReview, pinnedExcludedAccount, overrideReasonRequired, billingRefusal, billingAdvice, capabilityRefusal, requiresWebRefusal, primaryCapabilityUnenforceable };
 }
 
 /** One shared dry-run summary for `heddle route` and the `plan_dispatch` MCP tool (identical fields). */
@@ -353,10 +361,10 @@ export function summarizePlan(plan: DispatchPlan): Record<string, unknown> {
       ? { code: 'override-reason-required', reason: plan.overrideReasonRequired }
       : plan.sameProviderReview
       ? { code: 'same-provider-review', reason: plan.sameProviderReview }
-      : plan.billingRefusal
-      ? plan.billingRefusal
       : plan.decision.refusal
       ? plan.decision.refusal
+      : plan.billingRefusal
+      ? plan.billingRefusal
       : plan.pinnedExcludedAccount
       ? { code: 'no-dispatchable-account', reason: plan.pinnedExcludedAccount.reason }
       : noDispatchableAccount

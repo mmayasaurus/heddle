@@ -242,6 +242,10 @@ export interface DispatchPlan {
   /** HED-239: set when a requiresWeb class's effective target can't web — the dry run mirrors the
    *  runtime guard so plan_dispatch never advertises a web-research route the real dispatch refuses. */
   requiresWebRefusal?: string;
+  /** HED-395 F1: the PRIMARY's requested capability is unenforceable on its provider (NOT terminal —
+   *  a capability-fit fallback may rebind to a provider that enforces it). dispatch()'s plan-level
+   *  billing gate reads this to avoid preempting that safe fallback for a pay-per-token primary. */
+  primaryCapabilityUnenforceable?: boolean;
 }
 
 /** How the in-session route was chosen — the refusal reason must not misstate the YAML policy. */

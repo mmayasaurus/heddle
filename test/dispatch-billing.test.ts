@@ -17,6 +17,7 @@ vi.mock('../src/adapters/codex.js', async (importOriginal) => {
 
 import { dispatch, planDispatch } from '../src/dispatch.js';
 import type { DispatchRequest } from '../src/dispatch.js';
+import { summarizePlan } from '../src/dispatcher/plan.js';
 import { loadRouting } from '../src/routing.js';
 import { accountCapState, accountAtOrOverCap } from '../src/capaware.js';
 import { readLimitsMirror } from '../src/usage.js';
@@ -428,5 +429,49 @@ describe('dispatch billing enforcement (HED-395)', () => {
     expect(caps.codex.stale).toBe(true);                     // provider is stale (upstream-flagged)
     expect(caps.codex.accounts[0].stale).toBe(false);        // the ROW stays row-level fresh (NOT inherited)
     expect(accountCapState(caps.codex, 'open')).toBe('under'); // row-level: trusted for detection + display
+  });
+
+  it('lets a capability-fit fallback run past a pay-per-token PRIMARY billing refusal (F1)', async () => {
+    // A pay-per-token CURSOR primary asked for `browse` (cursor enforces nothing → 'unenforceable', NOT a
+    // terminal capability refusal) with a SUBSCRIPTION claude fallback that CAN enforce browse. The
+    // plan-level billing gate must NOT preempt the capability-fit fallback: dispatch reaches runTarget,
+    // denies the cursor primary on capability, rebinds to the claude fallback (REV-3), and spawns it
+    // (subscription → billing allows). The pay-per-token primary never spawns and never bills. Before F1
+    // the unconditional plan-level gate refused billing.pay-per-token on the primary before any fallback.
+    cursorClaudeRouting();
+    writeRegistry({
+      cursor: [{ id: 'cursor-metered', keyFile: null, billingClass: 'pay-per-token' }],
+      claude: [{ id: 'claude-sub', configDir: null, billingClass: 'subscription-quota' }],
+    });
+    const fake = fakeAdapter(undefined, { readAgents: false });
+    const outcome = await dispatch({
+      taskClass: 'cap-fit-billing', capabilities: ['browse'], prompt: 'x', cwd: tempDir(), identity: unbound,
+      accounts: [{ id: 'claude-sub', configDir: null, loggedIn: true }],
+      caps: { claude: claudeCapsFor('claude-sub') },
+      rotationAccounts: { codex: [], cursor: [{ id: 'cursor-metered', keyFile: null }] },
+    }, tempLedger(), () => fake.adapter);
+    expect(outcome).toMatchObject({ ok: true, account: 'claude-sub', usedFallback: true });
+    expect(fake.calls).toHaveLength(1);
+    // Red if F1 is reverted (unconditional `if (plan.billingRefusal)`): dispatch refuses
+    // billing.pay-per-token on the cursor primary with NO spawn (fake.calls === 0), never reaching the
+    // fallback — plan.primaryCapabilityUnenforceable && plan.fallback is exactly what lets it through.
+  });
+
+  it('previews decision.refusal (metered-pool) ahead of billingRefusal, matching runtime order (F2)', () => {
+    // dispatch() checks the cap-aware decision.refusal (dispatch.ts:140, code 'metered-pool-exhausted')
+    // BEFORE the billing gate (dispatch.ts:157). summarizePlan must select the SAME one when a plan trips
+    // both, or `heddle route` / plan_dispatch preview a billing.* code the run never returns (the F7
+    // parity gap the re-review caught). Build a real open-billing-at-cap plan (billingRefusal set), then
+    // overlay the cap-aware refusal the router adds when the pool is also exhausted — tripping BOTH guards
+    // naturally in one caps fixture is fiddly, and precedence is precisely what F2 fixes, so pin it here.
+    registry({ id: 'open', billingClass: 'subscription-quota', overage: { posture: 'open-billing' } });
+    const plan = planDispatch(request('open', 100));
+    expect(plan.billingRefusal?.code).toBe('billing.open-billing-at-cap');            // billing guard tripped
+    // Billing-only: summarizePlan still surfaces billingRefusal when it is the sole refusal.
+    expect((summarizePlan(plan).refusal as { code: string }).code).toBe('billing.open-billing-at-cap');
+    // Now the cap-aware guard trips too. Runtime returns metered-pool-exhausted (checked first); the
+    // preview must agree. Red if the F2 swap is reverted (billingRefusal listed first) → previews billing.*.
+    plan.decision.refusal = { code: 'metered-pool-exhausted', reason: 'metered pool exhausted (test)' };
+    expect((summarizePlan(plan).refusal as { code: string }).code).toBe('metered-pool-exhausted');
   });
 });

@@ -154,7 +154,14 @@ export async function dispatch(
   // account. plan.billingRefusal is set (plan.ts) ONLY when the dispatch reaches runTarget and the primary
   // account is refused (undefined for in-session previews / unclassifiable degrade), and it comes from the
   // same pure billingVerdict the runTarget gate and the dry-run preview use (F7 parity).
-  if (plan.billingRefusal) {
+  // F1 (HED-395): SKIP this plan-level gate ONLY when the primary would capability-fail AND a fallback
+  // is available — runTarget then denies the primary, the capability-fit fallback rebinds (REV-3), and
+  // runTarget's OWN billing gate bills the REBOUND account. Skipping here lets that safe fallback run
+  // instead of refusing the pay-per-token PRIMARY before it is ever reached (the regression the re-review
+  // caught). With no fallback, or an enforceable primary (primaryCapabilityUnenforceable === false), the
+  // gate fires exactly as before — preserving REV-1 (a refused primary never spends a classifier) and the
+  // authoritative runTarget gate still enforces every rebound account.
+  if (plan.billingRefusal && !(plan.primaryCapabilityUnenforceable && plan.fallback)) {
     return refuseBilling(ctx, req, route.taskClass, target, skillsForRefusal, plan.billingRefusal);
   }
 
