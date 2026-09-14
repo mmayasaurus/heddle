@@ -81,7 +81,7 @@ const overagePostures = new Set<OveragePosture>(['hard-stop', 'bounded-prepaid',
 let atomicWriteSequence = 0;
 
 // Mirrors init-project's temp-in-the-same-directory write so a registry is never half-written.
-function atomicWriteFile(path: string, content: string): void {
+export function atomicWriteFile(path: string, content: string): void {
   mkdirSync(dirname(path), { recursive: true });
   const temporary = join(dirname(path), `.${basename(path)}.${process.pid}.${atomicWriteSequence++}.tmp`);
   try {
