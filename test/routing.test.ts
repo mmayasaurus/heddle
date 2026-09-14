@@ -162,19 +162,18 @@ describe('resolveRoute / directRoute — policy fences', () => {
     expect(resolveRoute(table, 'adversarial-review').mcp).toEqual(['memtrace']);
   });
 
-  it('Stage 1: GLM is a known, directly-dispatchable provider but is wired into NO class auto-routing', () => {
-    // HED-422 Stage 1 ships GLM as provider plumbing only. An HTTP worker never receives materialized
-    // AGENTS.md packs or a "run git yourself" diff (runTarget inlines those for CLI providers), so a
-    // diff/doc review auto-routed to GLM would run without its brief — worse than refusing. It is
-    // therefore absent from every primary / fallback / reviewer_pool slot; Stage 1b adds HTTP-aware
-    // delivery + exhaustion routing before GLM re-enters the pool (cursor #111 finding, follow-up).
-    for (const taskClass of listTaskClasses(table)) {
-      const route = resolveRoute(table, taskClass);
-      const providers = [route.provider, route.fallback?.provider, ...(route.reviewerPool ?? []).map((e) => e.provider)]
-        .filter((p): p is string => Boolean(p)).map((p) => normalizeProvider(p));
-      expect(providers, `class "${taskClass}" must not auto-route to glm in Stage 1`).not.toContain('glm');
+  it('HED-465: GLM is the cursor-primary advisory fallback only, never an adversarial-review target', () => {
+    // glm ships on the two CURSOR-primary advisory classes (no dead-claude walk, no capability hatch).
+    for (const taskClass of ['second-opinion', 'quick-alt-take']) {
+      expect(resolveRoute(table, taskClass).fallback).toMatchObject({ provider: 'glm', model: 'glm-5.3' });
     }
-    // …but it stays reachable for an explicit, self-contained brief.
+    // research-summarize's fallback stays codex/luna, NOT glm: its claude PRIMARY needs an always-addressable
+    // non-claude walk (HED-264) and a capability-enforcing fallback (net/exec → codex). See routing.v0.yaml.
+    expect(resolveRoute(table, 'research-summarize').fallback).toMatchObject({ provider: 'codex', model: 'gpt-5.6-luna' });
+    const adversarial = resolveRoute(table, 'adversarial-review');
+    const adversarialProviders = [adversarial.provider, adversarial.fallback?.provider, ...(adversarial.reviewerPool ?? []).map((entry) => entry.provider)]
+      .filter((provider): provider is string => Boolean(provider)).map((provider) => normalizeProvider(provider));
+    expect(adversarialProviders).not.toContain('glm');
     expect(() => directRoute(table, 'glm', 'glm-5.3')).not.toThrow();
   });
 
