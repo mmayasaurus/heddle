@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, sep } from 'node:path';
@@ -130,7 +131,7 @@ const defaultWritePlist = (path: string, contents: string): void => {
   const homeDir = dirname(dirname(launchAgentsDir));
   mkdirSync(join(homeDir, '.heddle'), { recursive: true });
   mkdirSync(launchAgentsDir, { recursive: true });
-  const temp = join(launchAgentsDir, `.${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}.tmp`);
+  const temp = join(launchAgentsDir, `.${process.pid}-${Date.now()}-${randomBytes(6).toString('hex')}.tmp`);
   try {
     writeFileSync(temp, contents);
     chmodSync(temp, 0o644);
