@@ -182,10 +182,17 @@ function issueFixesPattern(issue: string): RegExp {
   return new RegExp(`Fixes\\s+${issue.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')}\\b`, 'i');
 }
 
-function mapMergedPullRequest(issue: string, repo: keyof typeof HEDDLE_REPOS, gh: GhRunner): number | null {
-  const github = HEDDLE_REPOS[repo].github;
-  const raw = gh(['pr', 'list', '-R', github, '--state', 'merged', '--search', issue, '--json', 'number,title,headRefName,body,mergedAt']);
-  const pulls = JSON.parse(raw) as PullRequest[];
+function fetchMergedPulls(repo: keyof typeof HEDDLE_REPOS, gh: GhRunner): PullRequest[] {
+  // A deterministic issue->PR map needs the FULL merged-PR set, NOT GitHub's `--search`: that search is
+  // relevance-ranked, capped, and eventually-consistent, so it returns different subsets per call and
+  // would map a multi-PR issue (a fix + a follow-up both saying "Fixes HED-n") to an ARBITRARY PR
+  // instead of skipping — feeding the candidate a diff the incumbent never reviewed. The list API is
+  // stable; 500 covers the repo's whole merged history. Filtering happens locally, in mapMergedPullRequest.
+  const raw = gh(['pr', 'list', '-R', HEDDLE_REPOS[repo].github, '--state', 'merged', '--limit', '500', '--json', 'number,title,headRefName,body']);
+  return JSON.parse(raw) as PullRequest[];
+}
+
+function mapMergedPullRequest(issue: string, pulls: readonly PullRequest[]): number | null {
   const matches = pulls.filter((pull) => Number.isInteger(pull.number) && issueFixesPattern(issue).test(pull.body ?? ''));
   return matches.length === 1 ? matches[0]!.number : null;
 }
@@ -343,13 +350,16 @@ function buildCorpus(out: string, opts: { limit?: number; pairs?: string[] }, gh
   const rows = selectRows(allRows, opts.limit, opts.pairs);
   const rounds: CorpusRound[] = [];
   const skipped: Skip[] = [];
+  const pullsByRepo = new Map<keyof typeof HEDDLE_REPOS, PullRequest[]>();
   for (const row of rows) {
     const repo = repoForCwd(row.cwd);
     if (!repo) {
       skipped.push({ dispatchId: row.dispatch_id, issue: row.issue, reason: 'scope-skip' });
       continue;
     }
-    const pr = mapMergedPullRequest(row.issue, repo, gh);
+    let pulls = pullsByRepo.get(repo);
+    if (!pulls) { pulls = fetchMergedPulls(repo, gh); pullsByRepo.set(repo, pulls); }
+    const pr = mapMergedPullRequest(row.issue, pulls);
     if (pr === null) {
       skipped.push({ dispatchId: row.dispatch_id, issue: row.issue, reason: 'ambiguous-pr-map' });
       continue;
