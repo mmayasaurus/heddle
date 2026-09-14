@@ -58,6 +58,11 @@ export const PROVIDER_REGISTRY: Record<'groq' | 'cerebras' | 'openrouter' | 'glm
   },
 };
 
+/** True for in-process HTTP providers (no filesystem/shell) — packs+diff must be embedded, not materialized. */
+export function isOpenAICompatProvider(provider: string): provider is 'groq' | 'cerebras' | 'openrouter' | 'glm' {
+  return Object.prototype.hasOwnProperty.call(PROVIDER_REGISTRY, provider);
+}
+
 interface ChatResponse {
   choices?: Array<{ finish_reason?: string | null; message?: { content?: unknown } }>;
   usage?: { prompt_tokens?: number; completion_tokens?: number; completion_tokens_details?: { reasoning_tokens?: number } };
