@@ -47,6 +47,17 @@ export interface DispatchOptions {
   readOnly?: boolean;
   /** Names of the MCP servers in mcpConfigPath — claude allowlists them as `mcp__<name>`. */
   mcpServers?: string[];
+  /** Optional OpenAI-compatible structured-output contract for adapters that support JSON Schema. */
+  responseSchema?: ResponseSchema;
+}
+
+export interface ResponseSchema {
+  /** OpenAI JSON-schema response format name. */
+  name: string;
+  /** JSON Schema object sent to the provider and checked against the returned JSON. */
+  schema: Record<string, unknown>;
+  /** Passed through to OpenAI-compatible servers that support strict schema enforcement. */
+  strict?: boolean;
 }
 
 export interface TokenUsage {
@@ -73,6 +84,6 @@ export interface WorkerResult {
 
 export interface WorkerAdapter {
   readonly name: string;
-  readonly provider: 'codex' | 'cursor' | 'claude' | 'gemini' | 'groq' | 'cerebras' | 'openrouter' | 'glm';
+  readonly provider: 'codex' | 'cursor' | 'claude' | 'gemini' | 'groq' | 'cerebras' | 'openrouter' | 'glm' | 'local';
   dispatch(prompt: string, opts: DispatchOptions): Promise<WorkerResult>;
 }

@@ -30,11 +30,16 @@ EXIT CODES: 0 ok · 1 error · 2 stand-down (issue actively claimed by another a
 
 Credentials: ~/.claude/spinventory-fleet/linear-agents.json (never in a repo).
 Tokens auto-mint/refresh; nothing here needs Maya's login.
+
+GitHub tracker support: `tracker: github` requires both `githubRepo` and `linearTeam` in
+~/.heddle/projects.json.
 """
 import argparse
 import json
 import os
 import pathlib
+import re
+import subprocess
 import sys
 import tempfile
 import time
@@ -122,11 +127,17 @@ class Tracker:
     def issue(self, ident):
         raise NotImplementedError
 
-    def list(self, filters, limit):
-        # Phase 2 implements this per cmd_list's semantics: over-fetch (first=max(limit, 100)),
-        # priority-sort, THEN slice to limit — a plain first=limit drops high-priority issues past
-        # Linear's first N (HED-408 adversarial review, ledger 841). In phase 1 cmd_list still calls
-        # the client directly, so this stays unimplemented until cmd_* route through Tracker.
+    def list_issues(self, *, mine: bool, area: str | None, me_id: str, limit: int) -> list[dict]:
+        raise NotImplementedError
+
+    def area_counts(self) -> list[tuple[str, int]]:
+        raise NotImplementedError
+
+    def create_issue(self, *, title: str, type_label: str, area: str | None, platform: str | None,
+                     desc: str | None, priority: int | None) -> dict:
+        raise NotImplementedError
+
+    def flag_for_human(self, issue: dict, agent_key: str, ask: str) -> bool:
         raise NotImplementedError
 
     def states(self, team_key=None):
@@ -232,7 +243,9 @@ class Lin:
 
 
 class LinearTracker(Tracker):
-    """Phase-1 Tracker adapter that delegates to the unchanged Linear client."""
+    """Tracker backed by the Linear GraphQL client. Delegates issue/me/state/comment to an
+    unchanged Lin instance and implements list_issues/area_counts/create_issue/flag_for_human
+    with the same GraphQL those commands used before HED-408 phase 2a routed them here."""
 
     def __init__(self, key):
         self._linear = Lin(key)
@@ -248,10 +261,101 @@ class LinearTracker(Tracker):
     def issue(self, ident):
         return self._linear.issue(ident)
 
-    # NOTE: no `list` override — cmd_list still calls the client directly (via __getattr__) in
-    # phase 1, so overriding it here would be dead code that drifts from cmd_list's over-fetch +
-    # priority-sort semantics (HED-408 adversarial review, ledger 841). Phase 2 implements it once
-    # cmd_* route through the Tracker interface.
+    def list_issues(self, *, mine: bool, area: str | None, me_id: str, limit: int) -> list[dict]:
+        f = {"team": {"key": {"eq": TEAM_KEY}}}
+        if mine:
+            f["delegate"] = {"id": {"eq": me_id}}
+            f["state"] = {"type": {"in": ["backlog", "unstarted", "started"]}}
+        else:
+            f["delegate"] = {"null": True}
+            f["state"] = {"type": {"in": ["backlog", "unstarted"]}}
+        if area:
+            f["labels"] = {"name": {"eq": area}}
+        d = self._linear.gql("""query($f: IssueFilter, $n: Int) {
+            issues(filter: $f, first: $n) { nodes {
+                identifier title priority priorityLabel state { name }
+                labels { nodes { name parent { name } } } delegate { name } } } }""",
+            {"f": f, "n": max(limit, 100)})
+        nodes = d["issues"]["nodes"]
+        nodes.sort(key=lambda i: i["priority"] if i["priority"] > 0 else 99)
+        return [{
+            "identifier": i["identifier"],
+            "title": i["title"],
+            "priorityLabel": i["priorityLabel"],
+            "area": next((l["name"] for l in i["labels"]["nodes"]
+                          if (l.get("parent") or {}).get("name") == "Area"), "-"),
+            "state_name": i["state"]["name"],
+            "delegate_name": i["delegate"]["name"] if i["delegate"] else None,
+        } for i in nodes[:limit]]
+
+    def area_counts(self) -> list[tuple[str, int]]:
+        area_labels = [l for l in self._linear.labels()
+                       if (l.get("parent") or {}).get("name") == "Area"]
+        counts = []
+        for l in sorted(area_labels, key=lambda x: x["name"]):
+            d = self._linear.gql("""query($f: IssueFilter) { issues(filter: $f, first: 1) {
+                nodes { id } } issueCount: issues(filter: $f, first: 250) { nodes { id } } }""",
+                {"f": {"team": {"key": {"eq": TEAM_KEY}},
+                       "labels": {"name": {"eq": l["name"]}},
+                       "state": {"type": {"in": ["backlog", "unstarted", "started"]}}}})
+            counts.append((l["name"], len(d["issueCount"]["nodes"])))
+        return counts
+
+    def create_issue(self, *, title: str, type_label: str, area: str | None, platform: str | None,
+                     desc: str | None, priority: int | None) -> dict:
+        labels = self._linear.labels()
+
+        def lid(name, group):
+            for l in labels:
+                if l["name"].lower() == name.lower() and (l.get("parent") or {}).get("name") == group:
+                    return l["id"]
+            sys.exit(f"lin.sh: no {group} label named {name!r}")
+
+        label_ids = [lid(type_label, "Type")]
+        if area:
+            label_ids.append(lid(area, "Area"))
+        if platform:
+            label_ids.append(lid(platform, "Platform"))
+        team = self._linear.gql('{ teams(filter:{key:{eq:"%s"}}) { nodes { id } } }' % TEAM_KEY)
+        inp = {"teamId": team["teams"]["nodes"][0]["id"], "title": title, "labelIds": label_ids}
+        if desc:
+            inp["description"] = desc
+        if priority:
+            inp["priority"] = priority
+        d = self._linear.gql("""mutation($input: IssueCreateInput!) {
+            issueCreate(input: $input) { issue { identifier url } } }""", {"input": inp})
+        return d["issueCreate"]["issue"]
+
+    def flag_for_human(self, issue: dict, agent_key: str, ask: str) -> bool:
+        # needs-maya is a WORKSPACE-level label (teamId=null). A non-admin fleet agent CANNOT create a
+        # team-scoped label — Linear returns "not allowed to create labels in this team" (verified live
+        # 2026-08-21) — but CAN create a workspace label, which coexists across SPI + HED and is exactly
+        # the cross-team state flag we want. Accept ONLY a workspace-level match (never a same-name team
+        # label — that would defeat the contract and can fail issueAddLabel for issues in other teams);
+        # create workspace-level (no teamId) when none exists.
+        labels = self._linear.gql("""query {
+            issueLabels(filter:{ name:{ eq:"needs-maya" } }, first:50) {
+                nodes { id name team { id } }
+            }
+        }""")["issueLabels"]["nodes"]
+        label = next((l for l in labels if l.get("team") is None), None)
+        if label is None:
+            created = self._linear.gql("""mutation($input: IssueLabelCreateInput!) {
+                issueLabelCreate(input: $input) { success issueLabel { id name } }
+            }""", {"input": {"name": "needs-maya"}})["issueLabelCreate"]
+            label = created.get("issueLabel")
+            if not created.get("success") or not label:
+                sys.exit("lin.sh: could not create the needs-maya label")
+
+        label_ids = [label["id"] for label in issue["labels"]["nodes"]]
+        if label["id"] not in label_ids:
+            self._linear.gql("""mutation($id: String!, $lid: String!) {
+                issueAddLabel(id: $id, labelId: $lid) { success } }""",
+                {"id": issue["id"], "lid": label["id"]})
+        # Return a NEUTRAL bool, not the Linear commentCreate envelope — cmd_needs_maya and phase-2b's
+        # GitHubIssuesTracker must both satisfy the same contract (HED-408 phase-2a review).
+        result = self._linear.comment(issue["id"], f"🔶 DECISION NEEDED (Agent {agent_key})\n{ask}")
+        return bool(result.get("commentCreate", {}).get("success"))
 
     def states(self, team_key=None):
         return self._linear.states(team_key)
@@ -272,7 +376,310 @@ class LinearTracker(Tracker):
         return getattr(self._linear, name)
 
 
-def tracker_backend_for_agent(agent_key, registry_path=None):
+class GitHubIssuesTracker(Tracker):
+    """Tracker backed by repository GitHub Issues via the gh CLI."""
+
+    _STATES = [
+        {"id": "gh:unstarted", "name": "Todo", "type": "unstarted"},
+        {"id": "gh:started", "name": "In Progress", "type": "started"},
+        {"id": "gh:completed", "name": "Done", "type": "completed"},
+    ]
+    _PRIORITY_LABELS = {1: "Urgent", 2: "High", 3: "Medium", 4: "Low"}
+
+    def __init__(self, key, repo, team_key):
+        self._key = key
+        self._repo = repo
+        self._team_key = team_key
+        self._label_names = None
+
+    @property
+    def key(self):
+        return self._key
+
+    @property
+    def me(self):
+        return {"id": self._key, "name": f"Agent {self._key}"}
+
+    def _gh(self, args, *, repo=True, input=None, parse_json=True):
+        cmd = ["gh", *args]
+        if repo:
+            cmd.extend(["-R", self._repo])
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, input=input)
+        except FileNotFoundError:
+            sys.exit("lin.sh: gh CLI not found — install and authenticate gh")
+        if result.returncode:
+            sys.exit(f"lin.sh: gh {' '.join(args)} failed: {result.stderr.strip() or result.returncode}")
+        return json.loads(result.stdout or "null") if parse_json else result.stdout
+
+    @staticmethod
+    def _num(ident):
+        s = str(ident).strip()
+        match = re.search(r"/issues/(\d+)", s) or re.search(r"(?:^|#)(\d+)$", s)
+        if not match:
+            sys.exit(f"lin.sh: invalid GitHub issue identifier {ident!r}")
+        return match.group(1)
+
+    @classmethod
+    def _priority(cls, labels):
+        for label in labels:
+            match = re.fullmatch(r"priority:\s*(\d+)", label.get("name", ""))
+            if match:
+                return int(match.group(1))
+        return 0
+
+    @staticmethod
+    def _state_of(state, labels):
+        if isinstance(state, dict):
+            state = state.get("name") or state.get("state")
+        if str(state or "").upper() == "CLOSED":
+            return {"id": "gh:completed", "name": "Done", "type": "completed"}
+        if any(label.get("name") == "status: in-progress" for label in labels):
+            return {"id": "gh:started", "name": "In Progress", "type": "started"}
+        return {"id": "gh:unstarted", "name": "Todo", "type": "unstarted"}
+
+    def _branch(self, number, title):
+        slug = re.sub(r"[^a-z0-9]+", "-", (title or "").lower()).strip("-")[:48]
+        return f"agent{self._key}/{number}-{slug}"
+
+    def issue(self, ident):
+        number = self._num(ident)
+        data = self._gh(["issue", "view", number, "--json",
+                         "number,title,body,url,state,labels,assignees,comments"])
+        labels = data.get("labels") or []
+        assignees = data.get("assignees") or []
+        assignee = None
+        if assignees:
+            login = assignees[0].get("login")
+            if login:
+                assignee = {"id": login, "name": login}
+        delegate = None
+        for label in labels:
+            name = label.get("name", "")
+            if name.startswith("delegate: "):
+                agent_key = name[len("delegate: "):]
+                delegate = {"id": agent_key, "name": f"Agent {agent_key}"}
+                break
+        priority = self._priority(labels)
+        comments_src = (data.get("comments") or [])[-6:]
+        return {
+            "id": str(data["number"]),
+            "identifier": f"#{data['number']}",
+            "title": data["title"],
+            "url": data["url"],
+            "branchName": self._branch(data["number"], data["title"]),
+            "priority": priority,
+            "priorityLabel": self._PRIORITY_LABELS.get(priority, "No priority"),
+            "description": data.get("body") or "",
+            "state": self._state_of(data.get("state"), labels),
+            "delegate": delegate,
+            "assignee": assignee,
+            "labels": {"nodes": [{"id": label["name"], "name": label["name"]}
+                                  for label in labels]},
+            "team": {"id": None, "key": self._team_key},
+            "comments": {"nodes": [
+                {"body": comment["body"], "createdAt": comment["createdAt"],
+                 "user": {"name": (comment.get("author") or {}).get("login") or "?"},
+                 "botActor": None, "externalUser": None}
+                for comment in comments_src
+            ]},
+        }
+
+    def states(self, team_key=None):
+        return list(self._STATES)
+
+    def state_by(self, *, type=None, name=None, team_key=None):
+        for state in self._STATES:
+            if name and state["name"] == name:
+                return state
+        for state in self._STATES:
+            if type and state["type"] == type:
+                return state
+        sys.exit(f"lin.sh: no workflow state matching type={type} name={name}")
+
+    def _labels_for(self, number):
+        return self._gh(["issue", "view", number, "--json", "labels"]).get("labels") or []
+
+    def _is_closed(self, number):
+        state = self._gh(["issue", "view", number, "--json", "state"]).get("state")
+        if isinstance(state, dict):
+            state = state.get("name") or state.get("state")
+        return str(state or "").upper() == "CLOSED"
+
+    def _clear_status(self, number):
+        for label in self._labels_for(number):
+            name = label.get("name", "")
+            if name.startswith("status: "):
+                self._gh(["issue", "edit", number, "--remove-label", name], parse_json=False)
+
+    def _ensure_label(self, name):
+        if self._label_names is None:
+            labels = self._gh(["label", "list", "--limit", "1000", "--json", "name"])
+            self._label_names = [label["name"] for label in labels or []]
+        # GitHub label names are case-insensitive-unique: reuse an existing case-variant rather than
+        # attempting to create it (a create of a case-variant fails "already exists").
+        for existing in self._label_names:
+            if existing.lower() == name.lower():
+                return existing
+        self._gh(["label", "create", name], parse_json=False)
+        self._label_names.append(name)
+        return name
+
+    def _clear_delegate(self, number, except_name=None):
+        # Remove delegate labels, optionally sparing except_name so a same-agent re-claim never has a
+        # window with its own delegate label missing (round-2 finding 1 — the lock-drop race: a
+        # concurrent claim or a kill in the gap would otherwise see no owner).
+        for label in self._labels_for(number):
+            name = label.get("name", "")
+            if name.startswith("delegate: ") and name != except_name:
+                self._gh(["issue", "edit", number, "--remove-label", name], parse_json=False)
+
+    def _set_status(self, number, status):
+        self._clear_status(number)
+        # Use the canonical casing _ensure_label resolves: `gh issue edit --add-label` is
+        # case-sensitive, so a pre-existing case-variant (e.g. "Status: in-progress") must be added by
+        # its real name, not the lowercase constructed one.
+        name = self._ensure_label(f"status: {status}")
+        self._gh(["issue", "edit", number, "--add-label", name], parse_json=False)
+
+    def update(self, issue_id, **fields):
+        number = self._num(issue_id)
+        if "delegateId" in fields:
+            delegate = fields["delegateId"]
+            if delegate is None:
+                self._clear_delegate(number)
+                assignees = self._gh(["issue", "view", number, "--json", "assignees"]).get("assignees") or []
+                for assignee in assignees:
+                    login = assignee.get("login")
+                    if login:
+                        self._gh(["issue", "edit", number, "--remove-assignee", login], parse_json=False)
+            else:
+                # Resolve the canonical label casing first (add-label is case-sensitive), then spare
+                # exactly that name when clearing and add it verbatim.
+                name = self._ensure_label(f"delegate: {delegate}")
+                self._clear_delegate(number, except_name=name)
+                self._gh(["issue", "edit", number, "--add-label", name], parse_json=False)
+                self._gh(["issue", "edit", number, "--add-assignee", "@me"], parse_json=False)
+        if "stateId" in fields:
+            state_id = fields["stateId"]
+            if state_id == "gh:started":
+                if self._is_closed(number):
+                    self._gh(["issue", "reopen", number], parse_json=False)
+                self._set_status(number, "in-progress")
+            elif state_id == "gh:completed":
+                self._set_status(number, "done")
+                if not self._is_closed(number):
+                    self._gh(["issue", "close", number], parse_json=False)
+            elif state_id == "gh:unstarted":
+                self._clear_status(number)
+                if self._is_closed(number):
+                    self._gh(["issue", "reopen", number], parse_json=False)
+            else:
+                sys.exit(f"lin.sh: unknown GitHub workflow state {state_id!r}")
+        return {"success": True}
+
+    def comment(self, issue_id, body):
+        self._gh(["issue", "comment", self._num(issue_id), "--body", body], parse_json=False)
+        return {"success": True}
+
+    def list_issues(self, *, mine: bool, area: str | None, me_id: str, limit: int) -> list[dict]:
+        if mine:
+            args = ["issue", "list", "--state", "open", "--label", f"delegate: {me_id}"]
+            if area:
+                args.extend(["--label", f"Area: {area}"])
+        else:
+            search = 'is:open no:assignee -label:"status: in-progress"'
+            if area:
+                search += f' label:"Area: {area}"'
+            args = ["issue", "list", "--search", search]
+        args.extend(["--json", "number,title,labels,assignees,state", "--limit", str(max(limit, 100))])
+        nodes = self._gh(args) or []
+        rows = []
+        for node in nodes:
+            labels = node.get("labels") or []
+            priority = self._priority(labels)
+            rows.append({
+                "identifier": f"#{node['number']}",
+                "title": node["title"],
+                "priorityLabel": self._PRIORITY_LABELS.get(priority, "No priority"),
+                "area": next((label["name"][6:] for label in labels
+                              if label.get("name", "").startswith("Area: ")), "-"),
+                "state_name": "In Progress" if any(
+                    label.get("name") == "status: in-progress" for label in labels) else "Todo",
+                # Identity is the delegate:<letter> label, not the (shared) gh assignee login
+                # (round-2 finding 2 — mine/list must show the fleet agent, not "mmayasaurus").
+                "delegate_name": next((f"Agent {label['name'][len('delegate: '):]}"
+                                       for label in labels
+                                       if label.get("name", "").startswith("delegate: ")), None),
+                "_priority": priority,
+            })
+        rows.sort(key=lambda row: row["_priority"] if row["_priority"] > 0 else 99)
+        return [{key: value for key, value in row.items() if key != "_priority"}
+                for row in rows[:limit]]
+
+    def create_issue(self, *, title, type_label, area, platform, desc, priority):
+        labels = self.labels()
+
+        def label_name(value, group):
+            # Accept either the bare taxonomy value ("Core") or the full label name ("Area: Core").
+            prefix = f"{group}: "
+            bare = value[len(prefix):] if value.lower().startswith(prefix.lower()) else value
+            for label in labels:
+                parent = (label.get("parent") or {}).get("name")
+                if parent and parent.lower() == group.lower() and label["name"].lower() == bare.lower():
+                    return label["id"]
+            # Genuinely absent (no case-insensitive match in this group): create it, using the
+            # canonical name _ensure_label resolves/returns.
+            return self._ensure_label(f"{group}: {bare}")
+
+        label_names = [label_name(type_label, "Type")]
+        if area is not None:
+            label_names.append(label_name(area, "Area"))
+        if platform is not None:
+            label_names.append(label_name(platform, "Platform"))
+        if priority is not None:
+            label_names.append(self._ensure_label(f"priority: {priority}"))
+        args = ["issue", "create", "--title", title, "--body-file", "-"]
+        for name in label_names:
+            args.extend(["--label", name])
+        url_out = self._gh(args, input=desc or "", parse_json=False)
+        url = next((line.strip() for line in reversed(url_out.splitlines()) if line.strip()), None)
+        if not url:
+            sys.exit("lin.sh: gh issue create returned no URL")
+        number = self._num(url)
+        return {"identifier": f"#{number}", "url": url}
+
+    def area_counts(self):
+        area_labels = [label for label in self.labels()
+                       if (label.get("parent") or {}).get("name") == "Area"]
+        counts = []
+        for label in sorted(area_labels, key=lambda label: label["name"]):
+            nodes = self._gh(["issue", "list", "--state", "open", "--label", label["id"],
+                              "--json", "number", "--limit", "1000"])
+            counts.append((label["name"], len(nodes or [])))
+        return counts
+
+    def flag_for_human(self, issue, agent_key, ask):
+        number = issue["id"]
+        label = self._ensure_label("needs-maya")
+        if not any(node["name"].lower() == label.lower() for node in issue["labels"]["nodes"]):
+            self._gh(["issue", "edit", number, "--add-label", label], parse_json=False)
+        self.comment(issue["id"], f"🔶 DECISION NEEDED (Agent {agent_key})\n{ask}")
+        return True
+
+    def labels(self):
+        if self._label_names is None:
+            labels = self._gh(["label", "list", "--limit", "1000", "--json", "name"])
+            self._label_names = [label["name"] for label in labels or []]
+        parsed = []
+        for label in self._label_names:
+            parent, separator, name = label.partition(": ")
+            parsed.append({"id": label, "name": name if separator else label,
+                           "parent": {"name": parent} if separator else None})
+        return parsed
+
+
+def _project_for_agent(agent_key, registry_path=None):
     # Accept a str OR Path (or None → default) and coerce, so a string config path fails soft to
     # linear via the guarded read below rather than an uncaught AttributeError (HED-408 review).
     path = pathlib.Path(registry_path) if registry_path else (pathlib.Path.home() / ".heddle" / "projects.json")
@@ -281,39 +688,54 @@ def tracker_backend_for_agent(agent_key, registry_path=None):
     except (OSError, ValueError):
         # ValueError covers JSONDecodeError AND UnicodeDecodeError — a corrupt-encoding registry must
         # fail soft to linear, not crash lin.sh (HED-408 adversarial review, ledger 841).
-        return "linear"
+        return None
     if not isinstance(registry, dict):
-        return "linear"
+        return None
     projects = registry.get("projects")
     if not isinstance(projects, list):
-        return "linear"
+        return None
     project = next((candidate for candidate in projects
                     if isinstance(candidate, dict)
                     and isinstance(candidate.get("agentIds"), list)
                     and agent_key in candidate["agentIds"]), None)
+    return project
+
+
+def _tracker_string(project):
     if project is None:
         return "linear"
     tracker = project.get("tracker")
     if not isinstance(tracker, str) or not tracker.strip():
         return "linear"
     tracker = tracker.strip().lower()
-    if tracker == "linear":
+    if tracker in ("linear", "github"):
         return tracker
     print(f"lin.sh: warning: unsupported tracker {tracker!r} for project "
-          f"{project.get('name', '?')!r}; defaulting to linear (GitHub support lands in phase 2)",
+          f"{project.get('name', '?')!r}; defaulting to linear",
           file=sys.stderr)
     return "linear"
 
 
+def tracker_backend_for_agent(agent_key, registry_path=None):
+    return _tracker_string(_project_for_agent(agent_key, registry_path))
+
+
 def tracker_for_agent(agent_key, registry_path=None):
-    backend = tracker_backend_for_agent(agent_key, registry_path)
-    backends = {"linear": LinearTracker}
-    if backend not in backends:
-        # Unreachable in phase 1 (tracker_backend_for_agent only ever returns "linear"), but fail
-        # LOUD and CLEAR rather than with a cryptic KeyError if a future backend is selected but not
-        # yet wired here — surfacing the mis-wiring beats a silent fallback (HED-408 review).
-        raise SystemExit(f"lin.sh: internal error: tracker backend {backend!r} selected but not wired")
-    return backends[backend](agent_key)
+    project = _project_for_agent(agent_key, registry_path)
+    backend = _tracker_string(project)
+    if backend == "linear":
+        return LinearTracker(agent_key)
+    if backend == "github":
+        repo = (project or {}).get("githubRepo")
+        if not isinstance(repo, str) or not repo.strip():
+            sys.exit(f"lin.sh: agent {agent_key!r} has tracker=github but no githubRepo — add "
+                     f'"githubRepo": "owner/repo" to ~/.heddle/projects.json')
+        team = (project or {}).get("linearTeam")
+        if not isinstance(team, str) or not team.strip():
+            sys.exit(f"lin.sh: agent {agent_key!r} has tracker=github but no linearTeam — add "
+                     f'"linearTeam": "HED" to ~/.heddle/projects.json')
+        return GitHubIssuesTracker(agent_key, repo.strip(), team.strip())
+    raise SystemExit(f"lin.sh: internal error: tracker backend {backend!r} selected but not wired")
 
 
 def author_of(c):
@@ -440,7 +862,9 @@ def queue_age(entry, now):
 
 def cmd_whoami(lin, _args):
     print(f"agent key : {lin.key}")
-    print(f"linear    : {lin.me['name']} (id {lin.me['id'][:8]}…)")
+    identity_id = lin.me["id"]
+    suffix = "…" if len(identity_id) > 8 else ""
+    print(f"identity  : {lin.me['name']} (id {identity_id[:8]}{suffix})")
 
 
 def cmd_view(lin, args):
@@ -472,44 +896,22 @@ def cmd_list(lin, args):
               f"board only — {TEAM_KEY}-team issues are not a source of work; use LIN_TEAM=HED lin.sh "
               f"list. Claims on {APP_TEAM_KEY}-team issues are refused for heddle-fleet identities.",
               file=sys.stderr)
-    f = {"team": {"key": {"eq": TEAM_KEY}}}
-    if args.mine:
-        f["delegate"] = {"id": {"eq": lin.me["id"]}}
-        f["state"] = {"type": {"in": ["backlog", "unstarted", "started"]}}
-    else:
-        f["delegate"] = {"null": True}
-        f["state"] = {"type": {"in": ["backlog", "unstarted"]}}
-    if args.area:
-        f["labels"] = {"name": {"eq": args.area}}
-    d = lin.gql("""query($f: IssueFilter, $n: Int) {
-        issues(filter: $f, first: $n) { nodes {
-            identifier title priority priorityLabel state { name }
-            labels { nodes { name parent { name } } } delegate { name } } } }""",
-        {"f": f, "n": max(args.limit, 100)})
-    nodes = d["issues"]["nodes"]
-    if not nodes:
+    # me_id only matters to the `mine` filter; resolving lin.me for an unclaimed list would add a
+    # viewer round-trip origin/main never made (and a new failure mode) — HED-408 phase-2a review.
+    rows = lin.list_issues(mine=args.mine, area=args.area,
+                           me_id=(lin.me["id"] if args.mine else None), limit=args.limit)
+    if not rows:
         print("no matching issues")
         return
-    nodes.sort(key=lambda i: i["priority"] if i["priority"] > 0 else 99)
-    nodes = nodes[:args.limit]
-    for i in nodes:
-        area = next((l["name"] for l in i["labels"]["nodes"]
-                     if (l.get("parent") or {}).get("name") == "Area"), "-")
-        who = f"  ← {i['delegate']['name']}" if i["delegate"] else ""
-        print(f"{i['identifier']:<8} {i['priorityLabel']:<9} [{area}] "
-              f"{short(i['title'], 70)} ({i['state']['name']}){who}")
+    for row in rows:
+        who = f"  ← {row['delegate_name']}" if row["delegate_name"] else ""
+        print(f"{row['identifier']:<8} {row['priorityLabel']:<9} [{row['area']}] "
+              f"{short(row['title'], 70)} ({row['state_name']}){who}")
 
 
 def cmd_areas(lin, args):
-    area_labels = [l for l in lin.labels() if (l.get("parent") or {}).get("name") == "Area"]
-    for l in sorted(area_labels, key=lambda x: x["name"]):
-        d = lin.gql("""query($f: IssueFilter) { issues(filter: $f, first: 1) {
-            nodes { id } } issueCount: issues(filter: $f, first: 250) { nodes { id } } }""",
-            {"f": {"team": {"key": {"eq": TEAM_KEY}},
-                   "labels": {"name": {"eq": l["name"]}},
-                   "state": {"type": {"in": ["backlog", "unstarted", "started"]}}}})
-        n = len(d["issueCount"]["nodes"])
-        print(f"{l['name']:<22} {n} open")
+    for name, n in lin.area_counts():
+        print(f"{name:<22} {n} open")
 
 
 def cmd_claim(lin, args):
@@ -591,30 +993,9 @@ def cmd_create(lin, args):
     if refusal:
         print(refusal)
         sys.exit(2)
-    labels = lin.labels()
-
-    def lid(name, group):
-        for l in labels:
-            if l["name"].lower() == name.lower() and (l.get("parent") or {}).get("name") == group:
-                return l["id"]
-        sys.exit(f"lin.sh: no {group} label named {name!r}")
-
-    label_ids = [lid(args.type, "Type")]
-    if args.area:
-        label_ids.append(lid(args.area, "Area"))
-    if args.platform:
-        label_ids.append(lid(args.platform, "Platform"))
-    team = lin.gql('{ teams(filter:{key:{eq:"%s"}}) { nodes { id } } }' % TEAM_KEY)
-    inp = {"teamId": team["teams"]["nodes"][0]["id"], "title": args.title,
-           "labelIds": label_ids}
-    if args.desc:
-        inp["description"] = args.desc
-    if args.priority:
-        inp["priority"] = args.priority
-    d = lin.gql("""mutation($input: IssueCreateInput!) {
-        issueCreate(input: $input) { issue { identifier url } } }""", {"input": inp})
-    iss = d["issueCreate"]["issue"]
-    print(f"created {iss['identifier']}  {iss['url']}")
+    res = lin.create_issue(title=args.title, type_label=args.type, area=args.area,
+                           platform=args.platform, desc=args.desc, priority=args.priority)
+    print(f"created {res['identifier']}  {res['url']}")
 
 
 def cmd_needs_maya(lin, args):
@@ -639,33 +1020,7 @@ def cmd_needs_maya(lin, args):
     if refusal:
         print(refusal)
         sys.exit(2)
-    # needs-maya is a WORKSPACE-level label (teamId=null). A non-admin fleet agent CANNOT create a
-    # team-scoped label — Linear returns "not allowed to create labels in this team" (verified live
-    # 2026-08-21) — but CAN create a workspace label, which coexists across SPI + HED and is exactly
-    # the cross-team state flag we want. Accept ONLY a workspace-level match (never a same-name team
-    # label — that would defeat the contract and can fail issueAddLabel for issues in other teams);
-    # create workspace-level (no teamId) when none exists.
-    labels = lin.gql("""query {
-        issueLabels(filter:{ name:{ eq:"needs-maya" } }, first:50) {
-            nodes { id name team { id } }
-        }
-    }""")["issueLabels"]["nodes"]
-    label = next((l for l in labels if l.get("team") is None), None)
-    if label is None:
-        created = lin.gql("""mutation($input: IssueLabelCreateInput!) {
-            issueLabelCreate(input: $input) { success issueLabel { id name } }
-        }""", {"input": {"name": "needs-maya"}})["issueLabelCreate"]
-        label = created.get("issueLabel")
-        if not created.get("success") or not label:
-            sys.exit("lin.sh: could not create the needs-maya label")
-
-    label_ids = [label["id"] for label in issue["labels"]["nodes"]]
-    if label["id"] not in label_ids:
-        lin.gql("""mutation($id: String!, $lid: String!) {
-            issueAddLabel(id: $id, labelId: $lid) { success } }""",
-                {"id": issue["id"], "lid": label["id"]})
-    comment = lin.comment(issue["id"], f"🔶 DECISION NEEDED (Agent {lin.key})\n{args.ask}")
-    if not comment.get("commentCreate", {}).get("success"):
+    if not lin.flag_for_human(issue, lin.key, args.ask):
         sys.exit("lin.sh: could not post the needs-maya decision comment; queue entry was not added")
     append_needs_maya_entry({
         "issue": issue["identifier"],

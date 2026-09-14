@@ -58,12 +58,21 @@ export const PROVIDER_REGISTRY: Record<'groq' | 'cerebras' | 'openrouter' | 'glm
   },
 };
 
-/** True for in-process HTTP providers (no filesystem/shell) — packs+diff must be embedded, not materialized. */
+/** True for the static OpenAI-compat registry providers (groq / cerebras / openrouter / glm). */
 export function isOpenAICompatProvider(provider: string): provider is 'groq' | 'cerebras' | 'openrouter' | 'glm' {
   return Object.prototype.hasOwnProperty.call(PROVIDER_REGISTRY, provider);
 }
 
-interface ChatResponse {
+/**
+ * True for every in-process HTTP provider (no filesystem/shell): the OpenAI-compat registry plus the
+ * local LM Studio adapter. The dispatcher must EMBED packs + diff for these (they cannot run git or read
+ * a materialized AGENTS.md), so this — not `isOpenAICompatProvider` — is the correct `isHttp` test.
+ */
+export function isInProcessHttpProvider(provider: string): boolean {
+  return isOpenAICompatProvider(provider) || provider === 'local';
+}
+
+export interface ChatResponse {
   choices?: Array<{ finish_reason?: string | null; message?: { content?: unknown } }>;
   usage?: { prompt_tokens?: number; completion_tokens?: number; completion_tokens_details?: { reasoning_tokens?: number } };
 }
@@ -105,7 +114,7 @@ export class OpenAICompatAdapter implements WorkerAdapter {
 
     const first = await this.request(prompt, opts, apiKey, this.config.maxTokensDefault, deadline);
     if ('result' in first) return completed(first.result);
-    const firstResult = this.toResult(first.response, first.httpOk);
+    const firstResult = toResult(first.response, first.httpOk);
     if (!this.needsReasoningRetry(first.response) || Date.now() >= deadline) return completed(firstResult);
 
     const firstBudget = this.budgetFor(this.config.maxTokensDefault);
@@ -113,7 +122,7 @@ export class OpenAICompatAdapter implements WorkerAdapter {
     if (retryBudget === firstBudget) return completed(firstResult);
     const retry = await this.request(prompt, opts, apiKey, retryBudget, deadline);
     if ('result' in retry) return completed({ ...retry.result, usage: sumUsage(firstResult.usage, retry.result.usage) });
-    const result = this.toResult(retry.response, retry.httpOk);
+    const result = toResult(retry.response, retry.httpOk);
     const final = result.output.length === 0
       ? { ...result, ok: false, error: 'empty content after reasoning-retry' }
       : result;
@@ -152,17 +161,6 @@ export class OpenAICompatAdapter implements WorkerAdapter {
     }
   }
 
-  private toResult(response: ChatResponse, httpOk: boolean): WorkerResult {
-    const choice = response.choices?.[0];
-    const output = typeof choice?.message?.content === 'string' ? choice.message.content : '';
-    const usage: TokenUsage | undefined = response.usage ? {
-      inputTokens: response.usage.prompt_tokens,
-      outputTokens: response.usage.completion_tokens,
-      reasoningOutputTokens: response.usage.completion_tokens_details?.reasoning_tokens,
-    } : undefined;
-    return { ok: httpOk && output.length > 0, output, usage, exitCode: null, error: output.length ? undefined : 'empty content', raw: response };
-  }
-
   private needsReasoningRetry(response: ChatResponse): boolean {
     const choice = response.choices?.[0];
     const content = typeof choice?.message?.content === 'string' ? choice.message.content : '';
@@ -174,7 +172,18 @@ export class OpenAICompatAdapter implements WorkerAdapter {
   }
 }
 
-function sumUsage(first?: TokenUsage, second?: TokenUsage): TokenUsage | undefined {
+export function toResult(response: ChatResponse, httpOk: boolean): WorkerResult {
+  const choice = response.choices?.[0];
+  const output = typeof choice?.message?.content === 'string' ? choice.message.content : '';
+  const usage: TokenUsage | undefined = response.usage ? {
+    inputTokens: response.usage.prompt_tokens,
+    outputTokens: response.usage.completion_tokens,
+    reasoningOutputTokens: response.usage.completion_tokens_details?.reasoning_tokens,
+  } : undefined;
+  return { ok: httpOk && output.length > 0, output, usage, exitCode: null, error: output.length ? undefined : 'empty content', raw: response };
+}
+
+export function sumUsage(first?: TokenUsage, second?: TokenUsage): TokenUsage | undefined {
   const sum = (a?: number, b?: number): number | undefined => a === undefined && b === undefined ? undefined : (a ?? 0) + (b ?? 0);
   const usage = {
     inputTokens: sum(first?.inputTokens, second?.inputTokens),
