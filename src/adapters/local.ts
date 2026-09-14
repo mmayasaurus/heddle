@@ -169,33 +169,37 @@ function isStructuredOutputValid(output: string, responseSchema: ResponseSchema)
 // (e.g. $ref, dependentRequired, patternProperties) are not enforced, so it can accept output a fuller
 // validator would reject — but it never rejects output that conforms.
 function matchesJsonSchema(value: unknown, schema: Record<string, unknown>): boolean {
+  if (!matchesCombinators(value, schema)) return false;
+  const types = Array.isArray(schema.type) ? schema.type : [schema.type];
+  if (types[0] !== undefined && !types.some((type) => matchesType(value, type))) return false;
+  if (typeof value === 'string') return matchesStringConstraints(value, schema);
+  if (typeof value === 'number') return matchesNumberConstraints(value, schema);
+  if (Array.isArray(value)) {
+    return matchesArrayConstraints(value, schema)
+      && (!isRecord(schema.items) || value.every((entry) => matchesJsonSchema(entry, schema.items as Record<string, unknown>)));
+  }
+  if (!isRecord(value)) return true;
+  return matchesObjectConstraints(value, schema);
+}
+
+function matchesCombinators(value: unknown, schema: Record<string, unknown>): boolean {
   if (Array.isArray(schema.allOf) && !schema.allOf.every((entry) => isRecord(entry) && matchesJsonSchema(value, entry))) return false;
   if (Array.isArray(schema.anyOf) && !schema.anyOf.some((entry) => isRecord(entry) && matchesJsonSchema(value, entry))) return false;
   if (Array.isArray(schema.oneOf) && schema.oneOf.filter((entry) => isRecord(entry) && matchesJsonSchema(value, entry)).length !== 1) return false;
   if (isRecord(schema.not) && matchesJsonSchema(value, schema.not)) return false;
   if (Object.hasOwn(schema, 'const') && value !== schema.const) return false;
   if (Array.isArray(schema.enum) && !schema.enum.some((entry) => value === entry)) return false;
+  return true;
+}
 
-  const types = Array.isArray(schema.type) ? schema.type : [schema.type];
-  if (types[0] !== undefined && !types.some((type) => matchesType(value, type))) return false;
-
-  if (typeof value === 'string' && !matchesStringConstraints(value, schema)) return false;
-  if (typeof value === 'number' && !matchesNumberConstraints(value, schema)) return false;
-  if (Array.isArray(value)) {
-    if (!matchesArrayConstraints(value, schema)) return false;
-    const itemSchema = schema.items;
-    return !isRecord(itemSchema) || value.every((entry) => matchesJsonSchema(entry, itemSchema));
-  }
-  if (!isRecord(value)) return true;
-
+function matchesObjectConstraints(value: Record<string, unknown>, schema: Record<string, unknown>): boolean {
   if (Array.isArray(schema.required) && schema.required.some((key) => typeof key !== 'string' || !Object.hasOwn(value, key))) return false;
-  if (isRecord(schema.properties)) {
-    for (const [key, propertySchema] of Object.entries(schema.properties)) {
-      if (Object.hasOwn(value, key) && isRecord(propertySchema) && !matchesJsonSchema(value[key], propertySchema)) return false;
-    }
+  if (!isRecord(schema.properties)) return true;
+  for (const [key, propertySchema] of Object.entries(schema.properties)) {
+    if (Object.hasOwn(value, key) && isRecord(propertySchema) && !matchesJsonSchema(value[key], propertySchema)) return false;
   }
-  if (schema.additionalProperties === false && isRecord(schema.properties)) {
-    return Object.keys(value).every((key) => Object.hasOwn(schema.properties!, key));
+  if (schema.additionalProperties === false) {
+    return Object.keys(value).every((key) => Object.hasOwn(schema.properties as Record<string, unknown>, key));
   }
   return true;
 }
