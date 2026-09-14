@@ -1,4 +1,5 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
@@ -28,6 +29,13 @@ export interface FleetHookInstallReport {
 export interface FleetHookDiffReport {
   clean: boolean;
   files: FleetHookFileResult[];
+}
+
+export interface FleetUninstallReport {
+  targetDir: string;
+  dryRun: boolean;
+  removed: string[];
+  preserved: string[];
 }
 
 export type FleetLauncherOptions = FleetHookOptions;
@@ -85,6 +93,29 @@ function canonicalFiles(assetSet: FleetAssetSet, canonicalDir: string): string[]
   // An empty canon is a broken checkout, never a vacuously clean install/diff.
   if (names.length === 0) throw new Error(`fleet ${assetSet.kind} canon is empty: ${canonicalDir}`);
   return names;
+}
+
+function manifestHashes(): Map<string, string> {
+  const path = join(FLEET_ROOT, 'MANIFEST.sha256');
+  if (!existsSync(path)) throw new Error(`fleet manifest not found: ${path}`);
+  const hashes = new Map<string, string>();
+  for (const line of readFileSync(path, 'utf8').split('\n')) {
+    const match = /^([a-f0-9]{64})  (.+)$/.exec(line);
+    if (match) hashes.set(match[2], match[1]);
+  }
+  return hashes;
+}
+
+function verifyDefaultCanon(assetSet: FleetAssetSet, canonicalDir: string, names: string[]): void {
+  if (canonicalDir !== assetSet.canonicalDir) return;
+  const hashes = manifestHashes();
+  for (const name of names) {
+    const directory = assetSet.kind === 'bin' ? 'bin' : `${assetSet.kind}s`;
+    const path = `${directory}/${name}`;
+    const expected = hashes.get(path);
+    const actual = createHash('sha256').update(readFileSync(join(canonicalDir, name))).digest('hex');
+    if (!expected || actual !== expected) throw new Error(`fleet manifest mismatch for ${path}`);
+  }
 }
 
 function sameContent(source: string, target: string): boolean {
@@ -151,6 +182,42 @@ function diffFleetAssets(assetSet: FleetAssetSet, options: FleetHookOptions): Fl
   return { clean: files.length === 0, files };
 }
 
+function uninstallFleetAssets(assetSet: FleetAssetSet, options: FleetHookOptions): FleetUninstallReport {
+  const { canonicalDir, targetDir } = paths(assetSet, options);
+  const names = canonicalFiles(assetSet, canonicalDir);
+  verifyDefaultCanon(assetSet, canonicalDir, names);
+  const removed: string[] = [];
+  const preserved: string[] = [];
+  // Do not follow a substituted fleet directory (for example, a user symlink): files reachable
+  // through it are not provably the files heddle installed at this location.
+  if (existsSync(targetDir) && !lstatSync(targetDir).isDirectory()) {
+    return {
+      targetDir,
+      dryRun: options.dryRun === true,
+      removed,
+      preserved: names.map((name) => join(targetDir, name)).filter(existsSync),
+    };
+  }
+  for (const name of names) {
+    const source = join(canonicalDir, name);
+    const target = join(targetDir, name);
+    if (!existsSync(target)) continue;
+    // A symlink, directory, or other irregular target was never proven to be fleet-written.
+    if (!lstatSync(target).isFile() || !sameContent(source, target) || !sameMode(source, target)) {
+      preserved.push(target);
+      continue;
+    }
+    if (!options.dryRun) unlinkSync(target);
+    removed.push(target);
+  }
+  // Only remove the fleet directory itself when it contains nothing at all. This intentionally
+  // preserves the directory beside any user file, including files outside the current canon.
+  if (!options.dryRun && existsSync(targetDir) && lstatSync(targetDir).isDirectory() && readdirSync(targetDir).length === 0) {
+    rmdirSync(targetDir);
+  }
+  return { targetDir, dryRun: options.dryRun === true, removed, preserved };
+}
+
 /** Copy the vendored Python canon into a home-scoped fleet installation. */
 export function installFleetHooks(options: FleetHookOptions = {}): FleetHookInstallReport {
   return installFleetAssets(ASSET_SETS.hook, options);
@@ -179,4 +246,19 @@ export function installFleetBin(options: FleetBinOptions = {}): FleetBinInstallR
 /** Compare the installed fleet bin tools to the vendored canon. */
 export function diffFleetBin(options: FleetBinOptions = {}): FleetBinDiffReport {
   return diffFleetAssets(ASSET_SETS.bin, options);
+}
+
+/** Remove only installed fleet hooks whose bytes and mode still match the manifest-verified canon. */
+export function uninstallFleetHooks(options: FleetHookOptions = {}): FleetUninstallReport {
+  return uninstallFleetAssets(ASSET_SETS.hook, options);
+}
+
+/** Remove only installed fleet launchers whose bytes and mode still match the manifest-verified canon. */
+export function uninstallFleetLaunchers(options: FleetLauncherOptions = {}): FleetUninstallReport {
+  return uninstallFleetAssets(ASSET_SETS.launcher, options);
+}
+
+/** Remove only installed fleet bin files whose bytes and mode still match the manifest-verified canon. */
+export function uninstallFleetBin(options: FleetBinOptions = {}): FleetUninstallReport {
+  return uninstallFleetAssets(ASSET_SETS.bin, options);
 }
