@@ -1,16 +1,17 @@
 import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join, relative } from 'node:path';
+import { dirname, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const root = join(dirname(fileURLToPath(import.meta.url)), '..', 'fleet');
+const root = process.argv[2] ?? join(dirname(fileURLToPath(import.meta.url)), '..', 'fleet');
 const manifestPath = join(root, 'MANIFEST.sha256');
 
 function filesUnder(current = root) {
   return readdirSync(current, { withFileTypes: true }).flatMap((entry) => {
     const path = join(current, entry.name);
     if (entry.isDirectory()) return filesUnder(path);
-    return entry.isFile() && path !== manifestPath ? [relative(root, path)] : [];
+    if (entry.isFile()) return path === manifestPath ? [] : [relative(root, path).split(sep).join('/')];
+    throw new Error(`fleet manifest: non-regular entry at ${relative(root, path).split(sep).join('/')}`);
   }).sort();
 }
 

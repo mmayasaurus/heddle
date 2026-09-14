@@ -71,7 +71,16 @@ describe('fleet bin', () => {
     const dryRun = await runCli(['fleet', 'install-bin', '--dry-run'], { home: dryRunHome });
     expect(dryRun.code).toBe(0);
     expect(dryRun.stdout).toContain(`target: ${join(dryRunHome, '.heddle', 'fleet', 'bin')}`);
-    expect(dryRun.stdout.split('\n').slice(1).filter(Boolean)).toHaveLength(10);
+    const dryRunLines = dryRun.stdout.split('\n').slice(1).filter(Boolean);
+    expect(dryRunLines).toHaveLength(10);
+    expect(dryRunLines.every((line) => line.startsWith('would create '))).toBe(true);
+    const dryRunJson = await runCli(['fleet', 'install-bin', '--dry-run', '--json'], { home: dryRunHome });
+    expect(dryRunJson.code).toBe(0);
+    expect(JSON.parse(dryRunJson.stdout)).toEqual(expect.objectContaining({
+      dryRun: true,
+      targetDir: join(dryRunHome, '.heddle', 'fleet', 'bin'),
+      files: expect.any(Array),
+    }));
     expect(existsSync(join(dryRunHome, '.heddle', 'fleet', 'bin'))).toBe(false);
   });
 });
