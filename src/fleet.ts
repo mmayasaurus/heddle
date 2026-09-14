@@ -36,6 +36,10 @@ export interface FleetUninstallReport {
   dryRun: boolean;
   removed: string[];
   preserved: string[];
+  /** Anomalies that blocked removal (a symlinked ancestor/target, or a non-regular file at a
+   * canonical path): surfaced for operator attention, never deleted. Distinct from `preserved`,
+   * which is specifically a user-MODIFIED regular file. */
+  warnings: string[];
 }
 
 export type FleetLauncherOptions = FleetHookOptions;
@@ -126,6 +130,27 @@ function sameMode(source: string, target: string): boolean {
   return (statSync(source).mode & 0o777) === (statSync(target).mode & 0o777);
 }
 
+/**
+ * lstat a path, returning undefined when it does not exist (ENOENT). Unlike existsSync it does NOT
+ * follow symlinks, so a DANGLING symlink is reported present (its Stats has isSymbolicLink() true).
+ */
+function lstatOrUndefined(path: string): ReturnType<typeof lstatSync> | undefined {
+  try {
+    return lstatSync(path);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Uninstall-only mode comparison over the FULL 0o7777 permission set (setuid/setgid/sticky included).
+ * The shared sameMode masks 0o777 for install/diff, which never set special bits; uninstall must
+ * refuse to delete a byte-identical file whose special bits an operator changed.
+ */
+function sameUninstallMode(source: string, target: string): boolean {
+  return (statSync(source).mode & 0o7777) === (lstatSync(target).mode & 0o7777);
+}
+
 function installAction(source: string, target: string): Extract<FleetHookAction, 'created' | 'updated' | 'unchanged'> {
   if (!existsSync(target)) return 'created';
   if (!statSync(target).isFile()) throw new Error(`target exists and is not a regular file: ${target}`);
@@ -186,36 +211,61 @@ function uninstallFleetAssets(assetSet: FleetAssetSet, options: FleetHookOptions
   const { canonicalDir, targetDir } = paths(assetSet, options);
   const names = canonicalFiles(assetSet, canonicalDir);
   verifyDefaultCanon(assetSet, canonicalDir, names);
+  const dryRun = options.dryRun === true;
   const removed: string[] = [];
   const preserved: string[] = [];
-  // Do not follow a substituted fleet directory (for example, a user symlink): files reachable
-  // through it are not provably the files heddle installed at this location.
-  if (existsSync(targetDir) && !lstatSync(targetDir).isDirectory()) {
-    return {
-      targetDir,
-      dryRun: options.dryRun === true,
-      removed,
-      preserved: names.map((name) => join(targetDir, name)).filter(existsSync),
-    };
+  const warnings: string[] = [];
+
+  // Ancestor-symlink guard (default ~/.heddle/fleet layout only). The per-file checks below prove a
+  // TARGET is a regular file byte+mode-identical to canon — but if an ancestor (~/.heddle or
+  // ~/.heddle/fleet) is a symlink, `target` resolves THROUGH it, and a fleet symlinked onto the canon
+  // itself would make every file "match" and be unlinked (deleting the source canon). Refuse
+  // wholesale when an ancestor is substituted; a legitimately-symlinked ~/.heddle becomes preserve-all
+  // (install still works through it — uninstall simply declines to guess what it did not provably lay down).
+  if (options.targetDir === undefined) {
+    const homeDir = options.homeDir ?? homedir();
+    for (const ancestor of [join(homeDir, '.heddle'), join(homeDir, '.heddle', 'fleet')]) {
+      if (lstatOrUndefined(ancestor)?.isSymbolicLink()) {
+        warnings.push(`refused to uninstall ${assetSet.kind}: ancestor path ${ancestor} is a symlink — not removing files reached through it`);
+        return { targetDir, dryRun, removed, preserved, warnings };
+      }
+    }
   }
+
+  // The fleet directory itself must be a real directory. A symlink (even dangling) or a file in its
+  // place was never proven to be the directory heddle installed into — do not follow or remove through it.
+  const targetDirStat = lstatOrUndefined(targetDir);
+  if (targetDirStat && !targetDirStat.isDirectory()) {
+    warnings.push(`refused to uninstall ${assetSet.kind}: ${targetDir} is not a real directory (symlink?) — not removing files reached through it`);
+    return { targetDir, dryRun, removed, preserved, warnings };
+  }
+
   for (const name of names) {
     const source = join(canonicalDir, name);
     const target = join(targetDir, name);
-    if (!existsSync(target)) continue;
-    // A symlink, directory, or other irregular target was never proven to be fleet-written.
-    if (!lstatSync(target).isFile() || !sameContent(source, target) || !sameMode(source, target)) {
+    const targetStat = lstatOrUndefined(target);
+    if (!targetStat) continue; // genuinely absent (ENOENT) — nothing to remove
+    // A symlink (including a dangling one), directory, or other irregular target was never proven to
+    // be a fleet-written file: never unlink it, and surface it so the operator can inspect.
+    if (!targetStat.isFile()) {
+      warnings.push(`preserved ${target}: not a regular file (symlink or directory) — heddle did not install it here`);
+      continue;
+    }
+    // A regular file whose bytes or FULL permission set differ from canon is an operator edit: keep it.
+    if (!sameContent(source, target) || !sameUninstallMode(source, target)) {
       preserved.push(target);
       continue;
     }
-    if (!options.dryRun) unlinkSync(target);
+    if (!dryRun) unlinkSync(target);
     removed.push(target);
   }
+
   // Only remove the fleet directory itself when it contains nothing at all. This intentionally
   // preserves the directory beside any user file, including files outside the current canon.
-  if (!options.dryRun && existsSync(targetDir) && lstatSync(targetDir).isDirectory() && readdirSync(targetDir).length === 0) {
+  if (!dryRun && targetDirStat?.isDirectory() && readdirSync(targetDir).length === 0) {
     rmdirSync(targetDir);
   }
-  return { targetDir, dryRun: options.dryRun === true, removed, preserved };
+  return { targetDir, dryRun, removed, preserved, warnings };
 }
 
 /** Copy the vendored Python canon into a home-scoped fleet installation. */
@@ -246,6 +296,18 @@ export function installFleetBin(options: FleetBinOptions = {}): FleetBinInstallR
 /** Compare the installed fleet bin tools to the vendored canon. */
 export function diffFleetBin(options: FleetBinOptions = {}): FleetBinDiffReport {
   return diffFleetAssets(ASSET_SETS.bin, options);
+}
+
+/**
+ * Verify a fleet asset set's canon is present, non-empty, and (for the default canon) manifest-
+ * identical — WITHOUT touching any installed target. `uninstall` runs this for every asset set before
+ * removing anything, so a manifest/canon failure aborts the whole command rather than leaving one set
+ * removed and another intact.
+ */
+export function verifyFleetCanon(kind: FleetAssetSet['kind'], options: FleetHookOptions = {}): void {
+  const assetSet = ASSET_SETS[kind];
+  const { canonicalDir } = paths(assetSet, options);
+  verifyDefaultCanon(assetSet, canonicalDir, canonicalFiles(assetSet, canonicalDir));
 }
 
 /** Remove only installed fleet hooks whose bytes and mode still match the manifest-verified canon. */

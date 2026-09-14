@@ -1046,15 +1046,19 @@ try {
       // This mutates user-scoped files, so reject every unrecognized or positional argument first.
       const unknownArgs = process.argv.slice(3).filter((arg) => !['--dry-run', '--json'].includes(arg));
       if (unknownArgs.length > 0) {
-        console.error(`heddle uninstall: unknown argument${unknownArgs.length === 1 ? '' : 's'} ${unknownArgs.join(', ')} — allowed: --dry-run, --json`);
-        process.exitCode = 2;
+        const error = `heddle uninstall: unknown argument${unknownArgs.length === 1 ? '' : 's'} ${unknownArgs.join(', ')} — allowed: --dry-run, --json`;
+        // Under --json, emit a machine-readable error to stdout (draining before exit) so a --json
+        // caller never parses empty stdout; otherwise a plain message to stderr (matches heddle doctor).
+        if (json) process.stdout.write(`${JSON.stringify({ ok: false, error })}\n`, () => process.exit(2));
+        else { console.error(error); process.exit(2); }
         break;
       }
       const report = uninstall({ dryRun: has('--dry-run') });
       out(json, report, () => [
         ...report.removed.map((path) => `${report.dryRun ? 'would remove' : 'removed'} ${path}`),
         ...report.preserved.map((path) => `preserved (modified — not removed) ${path}`),
-        report.removed.length || report.preserved.length ? '' : '(nothing to uninstall)',
+        ...report.warnings.map((warning) => `warning: ${warning}`),
+        report.removed.length || report.preserved.length || report.warnings.length ? '' : '(nothing to uninstall)',
       ].filter(Boolean).join('\n'));
       break;
     }

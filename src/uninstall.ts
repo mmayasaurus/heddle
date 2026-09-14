@@ -1,4 +1,4 @@
-import { uninstallFleetBin, uninstallFleetHooks, uninstallFleetLaunchers } from './fleet.js';
+import { uninstallFleetBin, uninstallFleetHooks, uninstallFleetLaunchers, verifyFleetCanon } from './fleet.js';
 
 export interface UninstallOptions {
   dryRun?: boolean;
@@ -7,6 +7,9 @@ export interface UninstallOptions {
 export interface UninstallReport {
   removed: string[];
   preserved: string[];
+  /** Anomalies that blocked removal across all asset sets (symlinked ancestor/target, or a
+   * non-regular file at a canonical path). Surfaced, never deleted. */
+  warnings: string[];
   dryRun: boolean;
 }
 
@@ -20,6 +23,13 @@ export interface UninstallReport {
  */
 export function uninstall(options: UninstallOptions = {}): UninstallReport {
   const dryRun = options.dryRun === true;
+  // Verify EVERY asset set's canon before removing anything: a manifest/canon failure must abort the
+  // whole command, never leave one set removed and another still installed (atomic across sets). Each
+  // per-set uninstaller re-verifies its own canon too; running all three checks up front is the
+  // structural guarantee that removal is all-or-nothing across sets.
+  verifyFleetCanon('bin');
+  verifyFleetCanon('hook');
+  verifyFleetCanon('launcher');
   const fleetReports = [
     uninstallFleetBin({ dryRun }),
     uninstallFleetHooks({ dryRun }),
@@ -28,6 +38,7 @@ export function uninstall(options: UninstallOptions = {}): UninstallReport {
   return {
     removed: fleetReports.flatMap((report) => report.removed),
     preserved: fleetReports.flatMap((report) => report.preserved),
+    warnings: fleetReports.flatMap((report) => report.warnings),
     dryRun,
   };
 }
