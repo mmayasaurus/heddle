@@ -111,7 +111,7 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
   heddle usage [--since <iso>] [--json]    per-provider totals
   heddle usage --remaining [--account <id>] [--json]  per-account quota headroom
   heddle usage poll-claude [--account <id>] [--json]  poll Claude OAuth usage and atomically write per-account sidecars
-  heddle usage install-poll-launchd [--start-interval <secs>] [--dry-run] [--json]  install the keeper-less launchd usage-poll producer (refuses if the window-keeper is loaded; loading it is a manual step)
+  heddle usage install-poll-launchd [--start-interval <secs>] [--dry-run] [--json]  install + load the keeper-less launchd usage-poll producer (running this yourself is the activation step — the pack never loads it; refuses if the window-keeper is loaded)
   heddle top [--once] [--json]  one disk-only dashboard snapshot (watch mode is Slice 2)
   heddle account pick [--for <letter[,letter...]>] [--json] [--explain]   healthiest addressable Claude account for a fleet relaunch
   heddle account seat-weights sync   atomically refresh ~/.heddle/seat-weights.json from routing/lanes.yaml
@@ -167,9 +167,12 @@ const json = has('--json');
  * Skipped too for `usage poll-claude` (HED-329): a scheduled vendor-poll that only writes usage
  * sidecars runs headless on a launchd timer (~5 min), has no ledger reads to make honest, and must
  * not mutate the ledger — closing orphans as a side effect of a background poll — on that cadence.
+ * Skipped too for `usage install-poll-launchd` (HED-517): a local launchd installer that only writes
+ * a plist and calls launchctl has no ledger reads to make honest and must not sweep orphans — a
+ * `--dry-run` preview especially must observe, not mutate.
  * Best-effort — a hygiene failure must never break the command the operator actually ran.
  */
-if (cmd !== 'mode' && cmd !== 'pr' && cmd !== 'comms' && cmd !== 'fleet' && cmd !== 'top' && !(cmd === 'ledger' && (process.argv[3] === 'sweep' || process.argv[3] === 'finish')) && !(cmd === 'usage' && process.argv[3] === 'poll-claude')) {
+if (cmd !== 'mode' && cmd !== 'pr' && cmd !== 'comms' && cmd !== 'fleet' && cmd !== 'top' && !(cmd === 'ledger' && (process.argv[3] === 'sweep' || process.argv[3] === 'finish')) && !(cmd === 'usage' && (process.argv[3] === 'poll-claude' || process.argv[3] === 'install-poll-launchd'))) {
   try {
     const { closed } = new Ledger().sweepOrphans();
     if (closed > 0) console.error(`heddle: closed ${closed} orphaned in-flight dispatch row${closed === 1 ? '' : 's'} (heddle ledger --json shows outcome='orphaned')`);
@@ -790,7 +793,7 @@ try {
         }
         const report = installUsagePollLaunchd({ dryRun: has('--dry-run'), startIntervalSecs: raw ? Number(raw) : undefined });
         out(json, report, () => report.message);
-        if (report.keeperConflict) process.exitCode = 1;
+        if (report.action === 'refused') process.exitCode = 1;
         break;
       }
       if (has('--remaining')) {

@@ -1,18 +1,29 @@
 import { execFileSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const USAGE_POLL_LABEL = 'io.heddle.usage-poll-claude';
 export const WINDOW_KEEPER_LABEL = 'io.heddle.window-keeper';
 export const DEFAULT_POLL_INTERVAL_SECS = 300;
 
+// Overrides the scheduled `heddle usage poll-claude` reads that a minimal launchd environment would
+// otherwise drop — so the producer polls the same registry and writes the same sidecar directory the
+// installing shell (and the rest of heddle) uses. Baked into the plist's EnvironmentVariables only
+// when set at install time; unset ⇒ omitted ⇒ the job uses the same defaults every other command does.
+const PROPAGATED_ENV_KEYS = ['HEDDLE_USAGE_DIR', 'HEDDLE_ACCOUNTS'] as const;
+
+// launchctl print exits 113 ("Could not find …") for an absent service — the ONLY failure that proves
+// the keeper is not loaded. Any other failure (spawn ENOENT, EPERM, transient) is indeterminate.
+const LAUNCHCTL_NOT_FOUND_STATUS = 113;
+
 export interface UsagePollLaunchdDeps {
   homeDir?: string;
   uid?: number;
   nodeBin?: string;
   cliJs?: string;
+  env?: NodeJS.ProcessEnv;
   isKeeperLoaded?: (uid: number) => boolean;
   readPlist?: (path: string) => string | null;
   writePlist?: (path: string, contents: string) => void;
@@ -32,6 +43,7 @@ export interface UsagePollLaunchdReport {
   nodeBin: string;
   cliJs: string;
   startIntervalSecs: number;
+  env: Record<string, string>;
   keeperConflict: boolean;
   loaded: boolean;
   dryRun: boolean;
@@ -45,10 +57,22 @@ const escapeXml = (value: string): string => value
   .replaceAll('"', '&quot;')
   .replaceAll("'", '&apos;');
 
-export function renderUsagePollPlist(opts: { nodeBin: string; cliJs: string; homeDir: string; startIntervalSecs: number }): string {
+export function renderUsagePollPlist(opts: {
+  nodeBin: string;
+  cliJs: string;
+  homeDir: string;
+  startIntervalSecs: number;
+  env?: Record<string, string>;
+}): string {
   const nodeBin = escapeXml(opts.nodeBin);
   const cliJs = escapeXml(opts.cliJs);
   const homeDir = escapeXml(opts.homeDir);
+  const envEntries = Object.entries(opts.env ?? {});
+  const envBlock = envEntries.length === 0 ? '' : `  <key>EnvironmentVariables</key>
+  <dict>
+${envEntries.map(([k, v]) => `    <key>${escapeXml(k)}</key>\n    <string>${escapeXml(v)}</string>`).join('\n')}
+  </dict>
+`;
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -62,7 +86,7 @@ export function renderUsagePollPlist(opts: { nodeBin: string; cliJs: string; hom
     <string>usage</string>
     <string>poll-claude</string>
   </array>
-  <key>StartInterval</key>
+${envBlock}  <key>StartInterval</key>
   <integer>${opts.startIntervalSecs}</integer>
   <key>RunAtLoad</key>
   <true/>
@@ -77,10 +101,18 @@ export function renderUsagePollPlist(opts: { nodeBin: string; cliJs: string; hom
 
 const defaultIsKeeperLoaded = (uid: number): boolean => {
   try {
-    execFileSync('launchctl', ['print', `gui/${uid}/${WINDOW_KEEPER_LABEL}`], { stdio: 'ignore' });
+    execFileSync('launchctl', ['print', `gui/${uid}/${WINDOW_KEEPER_LABEL}`], { stdio: ['ignore', 'ignore', 'pipe'] });
     return true;
-  } catch {
-    return false;
+  } catch (error) {
+    const err = error as NodeJS.ErrnoException & { status?: number | null; stderr?: Buffer | string };
+    const stderr = String(err.stderr ?? '').trim();
+    // Only a confirmed "not found" proves the keeper is absent. Every other failure is indeterminate:
+    // fail SAFE by refusing rather than installing a second producer past an unreadable keeper status.
+    if (err.status === LAUNCHCTL_NOT_FOUND_STATUS || /could not find|no such/i.test(stderr)) return false;
+    throw new Error(
+      `cannot determine whether ${WINDOW_KEEPER_LABEL} is loaded (launchctl exit ${err.status ?? err.code ?? '?'}` +
+      `${stderr ? `: ${stderr}` : ''}); refusing to install a second usage producer.`,
+    );
   }
 };
 
@@ -104,7 +136,11 @@ const defaultWritePlist = (path: string, contents: string): void => {
     chmodSync(temp, 0o644);
     renameSync(temp, path);
   } finally {
-    if (existsSync(temp)) unlinkSync(temp);
+    // Best-effort cleanup: a rename success leaves no temp, and a cleanup error must never mask the
+    // real write error propagating out of the try.
+    try {
+      if (existsSync(temp)) unlinkSync(temp);
+    } catch { /* leave the stray temp rather than shadow the original failure */ }
   }
 };
 
@@ -112,12 +148,18 @@ const defaultBootout = (uid: number, plistPath: string): void => {
   try {
     execFileSync('launchctl', ['bootout', `gui/${uid}`, plistPath], { stdio: 'ignore' });
   } catch {
-    // A job that was not already loaded has nothing to boot out.
+    // A job that was not already loaded has nothing to boot out — expected on a first install.
   }
 };
 
 const defaultBootstrap = (uid: number, plistPath: string): void => {
-  execFileSync('launchctl', ['bootstrap', `gui/${uid}`, plistPath], { stdio: 'ignore' });
+  try {
+    execFileSync('launchctl', ['bootstrap', `gui/${uid}`, plistPath], { stdio: ['ignore', 'ignore', 'pipe'] });
+  } catch (error) {
+    const err = error as NodeJS.ErrnoException & { stderr?: Buffer | string };
+    const stderr = String(err.stderr ?? '').trim();
+    throw new Error(`launchctl bootstrap gui/${uid} ${plistPath} failed${stderr ? `: ${stderr}` : ` (${err.message})`}`);
+  }
 };
 
 // The producer plist runs `node <cli.js>`; resolve THIS process's sibling dist/cli.js so the running
@@ -134,6 +176,11 @@ const defaultCliJs = (): string => {
   }
 };
 
+// A LaunchAgent outlives the shell that installed it. A cli.js under a git worktree
+// (…/.worktrees/<name>/dist/cli.js) is removed when the worktree is, silently breaking every future
+// poll — so refuse to bake one, mirroring the dashboard keeper installer.
+const isWorktreePath = (path: string): boolean => path.split(sep).includes('.worktrees');
+
 export function installUsagePollLaunchd(options: UsagePollLaunchdOptions = {}, partial: UsagePollLaunchdDeps = {}): UsagePollLaunchdReport {
   const homeDir = partial.homeDir ?? homedir();
   const uid = partial.uid ?? process.getuid?.() ?? 0;
@@ -142,24 +189,40 @@ export function installUsagePollLaunchd(options: UsagePollLaunchdOptions = {}, p
   const startIntervalSecs = options.startIntervalSecs ?? DEFAULT_POLL_INTERVAL_SECS;
   if (!Number.isInteger(startIntervalSecs) || startIntervalSecs <= 0) throw new Error('startIntervalSecs must be a positive integer');
 
+  const sourceEnv = partial.env ?? process.env;
+  const env: Record<string, string> = {};
+  for (const key of PROPAGATED_ENV_KEYS) {
+    const value = sourceEnv[key];
+    if (value !== undefined && value !== '') env[key] = value;
+  }
+
   const plistPath = join(homeDir, 'Library', 'LaunchAgents', `${USAGE_POLL_LABEL}.plist`);
   const dryRun = options.dryRun === true;
+  const base = { label: USAGE_POLL_LABEL, plistPath, nodeBin, cliJs, startIntervalSecs, env };
+
+  // The either/or keeper guard (guardrail): exactly one usage-sidecar producer per machine.
   if ((partial.isKeeperLoaded ?? defaultIsKeeperLoaded)(uid)) {
     return {
-      label: USAGE_POLL_LABEL, plistPath, action: 'refused', nodeBin, cliJs, startIntervalSecs,
-      keeperConflict: true, loaded: false, dryRun,
+      ...base, action: 'refused', keeperConflict: true, loaded: false, dryRun,
       message: `${WINDOW_KEEPER_LABEL} is loaded and already produces usage sidecars; exactly one producer is allowed per machine.`,
     };
   }
 
-  const rendered = renderUsagePollPlist({ nodeBin, cliJs, homeDir, startIntervalSecs });
+  // Never bake an ephemeral (worktree) CLI path into a persistent LaunchAgent.
+  if (isWorktreePath(cliJs)) {
+    return {
+      ...base, action: 'refused', keeperConflict: false, loaded: false, dryRun,
+      message: `resolved CLI path is inside a git worktree (${cliJs}); refusing to bake an ephemeral path into a persistent LaunchAgent — run from an installed heddle or pass an explicit cli.js.`,
+    };
+  }
+
+  const rendered = renderUsagePollPlist({ nodeBin, cliJs, homeDir, startIntervalSecs, env });
   const existing = (partial.readPlist ?? defaultReadPlist)(plistPath);
   const action = existing === null ? 'created' : existing === rendered ? 'unchanged' : 'updated';
   if (dryRun) {
     const plannedAction = action === 'created' ? 'would-create' : action === 'updated' ? 'would-update' : 'would-skip';
     return {
-      label: USAGE_POLL_LABEL, plistPath, action: plannedAction, nodeBin, cliJs, startIntervalSecs,
-      keeperConflict: false, loaded: false, dryRun: true,
+      ...base, action: plannedAction, keeperConflict: false, loaded: false, dryRun: true,
       message: `would ${plannedAction.slice('would-'.length)} ${plistPath}`,
     };
   }
@@ -168,8 +231,7 @@ export function installUsagePollLaunchd(options: UsagePollLaunchdOptions = {}, p
   (partial.bootout ?? defaultBootout)(uid, plistPath);
   (partial.bootstrap ?? defaultBootstrap)(uid, plistPath);
   return {
-    label: USAGE_POLL_LABEL, plistPath, action, nodeBin, cliJs, startIntervalSecs,
-    keeperConflict: false, loaded: true, dryRun: false,
+    ...base, action, keeperConflict: false, loaded: true, dryRun: false,
     message: `${action} ${plistPath} and loaded ${USAGE_POLL_LABEL}`,
   };
 }

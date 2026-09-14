@@ -15,6 +15,11 @@ It writes `~/Library/LaunchAgents/io.heddle.usage-poll-claude.plist` and (bootou
 job that runs `heddle usage poll-claude` every 300 seconds (override with `--start-interval`). That
 command polls **all** registry accounts and atomically writes each `claude-<id>.oauth-usage.json`.
 
+If `HEDDLE_USAGE_DIR` or `HEDDLE_ACCOUNTS` is set in the installing shell, the installer bakes it into
+the plist's `EnvironmentVariables` so the scheduled job reads the same registry and writes the same
+sidecar directory the rest of heddle uses — launchd otherwise runs with a minimal environment and
+would silently fall back to the defaults.
+
 ## Self-resolving invocation
 
 The producer plist invokes the CLI as an **explicit** `node <dist/cli.js>` — launchd's PATH has no
