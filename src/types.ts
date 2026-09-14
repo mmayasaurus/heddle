@@ -21,6 +21,8 @@ export interface DispatchOptions {
   extraFlags?: string[];
   /** Hard wall-clock limit; adapters kill the child past this. */
   timeoutMs?: number;
+  /** Claude-only maximum period without stdout before its idle watchdog kills the worker. */
+  idleTimeoutMs?: number;
   /** Resume a prior session/thread instead of starting fresh. */
   resume?: string;
   /**

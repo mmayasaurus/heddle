@@ -12,7 +12,7 @@ import { CodexAdapter } from '../src/adapters/codex.js';
 import { CursorAdapter } from '../src/adapters/cursor.js';
 
 const mockedRun = vi.mocked(run);
-const baseRun = { stderr: '', exitCode: 0, timedOut: false, stdoutTruncated: false, stderrTruncated: false };
+const baseRun = { stderr: '', exitCode: 0, timedOut: false, idleTimedOut: false, stdoutTruncated: false, stderrTruncated: false };
 const cursorOutput = JSON.stringify({ type: 'result', is_error: false, result: 'cursor response', session_id: 'cursor-session', usage: { inputTokens: 1, outputTokens: 1 } });
 const claudeOutput = JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'claude response', session_id: 'claude-session', usage: { input_tokens: 1, output_tokens: 1 } });
 const codexOutput = [
@@ -23,6 +23,15 @@ const codexOutput = [
 const agyOutput = JSON.stringify({ event: 'result', result: { status: 'SUCCESS', response: 'agy response', conversation_id: 'agy-session', usage: { input_tokens: 1, output_tokens: 1 } } });
 
 describe('subprocess adapter truncation handling', () => {
+  it('reports a distinct Claude idle-watchdog failure', async () => {
+    mockedRun.mockResolvedValueOnce({ ...baseRun, stdout: '', exitCode: null, idleTimedOut: true });
+
+    const result = await new ClaudeAdapter().dispatch('work', { model: 'sonnet', cwd: '/tmp', idleTimeoutMs: 456 });
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain('claude produced no output for 456ms (idle watchdog SIGKILL)');
+  });
+
   it.each([
     ['cursor', new CursorAdapter(), cursorOutput, { model: 'kimi-k3', cwd: '/tmp' }],
     ['claude', new ClaudeAdapter(), claudeOutput, { model: 'sonnet', cwd: '/tmp' }],

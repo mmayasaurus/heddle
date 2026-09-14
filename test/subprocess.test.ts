@@ -12,7 +12,7 @@ describe('subprocess run() — the shared adapter runner', () => {
   const { tempDir } = useTempResources('heddle-subprocess-');
   it('captures stdout, stderr, and the exit code on a clean exit', async () => {
     const r = await run(NODE, ['-e', 'process.stdout.write("out"); process.stderr.write("err")'], process.cwd(), 10_000);
-    expect(r).toEqual({ stdout: 'out', stderr: 'err', exitCode: 0, timedOut: false, stdoutTruncated: false, stderrTruncated: false });
+    expect(r).toEqual({ stdout: 'out', stderr: 'err', exitCode: 0, timedOut: false, idleTimedOut: false, stdoutTruncated: false, stderrTruncated: false });
   });
 
   it('reports a non-zero exit code', async () => {
@@ -24,6 +24,37 @@ describe('subprocess run() — the shared adapter runner', () => {
   it('kills a process that exceeds the timeout and flags timedOut (exitCode null on SIGKILL)', async () => {
     const r = await run(NODE, ['-e', 'setTimeout(() => {}, 60_000)'], process.cwd(), 300);
     expect(r.timedOut).toBe(true);
+    expect(r.idleTimedOut).toBe(false);
+    expect(r.exitCode).toBeNull();
+  });
+
+  it('kills a silent process with the idle watchdog before the hard deadline', async () => {
+    const r = await run(NODE, ['-e', 'process.stdout.write("started"); setTimeout(() => {}, 700)'], process.cwd(), 5_000, undefined, undefined, undefined, 200);
+    expect(r.idleTimedOut).toBe(true);
+    expect(r.timedOut).toBe(false);
+    expect(r.exitCode).toBeNull();
+  });
+
+  it('resets the idle watchdog on each stdout chunk', async () => {
+    // 50ms chunk cadence vs a 400ms idle budget = 8x margin, so a stalled CI event loop (this suite's
+    // real-timer subprocess tests flake under heavy parallel load) does not trip a false idle kill.
+    const r = await run(NODE, ['-e', 'let n = 0; const t = setInterval(() => { process.stdout.write("."); if (++n === 12) { clearInterval(t); process.exit(0); } }, 50)'], process.cwd(), 5_000, undefined, undefined, undefined, 400);
+    expect(r.idleTimedOut).toBe(false);
+    expect(r.timedOut).toBe(false);
+    expect(r.exitCode).toBe(0);
+  });
+
+  it('leaves the idle watchdog disabled when its timeout is unset', async () => {
+    const r = await run(NODE, ['-e', 'process.stdout.write("started"); setTimeout(() => process.exit(0), 700)'], process.cwd(), 5_000);
+    expect(r.idleTimedOut).toBe(false);
+    expect(r.timedOut).toBe(false);
+    expect(r.exitCode).toBe(0);
+  });
+
+  it('disables the idle watchdog when the hard deadline cannot exceed its grace window', async () => {
+    const r = await run(NODE, ['-e', 'process.stdout.write("started"); setTimeout(() => {}, 700)'], process.cwd(), 300, undefined, undefined, undefined, 200);
+    expect(r.timedOut).toBe(true);
+    expect(r.idleTimedOut).toBe(false);
     expect(r.exitCode).toBeNull();
   });
 

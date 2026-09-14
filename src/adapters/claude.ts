@@ -35,6 +35,11 @@ import type { DispatchOptions, WorkerAdapter, WorkerResult, TokenUsage } from '.
  */
 export const CLAUDE_WORKER_PROTOCOL_VERSION = 1;
 
+// A Claude worker running its own long tool call (for example `npx vitest run`, observed at ~128s)
+// emits no stream events for the tool's duration. Five minutes leaves margin for healthy tool calls,
+// catches genuinely hung turns, and remains well below the default 600s hard deadline.
+export const DEFAULT_CLAUDE_IDLE_TIMEOUT_MS = 300_000;
+
 /** Task classes the routing table sends to Claude, for reference by generators. */
 export type ClaudeWorkerModel = 'fable' | 'opus' | 'sonnet' | 'haiku';
 
@@ -190,10 +195,12 @@ export class ClaudeAdapter implements WorkerAdapter {
     }
     const started = Date.now();
     const timeoutMs = opts.timeoutMs ?? 600_000;
-    const { stdout, stderr, exitCode, timedOut, stdoutTruncated } = await run(this.bin, args, opts.cwd, timeoutMs, opts.env, opts.envUnset);
+    const idleMs = opts.idleTimeoutMs ?? DEFAULT_CLAUDE_IDLE_TIMEOUT_MS;
+    const { stdout, stderr, exitCode, timedOut, idleTimedOut, stdoutTruncated } = await run(this.bin, args, opts.cwd, timeoutMs, opts.env, opts.envUnset, undefined, idleMs);
     const parsed = parseClaudeResult(stdout, exitCode);
     // A timeout must be tellable apart from a crash: SIGKILL alone reports only a null exit.
     if (timedOut) parsed.error = `claude timed out after ${timeoutMs}ms (SIGKILL)` + (parsed.error ? `; ${parsed.error}` : '');
+    else if (idleTimedOut) parsed.error = `claude produced no output for ${idleMs}ms (idle watchdog SIGKILL) — likely a hung turn` + (parsed.error ? `; ${parsed.error}` : '');
     // stderr often carries the useful context even when a result JSON WAS parsed (e.g. error
     // subtypes with an empty result) — attach the tail on every failure.
     if (!parsed.ok && parsed.error && stderr.trim().length) {
