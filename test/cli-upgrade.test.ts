@@ -2,6 +2,7 @@ import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from '
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { runCli, withTempHome } from './helpers/cli.js';
+import { PROJECTS_SCHEMA_VERSION } from '../src/projects.js';
 
 const fleetBin = (home: string) => join(home, '.heddle', 'fleet', 'bin');
 
@@ -71,5 +72,33 @@ describe('heddle upgrade', () => {
     expect(JSON.parse(result.stdout)).toMatchObject({ dryRun: true, migrations: expect.arrayContaining([
       expect.objectContaining({ kind: 'accounts', action: 'would-migrate', from: 1, to: 2 }),
     ]), assets: expect.arrayContaining([expect.objectContaining({ action: 'would-create' })]) });
+  });
+
+  it('honors HEDDLE_PROJECTS for the projects registry, not just the default path', async () => {
+    const home = withTempHome();
+    const projects = join(home, 'custom-projects.json');
+    // A valid CURRENT-version projects registry at a custom path: upgrade must report IT (current),
+    // proving it resolved HEDDLE_PROJECTS rather than the (absent) default path.
+    writeFileSync(projects, JSON.stringify({ schemaVersion: PROJECTS_SCHEMA_VERSION, projects: [] }) + '\n');
+
+    const result = await runCli(['upgrade', '--json'], { home, env: { HEDDLE_PROJECTS: projects } });
+
+    expect(result.code).toBe(0);
+    const projectsEntry = JSON.parse(result.stdout).migrations.find((m: { kind: string }) => m.kind === 'projects');
+    expect(projectsEntry.path).toBe(projects);
+    expect(projectsEntry.action).not.toBe('absent');
+  });
+
+  it('rejects an unknown/mistyped flag instead of performing real writes', async () => {
+    const home = withTempHome();
+    const accounts = join(home, 'accounts.json');
+    writeFileSync(accounts, '{"claude":[]}\n');
+
+    // A typo'd --dry-run (here --dryrun) must NOT silently mutate the filesystem.
+    const result = await runCli(['upgrade', '--dryrun'], { home, env: { HEDDLE_ACCOUNTS: accounts } });
+
+    expect(result.code).not.toBe(0);
+    expect(JSON.parse(readFileSync(accounts, 'utf8'))).toEqual({ claude: [] });
+    expect(existsSync(fleetBin(home))).toBe(false);
   });
 });

@@ -84,6 +84,15 @@ describe('migrateConfigFile', () => {
     expect(JSON.parse(readFileSync(path, 'utf8'))).toEqual({ schemaVersion: 2, claude: [] });
   });
 
+  it('rejects an explicit null accounts schemaVersion instead of promoting it as legacy', () => {
+    const original = '{\n  "schemaVersion": null,\n  "claude": []\n}\n';
+    const path = writeFixture('null-version.json', original);
+
+    // `?? baseline` would coerce null→v1→v2; the loader rejects explicit null as corrupt, so must this.
+    expect(() => migrateConfigFile('accounts', path)).toThrow(/invalid schemaVersion/i);
+    expect(readFileSync(path, 'utf8')).toBe(original);
+  });
+
   it('plans a migration without writing a backup or changing the file in dry-run mode', () => {
     const original = '{\n  "schemaVersion": 1,\n  "value": "dry"\n}\n';
     const path = writeFixture('dry-run.json', original);

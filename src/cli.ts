@@ -969,11 +969,21 @@ try {
     }
 
     case 'upgrade': {
+      // A mutating command must reject a mistyped flag rather than proceed with real writes: e.g.
+      // `heddle upgrade --dryrun` (missing the hyphen) would otherwise leave dryRun false and mutate.
+      const unknownArgs = process.argv.slice(3).filter((arg) => arg !== '--dry-run' && arg !== '--force' && arg !== '--json');
+      if (unknownArgs.length > 0) {
+        console.error(`heddle upgrade: unknown argument${unknownArgs.length === 1 ? '' : 's'} ${unknownArgs.join(', ')} — allowed: --dry-run, --force, --json`);
+        process.exitCode = 2;
+        break;
+      }
       const dryRun = has('--dry-run');
       const forced = has('--force');
       const accountsPath = process.env.HEDDLE_ACCOUNTS ?? DEFAULT_ACCOUNTS_PATH;
       const migrations = [
-        { kind: 'projects', path: DEFAULT_PROJECTS_PATH },
+        // Honor HEDDLE_PROJECTS like doctor.ts / loadGateMaps (skillpacks.ts) do — else a custom
+        // projects registry is left unmigrated while upgrade touches only the default path.
+        { kind: 'projects', path: process.env.HEDDLE_PROJECTS?.trim() || DEFAULT_PROJECTS_PATH },
         { kind: 'accounts', path: accountsPath },
       ].map(({ kind, path }) => {
         if (!existsSync(path)) return { kind, path, action: 'absent' as const };

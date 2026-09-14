@@ -36,7 +36,10 @@ const ACCOUNTS_LEGACY_BASELINE = 1;
 export const CONFIG_MIGRATIONS: ConfigMigrationRegistry = {
   accounts: {
     currentVersion: ACCOUNTS_SCHEMA_VERSION,
-    storedVersion: (raw) => raw.schemaVersion ?? ACCOUNTS_LEGACY_BASELINE,
+    // Only an ABSENT schemaVersion is the legacy baseline. An explicit `null` (or any other
+    // non-integer) must fall through to the loud schemaVersion() validator — the account loader
+    // likewise rejects an explicit null as corrupt, so migration must not silently promote it.
+    storedVersion: (raw) => (raw.schemaVersion === undefined ? ACCOUNTS_LEGACY_BASELINE : raw.schemaVersion),
     steps: [
       { from: ACCOUNTS_LEGACY_BASELINE, to: ACCOUNTS_SCHEMA_VERSION, migrate: (raw) => raw },
     ],
