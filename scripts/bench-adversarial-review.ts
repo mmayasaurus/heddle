@@ -414,6 +414,12 @@ export function asJudgeResult(value: unknown, round: CorpusRound): JudgeResult {
     if (seen.has(finding.idx)) throw new Error(`judge-${round.dispatchId}: duplicate candidate finding index ${finding.idx}`);
     seen.add(finding.idx);
   }
+  // A matched accepted finding IS a TP (line above ties class TP to matchesAcceptedIncumbent), so a positive
+  // matched count with zero TP findings is self-contradictory — reject it rather than persist fabricated recall
+  // (matched/findingsAccepted > 0 for a candidate that caught nothing).
+  if (data.acceptedIncumbentMatchedCount! > 0 && !findings.some((finding) => finding.class === 'TP')) {
+    throw new Error(`judge-${round.dispatchId}: acceptedIncumbentMatchedCount is ${data.acceptedIncumbentMatchedCount} but no candidate finding is classified TP`);
+  }
   return { roundId: data.roundId!, candidateFindings: findings, acceptedIncumbentMatchedCount: data.acceptedIncumbentMatchedCount! };
 }
 

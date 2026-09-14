@@ -68,12 +68,20 @@ describe('shadow review', () => {
     expect(receipts(allScored.receiptDir!)).toHaveLength(3);
   });
 
-  it('forces a requested dispatch id and records no-such-round when it is absent', () => {
+  it('forces a requested dispatch id, refuses an already-scored id without a duplicate, and reports no-such-round when absent', () => {
     const root = tempDir();
     const deps = testDeps(root, [round(30), round(20)], [{ ok: false, error: 'judge unavailable' }]);
 
     expect(runShadowRound({ dispatchId: 20 }, deps)).toMatchObject({ status: 'skipped', dispatchId: 20, reason: 'local-declined:judge unavailable' });
     expect(runShadowRound({ dispatchId: 999 }, deps)).toEqual({ status: 'skipped', dispatchId: 999, reason: 'no-such-round' });
+
+    // qodo #1: a forced id already in the scored receipts is refused (not re-scored → no duplicate diff).
+    const scoredRoot = tempDir();
+    const scored = testDeps(scoredRoot, [round(30), round(20)]);
+    mkdirSync(scored.receiptDir!, { recursive: true });
+    writeFileSync(join(scored.receiptDir!, 'receipts.jsonl'), `${JSON.stringify({ dispatchId: 30, status: 'scored' })}\n`);
+    expect(runShadowRound({ dispatchId: 30 }, scored)).toEqual({ status: 'skipped', dispatchId: 30, reason: 'already-scored' });
+    expect(receipts(scored.receiptDir!).filter((receipt) => receipt.status === 'scored')).toHaveLength(1);
   });
 
   it('records local ram-pressure and reachability declines without scoring', () => {
@@ -126,6 +134,35 @@ describe('shadow review', () => {
     expect(report).toContain('claude/opus');
     expect(report).toContain('codex/gpt-5.6-sol');
     expect(report).toContain('local-declined:ram-pressure (2)');
+  });
+
+  it('rejects a self-contradictory judge (matched > 0 with no TP finding) as score-failed, writing no receipt (qodo #3)', () => {
+    const root = tempDir();
+    const contradictory = JSON.stringify({
+      roundId: 30,
+      candidateFindings: [{ idx: 1, class: 'NOVEL', matchesAcceptedIncumbent: false, rationale: 'nothing actually matched' }],
+      acceptedIncumbentMatchedCount: 2,
+    });
+    const deps = testDeps(root, [round(30)], [{ ok: true, output: 'candidate' }, { ok: true, output: contradictory }]);
+    expect(runShadowRound({}, deps)).toMatchObject({ status: 'skipped', dispatchId: 30, reason: expect.stringContaining('score-failed') });
+    expect(receipts(deps.receiptDir!).filter((receipt) => receipt.status === 'scored')).toHaveLength(0);
+  });
+
+  it('deduplicates scored receipts by dispatch id, and keeps the hallucination gate pending until every round is checked (qodo #1, #2)', () => {
+    const base = { issue: 'HED-1', pr: 1, repo: 'heddle' as const, authorProvider: 'codex', reviewerProvider: 'claude', reviewerModel: 'opus', candidateProvider: 'local' as const, candidateModel: 'local', findingsTotal: 2, findingsAccepted: 2, tp: 1, fp: 0, novel: 0, acceptedMatched: 1, recall: 0.5, precision: 1, at: '2026-09-14T12:00:00.000Z', status: 'scored' as const };
+
+    // dedup: two receipts with the SAME dispatchId count as one distinct diff.
+    const deduped = renderShadowReport([{ ...base, dispatchId: 7 }, { ...base, dispatchId: 7 }]);
+    expect(deduped).toContain('1 rounds scored');
+    expect(deduped).toContain('diffs: 1/20');
+
+    // hallucination gate KNOWN for only SOME rounds → stays pending with checked/total (never a false pass).
+    const partial = renderShadowReport([{ ...base, dispatchId: 1, hallucinatedCitations: 0 }, { ...base, dispatchId: 2 }]);
+    expect(partial).toContain('hallucinated citations surviving file:line check: pending — 1/2 rounds checked');
+
+    // hallucination gate KNOWN for ALL rounds → concrete count + pass tick.
+    const complete = renderShadowReport([{ ...base, dispatchId: 1, hallucinatedCitations: 0 }, { ...base, dispatchId: 2, hallucinatedCitations: 0 }]);
+    expect(complete).toContain('hallucinated citations surviving file:line check: 0 ✓');
   });
 
   it('is dormant: injected execution touches only work and receipt directories', () => {

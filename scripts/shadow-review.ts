@@ -253,11 +253,14 @@ export function runShadowRound(options: ShadowOptions = {}, deps: ShadowDeps = {
   );
   const selected = options.dispatchId === undefined
     ? rounds.find((round) => !scoredIds.has(round.dispatchId))
-    : rounds.find((round) => round.dispatchId === options.dispatchId);
+    : rounds.find((round) => round.dispatchId === options.dispatchId && !scoredIds.has(round.dispatchId));
   if (!selected) {
-    return options.dispatchId === undefined
-      ? skipResult(undefined, 'no-qualifying-round', receiptDir, at, dryRun, false)
-      : skipResult(options.dispatchId, 'no-such-round', receiptDir, at, dryRun);
+    if (options.dispatchId === undefined) return skipResult(undefined, 'no-qualifying-round', receiptDir, at, dryRun, false);
+    // A forced id that EXISTS but is already scored must not be re-scored — a duplicate receipt would inflate
+    // the diff count, the day span, and every aggregate metric against the promotion bar (qodo #1). Neither
+    // forced-refusal writes a receipt (operator no-ops, like no-qualifying-round).
+    const reason = rounds.some((round) => round.dispatchId === options.dispatchId) ? 'already-scored' : 'no-such-round';
+    return skipResult(options.dispatchId, reason, receiptDir, at, dryRun, false);
   }
 
   return dispatchScoreReceipt(selected, { dispatchRunner, workDir, receiptDir, summary, at, dryRun });
@@ -296,7 +299,11 @@ function promotionBarLines(scored: readonly ScoredReceipt[], totals: ReportTotal
   const localPrecisionExclNovel = totals.tp + totals.fp === 0 ? null : totals.tp / (totals.tp + totals.fp);
   const cloudPrecision = totals.findingsTotal === 0 ? null : totals.findingsAccepted / totals.findingsTotal;
   const days = spanDays(scored);
-  const hallucinationKnown = scored.some((receipt) => receipt.hallucinatedCitations !== undefined);
+  // Gate 4 is KNOWN only when EVERY scored round has been through the file:line post-check (qodo #2): once
+  // the check supplies data for only SOME rounds, summing the rest as 0 would let a passing ✓ hide unchecked
+  // rounds. Until all are checked the gate stays pending and shows how many are checked.
+  const checked = scored.filter((receipt) => receipt.hallucinatedCitations !== undefined).length;
+  const hallucinationKnown = scored.length > 0 && checked === scored.length;
   const precisionMeets = localPrecision !== null && cloudPrecision !== null && localPrecision >= cloudPrecision;
   return [
     'Promotion bar (HED-321 — all four must hold; activation stays Maya-gated):',
@@ -304,7 +311,7 @@ function promotionBarLines(scored: readonly ScoredReceipt[], totals: ReportTotal
     `  • calendar days elapsed: ${days.toFixed(1)}/${SHADOW_BAR_MIN_DAYS}${tick(days >= SHADOW_BAR_MIN_DAYS)}`,
     `  • precision (confirmed-real/raised, same diffs — the gate): local ${pct(localPrecision)} vs cloud ${pct(cloudPrecision)}${tick(precisionMeets)}`,
     `      context: local excl. NOVEL = ${pct(localPrecisionExclNovel)} (NOVEL counted as raised-but-unconfirmed; final NOVEL handling is R's call at promotion)`,
-    `  • hallucinated citations surviving file:line check: ${hallucinationKnown ? `${totals.hallucinated}${tick(totals.hallucinated === 0)}` : 'pending — mechanical post-check not yet implemented'}`,
+    `  • hallucinated citations surviving file:line check: ${hallucinationKnown ? `${totals.hallucinated}${tick(totals.hallucinated === 0)}` : `pending — ${checked}/${scored.length} rounds checked (mechanical post-check not yet implemented)`}`,
   ];
 }
 
@@ -331,13 +338,21 @@ function skipLines(receipts: readonly ShadowReceipt[]): string[] {
   return [`Skipped: ${[...skips.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([reason, count]) => `${reason} (${count})`).join('; ')}`];
 }
 
+// Defensive dedup by dispatchId (qodo #1): a forced re-score is now refused, but a historical duplicate or a
+// concurrent run must still never inflate the distinct-diff count or aggregates. Keep the LAST receipt per id.
+function dedupeScored(receipts: readonly ShadowReceipt[]): ScoredReceipt[] {
+  const byId = new Map<number, ScoredReceipt>();
+  for (const receipt of receipts) if (receipt.status === 'scored') byId.set(receipt.dispatchId, receipt);
+  return [...byId.values()];
+}
+
 /**
  * Renders receipt history and progress toward the HED-321 promotion bar (the four gates in the constants
  * above). It only REPORTS — it never makes or applies an activation decision; activation stays Maya-gated.
  * Recall is shown for information only and is deliberately not a gate.
  */
 export function renderShadowReport(receipts: readonly ShadowReceipt[]): string {
-  const scored = receipts.filter((receipt): receipt is ScoredReceipt => receipt.status === 'scored');
+  const scored = dedupeScored(receipts);
   const totals = sumReceipts(scored);
   const recall = totals.findingsAccepted === 0 ? null : totals.acceptedMatched / totals.findingsAccepted;
   return [
