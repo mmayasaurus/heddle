@@ -46,7 +46,7 @@ Drift includes permission mode differences as well as byte differences. When byt
 
 ## `launchers-diff` scope
 
-`launchers-diff` compares only the `.sh` files present in the canon directory (discovered dynamically, like the hook set's `.py` discovery — the canon directory is git-controlled, so additions arrive only via reviewed commits); installed extras are ignored. Dynamic discovery keeps `src/fleet.ts` name-free and the test fixtures use neutral names; this document is the one shipped file that names the launchers — its catalog lines are carried by line-keyed entries in the public-scrub allowlist.
+`launchers-diff` compares only the `.sh` files present in the canon directory (discovered dynamically, like the hook set's `.py` discovery — the canon directory is git-controlled, so additions arrive only via reviewed commits); installed extras are ignored. Dynamic discovery keeps `src/fleet.ts` name-free and the test fixtures use neutral names; this document names only identity-free launcher filenames, and the catalog below describes identity-bearing couplings generically with file:line pointers — so the shipped doc carries no tenant or machine identity (both the public-scrub suite and the release generator's output gate verify this, with an empty allowlist).
 
 ## Cutover is separate
 
@@ -64,15 +64,15 @@ The v1 `resume-sessions.sh` was a 2026-06-29 crash-recovery one-off with hardcod
 
 Catalog only: do not fix these in the installed-copy phase. Canon bugs route upstream and are then re-vendored, following the HED-499 pattern.
 
-- `resume-sessions-v2.sh:113-114` hardcodes the Maya Spinventory workspace root and its inner repository/worktree location.
+- `resume-sessions-v2.sh:113-114` hardcodes the operator's workspace root and its inner repository/worktree location as absolute paths.
 - `resume-sessions-v2.sh:117-119` assumes the local Claude session store, `~/.heddle/accounts.json`, and a Heddle CLI build at `~/Developer/heddle/dist/cli.js`.
-- `resume-sessions-v2.sh:160`, `resume-sessions-v2.sh:261-264`, and `resume-sessions-v2.sh:756-759` hardcode the Heddle comms server at `/Users/mayatobi/Developer/heddle/dist/comms/channel-server.js` and disable comms when that file is absent.
+- `resume-sessions-v2.sh:160`, `resume-sessions-v2.sh:261-264`, and `resume-sessions-v2.sh:756-759` hardcode an absolute, operator-home-anchored path to the heddle comms channel-server build (`dist/comms/channel-server.js` under the operator's checkout) and disable comms when that file is absent.
 - `resume-sessions-v2.sh:177` and `resume-sessions-v2.sh:194-205` couple optional settings overlays to a caller-provided, readable `FLEET_SETTINGS_FILE`, canonicalized to the current filesystem and constrained for tab-shell emission.
 - `resume-sessions-v2.sh:304-310` assumes the user's `~/.claude` store is shared into each configured account directory and invokes the workspace-local `.claude/bin/heddle-account-share.sh` remediation path.
 - `resume-sessions-v2.sh:689-703` defaults Heddle-fleet sessions to `~/Developer/heddle` and forces R–Z into that cwd; `resume-sessions-v2.sh:926-950` recreates missing session/worktree directories and uses the hardcoded inner repository for `git worktree add`.
 - `resume-sessions-v2.sh:762-769` launches every resumed session from the session-derived or forced project cwd, so successful resume depends on those workspace paths existing and matching Claude's cwd-scoped session storage.
 - `resume-sessions-v2.sh:877-923` requires macOS `osascript` automation for iTerm2 or Terminal.app and defaults unrecognized terminal environments to iTerm2.
-- `resume-sessions-spi.sh:23` and `fleet-relaunch.sh:79` hardcode the Spinventory consumer-pack path in `HEDDLE_PACKS`.
+- The remaining project wrapper (its line 23) and `fleet-relaunch.sh:79` hardcode an absolute consumer-pack path in `HEDDLE_PACKS`.
 - `resume-sessions-gpt.sh:23-27` requires the local `claudex` proxy harness/default store and fixes the numbered-fleet launch policy around it.
 
-The wrapper `cd` calls (`resume-sessions-hed.sh:17`, `resume-sessions-spi.sh:16`, `resume-sessions-gpt.sh:13`, and `fleet-relaunch.sh:25`) intentionally resolve their shared files relative to the installed launcher directory. They require the five-file set to be installed together, but do not themselves assume the original workspace checkout path.
+The wrapper `cd` calls (`resume-sessions-hed.sh:17`, `resume-sessions-gpt.sh:13`, the remaining wrapper's line 16, and `fleet-relaunch.sh:25`) intentionally resolve their shared files relative to the installed launcher directory. They require the five-file set to be installed together, but do not themselves assume the original workspace checkout path.
