@@ -6,6 +6,10 @@ export const ACCOUNTS_SCHEMA_VERSION = 2;
 
 // A1/HED-395 owns this taxonomy and env.ts allow-by-class enforcement; it will import this type when it lands.
 export type BillingClass = 'subscription-flat' | 'subscription-quota' | 'free-tier' | 'prepaid-credit' | 'pay-per-token';
+export const BILLING_CLASSES = ['subscription-flat', 'subscription-quota', 'free-tier', 'prepaid-credit', 'pay-per-token'] as const;
+export function isBillingClass(v: unknown): v is BillingClass {
+  return typeof v === 'string' && (BILLING_CLASSES as readonly string[]).includes(v);
+}
 export type AccountTier = 'T0' | 'T1' | 'T2' | 'T3';
 export type OveragePosture = 'hard-stop' | 'bounded-prepaid' | 'open-billing';
 
@@ -72,9 +76,7 @@ const modeledProviderSet = new Set<string>(ACCOUNT_PROVIDERS);
 export const isAccountModeledProvider = (provider: string): boolean => modeledProviderSet.has(provider);
 type Row = Record<string, unknown>;
 
-const billingClasses = new Set<BillingClass>([
-  'subscription-flat', 'subscription-quota', 'free-tier', 'prepaid-credit', 'pay-per-token',
-]);
+const billingClasses = new Set<BillingClass>(BILLING_CLASSES);
 const tiers = new Set<AccountTier>(['T0', 'T1', 'T2', 'T3']);
 const overagePostures = new Set<OveragePosture>(['hard-stop', 'bounded-prepaid', 'open-billing']);
 

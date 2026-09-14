@@ -2,6 +2,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
+import { isBillingClass, BILLING_CLASSES } from './accounts.js';
 
 /**
  * Routing table loader — task class → provider/model/effort/skills, with fallbacks and the
@@ -109,6 +110,12 @@ export function loadRouting(path = defaultRoutingPath()): RoutingTable {
     taskClasses: raw.task_classes,
     laneDefaults: parseLaneDefaults(raw.lane_defaults),
   };
+  for (const [name, cfg] of Object.entries(table.providers)) {
+    const bc = (cfg as Record<string, unknown>)?.billing_class;
+    if (bc !== undefined && !isBillingClass(bc)) {
+      throw new Error(`routing table: providers.${name}.billing_class must be one of ${BILLING_CLASSES.join(', ')} (got ${JSON.stringify(bc)})`);
+    }
+  }
   // HED-106 (qodo/codex review): a lane_default is a ROUTE the ladder can auto-select, so it passes the
   // SAME policy fences as a class primary/fallback — known + non-excluded + non-held provider, and no
   // `never_via_cursor` family through Cursor. Without this a config edit could make the walk auto-select
