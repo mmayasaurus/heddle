@@ -29,6 +29,9 @@ import { runPrWatch } from './pr-watch.js';
 import { bootstrapComms } from './comms/bootstrap.js';
 import { loadAccountRegistry } from './accounts.js';
 import { diffFleetHooks, diffFleetLaunchers, installFleetHooks, installFleetLaunchers } from './fleet.js';
+import { NativeCliRunner, type NativeProvider } from './wizard/cli-runner.js';
+import { ReadlinePrompter, ScriptedPrompter, type Prompter } from './wizard/prompt.js';
+import { runAccountsAdd } from './wizard/accounts-add.js';
 import { releaseStandalone } from './release/standalone.js';
 import { assembleTop, renderTopText } from './top.js';
 
@@ -77,6 +80,7 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
   heddle projects [--json]       registered projects and their fleets (~/.heddle/projects.json; HED-160)
   heddle accounts list [--json]  registered Claude, Codex, and Cursor accounts
   heddle accounts verify         verify local credential paths and recorded Claude login state
+  heddle accounts add [--provider <p>] [--answers <file>]  add native-login accounts interactively
   heddle comms init [--json]     initialize the comms database, operator token, and registered project rooms
   heddle fleet install-hooks [--dry-run] [--json]  install vendored fleet hooks under ~/.heddle/fleet/hooks
   heddle fleet hooks-diff [--json]  compare installed fleet hooks with the vendored canon
@@ -764,6 +768,31 @@ try {
 
     case 'accounts': {
       const action = process.argv[3];
+      if (action === 'add') {
+        const requested = arg('--provider');
+        if (has('--provider') && (requested === undefined || requested.startsWith('--'))) throw new Error('--provider needs a value: claude, codex, or cursor');
+        if (requested && !['claude', 'codex', 'cursor'].includes(requested)) throw new Error('--provider must be claude, codex, or cursor');
+        const answersPath = arg('--answers');
+        if (has('--answers') && (answersPath === undefined || answersPath.startsWith('--'))) throw new Error('--answers needs a path to a JSON answer file');
+        let prompter: Prompter;
+        if (answersPath !== undefined) {
+          const parsed: unknown = JSON.parse(readFileSync(answersPath, 'utf8'));
+          if (!Array.isArray(parsed)) throw new Error(`--answers file must contain a JSON array of answers (got ${parsed === null ? 'null' : typeof parsed})`);
+          prompter = new ScriptedPrompter(parsed);
+        } else {
+          prompter = new ReadlinePrompter();
+        }
+        try {
+          const summary = await runAccountsAdd(
+            requested ? { provider: requested as NativeProvider } : {},
+            { prompter, runner: new NativeCliRunner(), report: (line) => process.stderr.write(`${line}\n`) },
+          );
+          process.stdout.write(`${JSON.stringify(summary)}\n`);
+        } finally {
+          prompter.close();
+        }
+        break;
+      }
       const registry = loadAccountRegistry();
       if (action === 'list') {
         out(json, registry, () => {
@@ -817,7 +846,7 @@ try {
         if (fail) process.exitCode = 1;
         break;
       }
-      console.error('usage: heddle accounts <list|verify> [--json]');
+      console.error('usage: heddle accounts <list|verify|add> [--json]');
       process.exitCode = 2;
       break;
     }
