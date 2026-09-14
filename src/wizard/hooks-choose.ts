@@ -20,7 +20,10 @@ function fixtureCases(path: string): PreviewFixtureCase[] {
       if (!line.trim() || line.trim().startsWith('#')) return [];
       try {
         const item = JSON.parse(line) as Partial<PreviewFixtureCase>;
+        // Require a string hook_event_name: previewCase → fixtureEvalContext throws without one,
+        // which would abort the whole chooser on a single malformed catalog fixture (codeant #152).
         return typeof item.name === 'string' && item.payload && typeof item.payload === 'object' && !Array.isArray(item.payload)
+          && typeof (item.payload as HookPayload).hook_event_name === 'string'
           ? [{ name: item.name, payload: item.payload }]
           : [];
       } catch { return []; }

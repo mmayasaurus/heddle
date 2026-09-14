@@ -14,7 +14,7 @@ function seedCatalog(root: string): void {
   mkdirSync(join(root, 'tests'), { recursive: true });
   for (const [id, action, enforce] of [['synthetic-block', 'block', true], ['synthetic-nudge', 'nudge', false]] as const) {
     writeFileSync(join(root, `${id}.yaml`), `id: ${id}\nevent: PreToolUse\nmatch:\n  tool: SyntheticShell\naction: ${action}\nenforce: ${enforce}\nsubagent_aware: false\nmessage: synthetic ${action} guidance\nfail_open: true\n`);
-    writeFileSync(join(root, 'tests', `${id}.jsonl`), `${payloads.map(JSON.stringify).join('\n')}\n`);
+    writeFileSync(join(root, 'tests', `${id}.jsonl`), `${payloads.map((p) => JSON.stringify(p)).join('\n')}\n`);
   }
 }
 
@@ -60,5 +60,17 @@ describe('runHooksChoose', () => {
     const root = tempDir(); seedCatalog(root);
     const result = await runHooksChoose({ catalogRoot: root }, { prompter: new TranscriptPrompter([true, true, false]) });
     expect(result).toEqual({ selected: [{ id: 'synthetic-block', enforce: true }] });
+  });
+
+  it('skips a malformed fixture case (missing hook_event_name) instead of aborting the chooser', async () => {
+    const root = tempDir();
+    mkdirSync(join(root, 'tests'), { recursive: true });
+    writeFileSync(join(root, 'synthetic-nudge.yaml'), `id: synthetic-nudge\nevent: PreToolUse\nmatch:\n  tool: SyntheticShell\naction: nudge\nenforce: false\nsubagent_aware: false\nmessage: synthetic guidance\nfail_open: true\n`);
+    // payload has no hook_event_name — previewCase would throw; the chooser must skip the case, not abort.
+    writeFileSync(join(root, 'tests', 'synthetic-nudge.jsonl'), `${JSON.stringify({ name: 'no-event', payload: { tool_name: 'SyntheticShell' }, expect: { outcome: 'none' } })}\n`);
+    const lines: string[] = [];
+    await expect(runHooksChoose({ catalogRoot: root }, { prompter: new TranscriptPrompter([false]), report: (line) => lines.push(line) }))
+      .resolves.toEqual({ selected: [] });
+    expect(lines.some((line) => line.includes('no fixture cases available for preview'))).toBe(true);
   });
 });
