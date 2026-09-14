@@ -683,12 +683,15 @@ try {
         }
         let accounts = readClaudeAccounts();
         if (account) {
-          const match = accounts.filter((row) => row.id === account);
-          if (match.length === 0) {
+          // A single requested id selects a SINGLE account (mirrors the `.find` id-lookup at the
+          // `account pick` path): a duplicate-id registry must not poll one account repeatedly and
+          // let its sidecar be overwritten by duplicate results (CodeAnt #140).
+          const match = accounts.find((row) => row.id === account);
+          if (!match) {
             console.error(`heddle usage poll-claude: no registry account with id "${account}"`);
             process.exit(1);
           }
-          accounts = match;
+          accounts = [match];
         }
         const result = await pollClaudeUsage(accounts);
         const usageDir = process.env.HEDDLE_USAGE_DIR ?? DEFAULT_USAGE_DIR;
