@@ -1033,7 +1033,13 @@ try {
             prompter = new ReadlinePrompter();
           }
           try {
-            const choice = await prompter.select('Choose hook safety preset:', [...PRESET_TIERS, 'custom']);
+            // Only offer the preset step when a rule catalog actually exists. Before a catalog is present
+            // (e.g. the starter rule pack is not installed yet) there is nothing for a preset to resolve, so
+            // fall straight to the chooser — leaving the flow, and any existing --answers script, unchanged
+            // until a catalog exists. This keeps the preset feature dormant rather than failing by default.
+            const choice = loadRules(catalogRoot).length
+              ? await prompter.select('Choose hook safety preset:', [...PRESET_TIERS, 'custom'])
+              : 'custom';
             hookRules = choice === 'custom'
               ? (await runHooksChoose({ catalogRoot }, { prompter, report: (line) => process.stderr.write(`${line}\n`) })).selected
               : resolvePreset(choice as SafetyPreset, catalogRoot);

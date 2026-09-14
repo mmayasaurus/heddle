@@ -242,6 +242,23 @@ describe('init-project', () => {
     expect(JSON.parse(custom.stdout).steps.some((step: { step: string }) => step.step === 'hook-rule:synthetic-custom')).toBe(true);
   }, 30_000);
 
+  it('skips the preset step (and does not consume answers) when the catalog has no rules', async () => {
+    const base = tempDir();
+    const emptyCatalog = tempDir();
+    mkdirSync(emptyCatalog, { recursive: true });
+    const { canonical, target } = fixture(base);
+    // An old-style custom-chooser --answers script leading with a boolean: without the empty-catalog gate
+    // the new preset select would consume the leading `true` and reject it ('invalid scripted choice').
+    // With no catalog there is no preset step, so the flow (and the script) is unchanged and nothing installs.
+    const answers = join(base, 'legacy-answers.json');
+    writeFileSync(answers, JSON.stringify([true, false]));
+    const result = await runCli(['init-project', target, '--canonical', canonical, '--name', 'toy', '--team', 'NEW', '--agents', 'Z', '--room', '#toy', '--launcher', 'resume-toy.sh', '--answers', answers, '--dry-run', '--json'], { home: join(base, 'empty-home'), env: { HEDDLE_RULES_DIR: emptyCatalog } });
+    expect(result.code).toBe(0);
+    expect(`${result.stdout}${result.stderr}`).not.toContain('invalid scripted choice');
+    expect(`${result.stdout}${result.stderr}`).not.toContain('Choose hook safety preset');
+    expect(JSON.parse(result.stdout).steps.some((step: { step: string }) => step.step.startsWith('hook-rule:'))).toBe(false);
+  }, 30_000);
+
   it('renders discipline wiring in the first matching group while preserving user hooks and groups', () => {
     const opts = options(tempDir());
     mkdirSync(join(opts.dir, '.claude'));
