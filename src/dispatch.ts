@@ -173,6 +173,24 @@ export async function dispatch(
     });
   }
 
+  // ---- HED-519: headless claude opus/fable is unreliable for adversarial-review -----------------
+  // Computed in planDispatch (so `heddle route` / plan_dispatch preview and this dispatch agree).
+  if (plan.headlessClaudeReviewRefusal) {
+    return refusalOutcome(ctx, req, route.taskClass, target, skillsForRefusal, {
+      code: 'headless-claude-review-unreliable',
+      reason: plan.headlessClaudeReviewRefusal,
+      // HED-519 finding 5: don't send a cursor-authored review in a loop. "omit provider/model → cursor
+      // default" only works when a NON-cursor provider authored the change; when cursor authored it,
+      // pickReviewer re-picks a pool entry (can land back on claude) and "name cursor" is same-provider.
+      // The in-session claude path is the universal escape (no headless wall, and it isn't cursor).
+      instruction: `Route substantial adversarial reviews to cursor — this class's default cursor/grok-4.6-high `
+        + `ran the identical review in ~575s: omit provider/model to take the cursor class default (works when a `
+        + `non-cursor provider authored the change). For claude specifically, or when cursor authored the change `
+        + `under review (cursor can't review its own work), use an in-session subagent (in_session:true) — it has `
+        + `no headless timeout wall.`,
+    });
+  }
+
   // Auto-effort (opt-in): classify the sub-task's difficulty and pin the effort, unless the caller
   // already set one. Runs only after every plan-level refusal gate has passed — a refused dispatch
   // never spends a classifier (a max-children refusal can still waste one: that count is
