@@ -217,6 +217,12 @@ function snapshotSource(root: string, additions: Record<string, string> = {}): s
     writeFileSync(join(source, path), contents);
   }
   execFileSync('git', ['init', '-q'], { cwd: source });
+  // Disable the detached `git maintenance run --auto` that `git commit` forks: it writes into .git
+  // after the command returns and races the fixture's recursive teardown rm → ENOTEMPTY on
+  // source/.git under CI load. maintenance.auto=false is the lever (gc.auto=0 alone does not stop the
+  // detached fork — verified); persisted on the repo so the later add/commit/tag ops inherit it. — HED-520
+  execFileSync('git', ['config', 'maintenance.auto', 'false'], { cwd: source });
+  execFileSync('git', ['config', 'gc.auto', '0'], { cwd: source });
   execFileSync('git', ['add', '.'], { cwd: source });
   execFileSync('git', [
     '-c', 'user.name=test', '-c', 'user.email=test@example.com', 'commit', '-qm', 'source',
