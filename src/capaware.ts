@@ -7,7 +7,7 @@ import { buildLadder, tierOfProvider } from './ladder.js';
 import { bindingMeter, isFloored, type ClaudeFloors } from './floors.js';
 import { mcpAttachable, webCapable } from './mcp.js';
 import { bindingWindow, DISPATCH_SIGNAL_MAX_AGE_S, type CapsByProvider, type ProviderCaps } from './usage.js';
-import { isAccountModeledProvider, type Account } from './accounts.js';
+import { isAccountModeledProvider, type Account, type AccountEnvRepoint } from './accounts.js';
 
 /**
  * Cap-aware routing (HED-67) + Claude account advice (HED-68) — pure decisions over the caps that
@@ -470,6 +470,8 @@ export interface ClaudeAccount {
   loggedIn?: boolean;
   /** Operator-declared extra-usage posture. Absent means unknown, which is conservative at the cap. */
   overageEnabled?: boolean;
+  /** Dispatch-scoped endpoint credentials for a Claude-compatible free-tier account. */
+  envRepoint?: AccountEnvRepoint;
 }
 
 /** `~/.heddle/accounts.json` → `claude[]`. Missing/corrupt → []. Never throws. */
@@ -487,6 +489,11 @@ export function readClaudeAccounts(path: string = process.env.HEDDLE_ACCOUNTS ??
         note: typeof a.note === 'string' ? a.note : undefined,
         loggedIn: a.loggedIn === false ? false : undefined,
         ...(typeof a.overageEnabled === 'boolean' ? { overageEnabled: a.overageEnabled } : {}),
+        ...(a.envRepoint && typeof a.envRepoint === 'object'
+          && typeof (a.envRepoint as Record<string, unknown>).baseUrl === 'string'
+          && typeof (a.envRepoint as Record<string, unknown>).authTokenRef === 'string'
+          && typeof (a.envRepoint as Record<string, unknown>).service === 'string'
+          ? { envRepoint: a.envRepoint as AccountEnvRepoint } : {}),
       }));
   } catch {
     return [];

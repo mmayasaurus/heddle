@@ -196,7 +196,7 @@ export class ClaudeAdapter implements WorkerAdapter {
     const started = Date.now();
     const timeoutMs = opts.timeoutMs ?? 600_000;
     const idleMs = opts.idleTimeoutMs ?? DEFAULT_CLAUDE_IDLE_TIMEOUT_MS;
-    const { stdout, stderr, exitCode, timedOut, idleTimedOut, stdoutTruncated } = await run(this.bin, args, opts.cwd, timeoutMs, opts.env, opts.envUnset, undefined, idleMs);
+    const { stdout, stderr, exitCode, timedOut, idleTimedOut, stdoutTruncated } = await run(this.bin, args, opts.cwd, timeoutMs, opts.env, opts.envUnset, undefined, idleMs, opts.envRepoint);
     const parsed = parseClaudeResult(stdout, exitCode);
     // A timeout must be tellable apart from a crash: SIGKILL alone reports only a null exit.
     if (timedOut) parsed.error = `claude timed out after ${timeoutMs}ms (SIGKILL)` + (parsed.error ? `; ${parsed.error}` : '');

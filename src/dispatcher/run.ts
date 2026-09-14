@@ -5,7 +5,7 @@
  */
 import { materializeAgentsMd, readPack, composePacks } from '../skillpacks.js';
 import { materializeWorkerMcp, validateWorkerMcp, codexMcpFlags, claudeMcpConfigFile, webCapable } from '../mcp.js';
-import { isOpenAICompatProvider } from '../adapters/openai-compat.js';
+import { isOpenAICompatProvider, readSecretsEnvValue } from '../adapters/openai-compat.js';
 import { assessResult, type ResultAssessment } from '../classify.js';
 import { snapshotWorktree, sameSnapshot, diffInstruction, embeddedDiff } from '../review.js';
 import { parentCheckoutOf, checkoutFingerprint, escapedPaths, destroyedWork } from '../worktree.js';
@@ -81,6 +81,21 @@ export async function runTarget(
   for (const check of gateChecks) {
     const veto = check();
     if (veto) return refuseBilling(ctx, req, route.taskClass, target, skills, veto, fellBackFrom);
+  }
+  // Env-repoint keys are read only at this spawn chokepoint. The pure worker-env builder receives
+  // resolved values, never a secret reference and never process.env credentials.
+  const selectedEnvRepoint = target.provider === 'claude' ? ctx.claudeAccount?.account.envRepoint : undefined;
+  const envRepoint = selectedEnvRepoint === undefined ? undefined : {
+    baseUrl: selectedEnvRepoint.baseUrl,
+    authToken: readSecretsEnvValue(selectedEnvRepoint.authTokenRef),
+    service: selectedEnvRepoint.service,
+  };
+  if (envRepoint && !envRepoint.authToken) {
+    return refuseBilling(ctx, req, route.taskClass, target, skills, {
+      code: 'env-repoint.missing-token',
+      reason: `env-repoint ${selectedEnvRepoint!.service}: ${selectedEnvRepoint!.authTokenRef} not found in ~/.heddle/secrets.env`,
+      instruction: 'Add the referenced free-tier credential to ~/.heddle/secrets.env and retry.',
+    }, fellBackFrom);
   }
   // Loud-degrade-to-ALLOW (F2/F4/F6): the gate could not classify the account for spend but must NOT
   // silently skip — warn now, and carry the machine-greppable note onto the ledger row (finish, below)
@@ -216,6 +231,7 @@ export async function runTarget(
       timeoutMs: req.timeoutMs,
       resume: req.resume,
       env: { ...req.env, ...acct?.env, ...rotation?.env, ...stamps },
+      envRepoint: envRepoint && { ...envRepoint, authToken: envRepoint.authToken! },
       envUnset: [...(acct?.envUnset ?? []), ...(rotation?.unset ?? [])],
       capabilities: caps.granted,
       systemPromptAppend,

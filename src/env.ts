@@ -99,7 +99,20 @@ export interface WorkerEnvOptions {
    * and `claude auth status` reports logged-out; verified by Agent R 2026-08-15).
    */
   unset?: string[];
+  /**
+   * Dispatch-scoped credentials for an Anthropic-compatible endpoint. Values are resolved by the
+   * dispatcher before this pure env builder is called; they are never read from process.env here.
+   */
+  envRepoint?: { baseUrl: string; authToken: string; service: string };
 }
+
+const ENV_REPOINT_KEYS = ['ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN'] as const;
+
+const ENV_REPOINT_SERVICE_OVERRIDES: Record<string, Record<string, string>> = {
+  // HED-432/routing documents this model identifier, but not verified Anthropic-compatible ids for
+  // Kimi's default Sonnet/Opus/Haiku or subagent aliases. TODO(HED-531): add those exact ids when documented.
+  kimi: { ANTHROPIC_MODEL: 'kimi-k3-high' },
+};
 
 /**
  * Build the environment for a worker subprocess: the parent env minus every billing-switch variable
@@ -114,6 +127,13 @@ export function buildWorkerEnv(opts: WorkerEnvOptions = {}): {
 } {
   const env: NodeJS.ProcessEnv = { ...process.env };
   const stripped: string[] = [];
+  const envRepointOverrides: Record<string, string> = opts.envRepoint === undefined ? {} : {
+    [ENV_REPOINT_KEYS[0]]: opts.envRepoint.baseUrl,
+    [ENV_REPOINT_KEYS[1]]: opts.envRepoint.authToken,
+    ...(ENV_REPOINT_SERVICE_OVERRIDES[opts.envRepoint.service] ?? {}),
+  };
+  // Scoped to this call: env-repoint permission must not change the module-level allowlist.
+  const allowedOverrides = new Set([...OVERRIDE_ALLOWLIST, ...Object.keys(envRepointOverrides)]);
 
   // Fixed strips in one pass: billing-switch vars + the orchestrator's identity + the inherited credential.
   for (const key of [...BILLING_SWITCH_VARS, ...PARENT_IDENTITY_VARS, ...INHERITED_CREDENTIAL_VARS]) {
@@ -134,9 +154,9 @@ export function buildWorkerEnv(opts: WorkerEnvOptions = {}): {
     }
   }
 
-  for (const [key, value] of Object.entries(opts.overrides ?? {})) {
+  for (const [key, value] of Object.entries({ ...(opts.overrides ?? {}), ...envRepointOverrides })) {
     if ((PARENT_IDENTITY_VARS as readonly string[]).includes(key)) continue; // overrides cannot re-inject the parent's identity
-    if (!OVERRIDE_ALLOWLIST.has(key)) {
+    if (!allowedOverrides.has(key)) {
       const isSwitch = (BILLING_SWITCH_VARS as readonly string[]).includes(key)
         || VENDOR_CREDENTIAL_PREFIXES.some((p) => key.toUpperCase().startsWith(p));
       throw new Error(
