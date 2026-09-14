@@ -270,7 +270,10 @@ export function reconstructReviewedDiff(
 function readCorpus(dir: string): CorpusRound[] {
   const path = join(dir, 'corpus.jsonl');
   if (!existsSync(path)) throw new Error(`corpus not found: ${path}`);
-  return readFileSync(path, 'utf8').split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line) as CorpusRound);
+  return readFileSync(path, 'utf8').split(/\r?\n/).filter(Boolean).map((line, index) => {
+    try { return JSON.parse(line) as CorpusRound; }
+    catch { throw new Error(`${path} line ${index + 1} is not valid JSON`); }
+  });
 }
 
 function readSummary(dir: string): CorpusSummary {
@@ -377,7 +380,7 @@ export function asJudgeResult(value: unknown, round: CorpusRound): JudgeResult {
     throw new Error(`judge-${round.dispatchId}: acceptedIncumbentMatchedCount must be 0..${round.findingsAccepted}`);
   }
   const findings = data.candidateFindings.map((finding, index) => {
-    if (!finding || typeof finding !== 'object' || !['TP', 'FP', 'NOVEL'].includes(finding.class) || !Number.isInteger(finding.idx) || typeof finding.matchesAcceptedIncumbent !== 'boolean' || typeof finding.rationale !== 'string') {
+    if (!finding || typeof finding !== 'object' || !['TP', 'FP', 'NOVEL'].includes(finding.class) || !Number.isInteger(finding.idx) || finding.idx < 1 || typeof finding.matchesAcceptedIncumbent !== 'boolean' || typeof finding.rationale !== 'string') {
       throw new Error(`judge-${round.dispatchId}: candidate finding ${index + 1} is invalid`);
     }
     // TP and matchesAcceptedIncumbent are the same claim — a match IS a true positive and vice versa. Reject
