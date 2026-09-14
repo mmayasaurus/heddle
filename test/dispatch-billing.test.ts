@@ -1,9 +1,25 @@
 import { writeFileSync } from 'node:fs';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
+// REV-1 (HED-395): the auto-effort classifier (classifyEffort → classify → the codex classifier
+// adapter) must NEVER run for a billing-refused primary. Mock the codex adapter module — the same seam
+// classify.test.ts uses — so (a) no real classifier subprocess is ever spawned by these tests and (b)
+// we can assert the classifier was NOT invoked when a pay-per-token primary is refused at the plan
+// level before classifyEffort. The WORKER dispatch uses the INJECTED fake adapter (dispatch()'s 3rd
+// arg), never `new CodexAdapter()`, so this mock is inert for every other test in this file.
+const { classifierDispatch } = vi.hoisted(() => ({
+  classifierDispatch: vi.fn(async () => ({ ok: true, output: 'low', exitCode: 0 })),
+}));
+vi.mock('../src/adapters/codex.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/adapters/codex.js')>();
+  return { ...actual, CodexAdapter: class { dispatch = classifierDispatch; } };
+});
+
 import { dispatch, planDispatch } from '../src/dispatch.js';
 import type { DispatchRequest } from '../src/dispatch.js';
 import { loadRouting } from '../src/routing.js';
 import { accountCapState, accountAtOrOverCap } from '../src/capaware.js';
+import { readLimitsMirror } from '../src/usage.js';
 import type { Account } from '../src/accounts.js';
 import type { CapsByProvider, ProviderCaps } from '../src/usage.js';
 import { fakeAdapter, IDENTITIES, useTempResources } from './helpers.js';
@@ -82,9 +98,13 @@ describe('dispatch billing enforcement (HED-395)', () => {
     const table = loadRouting();
     (table.policy as any).cap_aware_routing.permit_pay_per_token = true;
     expect(planDispatch(request('metered'), table).billingRefusal).toBeUndefined();
+    // Preview-only by design: permit-ON is an ALLOW, so deleting the runTarget gate cannot regress it
+    // (it spawns either way), and dispatch() loads its own routing table (no permit injection). The
+    // gate-deletion-sensitive direction — permit-OFF pay-per-token REFUSES with NO spawn — is proven at
+    // spawn level by 'refuses pay-per-token by default' (fake.calls===0) and the REV-1 auto-effort test.
   });
 
-  it('allows open-billing under cap and refuses it at cap', () => {
+  it('allows open-billing under cap and refuses it at cap (preview + spawn)', async () => {
     registry({ id: 'open', billingClass: 'subscription-quota', overage: { posture: 'open-billing' } });
     expect(planDispatch(request('open', 99)).billingRefusal).toBeUndefined();
     const plan = planDispatch(request('open', 100));
@@ -93,13 +113,26 @@ describe('dispatch billing enforcement (HED-395)', () => {
     expect(plan.billingRefusal?.reason).toContain('subscription-quota');
     expect(plan.billingRefusal?.reason).toContain('open-billing');
     expect(plan.billingRefusal?.instruction).toContain('policy.cap_aware_routing.permit_pay_per_token');
+    // Spawn-level (REV-4, red if the runTarget gate is deleted): under cap spawns, at cap refuses with
+    // NO spawn — a preview-only assertion would stay green even if enforcement stopped refusing.
+    const underFake = fakeAdapter();
+    expect((await dispatch(request('open', 99), tempLedger(), () => underFake.adapter)).ok).toBe(true);
+    expect(underFake.calls).toHaveLength(1);
+    const atCapFake = fakeAdapter();
+    const atCap = await dispatch(request('open', 100), tempLedger(), () => atCapFake.adapter);
+    expect(atCapFake.calls).toHaveLength(0);
+    expect(atCap.refusal?.code).toBe('billing.open-billing-at-cap');
   });
 
-  it('allows a bounded-prepaid buffer at cap with advice, then refuses zero credits', () => {
+  it('allows a bounded-prepaid buffer at cap with advice, then refuses zero credits (preview + spawn)', async () => {
     registry({ id: 'buffer', billingClass: 'prepaid-credit', overage: { posture: 'bounded-prepaid', creditsRemaining: 7, spendLimit: 20 } });
     const allowed = planDispatch(request('buffer', 100));
     expect(allowed.billingRefusal).toBeUndefined();
     expect(allowed.billingAdvice).toBe('burning prepaid buffer (7 of 20)');
+    // Spawn-level (REV-4): a buffer with credits left at cap actually spawns.
+    const bufferFake = fakeAdapter();
+    expect((await dispatch(request('buffer', 100), tempLedger(), () => bufferFake.adapter)).ok).toBe(true);
+    expect(bufferFake.calls).toHaveLength(1);
 
     registry({ id: 'buffer', billingClass: 'prepaid-credit', overage: { posture: 'bounded-prepaid', creditsRemaining: 0, spendLimit: 20 } });
     const refused = planDispatch(request('buffer', 10));
@@ -109,6 +142,11 @@ describe('dispatch billing enforcement (HED-395)', () => {
     expect(refused.billingRefusal?.reason).toContain('prepaid-credit');
     expect(refused.billingRefusal?.reason).toContain('bounded-prepaid');
     expect(refused.billingRefusal?.instruction).toContain('policy.cap_aware_routing.permit_pay_per_token');
+    // Spawn-level (REV-4, red if the runTarget gate is deleted): zero credits refuses with NO spawn.
+    const zeroFake = fakeAdapter();
+    const zero = await dispatch(request('buffer', 10), tempLedger(), () => zeroFake.adapter);
+    expect(zeroFake.calls).toHaveLength(0);
+    expect(zero.refusal?.code).toBe('billing.prepaid-exhausted');
   });
 
   it('treats missing, stale, and null account caps as unknown without throwing', () => {
@@ -118,6 +156,12 @@ describe('dispatch billing enforcement (HED-395)', () => {
     expect(accountAtOrOverCap(malformed, 'a')).toBe(false);
     expect(accountCapState(codexCaps([{ id: 'a', used: null }]).codex, 'a')).toBe('unknown');
     expect(accountCapState(codexCaps([{ id: 'a', used: 100, stale: true }]).codex, 'a')).toBe('unknown');
+    // REV-2 / HED-443 symmetry: accountCapState is ROW-level by design — a FRESH per-account row
+    // (row.stale=false) is trusted even when the PROVIDER snapshot is stale, so detectOverageAlert can
+    // see a fresh RED row through a stale provider mirror. A naive `caps.stale → unknown` here would
+    // regress that AND wrongly refuse open-billing on a demonstrably-fresh under-cap reading. Pin it.
+    const providerStaleFreshRow = { ...codexCaps([{ id: 'a', used: 50 }]).codex, stale: true };
+    expect(accountCapState(providerStaleFreshRow, 'a')).toBe('under');
   });
 
   it('refuses open-billing when the bound account cap state is unknown', async () => {
@@ -250,5 +294,56 @@ describe('dispatch billing enforcement (HED-395)', () => {
     const preview = planDispatch({ ...request('default'), rotationAccounts });
     expect(preview.billingRefusal).toBeUndefined();
     expect(preview.billingAdvice).toBeUndefined();
+  });
+
+  it('does not spend the auto-effort classifier on a billing-refused primary (REV-1)', async () => {
+    classifierDispatch.mockClear();
+    registry({ id: 'metered', billingClass: 'pay-per-token' });
+    const fake = fakeAdapter();
+    const outcome = await dispatch({ ...request('metered'), autoEffort: true }, tempLedger(), () => fake.adapter);
+    expect(outcome.refusal?.code).toBe('billing.pay-per-token');
+    expect(fake.calls).toHaveLength(0);                  // no worker spawn
+    // The plan-level gate refuses BEFORE classifyEffort (dispatch.ts): a refused primary spends no
+    // classifier. Red if that gate is removed — classifyEffort would then run and call the classifier.
+    expect(classifierDispatch).not.toHaveBeenCalled();
+  });
+
+  it('allows open-billing on a FRESH under-cap row even when the provider snapshot is stale (REV-2 / HED-443)', async () => {
+    registry({ id: 'open', billingClass: 'subscription-quota', overage: { posture: 'open-billing' } });
+    const req = request('open');
+    // Provider snapshot stale, but the per-account row is FRESH (row.stale=false) and under cap. A fresh
+    // row is trusted THROUGH a stale provider mirror (that is how a fresh RED row is still detected), so
+    // the billing gate must ALLOW here — refusing on provider-level staleness alone would be over-strict
+    // and contradict the row-level trust HED-443 relies on. (Contrast: the limits.json SOURCE now marks
+    // rows stale when the snapshot is past its OWN window — see the readLimitsMirror test below.)
+    req.caps = { codex: {
+      provider: 'codex', source: 'limits.json', stale: true, capturedAt: 1,
+      fiveHour: { usedPercentage: null, resetsAt: null }, sevenDay: { usedPercentage: null, resetsAt: null },
+      windows: {}, noteCodes: [], activeAccount: 'open',
+      accounts: [{ id: 'open', fiveHour: { usedPercentage: 40, resetsAt: null }, sevenDay: { usedPercentage: null, resetsAt: null }, windows: {}, noteCodes: [], limitReached: false, stale: false }],
+    } } as unknown as CapsByProvider;
+    expect(planDispatch(req).billingRefusal).toBeUndefined();
+    const fake = fakeAdapter();
+    const outcome = await dispatch(req, tempLedger(), () => fake.adapter);
+    expect(fake.calls).toHaveLength(1);
+    expect(outcome.refusal).toBeUndefined();
+  });
+
+  it('marks limits.json account rows stale when the provider snapshot is past its own window (REV-2 source fix)', () => {
+    // An aged-out limits.json PROVIDER snapshot (nowS - capturedAt > staleAfterSecs) must mark its
+    // per-account rows stale too — not just the provider — so accountCapState returns 'unknown' and an
+    // open-billing account REFUSES rather than reading a dead usedPercentage as a fresh 'under'. The file
+    // itself is fresh (writtenAt=nowS) so it is not dropped wholesale; only the provider window aged out.
+    const dir = tempDir();
+    writeFileSync(`${dir}/limits.json`, JSON.stringify({
+      writtenAt: 5000,
+      limits: [{ provider: 'codex', capturedAt: 1000, staleAfterSecs: 300, stale: false,
+        fiveHour: { usedPercentage: 40 },
+        accounts: [{ id: 'open', stale: false, fiveHour: { usedPercentage: 40 } }] }],
+    }));
+    const caps = readLimitsMirror(dir, 5000)!;               // nowS 5000 − capturedAt 1000 = 4000 > 300
+    expect(caps.codex.stale).toBe(true);                     // provider aged out (pre-existing behavior)
+    expect(caps.codex.accounts[0].stale).toBe(true);         // REV-2: the ROW inherits pastOwnWindow
+    expect(accountCapState(caps.codex, 'open')).toBe('unknown'); // → open-billing refuses (F3), no dead 'under'
   });
 });

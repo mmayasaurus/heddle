@@ -11,7 +11,7 @@ import { readClaudeAccounts, pickClaudeAccount, capAwarePolicy, hardRefusal } fr
 import { classifyRotationRefusal, DEFAULT_COOLDOWN_S, DEFAULT_COOLING_PATH, readCooling, readRotationAccounts, writeCooling } from './rotation.js';
 import { basename } from 'node:path';
 import { defaultAdapterFor } from './dispatcher/adapters.js';
-import { refusalOutcome, refuseDepth1, refuseNotDispatchable, refuseInSession } from './dispatcher/refusals.js';
+import { refusalOutcome, refuseDepth1, refuseNotDispatchable, refuseInSession, refuseBilling } from './dispatcher/refusals.js';
 import { overrideReasonGate } from './dispatcher/override-gate.js';
 import { monocultureNote, formatMonocultureWarning } from './dispatcher/monoculture.js';
 import { planDispatch, resolveRotationAccount, hasNoDispatchableClaudeAccount, noDispatchableClaudeAccountReason } from './dispatcher/plan.js';
@@ -144,11 +144,19 @@ export async function dispatch(
     });
   }
 
-  // ---- Money-safety billing/overage (HED-395) is NOT gated here anymore --------------------------
-  // The authoritative gate lives at the spawn chokepoint (runTarget), keyed on the FINAL bound account
-  // for each attempt — so it covers the primary AND every rebound path (capability-fit fallback,
-  // account-failover, class fallback), not just the plan's primary account. The plan still computes
-  // plan.billingRefusal for the DRY-RUN preview (heddle route / plan_dispatch); enforcement is runTarget.
+  // ---- Money-safety billing/overage (HED-395): plan-level gate for the PRIMARY account -----------
+  // The AUTHORITATIVE gate is at the spawn chokepoint (runTarget), keyed on the FINAL bound account so it
+  // covers every rebound path (capability-fit fallback, account-failover, class fallback) the plan never
+  // saw. But runTarget runs AFTER the auto-effort classifier below — so without this, a billing-refused
+  // PRIMARY would spend a classifier dispatch before the runTarget gate could veto it. This plan-level
+  // check refuses the primary FIRST, restoring the "a refused dispatch never spends a classifier"
+  // invariant (see the auto-effort comment below); the runTarget gate still enforces every rebound
+  // account. plan.billingRefusal is set (plan.ts) ONLY when the dispatch reaches runTarget and the primary
+  // account is refused (undefined for in-session previews / unclassifiable degrade), and it comes from the
+  // same pure billingVerdict the runTarget gate and the dry-run preview use (F7 parity).
+  if (plan.billingRefusal) {
+    return refuseBilling(ctx, req, route.taskClass, target, skillsForRefusal, plan.billingRefusal);
+  }
 
   // ---- Claude-primary → structured, ledgered in-session refusal (HED-18) ----------------------
   if (plan.execution === 'in-session-subagent') {
@@ -233,6 +241,18 @@ export async function dispatch(
         ctx.rotationAccount = resolveRotationAccount(fallback, req, registry, readCooling(req.coolingPath ?? DEFAULT_COOLING_PATH));
         ctx.account = ctx.rotationAccount?.id ?? (fallback.provider === 'codex' && req.env?.CODEX_HOME ? basename(req.env.CODEX_HOME) : null);
         if (ctx.rotationAccount) ctx.routeReason += `; ${ctx.rotationAccount.reason}`;
+      } else if (fallback.provider === 'claude') {
+        // A CLAUDE capability-fit fallback needs its OWN headroom-based account pick, exactly like the
+        // class fallback below (REV-3): without it ctx.account stays the primary's stale binding and the
+        // runTarget billing gate would classify the WRONG account. forFable so a fable fallback is picked
+        // by Fable headroom. A non-empty registry with no addressable account must not inherit the
+        // caller's login — the capability fallback cannot run, so return the primary's capability refusal.
+        const fallbackAccounts = req.accounts ?? readClaudeAccounts();
+        ctx.claudeAccount = pickClaudeAccount(ctx.providerCaps?.claude, fallbackAccounts,
+          { pin: req.accountPin, routeAwayAtPct: capAwarePolicy(table).routeAwayAtPct, forFable: fallback.model === 'fable' }) ?? null;
+        ctx.account = ctx.claudeAccount?.account.id ?? null;
+        if (fallbackAccounts.length > 0 && ctx.claudeAccount === null) return primary;
+        if (ctx.claudeAccount) ctx.routeReason += `; ${ctx.claudeAccount.reason}`;
       }
       return runTarget(fallback, req, ctx, route, `${route.provider}/${route.model} (capability-unenforceable)`);
     }
