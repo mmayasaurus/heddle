@@ -24,6 +24,8 @@ export interface RouteTarget {
 
 export interface Route extends RouteTarget {
   taskClass: string;
+  /** Ordered dispatch-time targets. Literals preserve the static table; tier symbols resolve live. */
+  prefer?: RoutePreference[];
   fallback?: RouteTarget;
   /** One-line "when to pick this class and why it routes there" (YAML `why:`). */
   why?: string;
@@ -67,6 +69,11 @@ export const isTier = (v: unknown): v is Tier => v === 'T0' || v === 'T1' || v =
  *  bound validation AND the walk's own default so the two can never drift (HED-106 grok review). */
 export const DEFAULT_MIN_TIER: Tier = 'T1';
 
+/** A target symbol may name T3, unlike the auto-join expansion ladder's `Tier`. */
+export type TargetTier = 'T0' | 'T1' | 'T2' | 'T3';
+export const isTargetTier = (v: unknown): v is TargetTier => v === 'T0' || v === 'T1' || v === 'T2' || v === 'T3';
+export type RoutePreference = RouteTarget | { tier: TargetTier };
+
 export interface RoutingTable {
   version: number;
   policy: Record<string, unknown>;
@@ -108,6 +115,11 @@ export function loadRouting(path = defaultRoutingPath()): RoutingTable {
   // a forbidden lane that only fails at dispatch. Fenced at load so a bad map never reaches the walker.
   for (const [lane, target] of Object.entries(table.laneDefaults ?? {})) {
     assertRoutableTarget(table, target.provider, target.model, `lane_defaults.${lane}`);
+  }
+  // Preferences are a load-time policy fence just like lane defaults: malformed symbols and
+  // forbidden literal routes must never reach dispatch-time resolution.
+  for (const [taskClass, node] of Object.entries(table.taskClasses)) {
+    parsePrefer(table, node, `task_classes.${taskClass}`);
   }
   return table;
 }
@@ -161,6 +173,28 @@ function toTarget(node: any, where = 'task class'): RouteTarget | undefined {
   };
 }
 
+function parsePrefer(table: RoutingTable, node: any, where: string): RoutePreference[] | undefined {
+  const value = node?.prefer;
+  if (value === undefined || value === null) return undefined;
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error(`routing table: ${where}.prefer must be a non-empty list of provider/model literals or T0–T3`);
+  }
+  return value.map((entry, index) => {
+    const subject = `${where}.prefer[${index}]`;
+    if (typeof entry !== 'string' || entry.length === 0) {
+      throw new Error(`routing table: ${subject} must be a non-empty string provider/model literal or T0–T3`);
+    }
+    if (entry.startsWith('T')) return { tier: readTargetTier(entry, subject) };
+    const slash = entry.indexOf('/');
+    if (slash <= 0 || slash === entry.length - 1) {
+      throw new Error(`routing table: ${subject} must be a provider/model literal or T0–T3 (got ${JSON.stringify(entry)})`);
+    }
+    const target = { provider: entry.slice(0, slash), model: entry.slice(slash + 1) };
+    assertRoutableTarget(table, target.provider, target.model, subject);
+    return target;
+  });
+}
+
 /**
  * Own-property provider lookup. A task class, fallback, or reviewer_pool entry naming an INHERITED
  * property (`toString`, `constructor`, …) must read as an UNKNOWN provider — never the prototype
@@ -196,7 +230,11 @@ export function resolveRoute(table: RoutingTable, taskClass: string): Route {
     const known = Object.keys(table.taskClasses).join(', ');
     throw new Error(`unknown task class "${taskClass}". Known classes: ${known}`);
   }
-  const primary = toTarget(node, `task_classes.${taskClass}`)!;
+  const where = `task_classes.${taskClass}`;
+  const prefer = parsePrefer(table, node, where);
+  const declared = toTarget(node, where)!;
+  const firstLiteral = prefer?.find((entry): entry is RouteTarget => 'provider' in entry);
+  const primary = firstLiteral ? { ...declared, ...firstLiteral } : declared;
   if (!primary.provider || !primary.model) {
     throw new Error(`task class "${taskClass}" is missing provider or model`);
   }
@@ -232,6 +270,7 @@ export function resolveRoute(table: RoutingTable, taskClass: string): Route {
   return {
     taskClass,
     ...primary,
+    prefer,
     fallback,
     why: typeof node.why === 'string' ? node.why : undefined,
     editsCode: node.edits_code === true,
@@ -253,6 +292,12 @@ export function resolveRoute(table: RoutingTable, taskClass: string): Route {
 function readTier(value: unknown, where: string): Tier | undefined {
   if (value === undefined || value === null) return undefined;
   if (!isTier(value)) throw new Error(`routing table: ${where} must be one of T0, T1, T2 (got ${JSON.stringify(value)})`);
+  return value;
+}
+
+/** Strict target-symbol validator. This deliberately does not widen `Tier` or auto-join T3. */
+export function readTargetTier(value: unknown, where = 'target tier'): TargetTier {
+  if (!isTargetTier(value)) throw new Error(`routing table: ${where} must be one of T0, T1, T2, T3 (got ${JSON.stringify(value)})`);
   return value;
 }
 
@@ -356,6 +401,7 @@ export interface TaskClassDescription {
   read_only: boolean;
   auto_assess: boolean;
   reviewer_pool: string[];
+  prefer?: string[];
 }
 
 /**
@@ -388,6 +434,7 @@ export function describeTaskClasses(
       read_only: r.readOnly,
       auto_assess: r.autoAssess,
       reviewer_pool: (r.reviewerPool ?? []).map((e) => `${e.provider}/${e.model}`),
+      prefer: r.prefer?.map((entry) => 'tier' in entry ? entry.tier : `${entry.provider}/${entry.model}`),
     };
   });
 }

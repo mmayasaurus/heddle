@@ -7,6 +7,7 @@ import { buildLadder, tierOfProvider } from './ladder.js';
 import { bindingMeter, isFloored, type ClaudeFloors } from './floors.js';
 import { mcpAttachable, webCapable } from './mcp.js';
 import { bindingWindow, DISPATCH_SIGNAL_MAX_AGE_S, type CapsByProvider, type ProviderCaps } from './usage.js';
+import type { Account } from './accounts.js';
 
 /**
  * Cap-aware routing (HED-67) + Claude account advice (HED-68) — pure decisions over the caps that
@@ -155,11 +156,31 @@ function bindingFor(target: RouteTarget, caps: ProviderCaps): { label: string; u
  * so a pinned dispatch never walks (its own refusal path stands). Over-threshold is NOT death — the
  * picker returns the best account regardless of headroom, so this fires only on genuine exhaustion.
  */
+export function accountAvailabilityReason(target: RouteTarget, registry: Account[] | undefined): string | null {
+  // The empty-registry escape hatch is intentional: existing callers inherit their process login.
+  if (!registry || registry.length === 0) return null;
+  const matches = registry.filter((account) => account.provider === target.provider && account.loggedIn !== false);
+  if (matches.length === 0) return 'no-account';
+  // v1 model gate: Fable alone needs a T3 account. Other Claude models remain account-serveable
+  // until a complete model capability map exists.
+  if (target.provider === 'claude' && target.model === 'fable' && !matches.some((account) => account.tier === 'T3')) return 'no-fable-tier';
+  return null;
+}
+
+function routeDeadReason(
+  target: RouteTarget, caps: CapsByProvider, accounts: ClaudeAccount[], accountPin: string | undefined, routeAwayAtPct: number,
+  registry?: Account[],
+): string | null {
+  const registryReason = accountAvailabilityReason(target, registry);
+  if (registryReason) return registryReason;
+  if (target.provider !== 'claude' || accountPin || accounts.length === 0) return null;
+  return pickClaudeAccount(caps.claude, accounts, { routeAwayAtPct }) === null ? 'no-account' : null;
+}
+
 function claudeRouteDead(
   provider: string, caps: CapsByProvider, accounts: ClaudeAccount[], accountPin: string | undefined, routeAwayAtPct: number,
 ): boolean {
-  if (provider !== 'claude' || accountPin || accounts.length === 0) return false;
-  return pickClaudeAccount(caps.claude, accounts, { routeAwayAtPct }) === null;
+  return routeDeadReason({ provider, model: '' }, caps, accounts, accountPin, routeAwayAtPct) !== null;
 }
 
 /** A candidate is DEAD (skipped in the walk) when a metered pool refuses it, or its claude account pool
@@ -167,10 +188,10 @@ function claudeRouteDead(
  *  the codex/cursor cooling predicate is S3. */
 function laneDeadReason(
   target: RouteTarget, caps: CapsByProvider, accounts: ClaudeAccount[], accountPin: string | undefined, routeAwayAtPct: number,
+  registry?: Account[],
 ): string | null {
   if (target.provider === 'cursor' && caps.cursor && cursorRefusal(target.model, caps.cursor)) return 'metered';
-  if (claudeRouteDead(target.provider, caps, accounts, accountPin, routeAwayAtPct)) return 'no-account';
-  return null;
+  return routeDeadReason(target, caps, accounts, accountPin, routeAwayAtPct, registry);
 }
 
 /**
@@ -185,7 +206,7 @@ function laneDeadReason(
 function walkLadder(
   deadTarget: RouteTarget, declaredFallback: RouteTarget | undefined, caps: CapsByProvider,
   policy: CapAwarePolicy, ctx: LadderContext, accounts: ClaudeAccount[], accountPin: string | undefined,
-  checks: string[], deadNote: string,
+  checks: string[], deadNote: string, registry?: Account[],
 ): RouteDecision {
   const lanes = ctx.lanes();
   const minTier: Tier = ctx.minTier ?? DEFAULT_MIN_TIER;
@@ -214,7 +235,7 @@ function walkLadder(
     candidates.push({ target: { ...c.target, skills: ctx.skills, mcp: ctx.mcp, capabilities: ctx.grantedCapabilities }, label: `t${c.tier[1]}` });
   }
 
-  const evaluated = candidates.map((c) => ({ ...c, dead: laneDeadReason(c.target, caps, accounts, accountPin, policy.routeAwayAtPct) }));
+  const evaluated = candidates.map((c) => ({ ...c, dead: laneDeadReason(c.target, caps, accounts, accountPin, policy.routeAwayAtPct, registry) }));
   const tried: string[] = [];
   for (let i = 0; i < evaluated.length; i++) {
     const c = evaluated[i];
@@ -253,19 +274,21 @@ function walkLadder(
  */
 function maybeWalkDeadClaude(
   target: RouteTarget, fallback: RouteTarget | undefined, caps: CapsByProvider, policy: CapAwarePolicy,
-  opts: { explicit: boolean; claudeAccounts?: () => ClaudeAccount[]; accountPin?: string; ladder?: LadderContext },
+  opts: { explicit: boolean; claudeAccounts?: () => ClaudeAccount[]; accountRegistry?: () => Account[]; accountPin?: string; ladder?: LadderContext },
   checks: string[],
 ): RouteDecision | null {
   if (!opts.ladder || opts.explicit) return null; // explicit routes never walk; a pin is refused inside claudeRouteDead
   const accounts = opts.claudeAccounts?.() ?? [];
-  if (!claudeRouteDead(target.provider, caps, accounts, opts.accountPin, policy.routeAwayAtPct)) return null;
-  checks.push(`${target.provider}/${target.model}: no addressable claude account — walking the ladder (HED-264)`);
-  return walkLadder(target, fallback, caps, policy, opts.ladder, accounts, opts.accountPin, checks, `${target.provider}/${target.model} dead(no-account)`);
+  const registry = opts.accountRegistry?.();
+  const dead = routeDeadReason(target, caps, accounts, opts.accountPin, policy.routeAwayAtPct, registry);
+  if (!dead) return null;
+  checks.push(`${target.provider}/${target.model}: unavailable (${dead}) — walking the ladder (HED-264)`);
+  return walkLadder(target, fallback, caps, policy, opts.ladder, accounts, opts.accountPin, checks, `${target.provider}/${target.model} dead(${dead})`, registry);
 }
 
 export function decideRoute(
   table: RoutingTable, target: RouteTarget, fallback: RouteTarget | undefined, caps: CapsByProvider,
-  opts: { explicit: boolean; claudeAccounts?: () => ClaudeAccount[]; accountPin?: string; ladder?: LadderContext },
+  opts: { explicit: boolean; claudeAccounts?: () => ClaudeAccount[]; accountRegistry?: () => Account[]; accountPin?: string; ladder?: LadderContext },
 ): RouteDecision {
   const policy = capAwarePolicy(table);
   const checks: string[] = [];
@@ -369,9 +392,12 @@ export function decideRoute(
   // instead of the dead declared fallback) is deferred to HED-332 — it must cover the symmetric
   // under-threshold path too, else the same class splits behavior across a 2% window. The primary here
   // is non-claude (a dead claude PRIMARY was already walked above).
-  if (opts.ladder && claudeRouteDead(fallback.provider, caps, opts.claudeAccounts?.() ?? [], opts.accountPin, policy.routeAwayAtPct)) {
-    checks.push(`route-away target ${fallback.provider}/${fallback.model} has no addressable claude account — running the primary (soft cap); dead fallback dropped`);
-    return { target, fallback: undefined, routedAwayForCap: false, routeReason: `cap:over ${target.provider} ${primary.label}, fallback ${fallback.provider} dead(no-account) → ran primary`, checks };
+  const fallbackDead = opts.ladder
+    ? routeDeadReason(fallback, caps, opts.claudeAccounts?.() ?? [], opts.accountPin, policy.routeAwayAtPct, opts.accountRegistry?.())
+    : null;
+  if (fallbackDead) {
+    checks.push(`route-away target ${fallback.provider}/${fallback.model} is unavailable (${fallbackDead}) — running the primary (soft cap); dead fallback dropped`);
+    return { target, fallback: undefined, routedAwayForCap: false, routeReason: `cap:over ${target.provider} ${primary.label}, fallback ${fallback.provider} dead(${fallbackDead}) → ran primary`, checks };
   }
   if (fb && fb.used >= policy.routeAwayAtPct) {
     checks.push(`fallback ${fallback.provider} ${fb.label} also over — running the primary (fallback kept for failure retry: the cap is soft)`);

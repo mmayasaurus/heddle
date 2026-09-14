@@ -5,6 +5,8 @@
 import { basename } from 'node:path';
 import { loadRouting, resolveRoute, directRoute, providerExecution, providerConfig, type Route, type RouteTarget, type RoutingTable } from '../routing.js';
 import { loadLanes, type LanesConfig } from '../lanes.js';
+import { loadAccountRegistry, type Account } from '../accounts.js';
+import { resolveTierTarget } from '../tier-resolve.js';
 import { mcpAttachable, webCapable } from '../mcp.js';
 import { pickReviewer, normalizeProvider, type ReviewerPick } from '../review.js';
 import { decideCapabilities, capabilityPolicy } from '../capabilities.js';
@@ -105,6 +107,9 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
   let notDispatchable = false;
   let reviewerPick: ReviewerPick | null = null;
   let sameProviderReview: string | undefined;
+  let symbol: string | undefined;
+  let resolutionWalk: string[] | undefined;
+  let registryAccounts: Account[] | undefined;
   const author = normalizeProvider(req.authorProvider);
   if (!req.taskClass) {
     // Direct path, no class: orchestrator named the model. Full dynamic choice, still policy-fenced.
@@ -116,6 +121,19 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
     origin = 'direct';
   } else {
     route = resolveRoute(table, req.taskClass);
+    // Preference routing is an account-capability decision, not a cap/headroom refusal. It runs
+    // before the normal cap-aware path so an unavailable Fable can fall through to Opus.
+    const needsTierResolution = Boolean(route.prefer) || (route.provider === 'claude' && route.model === 'fable');
+    registryAccounts = needsTierResolution ? req.accountRegistry ?? loadAccountRegistry().accounts : undefined;
+    const tierResolution = registryAccounts
+      ? resolveTierTarget(route, registryAccounts, req.caps ?? readProviderCaps(), {
+          lanes: loadLanes(), laneDefaults: table.laneDefaults ?? {},
+        })
+      : undefined;
+    if (tierResolution) {
+      symbol = tierResolution.symbol;
+      resolutionWalk = tierResolution.walk;
+    }
     if (route.requiresExplicitOptIn && !req.optIn) {
       throw new Error(
         `task class "${req.taskClass}" requires explicit opt-in` +
@@ -129,7 +147,7 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
       // depth-1 still wins for a worker (checked below via identity) — but the plan just marks it.
       target = req.provider && req.model
         ? { ...route, provider: req.provider, model: req.model, skills: req.skills ?? route.skills, mcp: req.mcp ?? route.mcp }
-        : route;
+        : tierResolution ? { ...route, ...tierResolution } : route;
       origin = req.provider && req.model ? 'explicit' : 'class';
       notDispatchable = true;
     } else if (req.provider && req.model) {
@@ -146,8 +164,8 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
       target = { ...explicit, effort: req.effort, capabilities: route.capabilities };
       origin = 'explicit';
     } else {
-      target = route;
-      fallback = route.fallback;
+      target = tierResolution ? { ...route, ...tierResolution } : route;
+      fallback = tierResolution?.symbol === 'declared-fallback' ? undefined : route.fallback;
       // HED-3: when the class primary is the author's provider, take the first differing pool entry.
       const pick = route.reviewerPool
         ? pickReviewer(route, author, (provider, model, entryMcp) => {
@@ -197,6 +215,7 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
         // Memoized thunk: accounts.json is read AT MOST once per plan, and never for a route that
         // does not consult it (codex/cursor/gemini plans do zero disk IO here — PR #24).
         claudeAccounts: () => claudeAccounts(),
+        accountRegistry: registryAccounts ? () => registryAccounts : undefined,
         // HED-106 tier-ladder: when this class's declared route is genuinely dead (S1: a claude route
         // with no addressable account), expand across lanes.yaml instead of refusing (HED-264). Bounds
         // come from the class; the author family is excluded for review classes; lanes read lazily.
@@ -319,7 +338,7 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
       + `claude -p --output-format json is silent until completion, so a substantial review that overruns `
       + `SIGKILLs at its timeout with zero output (HED-511: 6/6 such dispatches died this way).`
     : undefined;
-  return { route, target, fallback, origin, execution, decision, skillsForRefusal, account, accountAdvice, accountPick, rotationAccount, claudeAccountCount, notDispatchable, reviewerPick, sameProviderReview, pinnedExcludedAccount, overrideReasonRequired, capabilityRefusal, requiresWebRefusal, headlessClaudeReviewRefusal };
+  return { route, target, fallback, origin, execution, decision, symbol, resolutionWalk, skillsForRefusal, account, accountAdvice, accountPick, rotationAccount, claudeAccountCount, notDispatchable, reviewerPick, sameProviderReview, pinnedExcludedAccount, overrideReasonRequired, capabilityRefusal, requiresWebRefusal, headlessClaudeReviewRefusal };
 }
 
 /** One shared dry-run summary for `heddle route` and the `plan_dispatch` MCP tool (identical fields). */
@@ -328,6 +347,8 @@ export function summarizePlan(plan: DispatchPlan): Record<string, unknown> {
   const noDispatchableAccount = hasNoDispatchableClaudeAccount(plan);
   return {
     task_class: plan.route.taskClass,
+    symbol: plan.symbol ?? null,
+    resolution_walk: plan.resolutionWalk ?? [],
     would_run: notDispatchable || plan.decision.refusal || plan.sameProviderReview || plan.pinnedExcludedAccount || noDispatchableAccount || plan.headlessClaudeReviewRefusal || plan.overrideReasonRequired || plan.capabilityRefusal || plan.requiresWebRefusal ? null : `${plan.target.provider}/${plan.target.model}`,
     execution: plan.execution ?? null,
     in_session: plan.execution === 'in-session-subagent',
