@@ -87,19 +87,75 @@ describe('adversarial review bench harness', () => {
         { oid: 'fix000000', committedDate: '2026-09-14T01:16:43Z' }, // post-review fix, must be excluded
       ],
     });
+    // reviewedHead (preB00000) descends from the branch parent only; the fork point is an ancestor of it.
+    const ancestor = (a: string, b: string): boolean =>
+      (a === 'preB00000' && b === 'p2branch0') || (a === 'forkpoint0' && b === 'preB00000');
     const calls: string[][] = [];
     const git: GitRunner = (_root, args) => {
       calls.push([...args]);
       if (args[0] === 'rev-list') return 'mergeoid0 p1main000 p2branch0\n';
-      if (args[0] === 'merge-base') return 'forkpoint0\n';
+      if (args[0] === 'merge-base' && args[1] === '--is-ancestor') {
+        if (ancestor(args[2]!, args[3]!)) return '';
+        throw new Error('not an ancestor');
+      }
+      if (args[0] === 'merge-base') return 'forkpoint0\n'; // merge-base(p1main000, preB00000)
       if (args[0] === 'diff') return 'diff --git a/x b/x\n+pre-fix\n';
       return '';
     };
     const result = reconstructReviewedDiff(99, 'heddle', started, gh, git);
     expect(result).toEqual({ diff: 'diff --git a/x b/x\n+pre-fix\n', reviewedHead: 'preB00000', forkPoint: 'forkpoint0' });
-    // The diff is taken against the fork point and the pre-review HEAD — never the merged branch tip.
-    expect(calls).toContainEqual(['merge-base', 'p1main000', 'p2branch0']);
+    // The fork point is merge-base(main-side parent, pre-review HEAD) — never the merged branch tip.
+    expect(calls).toContainEqual(['merge-base', 'p1main000', 'preB00000']);
     expect(calls).toContainEqual(['diff', 'forkpoint0', 'preB00000']);
+  });
+
+  it('identifies the main-side parent by ancestry, not parent order (drift-bug regression)', () => {
+    const started = '2026-09-14T00:38:47.938Z';
+    const gh: GhRunner = () => JSON.stringify({
+      mergeCommit: { oid: 'mergeoid0' },
+      commits: [
+        { oid: 'preB00000', committedDate: '2026-09-14T00:34:33Z' },
+        { oid: 'fix000000', committedDate: '2026-09-14T01:16:43Z' },
+      ],
+    });
+    // Parents listed BRANCH-first; reviewedHead descends from the branch tip only. Basing the diff on the
+    // branch tip's merge-base with main would overshoot reviewedHead (the drift bug) — the fix bases it on
+    // merge-base(main-side parent, reviewedHead) regardless of parent order.
+    const ancestor = (a: string, b: string): boolean =>
+      (a === 'preB00000' && b === 'branchtip') || (a === 'trueforkp' && b === 'preB00000');
+    const calls: string[][] = [];
+    const git: GitRunner = (_root, args) => {
+      calls.push([...args]);
+      if (args[0] === 'rev-list') return 'mergeoid0 branchtip mainside0\n'; // branch parent FIRST
+      if (args[0] === 'merge-base' && args[1] === '--is-ancestor') {
+        if (ancestor(args[2]!, args[3]!)) return '';
+        throw new Error('not an ancestor');
+      }
+      if (args[0] === 'merge-base') return 'trueforkp\n';
+      if (args[0] === 'diff') return 'DIFF\n';
+      return '';
+    };
+    const result = reconstructReviewedDiff(99, 'heddle', started, gh, git);
+    expect(result).toEqual({ diff: 'DIFF\n', reviewedHead: 'preB00000', forkPoint: 'trueforkp' });
+    expect(calls).toContainEqual(['merge-base', 'mainside0', 'preB00000']);
+    // The branch tip is never used as a plain (non --is-ancestor) merge-base argument.
+    expect(calls.some((c) => c[0] === 'merge-base' && c[1] !== '--is-ancestor' && c.includes('branchtip'))).toBe(false);
+  });
+
+  it('skips rather than emit a diff when the fork point degenerates to the reviewed head', () => {
+    const gh: GhRunner = () => JSON.stringify({
+      mergeCommit: { oid: 'mergeoid0' },
+      commits: [{ oid: 'preB00000', committedDate: '2026-09-14T00:34:33Z' }],
+    });
+    // Both parents report reviewedHead as an ancestor → main-side falls back to parents[0]; its merge-base
+    // with reviewedHead comes back equal to reviewedHead (empty diff / misidentified parent) → skip.
+    const git: GitRunner = (_root, args) => {
+      if (args[0] === 'rev-list') return 'mergeoid0 pA pB\n';
+      if (args[0] === 'merge-base' && args[1] === '--is-ancestor') return '';
+      if (args[0] === 'merge-base') return 'preB00000\n';
+      return '';
+    };
+    expect(reconstructReviewedDiff(99, 'heddle', '2026-09-14T00:38:47.938Z', gh, git)).toEqual({ skip: 'forkpoint-drift' });
   });
 
   it('skips a round whose merge commit is not a 2-parent merge (squash/rebase)', () => {

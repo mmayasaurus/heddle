@@ -41,7 +41,7 @@ export interface CorpusRound {
   notesRaw: string | null;
   /** The commit that was branch HEAD when the incumbent review ran (before its fixes landed). */
   reviewedHead: string;
-  /** The branch's fork point from main = merge-base of the merge commit's two parents. */
+  /** The branch's fork point from main = merge-base(main-side merge parent, reviewedHead). */
   forkPoint: string;
   /** The reviewed (pre-fix) diff: `git diff <forkPoint> <reviewedHead>`. */
   diff: string;
@@ -238,9 +238,12 @@ function fetchPullDetail(pr: number, repo: keyof typeof HEDDLE_REPOS, gh: GhRunn
  * findings, so a candidate replayed against it cannot rediscover those defects and recall collapses toward
  * zero. The reviewer instead saw the branch at its last commit BEFORE the review ran, diffed against the
  * branch's fork point from main. Because the PR later merged, that reviewed commit is now an ancestor of
- * main, so a `main...reviewedHead` diff is empty — the fork point survives only in the merge commit's two
- * parents (merge-base(P1, P2)). This repo merges with merge commits (never squash/rebase), so every PR has
- * a 2-parent merge commit; a non-2-parent merge is skipped rather than reconstructed wrong.
+ * main, so a `main...reviewedHead` diff is empty — the fork point is recovered from the merge commit's two
+ * parents: the main-side parent (the one reviewedHead does NOT descend from) merge-based against
+ * reviewedHead itself. Basing it on the branch-head parent instead would inject main commits that landed
+ * between the review and the merge as reversed deletions (the drift bug). This repo merges with merge
+ * commits (never squash/rebase), so every PR has a 2-parent merge commit; a non-2-parent merge is skipped
+ * rather than reconstructed wrong.
  */
 export function reconstructReviewedDiff(
   pr: number,
@@ -257,12 +260,27 @@ export function reconstructReviewedDiff(
   const root = HEDDLE_REPOS[repo].root;
   const parents = git(root, ['rev-list', '--parents', '-n', '1', detail.mergeCommit.oid]).trim().split(/\s+/).slice(1);
   if (parents.length !== 2) return { skip: `non-merge-commit(${parents.length}p)` };
-  const forkPoint = git(root, ['merge-base', parents[0]!, parents[1]!]).trim();
   // Compare by parsed epoch, never lexically: `committedDate` has second precision and started_at has
   // milliseconds, so a same-second commit would misorder under a string compare (…47Z vs …47.938Z).
   const preReview = (detail.commits ?? []).filter((commit) => Date.parse(commit.committedDate) < startedMs);
   if (!preReview.length) return { skip: 'no-pre-review-commit' };
   const reviewedHead = preReview.reduce((latest, commit) => (Date.parse(commit.committedDate) >= Date.parse(latest.committedDate) ? commit : latest)).oid;
+  // Fork point = the last MAIN commit reviewedHead descends from: merge-base against reviewedHead, NOT
+  // against the merge's branch-head parent. A branch that merged main in AFTER the review has a
+  // branch-head↔main merge-base LATER than reviewedHead, and basing the diff there injects those later main
+  // commits REVERSED (as deletions) into the "pre-fix" diff (the HED-524 drift bug). Identify the main-side
+  // parent as the one reviewedHead does NOT descend from (order-independent — we do not assume GitHub's
+  // base-first parent order), then diff from merge-base(mainParent, reviewedHead), which is always an
+  // ancestor of reviewedHead so no later-main drift can leak in.
+  const isAncestor = (ancestor: string, descendant: string): boolean => {
+    try { git(root, ['merge-base', '--is-ancestor', ancestor, descendant]); return true; }
+    catch { return false; }
+  };
+  const mainParent = isAncestor(reviewedHead, parents[0]!) ? parents[1]! : parents[0]!;
+  const forkPoint = git(root, ['merge-base', mainParent, reviewedHead]).trim();
+  // Never emit a reversed-drift diff: an equal forkPoint (empty diff, e.g. a misidentified parent) or one
+  // that is not an ancestor of reviewedHead is skipped rather than reconstructed wrong.
+  if (forkPoint === reviewedHead || !isAncestor(forkPoint, reviewedHead)) return { skip: 'forkpoint-drift' };
   const diff = git(root, ['diff', forkPoint, reviewedHead]);
   return { diff, reviewedHead, forkPoint };
 }
