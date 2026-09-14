@@ -152,7 +152,8 @@ describe('regression PR#99 — public scrub rejects placeholder issue keys and e
 
 function shippedFiles(): string[] {
   const output = execFileSync('git', [
-    'ls-files', '--', 'src', 'routing', 'skills', 'assets', 'test', 'docs', ':(exclude)docs/fleet/**', 'README.md', 'package.json',
+    'ls-files', '--', 'src', 'routing', 'skills', 'assets', 'test', 'docs', ':(exclude)docs/fleet/**',
+    'rules', ':(exclude)rules/proposed/**', 'README.md', 'package.json',
     'vitest.config.ts', ':(glob)tsconfig*.json',
   ], { encoding: 'utf8' });
 

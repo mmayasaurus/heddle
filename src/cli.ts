@@ -32,11 +32,14 @@ import { runPrSweep } from './pr-sweep.js';
 import { runPrWatch } from './pr-watch.js';
 import { bootstrapComms } from './comms/bootstrap.js';
 import { loadAccountRegistry } from './accounts.js';
+import { DEFAULT_ACCOUNTS_PATH } from './capaware.js';
+import { migrateConfigFile } from './config-migrations.js';
 import { diffFleetBin, diffFleetHooks, diffFleetLaunchers, installFleetBin, installFleetHooks, installFleetLaunchers } from './fleet.js';
 import { NativeCliRunner, type NativeProvider } from './wizard/cli-runner.js';
 import { ReadlinePrompter, ScriptedPrompter, type Prompter } from './wizard/prompt.js';
 import { runAccountsAdd } from './wizard/accounts-add.js';
 import { runHooksChoose, type HookRuleSelection } from './wizard/hooks-choose.js';
+import { PRESET_TIERS, resolvePreset, type SafetyPreset } from './wizard/presets.js';
 import { getProvider } from './provider-matrix.js';
 import { releaseStandalone } from './release/standalone.js';
 import { assembleTop, renderTopText } from './top.js';
@@ -94,10 +97,11 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
   heddle fleet launchers-diff [--json]  compare installed fleet launchers with the vendored canon
   heddle fleet install-bin [--dry-run] [--json]  install vendored fleet bin tools under ~/.heddle/fleet/bin
   heddle fleet bin-diff [--json]  compare installed fleet bin tools with the vendored canon
+  heddle upgrade [--dry-run] [--force] [--json]  migrate config schemas and refresh missing fleet assets without overwriting local edits
   heddle mode [desktop|mobile|away] [--note "<t>"] [--json]   operator mode (HED-336): no arg prints
                                  the current mode; a mode word sets it (~/.heddle/operator-mode.json —
                                  the pocket console and desktop app write the same file)
-  heddle init-project <dir> [--canonical <path>] [--name <n>] [--team <KEY>] [--agents A,B,…] [--room <#room>] [--launcher <script>] [--hook-rules <a,b>] [--enforce <a,b>] [--answers <file>] [--enforce-memtrace] [--dry-run] [--json] [--show-content]
+  heddle init-project <dir> [--canonical <path>] [--name <n>] [--team <KEY>] [--agents A,B,…] [--room <#room>] [--launcher <script>] [--preset <tier>] [--hook-rules <a,b>] [--enforce <a,b>] [--answers <file>] [--enforce-memtrace] [--dry-run] [--json] [--show-content]
   heddle whoami [--json]         this process's bound identity (HEDDLE_AGENT / FLEET_AGENT / .fleet-agent) + worker context
   heddle doctor [--json] [--provider <p>]   verify harnesses/accounts/config; --provider runs only that provider's checks plus global config checks (exit 1 on any fail)
   heddle release --standalone <outDir> [--source-ref <git ref>] [--init-git] [--verify] [--json]
@@ -172,7 +176,7 @@ const json = has('--json');
  * `--dry-run` preview especially must observe, not mutate.
  * Best-effort — a hygiene failure must never break the command the operator actually ran.
  */
-if (cmd !== 'mode' && cmd !== 'pr' && cmd !== 'comms' && cmd !== 'fleet' && cmd !== 'top' && !(cmd === 'ledger' && (process.argv[3] === 'sweep' || process.argv[3] === 'finish')) && !(cmd === 'usage' && (process.argv[3] === 'poll-claude' || process.argv[3] === 'install-poll-launchd'))) {
+if (cmd !== 'mode' && cmd !== 'pr' && cmd !== 'comms' && cmd !== 'fleet' && cmd !== 'top' && cmd !== 'upgrade' && !(cmd === 'ledger' && (process.argv[3] === 'sweep' || process.argv[3] === 'finish')) && !(cmd === 'usage' && (process.argv[3] === 'poll-claude' || process.argv[3] === 'install-poll-launchd'))) {
   try {
     const { closed } = new Ledger().sweepOrphans();
     if (closed > 0) console.error(`heddle: closed ${closed} orphaned in-flight dispatch row${closed === 1 ? '' : 's'} (heddle ledger --json shows outcome='orphaned')`);
@@ -981,6 +985,77 @@ try {
       break;
     }
 
+    case 'upgrade': {
+      // A mutating command must reject a mistyped flag rather than proceed with real writes: e.g.
+      // `heddle upgrade --dryrun` (missing the hyphen) would otherwise leave dryRun false and mutate.
+      const unknownArgs = process.argv.slice(3).filter((arg) => arg !== '--dry-run' && arg !== '--force' && arg !== '--json');
+      if (unknownArgs.length > 0) {
+        console.error(`heddle upgrade: unknown argument${unknownArgs.length === 1 ? '' : 's'} ${unknownArgs.join(', ')} — allowed: --dry-run, --force, --json`);
+        process.exitCode = 2;
+        break;
+      }
+      const dryRun = has('--dry-run');
+      const forced = has('--force');
+      const accountsPath = process.env.HEDDLE_ACCOUNTS ?? DEFAULT_ACCOUNTS_PATH;
+      const migrations = [
+        // Honor HEDDLE_PROJECTS like doctor.ts / loadGateMaps (skillpacks.ts) do — else a custom
+        // projects registry is left unmigrated while upgrade touches only the default path.
+        { kind: 'projects', path: process.env.HEDDLE_PROJECTS?.trim() || DEFAULT_PROJECTS_PATH },
+        { kind: 'accounts', path: accountsPath },
+      ].map(({ kind, path }) => {
+        if (!existsSync(path)) return { kind, path, action: 'absent' as const };
+        const result = migrateConfigFile(kind, path, { dryRun });
+        return {
+          kind,
+          path,
+          action: result.migrated ? (dryRun ? 'would-migrate' as const : 'migrated' as const) : 'current' as const,
+          from: result.from,
+          to: result.to,
+          ...(result.backupPath ? { backupPath: result.backupPath } : {}),
+        };
+      });
+
+      const assetGroups = [
+        { kind: 'bin', diff: diffFleetBin, install: installFleetBin },
+        { kind: 'hooks', diff: diffFleetHooks, install: installFleetHooks },
+        { kind: 'launchers', diff: diffFleetLaunchers, install: installFleetLaunchers },
+      ] as const;
+      const assets = assetGroups.flatMap(({ kind, diff, install }) => {
+        const differences = new Map(diff().files.map((file) => [file.name, file.action]));
+        const installed = install({ dryRun, skipDiffering: !forced });
+        return installed.files.map((file) => {
+          const difference = differences.get(file.name);
+          const action = difference === 'differing' && !forced
+            ? 'preserved'
+            : dryRun && file.action === 'created'
+              ? 'would-create'
+              : dryRun && file.action === 'updated'
+                ? 'would-update'
+                : file.action;
+          return { kind, name: file.name, action };
+        });
+      });
+      const report = { migrations, assets, dryRun, forced };
+      out(json, report, () => [
+        'Migrations:',
+        ...migrations.map((migration) => migration.action === 'absent'
+          ? `  ${migration.kind}: absent — nothing to migrate (${migration.path})`
+          : migration.action === 'current'
+            ? `  ${migration.kind}: already current (v${migration.to})`
+            : migration.action === 'would-migrate'
+              ? `  ${migration.kind}: would migrate v${migration.from}→v${migration.to}`
+              : `  ${migration.kind}: migrated v${migration.from}→v${migration.to} (backup: ${migration.backupPath})`),
+        'Assets:',
+        ...assets.map((asset) => asset.action === 'preserved'
+          ? `  ${asset.kind}/${asset.name}: differs from canonical — preserved (use --force to overwrite)`
+          : `  ${asset.kind}/${asset.name}: ${asset.action}`),
+        // Without prior-version shipped hashes, stale shipped files and user edits are indistinguishable.
+        // Both remain preserved by default; --force refreshes the canonical shipset.
+        'Note: stale shipped assets and user edits are both preserved by default; use --force to refresh canonical assets.',
+      ].join('\n'));
+      break;
+    }
+
     case 'mode': {
       const requested = process.argv[3];
       // No mode word (absent, or the next token is a flag like --json) → report the current mode.
@@ -1015,12 +1090,19 @@ try {
     case 'init-project': {
       const dir = process.argv[3];
       if (!dir || dir.startsWith('--')) {
-        console.error('usage: heddle init-project <dir> [--canonical <path>] [--name <n>] [--team <KEY>] [--agents A,B,…] [--room <#room>] [--launcher <script>] [--hook-rules <a,b>] [--enforce <a,b>] [--answers <file>] [--enforce-memtrace] [--dry-run] [--json] [--show-content]');
+        console.error('usage: heddle init-project <dir> [--canonical <path>] [--name <n>] [--team <KEY>] [--agents A,B,…] [--room <#room>] [--launcher <script>] [--preset <tier>] [--hook-rules <a,b>] [--enforce <a,b>] [--answers <file>] [--enforce-memtrace] [--dry-run] [--json] [--show-content]');
         process.exit(2);
       }
       const catalogRoot = resolveRulesRoot([]);
       let hookRules: HookRuleSelection[] | undefined;
-      if (has('--hook-rules')) {
+      if (has('--preset')) {
+        if (has('--hook-rules')) throw new Error('--preset and --hook-rules are mutually exclusive; choose one');
+        if (has('--enforce')) throw new Error('--preset cannot be used with --enforce; presets never enforce');
+        const tier = arg('--preset');
+        if (tier === undefined || tier.startsWith('-')) throw new Error(`--preset needs one of: ${PRESET_TIERS.join(', ')}`);
+        if (!PRESET_TIERS.includes(tier as SafetyPreset)) throw new Error(`unknown safety preset '${tier}' (choose ${PRESET_TIERS.join(', ')})`);
+        hookRules = resolvePreset(tier as SafetyPreset, catalogRoot);
+      } else if (has('--hook-rules')) {
         const requested = commaIds('--hook-rules');
         const enforced = has('--enforce') ? commaIds('--enforce') : [];
         const catalog = new Map(loadRules(catalogRoot).map((rule) => [rule.id, rule]));
@@ -1041,7 +1123,16 @@ try {
             prompter = new ReadlinePrompter();
           }
           try {
-            hookRules = (await runHooksChoose({ catalogRoot }, { prompter, report: (line) => process.stderr.write(`${line}\n`) })).selected;
+            // Only offer the preset step when a rule catalog actually exists. Before a catalog is present
+            // (e.g. the starter rule pack is not installed yet) there is nothing for a preset to resolve, so
+            // fall straight to the chooser — leaving the flow, and any existing --answers script, unchanged
+            // until a catalog exists. This keeps the preset feature dormant rather than failing by default.
+            const choice = loadRules(catalogRoot).length
+              ? await prompter.select('Choose hook safety preset:', [...PRESET_TIERS, 'custom'])
+              : 'custom';
+            hookRules = choice === 'custom'
+              ? (await runHooksChoose({ catalogRoot }, { prompter, report: (line) => process.stderr.write(`${line}\n`) })).selected
+              : resolvePreset(choice as SafetyPreset, catalogRoot);
           } finally {
             prompter.close();
           }
