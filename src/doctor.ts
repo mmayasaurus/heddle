@@ -1,9 +1,13 @@
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { PROVIDER_REGISTRY } from './adapters/openai-compat.js';
 import { DEFAULT_ACCOUNTS_PATH } from './capaware.js';
 import { DEFAULT_COMMS_PATH } from './comms/log.js';
 // Importing the trust-root constant from its definition keeps a SINGLE SOURCE OF TRUTH (re-deriving join(homedir(), '.heddle', 'operator.token') would be the two-paths bug class); server.ts has no import-time I/O so the import is side-effect-free.
 import { OPERATOR_TOKEN_PATH } from './comms/server.js';
 import {
+  artifactDriftCheck,
   binaryCheck,
   catalogCheck,
   commsCheck,
@@ -18,6 +22,9 @@ import {
 } from './health/checks.js';
 import {
   defaultExecFile,
+  defaultGitBehindOriginMain,
+  defaultReadFileBytes,
+  defaultSha256,
   errorText,
   result,
   type CheckResult,
@@ -90,6 +97,9 @@ function buildContext(
   const deps: DoctorDeps = {
     env: partial.env ?? process.env,
     execFile: partial.execFile ?? defaultExecFile,
+    readFileBytes: partial.readFileBytes ?? defaultReadFileBytes,
+    sha256: partial.sha256 ?? defaultSha256,
+    gitBehindOriginMain: partial.gitBehindOriginMain ?? defaultGitBehindOriginMain,
     now: partial.now ?? (() => new Date()),
     paths: partial.paths ?? {},
   };
@@ -104,6 +114,10 @@ function buildContext(
       graceMs: partial.timeouts?.graceMs ?? 2_000,
     },
     routingPath,
+    // doctor.ts compiles to dist/doctor.js (rootDir src, outDir dist), so .. is the repo root;
+    // . would resolve to dist/ and break the sibling dashboard lookup.
+    coreRoot: deps.paths.repoRoot ?? fileURLToPath(new URL('..', import.meta.url)),
+    heddleDir: deps.paths.heddle ?? join(homedir(), '.heddle'),
     lanes,
     missing: new Set<HarnessProvider>(),
   };
@@ -133,6 +147,7 @@ function assembleChecks(
     ]);
   definitions.push(...configChecks(ctx, accountsPath, projectsPath));
   definitions.push(commsCheck(commsPath, operatorTokenPath));
+  definitions.push(artifactDriftCheck(ctx));
   for (const [provider, config] of Object.entries(PROVIDER_REGISTRY) as Array<
     [keyof typeof PROVIDER_REGISTRY, (typeof PROVIDER_REGISTRY)[keyof typeof PROVIDER_REGISTRY]]
   >) {
