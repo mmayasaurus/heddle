@@ -222,6 +222,27 @@ describe('worktree escape detection', () => {
     expect(escapedPaths(before, checkoutFingerprint(root))).toEqual(['?? escaped.txt']);
   });
 
+  it('reports a tracked file renamed INTO a runtime dir and a tracked edit under one (qodo #1/#2)', () => {
+    const { root } = linkedWorktree(tempDir);
+    const gc = (...a: string[]) => git(root, '-c', 'user.email=t@t', '-c', 'user.name=t', ...a);
+    writeFileSync(join(root, 'tracked.txt'), 'content');
+    git(root, 'add', 'tracked.txt');
+    gc('commit', '-q', '-m', 'add tracked');
+
+    // git mv a tracked ordinary file INTO .serena — the source disappears; a reviewer must not hide
+    // moving tracked project content under a runtime dir (qodo #2).
+    const before = checkoutFingerprint(root)!;
+    mkdirSync(join(root, '.serena'));
+    git(root, 'mv', 'tracked.txt', '.serena/tracked.txt');
+    expect(escapedPaths(before, checkoutFingerprint(root))).not.toEqual([]);
+
+    // A tracked file now under .serena, edited unstaged, is still reported (exclusion is untracked-only, qodo #1).
+    gc('commit', '-q', '-m', 'move into serena');
+    const after = checkoutFingerprint(root)!;
+    writeFileSync(join(root, '.serena', 'tracked.txt'), 'edited');
+    expect(escapedPaths(after, checkoutFingerprint(root))).not.toEqual([]);
+  });
+
   it('reports parent paths that disappear between fingerprints', () => {
     const { root } = linkedWorktree(tempDir);
     const path = join(root, 'gone.txt');

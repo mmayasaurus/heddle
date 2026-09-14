@@ -165,13 +165,16 @@ export function checkoutFingerprint(root: string): CheckoutFingerprint | null {
       // path has no XY prefix, so parsing it as its own record yields a garbage entry (PR #28,
       // gitar — verified: `git mv a.txt b.txt` emits `R  b.txt\0a.txt\0`). Consume it here.
       if (status[0] === 'R' || status[0] === 'C') {
+        // A rename/copy is ALWAYS a tracked change — git rename-detects only tracked content (an
+        // untracked runtime write is a '??' record, excluded below). So it is real and always recorded;
+        // suppressing on a runtime destination would let a reviewer hide moving tracked project content
+        // into .memdb/.memtrace/.serena (qodo #2). Consume the second NUL field either way.
         const from = records[i + 1];
         i += 1;
-        if (isToolRuntimePath(path)) continue;
         entries.set(path, `${status}:from=${from ?? '?'}`);
         continue;
       }
-      if (isToolRuntimePath(path)) continue;
+      if (isToolRuntimePath(path) && status === '??') continue; // untracked tool-runtime churn only; a tracked change here is real (qodo #1)
       let digest = '<missing>';
       try { digest = createHash('sha256').update(readFileSync(join(root, path))).digest('hex').slice(0, 16); }
       catch { /* deleted, or a directory — the status letters still carry the change */ }

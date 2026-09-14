@@ -174,6 +174,26 @@ describe('adversarial review helpers', () => {
     expect(sameSnapshot(withConfig, snapshotWorktree(cwd))).toBe(false);
   });
 
+  it('still hashes a TRACKED file under a tool-runtime dir (a committed .serena/project.yml)', () => {
+    const cwd = tempDir();
+    git(cwd, 'init', '-q');
+    mkdirSync(join(cwd, '.serena'));
+    writeFileSync(join(cwd, '.serena', 'project.yml'), 'name: proj\n');
+    git(cwd, 'add', '.serena/project.yml');
+    commit(cwd, 'init');
+
+    const baseline = snapshotWorktree(cwd);
+    // An unstaged edit to the TRACKED config must change the digest — the exclusion is untracked-only,
+    // so a reviewer cannot edit committed .serena config unseen (qodo #1).
+    writeFileSync(join(cwd, '.serena', 'project.yml'), 'name: proj-edited\n');
+    expect(sameSnapshot(baseline, snapshotWorktree(cwd))).toBe(false);
+
+    // An UNTRACKED cache write beside it stays excluded.
+    const withEdit = snapshotWorktree(cwd);
+    writeFileSync(join(cwd, '.serena', 'cache.bin'), 'machine-local');
+    expect(sameSnapshot(withEdit, snapshotWorktree(cwd))).toBe(true);
+  });
+
   it('prepends an actionable diff instruction and leaves a blank line before the task', () => {
     const instruction = diffInstruction('main');
     expect(instruction).toContain('git diff main...HEAD');
