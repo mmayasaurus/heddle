@@ -9,17 +9,22 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 
+// Checkout locations follow the fleet-wide convention (lin.sh, pr-sweep.sh, launchers all hardcode
+// /Users/mayatobi/Developer/<repo>). Overridable per-repo for a different clone or CI.
 const HEDDLE_REPOS = {
-  heddle: { root: '/Users/mayatobi/Developer/heddle', github: 'mmayasaurus/heddle' },
-  'heddle-dashboard': { root: '/Users/mayatobi/Developer/heddle-dashboard', github: 'mmayasaurus/heddle-dashboard' },
+  heddle: { root: process.env.HEDDLE_REPO_ROOT ?? '/Users/mayatobi/Developer/heddle', github: 'mmayasaurus/heddle' },
+  'heddle-dashboard': { root: process.env.HEDDLE_DASHBOARD_REPO_ROOT ?? '/Users/mayatobi/Developer/heddle-dashboard', github: 'mmayasaurus/heddle-dashboard' },
 } as const;
 
-const CORPUS_QUERY = `SELECT r.dispatch_id, d.issue, d.cwd, r.author_provider, r.author_model,
+// d.cwd is prefiltered with a broad '%heddle%' (repoForCwd does the precise, absolute-path scope guard):
+// a review whose cwd is EXACTLY a repo root (no trailing slash) must not be dropped by a '%/heddle/%'
+// pattern. started_at is the review dispatch's real start time — used to reconstruct the reviewed commit.
+const CORPUS_QUERY = `SELECT r.dispatch_id, d.issue, d.cwd, d.started_at, r.author_provider, r.author_model,
        r.reviewer_provider, r.reviewer_model, r.findings_total, r.findings_accepted, r.notes
 FROM reviews r JOIN dispatches d ON d.id = r.dispatch_id
 WHERE r.outcome_at IS NOT NULL AND r.findings_total > 0
   AND d.issue LIKE 'HED-%'
-  AND (d.cwd LIKE '%heddle-dashboard%' OR d.cwd LIKE '%/heddle/%')
+  AND d.cwd LIKE '%heddle%'
 ORDER BY r.dispatch_id DESC;`;
 
 export interface CorpusRound {
@@ -34,6 +39,11 @@ export interface CorpusRound {
   findingsTotal: number;
   findingsAccepted: number;
   notesRaw: string | null;
+  /** The commit that was branch HEAD when the incumbent review ran (before its fixes landed). */
+  reviewedHead: string;
+  /** The branch's fork point from main = merge-base of the merge commit's two parents. */
+  forkPoint: string;
+  /** The reviewed (pre-fix) diff: `git diff <forkPoint> <reviewedHead>`. */
   diff: string;
 }
 
@@ -54,6 +64,7 @@ interface LedgerRow {
   dispatch_id: number;
   issue: string;
   cwd: string;
+  started_at: string | null;
   author_provider: string | null;
   author_model: string | null;
   reviewer_provider: string;
@@ -66,6 +77,16 @@ interface LedgerRow {
 interface PullRequest {
   number: number;
   body: string | null;
+}
+
+interface Commit {
+  oid: string;
+  committedDate: string;
+}
+
+interface PullDetail {
+  mergeCommit: { oid: string } | null;
+  commits: Commit[];
 }
 
 export interface CandidateFinding {
@@ -114,9 +135,18 @@ export interface ScoreReport {
 }
 
 export type GhRunner = (args: readonly string[]) => string;
+export type GitRunner = (root: string, args: readonly string[]) => string;
 
 function defaultGh(args: readonly string[]): string {
   return execFileSync('gh', args, {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    maxBuffer: 64 * 1024 * 1024,
+  });
+}
+
+function defaultGit(root: string, args: readonly string[]): string {
+  return execFileSync('git', ['-C', root, ...args], {
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
     maxBuffer: 64 * 1024 * 1024,
@@ -179,7 +209,7 @@ function selectRows(rows: LedgerRow[], limit: number | undefined, pairs: string[
 }
 
 function issueFixesPattern(issue: string): RegExp {
-  return new RegExp(`Fixes\\s+${issue.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')}\\b`, 'i');
+  return new RegExp(`Fixes\\s+${issue.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
 }
 
 function fetchMergedPulls(repo: keyof typeof HEDDLE_REPOS, gh: GhRunner): PullRequest[] {
@@ -197,8 +227,44 @@ function mapMergedPullRequest(issue: string, pulls: readonly PullRequest[]): num
   return matches.length === 1 ? matches[0]!.number : null;
 }
 
-function frozenDiff(pr: number, repo: keyof typeof HEDDLE_REPOS, gh: GhRunner): string {
-  return gh(['pr', 'diff', String(pr), '-R', HEDDLE_REPOS[repo].github]);
+function fetchPullDetail(pr: number, repo: keyof typeof HEDDLE_REPOS, gh: GhRunner): PullDetail {
+  return JSON.parse(gh(['pr', 'view', String(pr), '-R', HEDDLE_REPOS[repo].github, '--json', 'mergeCommit,commits'])) as PullDetail;
+}
+
+/**
+ * Reconstruct the EXACT diff the incumbent reviewed, not the merged diff.
+ *
+ * A merged PR's diff is POST-fix: it already contains the changes that resolved the incumbent's accepted
+ * findings, so a candidate replayed against it cannot rediscover those defects and recall collapses toward
+ * zero. The reviewer instead saw the branch at its last commit BEFORE the review ran, diffed against the
+ * branch's fork point from main. Because the PR later merged, that reviewed commit is now an ancestor of
+ * main, so a `main...reviewedHead` diff is empty — the fork point survives only in the merge commit's two
+ * parents (merge-base(P1, P2)). This repo merges with merge commits (never squash/rebase), so every PR has
+ * a 2-parent merge commit; a non-2-parent merge is skipped rather than reconstructed wrong.
+ */
+export function reconstructReviewedDiff(
+  pr: number,
+  repo: keyof typeof HEDDLE_REPOS,
+  startedAt: string | null,
+  gh: GhRunner,
+  git: GitRunner,
+): { diff: string; reviewedHead: string; forkPoint: string } | { skip: string } {
+  if (!startedAt) return { skip: 'no-started-at' };
+  const startedMs = Date.parse(startedAt);
+  if (Number.isNaN(startedMs)) return { skip: 'bad-started-at' };
+  const detail = fetchPullDetail(pr, repo, gh);
+  if (!detail.mergeCommit?.oid) return { skip: 'no-merge-commit' };
+  const root = HEDDLE_REPOS[repo].root;
+  const parents = git(root, ['rev-list', '--parents', '-n', '1', detail.mergeCommit.oid]).trim().split(/\s+/).slice(1);
+  if (parents.length !== 2) return { skip: `non-merge-commit(${parents.length}p)` };
+  const forkPoint = git(root, ['merge-base', parents[0]!, parents[1]!]).trim();
+  // Compare by parsed epoch, never lexically: `committedDate` has second precision and started_at has
+  // milliseconds, so a same-second commit would misorder under a string compare (…47Z vs …47.938Z).
+  const preReview = (detail.commits ?? []).filter((commit) => Date.parse(commit.committedDate) < startedMs);
+  if (!preReview.length) return { skip: 'no-pre-review-commit' };
+  const reviewedHead = preReview.reduce((latest, commit) => (Date.parse(commit.committedDate) >= Date.parse(latest.committedDate) ? commit : latest)).oid;
+  const diff = git(root, ['diff', forkPoint, reviewedHead]);
+  return { diff, reviewedHead, forkPoint };
 }
 
 function readCorpus(dir: string): CorpusRound[] {
@@ -241,15 +307,17 @@ export function buildCandidatePrompt(outDir: string, round: CorpusRound): string
 
 function judgePrompt(round: CorpusRound, candidateRaw: string): string {
   return [
-    'You are the judge for an adversarial-review quality bench. Accepted incumbent findings are ground truth. Return STRICT JSON only, with no Markdown fences or prose:',
+    'You are the judge for an adversarial-review quality bench. The DIFF below is the EXACT version the incumbent reviewer saw: it is reconstructed at the commit that was branch HEAD when the incumbent review ran, BEFORE any fixes for its findings were pushed. So every ACCEPTED incumbent finding describes a defect that IS present in this diff. Accepted incumbent findings are ground truth. Return STRICT JSON only, with no Markdown fences or prose:',
     '{"roundId": <dispatchId>,',
     ' "candidateFindings": [{"idx": 1, "class": "TP|FP|NOVEL", "matchesAcceptedIncumbent": true|false, "rationale": "<=200 chars"}],',
     ' "acceptedIncumbentMatchedCount": <int 0..findingsAccepted>}',
     '',
-    'TP = candidate finding describes the SAME defect as one the incumbent found AND ACCEPTED (wording/line precision may differ).',
-    'FP = matches an incumbent finding REJECTED as a false positive, OR is unsupported by the diff.',
-    'NOVEL = a plausibly-real issue visible in the diff the incumbent did not raise.',
-    'acceptedIncumbentMatchedCount = how many DISTINCT accepted incumbent findings the candidate caught (recall numerator; never exceeds findingsAccepted).',
+    'MATCH ON THE DEFECT, NOT THE WORDING. Classify a candidate finding TP when it identifies the SAME underlying defect as an ACCEPTED incumbent finding — the same file/code region and the same failure class count as a match even if the line number, phrasing, or severity differ. Do NOT require identical wording and do NOT penalise the candidate for describing the defect differently.',
+    'The incumbent had repository-wide code-discovery tools (memtrace); the candidate saw only this diff. An accepted incumbent finding that depends on code NOT visible in this diff is legitimately un-findable by the candidate — do not invent a match for it, but still keep it in findingsAccepted (the recall denominator).',
+    'TP = same defect as an ACCEPTED incumbent finding (matchesAcceptedIncumbent MUST be true).',
+    'FP = matches an incumbent finding REJECTED as a false positive, OR is unsupported by the diff (matchesAcceptedIncumbent MUST be false).',
+    'NOVEL = a plausibly-real issue visible in the diff the incumbent did not raise (matchesAcceptedIncumbent MUST be false).',
+    'acceptedIncumbentMatchedCount = how many DISTINCT accepted incumbent findings the candidate caught (recall numerator; 0..findingsAccepted). One candidate finding may match more than one accepted finding.',
     '',
     'DIFF:',
     round.diff,
@@ -264,8 +332,13 @@ function judgePrompt(round: CorpusRound, candidateRaw: string): string {
   ].join('\n');
 }
 
-/** Extract the first parseable JSON object, including one wrapped in prose or a Markdown fence. */
+/**
+ * Extract the judge's JSON result, tolerating prose or Markdown fences around it. Collect every balanced,
+ * parseable top-level object and prefer the one carrying a `roundId` key — so an example object emitted
+ * before the real answer (a common LLM habit) is never mistaken for the result.
+ */
 export function extractJudgeJson(raw: string): unknown {
+  const objects: unknown[] = [];
   for (let start = raw.indexOf('{'); start !== -1; start = raw.indexOf('{', start + 1)) {
     let depth = 0;
     let inString = false;
@@ -283,15 +356,19 @@ export function extractJudgeJson(raw: string): unknown {
       else if (char === '}') {
         depth -= 1;
         if (depth === 0) {
-          try { return JSON.parse(raw.slice(start, end + 1)); } catch { break; }
+          try { objects.push(JSON.parse(raw.slice(start, end + 1))); start = end; } catch { /* not JSON here; resume from the next opening brace */ }
+          break;
         }
       }
     }
   }
+  const withRound = objects.find((obj) => !!obj && typeof obj === 'object' && 'roundId' in (obj as object));
+  if (withRound !== undefined) return withRound;
+  if (objects.length) return objects[0];
   throw new Error('judge output did not contain a JSON object');
 }
 
-function asJudgeResult(value: unknown, round: CorpusRound): JudgeResult {
+export function asJudgeResult(value: unknown, round: CorpusRound): JudgeResult {
   if (!value || typeof value !== 'object') throw new Error(`judge-${round.dispatchId}: result must be an object`);
   const data = value as Partial<JudgeResult>;
   if (data.roundId !== round.dispatchId) throw new Error(`judge-${round.dispatchId}: roundId does not match corpus`);
@@ -302,6 +379,11 @@ function asJudgeResult(value: unknown, round: CorpusRound): JudgeResult {
   const findings = data.candidateFindings.map((finding, index) => {
     if (!finding || typeof finding !== 'object' || !['TP', 'FP', 'NOVEL'].includes(finding.class) || !Number.isInteger(finding.idx) || typeof finding.matchesAcceptedIncumbent !== 'boolean' || typeof finding.rationale !== 'string') {
       throw new Error(`judge-${round.dispatchId}: candidate finding ${index + 1} is invalid`);
+    }
+    // TP and matchesAcceptedIncumbent are the same claim — a match IS a true positive and vice versa. Reject
+    // a judge that disagrees with itself, so the recall numerator (matched) and precision (class) stay coherent.
+    if ((finding.class === 'TP') !== finding.matchesAcceptedIncumbent) {
+      throw new Error(`judge-${round.dispatchId}: finding ${index + 1} — class TP must match matchesAcceptedIncumbent`);
     }
     return finding as CandidateFinding;
   });
@@ -342,7 +424,13 @@ export function aggregateScoredRounds(candidate: string, rounds: ScoredRound[], 
   };
 }
 
-function buildCorpus(out: string, opts: { limit?: number; pairs?: string[] }, gh: GhRunner = defaultGh, ledgerPath = join(process.env.HEDDLE_HOME ?? join(homedir(), '.heddle'), 'ledger.db')): CorpusSummary {
+function buildCorpus(
+  out: string,
+  opts: { limit?: number; pairs?: string[] },
+  gh: GhRunner = defaultGh,
+  git: GitRunner = defaultGit,
+  ledgerPath = process.env.HEDDLE_LEDGER || join(homedir(), '.heddle', 'ledger.db'),
+): CorpusSummary {
   if (!existsSync(ledgerPath)) throw new Error(`ledger not found: ${ledgerPath}`);
   const db = new DatabaseSync(ledgerPath, { readOnly: true });
   let allRows: LedgerRow[];
@@ -351,6 +439,7 @@ function buildCorpus(out: string, opts: { limit?: number; pairs?: string[] }, gh
   const rounds: CorpusRound[] = [];
   const skipped: Skip[] = [];
   const pullsByRepo = new Map<keyof typeof HEDDLE_REPOS, PullRequest[]>();
+  const fetched = new Set<keyof typeof HEDDLE_REPOS>();
   for (const row of rows) {
     const repo = repoForCwd(row.cwd);
     if (!repo) {
@@ -364,7 +453,14 @@ function buildCorpus(out: string, opts: { limit?: number; pairs?: string[] }, gh
       skipped.push({ dispatchId: row.dispatch_id, issue: row.issue, reason: 'ambiguous-pr-map' });
       continue;
     }
-    const diff = frozenDiff(pr, repo, gh);
+    // Reconstruction needs the reviewed commit + merge commit present locally; fetch each repo once.
+    if (!fetched.has(repo)) { git(HEDDLE_REPOS[repo].root, ['fetch', 'origin', '--quiet']); fetched.add(repo); }
+    const reconstructed = reconstructReviewedDiff(pr, repo, row.started_at, gh, git);
+    if ('skip' in reconstructed) {
+      skipped.push({ dispatchId: row.dispatch_id, issue: row.issue, reason: reconstructed.skip });
+      continue;
+    }
+    const { diff, reviewedHead, forkPoint } = reconstructed;
     const lines = diff === '' ? 0 : diff.split(/\r?\n/).length - (diff.endsWith('\n') ? 1 : 0);
     if (lines === 0 || lines > 4000) {
       skipped.push({ dispatchId: row.dispatch_id, issue: row.issue, reason: lines === 0 ? 'empty-diff' : 'oversize-diff' });
@@ -375,7 +471,7 @@ function buildCorpus(out: string, opts: { limit?: number; pairs?: string[] }, gh
       authorProvider: row.author_provider, authorModel: row.author_model,
       reviewerProvider: row.reviewer_provider, reviewerModel: row.reviewer_model,
       findingsTotal: row.findings_total, findingsAccepted: row.findings_accepted,
-      notesRaw: row.notes, diff,
+      notesRaw: row.notes, reviewedHead, forkPoint, diff,
     });
   }
   mkdirSync(out, { recursive: true });
@@ -428,6 +524,7 @@ function renderReport(score: ScoreReport): string {
   const lines = [
     `# Adversarial-review quality bench — ${score.candidate}`,
     '',
+    `> Diffs are reconstructed at the reviewed commit (branch HEAD before the incumbent's fixes landed), so each accepted finding's defect is present in the diff the candidate saw.`,
     `> Deployment-condition confound — incumbent findings were produced WITH code-discovery MCP (memtrace); the candidate ran inline-diff-only (mcp:[]). This bench measures exactly that deployment delta; it is not controlled for.`,
     '',
     '## Headline',
