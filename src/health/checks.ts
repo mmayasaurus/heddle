@@ -4,7 +4,7 @@ import { PROVIDER_REGISTRY, readSecretsEnvValue } from '../adapters/openai-compa
 import { CommsLog, DEFAULT_ROOM } from '../comms/log.js';
 import { loadLanes, type LanesConfig } from '../lanes.js';
 import { loadProjectRegistry } from '../projects.js';
-import { listTaskClasses, loadRouting, resolveRoute } from '../routing.js';
+import { isPreferOnlyClass, listTaskClasses, loadRouting, resolveRoute } from '../routing.js';
 import { accountResult, catalogModels, loginStatus, targetModels } from './parse.js';
 import {
   probe,
@@ -298,6 +298,7 @@ export function configChecks(
         const routing = loadRouting(ctx.routingPath);
 
         for (const taskClass of listTaskClasses(routing)) {
+          if (isPreferOnlyClass(routing, taskClass)) continue;
           resolveRoute(routing, taskClass);
         }
 

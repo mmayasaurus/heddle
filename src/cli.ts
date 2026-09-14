@@ -501,7 +501,7 @@ try {
     case 'classes': {
       const rows = describeTaskClasses(loadRouting(), withMandatoryPacks);
       out(json, rows, () => rows.map((r) =>
-        `${r.task_class.padEnd(22)} ${r.provider}/${r.model}` +
+        `${r.task_class.padEnd(22)} ${r.provider && r.model ? `${r.provider}/${r.model}` : '(prefer-only)'}` +
         (r.effort ? ` (${r.effort})` : '') +
         (r.fallback ? `  ↳ ${r.fallback}` : '') +
         (r.opt_in_required ? '  [opt-in required]' : '') +
