@@ -34,6 +34,7 @@ import { diffFleetHooks, diffFleetLaunchers, installFleetHooks, installFleetLaun
 import { NativeCliRunner, type NativeProvider } from './wizard/cli-runner.js';
 import { ReadlinePrompter, ScriptedPrompter, type Prompter } from './wizard/prompt.js';
 import { runAccountsAdd } from './wizard/accounts-add.js';
+import { getProvider } from './provider-matrix.js';
 import { releaseStandalone } from './release/standalone.js';
 import { assembleTop, renderTopText } from './top.js';
 
@@ -82,7 +83,7 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
   heddle projects [--json]       registered projects and their fleets (~/.heddle/projects.json; HED-160)
   heddle accounts list [--json]  registered Claude, Codex, and Cursor accounts
   heddle accounts verify         verify local credential paths and recorded Claude login state
-  heddle accounts add [--provider <p>] [--answers <file>]  add native-login accounts interactively
+  heddle accounts add [--provider <p>] [--answers <file>]  add native-login or env-repoint accounts interactively
   heddle comms init [--json]     initialize the comms database, operator token, and registered project rooms
   heddle fleet install-hooks [--dry-run] [--json]  install vendored fleet hooks under ~/.heddle/fleet/hooks
   heddle fleet hooks-diff [--json]  compare installed fleet hooks with the vendored canon
@@ -821,8 +822,8 @@ try {
       const action = process.argv[3];
       if (action === 'add') {
         const requested = arg('--provider');
-        if (has('--provider') && (requested === undefined || requested.startsWith('--'))) throw new Error('--provider needs a value: claude, codex, or cursor');
-        if (requested && !['claude', 'codex', 'cursor'].includes(requested)) throw new Error('--provider must be claude, codex, or cursor');
+        if (has('--provider') && (requested === undefined || requested.startsWith('--'))) throw new Error('--provider needs a value: a matrix provider key or custom');
+        if (requested && requested !== 'custom' && !getProvider(requested)) throw new Error(`--provider must be a known matrix provider key or custom (got ${requested})`);
         const answersPath = arg('--answers');
         if (has('--answers') && (answersPath === undefined || answersPath.startsWith('--'))) throw new Error('--answers needs a path to a JSON answer file');
         let prompter: Prompter;
@@ -835,7 +836,7 @@ try {
         }
         try {
           const summary = await runAccountsAdd(
-            requested ? { provider: requested as NativeProvider } : {},
+            requested ? { provider: requested } : {},
             { prompter, runner: new NativeCliRunner(), report: (line) => process.stderr.write(`${line}\n`) },
           );
           process.stdout.write(`${JSON.stringify(summary)}\n`);
