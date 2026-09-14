@@ -9,6 +9,7 @@
   },
   "scripts": {
     "build": "tsc",
+    "bench:adv-review": "node scripts/bench-adversarial-review.ts",
     "typecheck": "tsc --noEmit -p tsconfig.test.json",
     "test": "vitest run",
     "test:watch": "vitest"
