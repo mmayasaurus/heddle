@@ -5,8 +5,11 @@ import { DEFAULT_ACCOUNTS_PATH } from './capaware.js';
 export const ACCOUNTS_SCHEMA_VERSION = 2;
 
 // A1/HED-395 owns this taxonomy and env.ts allow-by-class enforcement; it will import this type when it lands.
-export type BillingClass = 'subscription-flat' | 'subscription-quota' | 'free-tier' | 'prepaid-credit' | 'pay-per-token';
+// BILLING_CLASSES is the SINGLE source of truth: the BillingClass type, isBillingClass, and every runtime
+// validator (the billingClasses Set below, loadRouting) derive from this one tuple, so a class added in one
+// place can never compile-pass for a typed Account while the runtime validators still reject it (qodo #165).
 export const BILLING_CLASSES = ['subscription-flat', 'subscription-quota', 'free-tier', 'prepaid-credit', 'pay-per-token'] as const;
+export type BillingClass = (typeof BILLING_CLASSES)[number];
 export function isBillingClass(v: unknown): v is BillingClass {
   return typeof v === 'string' && (BILLING_CLASSES as readonly string[]).includes(v);
 }
