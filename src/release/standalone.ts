@@ -5,6 +5,7 @@ import { join, resolve } from 'node:path';
 import { standaloneReadme } from './readme.js';
 import { copyShipSet, extractShipSet } from './shipset.js';
 import { credentialPatterns, licenseCopyrightExemption, scanFiles, scrubExemptions } from './scrub.js';
+import { gitEnv } from './git-env.js';
 
 export type StandaloneOptions = {
   outDir: string; sourceRef?: string; initGit?: boolean; verify?: boolean; sourceDir?: string;
@@ -26,26 +27,6 @@ export function releaseStandalone(options: StandaloneOptions): StandaloneResult 
     rmSync(tempDir, { recursive: true, force: true });
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
-}
-
-// Git honors a family of environment variables that silently redirect it to a different repository
-// (GIT_DIR / GIT_WORK_TREE / GIT_COMMON_DIR / GIT_INDEX_FILE / GIT_OBJECT_DIRECTORY) or inject config
-// without touching a file (GIT_CONFIG* / GIT_CONFIG_KEY_n / VALUE_n). This gate must reason about the
-// operator's checkout at `sourceDir`, so every git call here runs with those stripped. Mirrors
-// src/worktree.ts's GIT_ENV_OVERRIDES — that is the canonical list; keep the two in sync. (HED-507 review F3)
-const GIT_ENV_OVERRIDES = new Set([
-  'GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY',
-  'GIT_CONFIG', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM', 'GIT_CONFIG_COUNT', 'GIT_CONFIG_PARAMETERS',
-  'GIT_CEILING_DIRECTORIES', 'GIT_DISCOVERY_ACROSS_FILESYSTEM',
-]);
-const GIT_ENV_OVERRIDE_RE = /^GIT_CONFIG_(?:KEY|VALUE)_\d+$/;
-
-function gitEnv(): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = {};
-  for (const [name, value] of Object.entries(process.env)) {
-    if (!GIT_ENV_OVERRIDES.has(name) && !GIT_ENV_OVERRIDE_RE.test(name)) env[name] = value;
-  }
-  return env;
 }
 
 // The headless-first invariant (HED-507, docs/ARCHITECTURE.md#headless-first-invariant): a standalone
@@ -151,12 +132,13 @@ function hashFile(path: string): string {
 }
 
 function initializeGit(root: string, sourceCommit: string): void {
-  execFileSync('git', ['init', '-b', 'main'], { cwd: root, stdio: 'ignore' });
-  execFileSync('git', ['add', '.'], { cwd: root, stdio: 'ignore' });
+  const env = gitEnv();
+  execFileSync('git', ['init', '-b', 'main'], { cwd: root, stdio: 'ignore', env });
+  execFileSync('git', ['add', '.'], { cwd: root, stdio: 'ignore', env });
   execFileSync('git', [
     '-c', 'user.name=heddle', '-c', 'user.email=heddle@localhost',
     'commit', '-m', `heddle standalone snapshot ${sourceCommit}`,
-  ], { cwd: root, stdio: 'ignore' });
+  ], { cwd: root, stdio: 'ignore', env });
 }
 
 function verifySnapshot(root: string): void {

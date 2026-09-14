@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, sep } from 'node:path';
+import { gitEnv } from './git-env.js';
 
 const rootFiles = new Set([
   'package.json', 'package-lock.json', 'tsconfig.json', 'tsconfig.test.json', 'vitest.config.ts', '.gitignore',
@@ -10,14 +11,15 @@ const rootFiles = new Set([
 
 export function extractShipSet(sourceDir: string, sourceRef: string): { dir: string; sourceCommit: string } {
   const dir = mkdtempSync(join(tmpdir(), 'heddle-standalone-source-'));
+  const env = gitEnv();
   const archive = execFileSync('git', ['archive', '--format=tar', sourceRef], {
-    cwd: sourceDir, maxBuffer: 64 * 1024 * 1024,
+    cwd: sourceDir, maxBuffer: 64 * 1024 * 1024, env,
   });
   const tarPath = join(dir, 'source.tar');
   writeFileSync(tarPath, archive);
   execFileSync('tar', ['-xf', tarPath, '-C', dir]);
   const sourceCommit = execFileSync('git', ['rev-parse', `${sourceRef}^{commit}`], {
-    cwd: sourceDir, encoding: 'utf8',
+    cwd: sourceDir, encoding: 'utf8', env,
   }).trim();
   return { dir, sourceCommit };
 }

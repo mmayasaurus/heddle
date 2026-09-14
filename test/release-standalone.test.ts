@@ -301,8 +301,44 @@ describe('HED-507 — headless-first main-HEAD invariant', () => {
     const result = releaseStandalone({ outDir, sourceDir: source });
 
     expect(result.ok).toBe(false);
-    expect(result.error).toMatch(/no local 'main'|main checkout/i);
+    expect(result.error).toMatch(/no local 'main'/i);
     expect(existsSync(outDir)).toBe(false);
+  });
+
+  it('cuts the artifact from sourceDir even when GIT_DIR points at another repo (hermetic git env)', () => {
+    const root = tempDir();
+    const source = snapshotSource(root);
+    const outDir = join(root, 'output');
+    const sourceTip = execFileSync('git', ['rev-parse', 'refs/heads/main'], { cwd: source, encoding: 'utf8' }).trim();
+
+    // a second, unrelated repo whose HEAD differs from sourceDir's tip
+    const other = join(root, 'other');
+    mkdirSync(other);
+    execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: other });
+    execFileSync('git', ['config', 'maintenance.auto', 'false'], { cwd: other });
+    execFileSync('git', ['config', 'gc.auto', '0'], { cwd: other });
+    writeFileSync(join(other, 'other.txt'), 'other\n');
+    execFileSync('git', ['add', '.'], { cwd: other });
+    execFileSync('git', [
+      '-c', 'user.name=test', '-c', 'user.email=test@example.com', 'commit', '-qm', 'other',
+    ], { cwd: other });
+    const otherTip = execFileSync('git', ['rev-parse', 'refs/heads/main'], { cwd: other, encoding: 'utf8' }).trim();
+    expect(otherTip).not.toBe(sourceTip);
+
+    const savedGitDir = process.env.GIT_DIR;
+    process.env.GIT_DIR = join(other, '.git');
+    try {
+      const result = releaseStandalone({ outDir, sourceDir: source });
+      expect(result.ok).toBe(true);
+      // both the gate and the ship-set cut must honor sourceDir, not GIT_DIR
+      expect(result.sourceCommit).toBe(sourceTip);
+      expect(result.sourceCommit).not.toBe(otherTip);
+      expect(existsSync(join(outDir, 'other.txt'))).toBe(false);
+      expect(existsSync(join(outDir, 'src/cli.ts'))).toBe(true);
+    } finally {
+      if (savedGitDir === undefined) delete process.env.GIT_DIR;
+      else process.env.GIT_DIR = savedGitDir;
+    }
   });
 });
 
