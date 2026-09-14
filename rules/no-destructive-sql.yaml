@@ -3,7 +3,7 @@ event: PreToolUse
 match:
   tool: Bash
   input:
-    command: '(?:[Dd][Rr][Oo][Pp]\s+(?:[Tt][Aa][Bb][Ll][Ee]|[Dd][Aa][Tt][Aa][Bb][Aa][Ss][Ee]|[Ss][Cc][Hh][Ee][Mm][Aa])|[Tt][Rr][Uu][Nn][Cc][Aa][Tt][Ee]\s+[Tt][Aa][Bb][Ll][Ee])\b'
+    command: '^(?=[\s\S]*\b(?:psql|mysql|mariadb|sqlite3)\b)(?=[\s\S]*(?:[Dd][Rr][Oo][Pp]\s+(?:[Tt][Aa][Bb][Ll][Ee]|[Dd][Aa][Tt][Aa][Bb][Aa][Ss][Ee]|[Ss][Cc][Hh][Ee][Mm][Aa])|[Tt][Rr][Uu][Nn][Cc][Aa][Tt][Ee]\s+[Tt][Aa][Bb][Ll][Ee])\b)'
 action: block
 enforce: false
 subagent_aware: true
@@ -11,5 +11,5 @@ message: 'Destructive DDL — DROP TABLE / DATABASE / SCHEMA, or TRUNCATE TABLE 
   irreversibly deletes data and structure. Confirm you have a current backup and
   are pointed at the intended (non-production) database before running.'
 fail_open: true
-provenance: HED-535
+provenance: HED-535; HED-548
 since: 2026-09-14
