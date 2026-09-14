@@ -6,6 +6,13 @@ import { ensureBuilt, runCli, withTempHome } from './helpers/cli.js';
 
 const { tempDir } = useTempResources('heddle-cli-account-test-');
 
+// The batch (multi-`--for`) picks census live `claude` processes for weighted residency. Without a
+// fixture that census shells out to the HOST's real `pgrep -x claude` / `ps eww` — non-hermetic, and
+// noisy under CI contention (HED-459 class). This empty-array fixture is the shared cross-consumer hook
+// (src/residents.ts, and heddle-window-keeper.py): it yields zero residents — exactly the state these
+// placement assertions assume — with no subprocess and no stderr warning.
+const HERMETIC_CENSUS = { HEDDLE_CENSUS_PS_FIXTURE: '[]' };
+
 function fixture(
   accounts: Array<{ id: string; configDir: string | null; loggedIn?: boolean }>,
   used: Record<string, number>,
@@ -260,10 +267,10 @@ describe('heddle account pick CLI', () => {
     ], { a: 30, b: 20, c: 10 });
 
     const result = await runCli(['account', 'pick', '--for', 'R,S,T,U,V,W', '--json'], {
-      env: { HEDDLE_ACCOUNTS: accountsPath, HEDDLE_USAGE_DIR: usageDir },
+      env: { HEDDLE_ACCOUNTS: accountsPath, HEDDLE_USAGE_DIR: usageDir, ...HERMETIC_CENSUS },
     });
 
-    expect(result.code).toBe(0);
+    expect(result).toMatchObject({ code: 0, stderr: '' });
     const assignments = JSON.parse(result.stdout).assignments as Record<string, { account: string }>;
     expect(Object.values(assignments).reduce<Record<string, number>>((counts, { account }) => {
       counts[account] = (counts[account] ?? 0) + 1;
@@ -278,10 +285,10 @@ describe('heddle account pick CLI', () => {
     ], { 'a-first': 30, 'z-healthier': 10 });
 
     const result = await runCli(['account', 'pick', '--for', 'R,S', '--json'], {
-      env: { HEDDLE_ACCOUNTS: accountsPath, HEDDLE_USAGE_DIR: usageDir },
+      env: { HEDDLE_ACCOUNTS: accountsPath, HEDDLE_USAGE_DIR: usageDir, ...HERMETIC_CENSUS },
     });
 
-    expect(result.code).toBe(0);
+    expect(result).toMatchObject({ code: 0, stderr: '' });
     const assignments = JSON.parse(result.stdout).assignments as Record<string, { account: string }>;
     expect(assignments.R.account).toBe('z-healthier');
   }, 30_000);
@@ -292,10 +299,10 @@ describe('heddle account pick CLI', () => {
     ], { freshest: 10, other: 30 });
 
     const result = await runCli(['account', 'pick', '--for', 'R,S', '--json'], {
-      env: { HEDDLE_ACCOUNTS: accountsPath, HEDDLE_USAGE_DIR: usageDir },
+      env: { HEDDLE_ACCOUNTS: accountsPath, HEDDLE_USAGE_DIR: usageDir, ...HERMETIC_CENSUS },
     });
 
-    expect(result.code).toBe(0);
+    expect(result).toMatchObject({ code: 0, stderr: '' });
     const assignments = JSON.parse(result.stdout).assignments as Record<string, { account: string }>;
     expect(assignments.R.account).toBe('freshest');
     expect(assignments.S.account).toBe('other');
@@ -307,7 +314,7 @@ describe('heddle account pick CLI', () => {
     ], { 'near-cap': 95, floored: 98 });
 
     const result = await runCli(['account', 'pick', '--for', 'R,S,U', '--json', '--explain'], {
-      env: { HEDDLE_ACCOUNTS: accountsPath, HEDDLE_USAGE_DIR: usageDir },
+      env: { HEDDLE_ACCOUNTS: accountsPath, HEDDLE_USAGE_DIR: usageDir, ...HERMETIC_CENSUS },
     });
 
     expect(result.code).toBe(1);
@@ -330,7 +337,7 @@ describe('heddle account pick CLI', () => {
     const { accountsPath, usageDir } = fixture([{ id: 'edge', configDir: '/tmp/edge' }], { edge: 90 });
 
     const result = await runCli(['account', 'pick', '--for', 'R,S,U', '--json'], {
-      env: { HEDDLE_ACCOUNTS: accountsPath, HEDDLE_USAGE_DIR: usageDir },
+      env: { HEDDLE_ACCOUNTS: accountsPath, HEDDLE_USAGE_DIR: usageDir, ...HERMETIC_CENSUS },
     });
 
     expect(result.code).toBe(1);
@@ -346,7 +353,7 @@ describe('heddle account pick CLI', () => {
     );
 
     const result = await runCli(['account', 'pick', '--for', 'R,S,U', '--json'], {
-      env: { HEDDLE_ACCOUNTS: accountsPath, HEDDLE_USAGE_DIR: usageDir },
+      env: { HEDDLE_ACCOUNTS: accountsPath, HEDDLE_USAGE_DIR: usageDir, ...HERMETIC_CENSUS },
     });
 
     expect(result.code).toBe(1);
@@ -362,10 +369,10 @@ describe('heddle account pick CLI', () => {
     ], { 'weekly-wall': 10, healthy: 40 }, { used7d: { 'weekly-wall': 98, healthy: 40 } });
 
     const result = await runCli(['account', 'pick', '--for', 'R,S', '--json'], {
-      env: { HEDDLE_ACCOUNTS: accountsPath, HEDDLE_USAGE_DIR: usageDir },
+      env: { HEDDLE_ACCOUNTS: accountsPath, HEDDLE_USAGE_DIR: usageDir, ...HERMETIC_CENSUS },
     });
 
-    expect(result.code).toBe(0);
+    expect(result).toMatchObject({ code: 0, stderr: '' });
     const assignments = JSON.parse(result.stdout).assignments as Record<string, { account: string } | { refused: true; reason: string }>;
     expect(assignments.R).toMatchObject({ account: 'healthy' });
     expect(assignments.S).toMatchObject({ account: 'healthy' });
@@ -377,10 +384,10 @@ describe('heddle account pick CLI', () => {
     ], { healthy: 60, ghost: 0 }, { includedAccountIds: ['healthy'] });
 
     const result = await runCli(['account', 'pick', '--for', 'R,S', '--json'], {
-      env: { HEDDLE_ACCOUNTS: accountsPath, HEDDLE_USAGE_DIR: usageDir },
+      env: { HEDDLE_ACCOUNTS: accountsPath, HEDDLE_USAGE_DIR: usageDir, ...HERMETIC_CENSUS },
     });
 
-    expect(result.code).toBe(0);
+    expect(result).toMatchObject({ code: 0, stderr: '' });
     const assignments = JSON.parse(result.stdout).assignments as Record<string, { account: string } | { refused: true; reason: string }>;
     expect(assignments.R).toMatchObject({ account: 'healthy' });
     expect(assignments.S).toMatchObject({ account: 'healthy' });
@@ -393,7 +400,7 @@ describe('heddle account pick CLI', () => {
     );
 
     const result = await runCli(['account', 'pick', '--for', 'R,S', '--json'], {
-      env: { HEDDLE_ACCOUNTS: accountsPath, HEDDLE_USAGE_DIR: usageDir },
+      env: { HEDDLE_ACCOUNTS: accountsPath, HEDDLE_USAGE_DIR: usageDir, ...HERMETIC_CENSUS },
     });
 
     expect(result.code).toBe(1);
@@ -408,7 +415,7 @@ describe('heddle account pick CLI', () => {
     );
 
     const result = await runCli(['account', 'pick', '--for', 'R,S', '--json'], {
-      env: { HEDDLE_ACCOUNTS: accountsPath, HEDDLE_USAGE_DIR: usageDir },
+      env: { HEDDLE_ACCOUNTS: accountsPath, HEDDLE_USAGE_DIR: usageDir, ...HERMETIC_CENSUS },
     });
 
     expect(result.code).toBe(1);

@@ -264,8 +264,6 @@ try {
       const caps = readProviderCaps();
       const lanes = loadLanes();
       const floors = claudeFloorsFrom(lanes);
-      writeSeatWeightsMirror(seatWeightsFrom(lanes));
-      const { weightOf } = readSeatWeights();
       const forAgent = arg('--for');
       if (has('--for') && (!forAgent || forAgent.startsWith('--'))) {
         console.error('usage: heddle account pick [--for <letter[,letter...]>] [--json] [--explain]');
@@ -291,6 +289,18 @@ try {
         process.exit(2);
       }
       const agents = [...new Set(requestedAgents)];
+      // Refresh the dumb seat-weight mirror from lanes policy, then read it back as the picker's weight
+      // lookup — and only AFTER every usage/caps/arg gate above, so a validation exit never leaves this
+      // side effect behind. The refresh is best-effort: `account pick` was read-only before HED-514 and
+      // resume-sessions-v2 calls it at fleet launch, so an unwritable ~/.heddle must degrade to unit
+      // weights (readSeatWeights already fails open) rather than crash the pick. `account seat-weights
+      // sync` keeps its loud failure instead — writing the mirror IS that command's whole job.
+      try {
+        writeSeatWeightsMirror(seatWeightsFrom(lanes));
+      } catch (error) {
+        console.error(`heddle: warning: could not refresh the seat-weights mirror (${(error as Error).message}); using the last-written or unit weights`);
+      }
+      const { weightOf } = readSeatWeights();
       // Single-account picks retain their long-standing cap-aware path; residency is batch placement state.
       // An unavailable census (null) degrades to residency-unaware placement rather than a partial count
       // that would under-fill an account into a stack — the census already warned why on stderr.
