@@ -1,5 +1,5 @@
-import type { Account } from './accounts.js';
-import { buildLadder, lanesInTier, tierOfProvider } from './ladder.js';
+import { isAccountModeledProvider, type Account } from './accounts.js';
+import { buildLadder, tierOfProvider } from './ladder.js';
 import type { LanesConfig } from './lanes.js';
 import { DEFAULT_MIN_TIER, type Route, type RoutePreference, type RouteTarget, type TargetTier, type Tier } from './routing.js';
 import type { CapsByProvider } from './usage.js';
@@ -24,11 +24,20 @@ function available(target: RouteTarget, accounts: Account[]): string | null {
   // An empty registry means this process inherits the caller's login. This preserves the legacy
   // no-registry behavior; only a non-empty registry can prove a provider unavailable.
   if (accounts.length === 0) return null;
+  // C2 (HED-397): only NATIVE Account providers (claude/codex/cursor) appear as `account.provider`, so
+  // only they are registry-decidable. Env-repoint providers (gemini/groq/glm/…) ride a native account
+  // via envRepoint.service (provider-matrix.ts); a target naming one is never dead via account presence
+  // (gating them would route the operator's gemini/groq lanes away). Universal presence is a follow-up.
+  if (!isAccountModeledProvider(target.provider)) return null;
   const providerAccounts = accounts.filter((account) => account.provider === target.provider && account.loggedIn !== false);
   if (providerAccounts.length === 0) return 'no logged-in account';
-  // v1 deliberately gates only Fable: non-Fable Claude models remain serveable by any logged-in
-  // Claude account until a complete per-model capability map is introduced.
-  if (target.provider === 'claude' && target.model === 'fable' && !providerAccounts.some((account) => account.tier === 'T3')) {
+  // v1 deliberately gates only Fable: non-Fable Claude models remain serveable by any logged-in Claude
+  // account until a complete per-model capability map is introduced. C1: an UNSET tier means
+  // fable-capable (pre-HED-395 rows are untiered — the operator's real registry today), so Fable is unavailable
+  // only when EVERY logged-in Claude account carries an EXPLICIT non-T3 tier; effective once HED-395
+  // back-fills tiers.
+  if (target.provider === 'claude' && target.model === 'fable'
+      && !providerAccounts.some((account) => account.tier === undefined || account.tier === 'T3')) {
     return 'no Fable-capable (T3) Claude account';
   }
   return null;
@@ -43,11 +52,30 @@ function enrich(route: Route, target: RouteTarget): RouteTarget {
   };
 }
 
+/**
+ * A LITERAL prefer entry is the class's own declared target expressed as `provider/model`, so it also
+ * inherits the class's effort/extraFlags (HED-397 M5) — where a tier/ladder candidate is a DIFFERENT
+ * provider and must NOT (per-provider effort vocabulary), matching walkLadder + resolveRoute's
+ * declared-fallback contract. The entry's own values still win, and an undefined key is never set.
+ */
+function enrichLiteral(route: Route, target: RouteTarget): RouteTarget {
+  const effort = target.effort ?? route.effort;
+  const extraFlags = target.extraFlags ?? route.extraFlags;
+  return {
+    ...enrich(route, target),
+    ...(effort === undefined ? {} : { effort }),
+    ...(extraFlags === undefined ? {} : { extraFlags }),
+  };
+}
+
 function tierCandidates(symbol: TargetTier, route: Route, context: TierResolveContext): Array<{ target: RouteTarget; label: string }> {
   if (symbol === 'T3') {
     // fable intentionally has no lane_default, so it can never auto-join HED-106. A requested T3
     // symbol is explicit policy and may target it, then descend through the existing T2→T0 ladder.
-    const direct = lanesInTier(context.lanes, 'T3-orchestrator' as never).includes('fable')
+    // C3 (HED-397): read the T3 lane directly — `lanesInTier`/TIER_KEY only map the auto-join tiers
+    // (T0–T2), so routing 'T3-orchestrator' through it returns undefined and `.includes` throws.
+    const t3Lanes = context.lanes.tiers['T3-orchestrator'] ?? [];
+    const direct = t3Lanes.includes('fable')
       ? [{ target: enrich(route, { provider: 'claude', model: 'fable' }), label: 'T3:fable' }]
       : [];
     const descended = buildLadder('T2', 'T0', 'T2', context.lanes, context.laneDefaults, () => true)
@@ -85,7 +113,7 @@ export function resolveTierTarget(
     const entryLabel = label(entry);
     const candidates = 'tier' in entry
       ? tierCandidates(entry.tier, route, context)
-      : [{ target: enrich(route, entry), label: entryLabel }];
+      : [{ target: enrichLiteral(route, entry), label: entryLabel }];
     for (const candidate of candidates) {
       const reason = available(candidate.target, accounts);
       if (reason) {

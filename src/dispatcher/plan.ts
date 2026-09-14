@@ -156,8 +156,20 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
     route = resolveRoute(table, req.taskClass);
     // Preference routing is an account-capability decision, not a cap/headroom refusal. It runs
     // before the normal cap-aware path so an unavailable Fable can fall through to Opus.
-    const needsTierResolution = Boolean(route.prefer) || (route.provider === 'claude' && route.model === 'fable');
-    registryAccounts = needsTierResolution ? req.accountRegistry ?? loadAccountRegistry().accounts : undefined;
+    // M1 (HED-397): only a NON-in-session, NON-explicit dispatch resolves a prefer/fable class. An
+    // in-session run uses the orchestrator's own login (mirrors the ladder's inSession guard below), and
+    // an explicit provider+model override is the caller's own choice — neither should read the registry,
+    // risk a throw, or acquire a resolution `symbol`.
+    const needsTierResolution = !req.inSession && !(req.provider && req.model)
+      && (Boolean(route.prefer) || (route.provider === 'claude' && route.model === 'fable'));
+    if (needsTierResolution) {
+      // M3: fail open — a corrupt accounts.json must not make a fable/prefer class THROW here, where
+      // routing otherwise inherits the caller's login (readClaudeAccounts swallows a bad read the same way).
+      registryAccounts = req.accountRegistry;
+      if (!registryAccounts) {
+        try { registryAccounts = loadAccountRegistry().accounts; } catch { registryAccounts = undefined; }
+      }
+    }
     const tierResolution = registryAccounts
       ? resolveTierTarget(route, registryAccounts, req.caps ?? readProviderCaps(), {
           lanes: loadLanes(), laneDefaults: table.laneDefaults ?? {},

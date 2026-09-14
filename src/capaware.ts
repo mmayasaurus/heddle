@@ -7,7 +7,7 @@ import { buildLadder, tierOfProvider } from './ladder.js';
 import { bindingMeter, isFloored, type ClaudeFloors } from './floors.js';
 import { mcpAttachable, webCapable } from './mcp.js';
 import { bindingWindow, DISPATCH_SIGNAL_MAX_AGE_S, type CapsByProvider, type ProviderCaps } from './usage.js';
-import type { Account } from './accounts.js';
+import { isAccountModeledProvider, type Account } from './accounts.js';
 
 /**
  * Cap-aware routing (HED-67) + Claude account advice (HED-68) — pure decisions over the caps that
@@ -182,11 +182,20 @@ function bindingFor(target: RouteTarget, caps: ProviderCaps): { label: string; u
 export function accountAvailabilityReason(target: RouteTarget, registry: Account[] | undefined): string | null {
   // The empty-registry escape hatch is intentional: existing callers inherit their process login.
   if (!registry || registry.length === 0) return null;
+  // C2 (HED-397): only NATIVE Account providers (claude/codex/cursor) appear as `account.provider`, so
+  // only they are registry-decidable. Env-repoint providers (gemini/groq/glm/…) ride a native account
+  // via envRepoint.service (provider-matrix.ts); a target naming one is NOT decidable here and must
+  // never be marked dead (gating them would route the operator's gemini/groq lanes away). Universal env-repoint
+  // presence is a follow-up (needs a provider-presence signal beyond the Account registry).
+  if (!isAccountModeledProvider(target.provider)) return null;
   const matches = registry.filter((account) => account.provider === target.provider && account.loggedIn !== false);
   if (matches.length === 0) return 'no-account';
-  // v1 model gate: Fable alone needs a T3 account. Other Claude models remain account-serveable
-  // until a complete model capability map exists.
-  if (target.provider === 'claude' && target.model === 'fable' && !matches.some((account) => account.tier === 'T3')) return 'no-fable-tier';
+  // v1 model gate: Fable alone needs a T3 account. Other Claude models remain account-serveable until a
+  // complete model capability map exists. C1: an UNSET tier means fable-capable (pre-HED-395 rows are
+  // untiered — the operator's real registry today), so Fable is dead only when EVERY logged-in Claude account
+  // carries an EXPLICIT non-T3 tier; the gate becomes effective once HED-395 back-fills tiers.
+  if (target.provider === 'claude' && target.model === 'fable'
+      && !matches.some((account) => account.tier === undefined || account.tier === 'T3')) return 'no-fable-tier';
   return null;
 }
 
