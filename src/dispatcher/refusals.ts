@@ -11,6 +11,7 @@ import type { DispatchContext, DispatchRequest, DispatchOutcome, DispatchRefusal
 export function baseRecord(
   ctx: DispatchContext, req: DispatchRequest, taskClass: string, target: RouteTarget,
   skills: string[], fellBackFrom: string | null, capabilities: string[] = [],
+  fence?: 'fenced' | 'mandate-only',
 ): DispatchStartRecord {
   return {
     orchestrator: ctx.attribution.orchestrator,
@@ -30,6 +31,7 @@ export function baseRecord(
     routeReason: ctx.routeReason ?? null,
     symbol: ctx.symbol ?? null,
     account: ctx.account ?? null,
+    ...(fence ? { fence } : {}),
   };
 }
 

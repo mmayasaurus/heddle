@@ -19,6 +19,9 @@ import type { Route } from './routing.js';
 const isTransientBasename = (base: string): boolean => base.startsWith('.heddle-');
 const HEDDLE_SPAN = /[ \t]*<!-- heddle:begin( id=[A-Za-z0-9._-]+)? -->[\s\S]*?<!-- heddle:end(?: id=[A-Za-z0-9._-]+)? -->\n?/g;
 
+/** The explicit instruction paired with snapshotWorktree() for harnesses without a real read-only fence. */
+export const READ_ONLY_MANDATE = 'READ-ONLY MANDATE: Never fix, never write. Do not edit, create, delete, or format any file; do not run commands that change state. Report findings only.';
+
 function mandateBytes(cwd: string, rel: string, raw: Buffer): Buffer {
   const base = rel.split('/').pop() ?? rel;
   if (base === 'AGENTS.md') return Buffer.from(raw.toString('utf8').replace(HEDDLE_SPAN, ''), 'utf8');

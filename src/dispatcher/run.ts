@@ -7,8 +7,10 @@ import { materializeAgentsMd, readPack, composePacks } from '../skillpacks.js';
 import { materializeWorkerMcp, validateWorkerMcp, codexMcpFlags, claudeMcpConfigFile, webCapable } from '../mcp.js';
 import { isInProcessHttpProvider } from '../adapters/openai-compat.js';
 import { assessResult, type ResultAssessment } from '../classify.js';
-import { snapshotWorktree, sameSnapshot, diffInstruction, embeddedDiff } from '../review.js';
+import { snapshotWorktree, sameSnapshot, diffInstruction, embeddedDiff, READ_ONLY_MANDATE } from '../review.js';
 import { parentCheckoutOf, checkoutFingerprint, escapedPaths, destroyedWork } from '../worktree.js';
+import { loadAccountRegistry } from '../accounts.js';
+import { effectiveFences } from '../fences.js';
 import { decideCapabilities, capabilityPolicy } from '../capabilities.js';
 import { capAwarePolicy } from '../capaware.js';
 import { WORKER_ENV } from '../identity.js';
@@ -104,10 +106,23 @@ export async function runTarget(
   for (const p of skills) readPack(p);
   validateWorkerMcp(target.provider, mcp);
   const adapter = ctx.adapterFor(target.provider);
+  // HED-404: only a bound native account whose harness positively enforces read-only may be
+  // recorded as fenced. Every resolution error or mismatch degrades to the explicit mandate.
+  const fence = (() => {
+    if (!route.readOnly) return undefined;
+    try {
+      const account = ctx.account === null ? undefined
+        : loadAccountRegistry().accounts.find((a) => a.provider === target.provider && a.id === ctx.account);
+      return effectiveFences(account?.harness ?? '', account?.fences).readOnlyEnforceable ? 'fenced' : 'mandate-only';
+    } catch {
+      return 'mandate-only';
+    }
+  })();
+  const mandateOnly = fence === 'mandate-only';
 
   // max-children: count + insert in one transaction (see Ledger.startUnderCap).
   const started = ctx.ledger.startUnderCap(
-    baseRecord(ctx, req, route.taskClass, target, skills, fellBackFrom, caps.granted), ctx.caps,
+    baseRecord(ctx, req, route.taskClass, target, skills, fellBackFrom, caps.granted, fence), ctx.caps,
   );
   if (started.refused) {
     return refusalOutcome(ctx, req, route.taskClass, target, skills, {
@@ -199,13 +214,14 @@ export async function runTarget(
     // The mandate baseline is taken AFTER materialization and compared BEFORE restore (in finally):
     // injected files are part of the baseline, so a reviewer that edits AGENTS.md/.mcp.json is
     // caught — with the old before-materialize/after-restore ordering, restore MASKED those edits.
-    before = route.readOnly ? snapshotWorktree(req.cwd) : null;
+    before = (mandateOnly || ctx.review) ? snapshotWorktree(req.cwd) : null;
     // HTTP providers cannot run git; Claude read-only reviewers also receive an embedded diff because
     // their tool set has no Bash. Tool-less HTTP prompts must not mention Read/Grep/Glob.
     const embedDiff = (isClaude && route.readOnly) || isHttp;
-    const basePrompt = req.diffBase
-      ? (embedDiff ? embeddedDiff(req.cwd, req.diffBase, undefined, !isHttp) : diffInstruction(req.diffBase)) + req.prompt
-      : req.prompt;
+    const mandate = mandateOnly ? `${READ_ONLY_MANDATE}\n\n` : '';
+    const mandatedPrompt = req.diffBase
+      ? (embedDiff ? embeddedDiff(req.cwd, req.diffBase, undefined, !isHttp) : diffInstruction(req.diffBase)) + mandate + req.prompt
+      : mandate + req.prompt;
     // Best-effort PREVENTION to pair with the detection above: state the boundary explicitly, since
     // a worker that walks up to find "the project root" lands in the parent checkout and has no
     // other way to know it is inside a linked worktree.
@@ -213,8 +229,8 @@ export async function runTarget(
       ? `Your project root is the git WORKTREE ${wt.worktreeRoot} (your working directory is ` +
         `${req.cwd}). Create and edit files ONLY under that worktree. Do NOT walk up to ` +
         `${wt.parentRoot} — that is a different checkout shared with other agents, and writing ` +
-        `there corrupts their work.\n\n${basePrompt}`
-      : basePrompt;
+        `there corrupts their work.\n\n${mandatedPrompt}`
+      : mandatedPrompt;
     result = await adapter.dispatch(prompt, {
       model: target.model,
       cwd: req.cwd,
@@ -302,6 +318,7 @@ export async function runTarget(
       // A reviewer that changed the worktree did NOT do the job it was given: the dispatch is not ok
       // (ledger ok=0), the findings are still returned, nothing is reverted (operator's call).
       const note = 'MANDATE VIOLATION: the read-only worker changed the worktree (content digest of HEAD + tracked/untracked files + stash differs from before the run) — inspect `git status`/`git diff` before trusting the findings; nothing was reverted';
+      process.stderr.write(`heddle: ${note}\n`);
       result.ok = false;
       result.error = result.error ? `${result.error}; ${note}` : note;
     }
