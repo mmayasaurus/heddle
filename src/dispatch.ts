@@ -173,6 +173,27 @@ export async function dispatch(
     });
   }
 
+  // ---- HED-511: headless claude opus/fable is unreliable for adversarial-review ----------------
+  // claude -p --output-format json is silent until completion, so a substantial headless review that
+  // overruns SIGKILLs at its timeout with zero output (6/6 such dispatches died this way). Steer to
+  // cursor (this class's default) — a structured, ledgered refusal before any spawn (HED-448 pattern).
+  if (
+    plan.execution === 'headless' &&
+    target.provider === 'claude' &&
+    /(?:^|[-/])(opus|fable)(?:[-/]|$)/i.test(target.model) &&
+    route.taskClass === 'adversarial-review'
+  ) {
+    return refusalOutcome(ctx, req, route.taskClass, target, skillsForRefusal, {
+      code: 'headless-claude-review-unreliable',
+      reason: `headless ${target.provider}/${target.model} for an adversarial-review is empirically unreliable — `
+        + `claude -p --output-format json is silent until completion, so a substantial review that overruns `
+        + `SIGKILLs at its timeout with zero output (HED-511: 6/6 such dispatches died this way).`,
+      instruction: `Route substantial adversarial reviews to cursor (this class's default cursor/grok-4.6-high `
+        + `completed the identical review in ~575s) — omit provider/model to take the class default, or name cursor. `
+        + `For claude specifically, use an in-session subagent (in_session:true), which has no headless timeout wall.`,
+    });
+  }
+
   // Auto-effort (opt-in): classify the sub-task's difficulty and pin the effort, unless the caller
   // already set one. Runs only after every plan-level refusal gate has passed — a refused dispatch
   // never spends a classifier (a max-children refusal can still waste one: that count is

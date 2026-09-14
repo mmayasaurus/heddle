@@ -134,4 +134,52 @@ describe('dispatch — class + explicit route, and in-session refusal', () => {
     expect([undefined, 'headless']).toContain(outcome.execution);
     expect(ledger.recent(1)[0].refusal).toBeNull();
   });
+
+  it('refuses headless Claude opus and fable adversarial reviews before an adapter is dispatched', async () => {
+    for (const model of ['opus', 'fable']) {
+      const fake = fakeAdapter();
+      const outcome = await dispatch(
+        { taskClass: 'adversarial-review', provider: 'claude', model, authorProvider: 'codex', prompt: 'review', cwd: tempDir() },
+        tempLedger(), () => fake.adapter,
+      );
+      expect(outcome.refusal?.code).toBe('headless-claude-review-unreliable');
+      expect(outcome.refusal?.instruction).toContain('cursor');
+      expect(fake.calls).toHaveLength(0);
+    }
+  });
+
+  it('does not apply the headless Claude review refusal outside its exact scope', async () => {
+    const accounts = [{ id: 'test', configDir: null }];
+    const caps = {
+      claude: {
+        provider: 'claude' as const, source: 'limits.json' as const, stale: false, capturedAt: 1,
+        fiveHour: { usedPercentage: null, resetsAt: null }, sevenDay: { usedPercentage: null, resetsAt: null },
+        windows: {}, noteCodes: [], activeAccount: null,
+        accounts: [{ id: 'test', fiveHour: { usedPercentage: 1, resetsAt: null }, sevenDay: { usedPercentage: null, resetsAt: null }, windows: {}, noteCodes: [], limitReached: false, stale: false }],
+      },
+    };
+    const deepImplementation = fakeAdapter(undefined, { readAgents: false });
+    const deepImplementationOutcome = await dispatch(
+      { taskClass: 'deep-implementation', provider: 'claude', model: 'opus', prompt: 'implement', cwd: tempDir(), accounts, caps },
+      tempLedger(), () => deepImplementation.adapter,
+    );
+    expect(deepImplementationOutcome.refusal?.code).not.toBe('headless-claude-review-unreliable');
+    expect(deepImplementation.calls).toHaveLength(1);
+
+    const cursorReview = fakeAdapter(undefined, { readAgents: false });
+    const cursorReviewOutcome = await dispatch(
+      { taskClass: 'adversarial-review', provider: 'cursor', model: 'grok-4.6-high', authorProvider: 'claude', prompt: 'review', cwd: tempDir(), caps: {} },
+      tempLedger(), () => cursorReview.adapter,
+    );
+    expect(cursorReviewOutcome.refusal?.code).not.toBe('headless-claude-review-unreliable');
+    expect(cursorReview.calls).toHaveLength(1);
+
+    const inSessionReview = fakeAdapter();
+    const inSessionOutcome = await dispatch(
+      { taskClass: 'adversarial-review', provider: 'claude', model: 'opus', authorProvider: 'codex', prompt: 'review', cwd: tempDir(), inSession: true },
+      tempLedger(), () => inSessionReview.adapter,
+    );
+    expect(inSessionOutcome.refusal?.code).toBe('claude-in-session');
+    expect(inSessionReview.calls).toHaveLength(0);
+  });
 });
