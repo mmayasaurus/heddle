@@ -221,6 +221,7 @@ export async function runTarget(
       systemPromptAppend,
       mcpConfigPath,
       readOnly: route.readOnly,
+      skipPermissions: req.skipPermissions,
       mcpServers: isClaude ? mcp : undefined,
     });
   } catch (err) {
