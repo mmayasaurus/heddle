@@ -181,7 +181,8 @@ describe('adversarial review helpers', () => {
     // .memtraceignore is tracked configuration, never a runtime artifact.
     writeFileSync(join(cwd, '.memtraceignore'), 'tracked configuration');
     expect(sameSnapshot(baseline, snapshotWorktree(cwd))).toBe(false);
-  });
+  }, 90_000); // snapshot-heavy: ~10 snapshotWorktree calls, each several REAL git spawns; a loaded
+  //            parallel-fork run can exceed the default 30s (HED-211). Generous ceiling, not a hang.
 
   it('still hashes a TRACKED file under a runtime dir, and excludes only untracked .serena/cache churn (HED-550)', () => {
     const cwd = tempDir();
@@ -202,7 +203,7 @@ describe('adversarial review helpers', () => {
     mkdirSync(join(cwd, '.serena', 'cache'), { recursive: true });
     writeFileSync(join(cwd, '.serena', 'cache', 'symbols.pkl'), 'machine-local');
     expect(sameSnapshot(withEdit, snapshotWorktree(cwd))).toBe(true);
-  });
+  }, 90_000); // snapshot-heavy (HED-211): generous ceiling under parallel-fork load, not a hang.
 
   it('does NOT see a reviewer write to a gitignored .serena/ path — the pre-existing ignored-path boundary (HED-569)', () => {
     // Boundary DOC, not a HED-550 regression: snapshotWorktree enumerates via
