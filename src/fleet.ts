@@ -15,6 +15,8 @@ export interface FleetHookOptions {
   canonicalDir?: string;
   targetDir?: string;
   dryRun?: boolean;
+  /** Preserve non-canonical installed files while still materializing missing canonical files. */
+  skipDiffering?: boolean;
 }
 
 export interface FleetHookInstallReport {
@@ -118,11 +120,12 @@ function installFleetAssets(assetSet: FleetAssetSet, options: FleetHookOptions):
     const target = join(targetDir, name);
     try {
       const action = installAction(source, target);
-      if (!options.dryRun && action !== 'unchanged') {
+      const preserved = options.skipDiffering && action === 'updated';
+      if (!options.dryRun && action !== 'unchanged' && !preserved) {
         mkdirSync(targetDir, { recursive: true });
         atomicCopy(source, target);
       }
-      files.push({ name, action });
+      files.push({ name, action: preserved ? 'differing' : action });
     } catch (error) {
       const written = files.filter((file) => file.action === 'created' || file.action === 'updated').map((file) => file.name);
       const unchanged = files.filter((file) => file.action === 'unchanged').map((file) => file.name);
