@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
 
 export interface EscalationTier { via: string; opt_in: boolean; requires_failed_attempts: number; fable_escalations_weekly: number; }
+export interface SeatWeightsConfig { default?: number; by_agent?: Record<string, number>; }
 export interface LanesConfig {
   tiers: {
     'T0-menial': string[];
@@ -16,6 +17,8 @@ export interface LanesConfig {
   floors: { claude: { never_below_pct: number; residency_cap_below_pct: number; residency_max: number }; cooling_minutes: number; menial_verify_days: number };
   caps: { openrouter_credits_weekly_usd: number };
   guards: { never_via_cursor: string[] };
+  /** Resolved fleet policy weights; consumers must not derive Fable/orchestrator status from these. */
+  seat_weights?: SeatWeightsConfig;
 }
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -74,6 +77,23 @@ function finiteNumber(node: Record<string, unknown>, key: string, where = key): 
   return value;
 }
 
+function optionalSeatWeights(raw: Record<string, unknown>): SeatWeightsConfig | undefined {
+  if (raw.seat_weights === undefined) return undefined;
+  const seatWeights = objectField(raw.seat_weights, 'seat_weights');
+  const byAgent = seatWeights.by_agent === undefined ? {} : objectField(seatWeights.by_agent, 'seat_weights.by_agent');
+  const resolvedByAgent: Record<string, number> = {};
+  for (const [agent, weight] of Object.entries(byAgent)) {
+    if (typeof weight !== 'number' || !Number.isFinite(weight)) {
+      throw new Error(`lanes config: seat_weights.by_agent.${agent} must be a finite number`);
+    }
+    resolvedByAgent[agent] = weight;
+  }
+  return {
+    ...(seatWeights.default === undefined ? {} : { default: finiteNumber(seatWeights, 'default', 'seat_weights.default') }),
+    by_agent: resolvedByAgent,
+  };
+}
+
 export function loadLanes(path = defaultLanesPath()): LanesConfig {
   if (!existsSync(path)) throw new Error(`lanes config not found: ${path}`);
 
@@ -84,6 +104,7 @@ export function loadLanes(path = defaultLanesPath()): LanesConfig {
   const claude = requiredObject(floors, 'claude', 'floors.claude');
   const caps = requiredObject(raw, 'caps');
   const guards = requiredObject(raw, 'guards');
+  const seatWeights = optionalSeatWeights(raw);
 
   return {
     tiers: {
@@ -110,5 +131,6 @@ export function loadLanes(path = defaultLanesPath()): LanesConfig {
     },
     caps: { openrouter_credits_weekly_usd: finiteNumber(caps, 'openrouter_credits_weekly_usd', 'caps.openrouter_credits_weekly_usd') },
     guards: { never_via_cursor: stringArray(guards, 'never_via_cursor', 'guards.never_via_cursor') },
+    ...(seatWeights === undefined ? {} : { seat_weights: seatWeights }),
   };
 }

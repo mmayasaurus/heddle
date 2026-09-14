@@ -3,7 +3,7 @@ import { run } from './subprocess.js';
 import type { DispatchOptions, WorkerAdapter, WorkerResult, TokenUsage } from '../types.js';
 
 /**
- * Claude Code adapter — `claude -p --output-format json` (HED-78, operator's request to "build the auto account
+ * Claude Code adapter — `claude -p --output-format stream-json` (HED-78, operator's request to "build the auto account
  * switching", 2026-08-15).
  *
  * Two ways heddle can run Claude work:
@@ -15,9 +15,10 @@ import type { DispatchOptions, WorkerAdapter, WorkerResult, TokenUsage } from '.
  *    with the most 5h headroom — which is what makes account rotation automatic.
  *
  * Invocation contract (verified live 2026-08-15, Claude Code 2.1.232 — docs/LANDMINES.md):
- *  - `--output-format json` prints ONE JSON object: {type:"result", subtype:"success"|…, is_error,
- *    result, session_id, duration_ms, num_turns, usage:{input_tokens, output_tokens,
- *    cache_read_input_tokens, cache_creation_input_tokens, output_tokens_details:{thinking_tokens}}}.
+ *  - `--output-format stream-json --verbose --include-partial-messages` prints an NDJSON event stream
+ *    (system, stream_event/content_block_delta, assistant, then one terminal {type:"result", subtype,
+ *    is_error, result, session_id, duration_ms, usage:{…}} line); lastResultJson extracts that terminal
+ *    line (no parse change). subprocess.ts caps each raw stream-json output at 32 MiB, including tool blocks.
  *  - `--resume <session_id>` continues a session (cwd-scoped; `--mcp-config` etc. must be re-passed
  *    on every call — heddle always re-passes). `--no-session-persistence` is NOT used (it kills resume).
  *  - `--permission-mode auto` ABORTS a headless session after repeated classifier blocks (LANDMINES),
@@ -134,7 +135,11 @@ export class ClaudeAdapter implements WorkerAdapter {
     const modelId = Object.hasOwn(CLAUDE_MODEL_IDS, opts.model)
       ? CLAUDE_MODEL_IDS[opts.model as ClaudeWorkerModel]
       : opts.model;
-    const args = ['-p', prompt, '--output-format', 'json', '--model', modelId];
+    // stream-json (+ --verbose, required by the CLI for -p stream-json; --include-partial-messages) emits
+    // NDJSON events mid-turn so a long headless run is observable and B2's run() idle watchdog has liveness
+    // to reset on. parseClaudeResult still extracts the terminal {type:"result"} line via lastResultJson —
+    // no parse change. Probe-verified flag set (test/fixtures capture below).
+    const args = ['-p', prompt, '--output-format', 'stream-json', '--verbose', '--include-partial-messages', '--model', modelId];
     // classify_effort can emit 'minimal' (codex vocabulary); claude accepts low|medium|high|xhigh|max.
     const effort = opts.effort === 'minimal' ? 'low' : opts.effort;
     if (effort) args.push('--effort', effort);
