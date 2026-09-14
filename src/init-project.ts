@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { parseDocument } from 'yaml';
 import { isAncestorOrEqual, PROJECTS_SCHEMA_VERSION, validateRegistry } from './projects.js';
 import { resolveRulesRoot } from './rules/lifecycle.js';
+import { loadRules } from './rules/load.js';
 import { RuleIdPattern } from './rules/schema.js';
 import type { HookRuleSelection } from './wizard/hooks-choose.js';
 
@@ -141,7 +142,92 @@ function wireDisciplineHooks(hooks: Record<string, any[]>, targets: Map<string, 
     target.group.hooks.splice(target.index ?? target.group.hooks.length, 0, ...block);
   }
 }
-function renderedSettings(path: string, canonical: string): { content: string; misplaced: string[]; raw: string | undefined } {
+// ── HED-536: consumer-side hook-rules bridge ───────────────────────────────────────────────────
+// When the operator opts into hook rules (via the 471 chooser / 472 preset tiers), wire the compiled
+// bridge (src/hook.ts → dist/hook.js) into the CONSUMER project's settings so its seeded rules run at
+// hook time. Consumer-only: this never wires heddle's OWN repo — turning the fleet's own rules on is a
+// separate, Maya-gated decision. Selection-gated + inert when empty, so a merge with zero selected
+// rules is byte-identical to the pre-bridge installer.
+
+// The bridge is a sibling of this module in dist/ (`here` === dist/ at runtime), so it is
+// join(here, 'hook.js') — NOT installerAsset(), which is join(here, '..', …) for repo-root assets.
+// Absolute, so the wired command is cwd-independent.
+function hookBridgePath(): string { return join(here, 'hook.js'); }
+
+// Distinctive text present ONLY in a heddle-generated bridge command, so a re-run recognises and
+// replaces a prior bridge entry (stripHookBridge) instead of duplicating it.
+const HOOK_BRIDGE_MARKER = 'heddle hook-rules bridge';
+function hookBridgeEntry(entry: any): boolean {
+  return typeof entry?.command === 'string' && entry.command.includes(HOOK_BRIDGE_MARKER);
+}
+
+// Bake the absolute node binary (process.execPath — the fnm/nvm-safe HEDDLE_BIN discipline: a hook
+// shell often has no version-managed node on PATH), the absolute bridge, and the consumer's own rules
+// dir into --rules (so evaluation is CLAUDE_PROJECT_DIR-independent and unaffected by resolveRulesRoot
+// precedence). Mirror the bridge shebang's --disable-warning=ExperimentalWarning so node:sqlite's
+// experimental warning never reaches hook stderr. Fail LOUD (exit 1) when node or the bridge is missing
+// — a broken install should be visible, like the discipline .py hookCommand; the bridge itself still
+// fails OPEN once it runs.
+function hookBridgeCommand(rulesDir: string): string {
+  const node = process.execPath;
+  const bridge = hookBridgePath();
+  assertShellSafeCanonical(node);
+  assertShellSafeCanonical(bridge);
+  assertShellSafeCanonical(rulesDir);
+  return `if [ -x "${node}" ] && [ -f "${bridge}" ]; then "${node}" --disable-warning=ExperimentalWarning "${bridge}" --rules "${rulesDir}"; else echo "${HOOK_BRIDGE_MARKER}: missing bridge ${bridge} or node ${node} — hook rules NOT evaluated; re-run heddle init-project" >&2; exit 1; fi`;
+}
+
+// The (event, matcher) registrations the SELECTED rules need. The bridge self-filters by event and
+// re-checks match.tool internally, so we register exactly one entry per distinct event, with matcher =
+// the union of that event's tools ("*" when any selected rule for the event matches every tool). Rules
+// are read from the catalog (their canonical definition), not the consumer copy, which may not be
+// seeded yet on a fresh install; a selected id absent from the catalog is a hard error, not a silent
+// no-op.
+function hookBridgeWiring(selection: HookRuleSelection[], catalogRoot: string): Array<{ event: string; matcher: string }> {
+  if (!selection.length) return [];
+  const byId = new Map(loadRules(catalogRoot).map((rule) => [rule.id, rule]));
+  const toolsByEvent = new Map<string, Set<string>>();
+  for (const { id } of selection) {
+    const rule = byId.get(id);
+    if (!rule) throw new Error(`hook rule '${id}' not found in catalog ${catalogRoot}`);
+    const tools = rule.match.tool === undefined ? ['*'] : (Array.isArray(rule.match.tool) ? rule.match.tool : [rule.match.tool]);
+    const forEvent = toolsByEvent.get(rule.event) ?? new Set<string>();
+    for (const tool of tools) forEvent.add(tool);
+    toolsByEvent.set(rule.event, forEvent);
+  }
+  return [...toolsByEvent].sort(([a], [b]) => a.localeCompare(b)).map(([event, tools]) => ({
+    event,
+    matcher: tools.has('*') ? '*' : [...tools].sort().join('|'),
+  }));
+}
+
+// Remove any prior bridge entry so a re-run does not duplicate it. Drop a group only when OUR removal
+// emptied it — never a user's pre-existing empty group nor a refilled discipline group.
+function stripHookBridge(hooks: Record<string, any[]>): void {
+  for (const event of Object.keys(hooks)) {
+    hooks[event] = hooks[event].filter((group) => {
+      if (!group || typeof group !== 'object' || !Array.isArray(group.hooks)) return true;
+      const before = group.hooks.length;
+      group.hooks = group.hooks.filter((entry: any) => !hookBridgeEntry(entry));
+      return !(group.hooks.length === 0 && group.hooks.length < before);
+    });
+  }
+}
+
+// Append one bridge group per registration (its own group, decoupled from the discipline splice
+// machinery; Claude Code allows duplicate matchers). Always appended last, so strip+rewire is
+// byte-stable across runs.
+function wireHookBridge(hooks: Record<string, any[]>, selection: HookRuleSelection[], catalogRoot: string, rulesDir: string): void {
+  const wiring = hookBridgeWiring(selection, catalogRoot);
+  if (!wiring.length) return;
+  const command = hookBridgeCommand(rulesDir);
+  for (const { event, matcher } of wiring) {
+    const groups = hooks[event] ?? (hooks[event] = []);
+    groups.push({ matcher, hooks: [{ type: 'command', command }] });
+  }
+}
+
+function renderedSettings(path: string, canonical: string, selection: HookRuleSelection[], catalogRoot: string, rulesDir: string): { content: string; misplaced: string[]; raw: string | undefined } {
   const raw = existsSync(path) ? readFileSync(path, 'utf8') : undefined;
   const source = raw === undefined ? {} : parseJson(raw, path, 'settings.json');
   if (!source || typeof source !== 'object' || Array.isArray(source)) throw new Error(`settings.json at ${path} must be a JSON object`);
@@ -149,6 +235,8 @@ function renderedSettings(path: string, canonical: string): { content: string; m
   const targets = new Map<string, { group: any; index?: number }>();
   const hooks = preservedHookGroups(source, path, misplaced, targets);
   wireDisciplineHooks(hooks, targets, canonical);
+  stripHookBridge(hooks);
+  wireHookBridge(hooks, selection, catalogRoot, rulesDir);
   const { hooks: _oldHooks, ...rest } = source;
   return { content: json({ ...rest, hooks }), misplaced, raw };
 }
@@ -263,9 +351,11 @@ function canonicalStep(canonical: string): InstallStep {
   const absent = OPTIONAL_HOOKS.filter((hook) => !existsSync(join(canonical, 'hooks', hook)));
   return { step: 'canonical', path: canonical, action: 'ok', reason: absent.length ? `optional hooks absent: ${absent.join(', ')}` : undefined };
 }
-function renderSettingsStep(dir: string, canonical: string, dryRun: boolean): InstallStep {
+function renderSettingsStep(dir: string, canonical: string, selection: HookRuleSelection[], catalogRoot: string, dryRun: boolean): InstallStep {
   const path = join(dir, '.claude', 'settings.json');
-  const settings = renderedSettings(path, canonical);
+  // `dir` is already canonical (resolveTarget realpaths it); the consumer's seeded rules dir is a
+  // stable subdir, baked into the bridge's --rules so evaluation is cwd-/env-independent.
+  const settings = renderedSettings(path, canonical, selection, catalogRoot, join(dir, 'rules'));
   const step: InstallStep = { ...stepFor(path, 'settings', settings.content, dryRun), expectedContent: settings.raw ?? null };
   if (settings.misplaced.length) step.reason = `moved ${settings.misplaced.length} misplaced discipline entr${settings.misplaced.length === 1 ? 'y' : 'ies'}: ${settings.misplaced.join(', ')}`;
   return step;
@@ -364,7 +454,7 @@ export function planInstall(input: InstallOptions): InstallPlan {
   const details = registrationDetails(input, dir, state.registry, state.raw);
   const dryRun = input.dryRun === true;
   const hookCatalogRoot = input.hookCatalogRoot ?? resolveRulesRoot([]);
-  const steps = [canonicalStep(canonical), renderSettingsStep(dir, canonical, dryRun), ...renderRulesSteps(dir, canonical, dryRun), ...renderHookRulesSteps(dir, input.hookRules ?? [], hookCatalogRoot, dryRun), renderMcpStep(dir, dryRun), renderIgnoreStep(dir, dryRun), renderGateStep(dir, dryRun), ...renderLifecycleCommandSteps(dir, dryRun), registryStep(input, dir, state, details, dryRun), enforceMarkerStep(input, dir, homeDir, dryRun)];
+  const steps = [canonicalStep(canonical), renderSettingsStep(dir, canonical, input.hookRules ?? [], hookCatalogRoot, dryRun), ...renderRulesSteps(dir, canonical, dryRun), ...renderHookRulesSteps(dir, input.hookRules ?? [], hookCatalogRoot, dryRun), renderMcpStep(dir, dryRun), renderIgnoreStep(dir, dryRun), renderGateStep(dir, dryRun), ...renderLifecycleCommandSteps(dir, dryRun), registryStep(input, dir, state, details, dryRun), enforceMarkerStep(input, dir, homeDir, dryRun)];
   return { options: { ...input, dir, canonical, name: details.name, homeDir }, steps };
 }
 

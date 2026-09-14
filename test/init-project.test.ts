@@ -316,6 +316,80 @@ describe('init-project', () => {
     expect(groups[2].hooks.map((entry: any) => entry.command)).toEqual(['echo user2']);
   });
 
+  it('HED-536: wires the dist/hook.js bridge into consumer settings when hook rules are selected', () => {
+    const opts = options(tempDir());
+    const catalog = tempDir();
+    const { id } = seedHookCatalog(catalog); // event: PreToolUse, match.tool: SyntheticShell
+    applyInstall(planInstall({ ...opts, hookRules: [{ id, enforce: false }], hookCatalogRoot: catalog }));
+    const settings = JSON.parse(readFileSync(join(opts.dir, '.claude', 'settings.json'), 'utf8'));
+    const bridge = settings.hooks.PreToolUse.filter((group: any) => group.matcher === 'SyntheticShell');
+    expect(bridge).toHaveLength(1);
+    expect(bridge[0].hooks).toHaveLength(1);
+    const command: string = bridge[0].hooks[0].command;
+    expect(command).toContain('heddle hook-rules bridge');                 // recognizable marker
+    expect(command).toContain(process.execPath);                          // baked fnm/nvm-safe node
+    expect(command).toContain('--disable-warning=ExperimentalWarning');   // mirrors the bridge shebang
+    expect(command).toMatch(/"\/[^"]*\/hook\.js"/);                       // absolute, here-relative bridge (not canonical)
+    expect(command).toContain(`--rules "${join(realpathSync.native(opts.dir), 'rules')}"`); // baked consumer rules dir
+    expect(command).not.toContain(opts.canonical);                        // scope proof: never the discipline canonical
+  });
+
+  it('HED-536: writes no bridge and stays inert when no hook rules are selected', () => {
+    const opts = options(tempDir());
+    applyInstall(planInstall(opts)); // no hookRules
+    const text = readFileSync(join(opts.dir, '.claude', 'settings.json'), 'utf8');
+    expect(text).not.toContain('hook.js');
+    expect(text).not.toContain('heddle hook-rules bridge');
+    const commands = Object.values(JSON.parse(text).hooks).flatMap((groups: any) => groups.flatMap((group: any) => group.hooks.map((hook: any) => hook.command)));
+    expect(commands).toHaveLength(14); // discipline .py wiring only, unchanged
+    expect(commands.every((command: string) => command.includes(opts.canonical))).toBe(true);
+  });
+
+  it('HED-536: is idempotent — re-running the same selection does not duplicate the bridge', () => {
+    const opts = options(tempDir());
+    const catalog = tempDir();
+    const { id } = seedHookCatalog(catalog);
+    const withRules = { ...opts, hookRules: [{ id, enforce: false }], hookCatalogRoot: catalog };
+    applyInstall(planInstall(withRules));
+    const first = readFileSync(join(opts.dir, '.claude', 'settings.json'), 'utf8');
+    expect(planInstall(withRules).steps.find((step) => step.step === 'settings')?.action).toBe('ok');
+    applyInstall(planInstall(withRules));
+    const second = readFileSync(join(opts.dir, '.claude', 'settings.json'), 'utf8');
+    expect(second).toBe(first);
+    const bridges = Object.values(JSON.parse(second).hooks).flatMap((groups: any) => groups.flatMap((group: any) => group.hooks.filter((hook: any) => hook.command.includes('heddle hook-rules bridge'))));
+    expect(bridges).toHaveLength(1);
+  });
+
+  it('HED-536: targets the consumer settings and never writes inside the heddle repo', () => {
+    const opts = options(tempDir());
+    const catalog = tempDir();
+    const { id } = seedHookCatalog(catalog);
+    const plan = planInstall({ ...opts, hookRules: [{ id, enforce: false }], hookCatalogRoot: catalog });
+    const settingsStep = plan.steps.find((step) => step.step === 'settings')!;
+    expect(settingsStep.path).toBe(join(realpathSync.native(opts.dir), '.claude', 'settings.json'));
+    expect(settingsStep.content).toContain('heddle hook-rules bridge');
+    // The bridge command REFERENCES heddle's own dist (here-relative), but no step WRITES into the
+    // heddle checkout. This test file is <repo>/test/…, so <repo> is two dirs up.
+    const heddleRepo = dirname(dirname(fileURLToPath(import.meta.url)));
+    for (const step of plan.steps) {
+      if (step.content && step.action !== 'ok' && step.action !== 'skip') {
+        expect(step.path.startsWith(`${heddleRepo}/`), `${step.step} → ${step.path}`).toBe(false);
+      }
+    }
+  });
+
+  it('HED-536: collapses selected rules that share an event into one bridge group', () => {
+    const opts = options(tempDir());
+    const catalog = tempDir();
+    seedPresetCatalog(catalog); // 5 rules, all PreToolUse, match: {} (no tool → matches every tool)
+    applyInstall(planInstall({ ...opts, hookRules: PRESET_RULE_IDS.map((id) => ({ id, enforce: false })), hookCatalogRoot: catalog }));
+    const settings = JSON.parse(readFileSync(join(opts.dir, '.claude', 'settings.json'), 'utf8'));
+    const bridgeGroups = settings.hooks.PreToolUse.filter((group: any) => group.hooks.some((hook: any) => hook.command.includes('heddle hook-rules bridge')));
+    expect(bridgeGroups).toHaveLength(1);
+    expect(bridgeGroups[0].matcher).toBe('*');
+    expect(bridgeGroups[0].hooks).toHaveLength(1);
+  });
+
   it('redacts only heddle configuration contents unless show-content is selected', () => {
     const opts = options(tempDir());
     const report = applyInstall(planInstall(opts));
