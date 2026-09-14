@@ -1,0 +1,12 @@
+id: pr-flow-reminder
+event: PreToolUse
+match:
+  tool: Bash
+  input:
+    command: '\bgh\s+pr\s+create\b'
+action: nudge
+enforce: false
+subagent_aware: false
+message: 'Opening a PR: land changes via branch -> PR (body carries "Fixes <ISSUE>") -> review sweep -> merge. Keep the default branch protected; do not commit straight to it.'
+fail_open: true
+provenance: HED-535

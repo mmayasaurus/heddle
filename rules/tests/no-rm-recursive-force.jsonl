@@ -1,0 +1,26 @@
+{"name":"match: rm -rf /x","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"rm -rf /x"}},"expect":{"outcome":"nudge","stdout_includes":"(would block)"}}
+{"name":"match: rm -fr /x","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"rm -fr /x"}},"expect":{"outcome":"nudge","stdout_includes":"(would block)"}}
+{"name":"match: rm -Rf /x","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"rm -Rf /x"}},"expect":{"outcome":"nudge","stdout_includes":"(would block)"}}
+{"name":"match: rm -rfv /x","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"rm -rfv /x"}},"expect":{"outcome":"nudge","stdout_includes":"(would block)"}}
+{"name":"match: rm -vrf /x","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"rm -vrf /x"}},"expect":{"outcome":"nudge","stdout_includes":"(would block)"}}
+{"name":"match: rm -r -f /x","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"rm -r -f /x"}},"expect":{"outcome":"nudge","stdout_includes":"(would block)"}}
+{"name":"match: rm -f -r /x","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"rm -f -r /x"}},"expect":{"outcome":"nudge","stdout_includes":"(would block)"}}
+{"name":"match: rm --recursive --force /x","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"rm --recursive --force /x"}},"expect":{"outcome":"nudge","stdout_includes":"(would block)"}}
+{"name":"match: rm --force --recursive /x","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"rm --force --recursive /x"}},"expect":{"outcome":"nudge","stdout_includes":"(would block)"}}
+{"name":"match: rm -r --force /x","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"rm -r --force /x"}},"expect":{"outcome":"nudge","stdout_includes":"(would block)"}}
+{"name":"match: rm --recursive -f /x","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"rm --recursive -f /x"}},"expect":{"outcome":"nudge","stdout_includes":"(would block)"}}
+{"name":"match: sudo rm -rf /x — recall: sudo prefix","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"sudo rm -rf /x"}},"expect":{"outcome":"nudge","stdout_includes":"(would block)"}}
+{"name":"match: find . -type f -exec rm -rf {} + — recall: find -exec","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"find . -type f -exec rm -rf {} +"}},"expect":{"outcome":"nudge","stdout_includes":"(would block)"}}
+{"name":"match: echo done && rm -rf build — recall: after &&","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"echo done && rm -rf build"}},"expect":{"outcome":"nudge","stdout_includes":"(would block)"}}
+{"name":"match: xargs rm -rf — recall: xargs","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"xargs rm -rf"}},"expect":{"outcome":"nudge","stdout_includes":"(would block)"}}
+{"name":"match: time rm -rf node_modules — recall: time prefix","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"time rm -rf node_modules"}},"expect":{"outcome":"nudge","stdout_includes":"(would block)"}}
+{"name":"match: rm -rf /tmp/build-cache — CARVE-OUT: scratch/cache cleanup still nudges (path-blind, nudge-only)","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"rm -rf /tmp/build-cache"}},"expect":{"outcome":"nudge","stdout_includes":"(would block)"}}
+{"name":"non-match: rm file.txt","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"rm file.txt"}},"expect":{"outcome":"none"}}
+{"name":"non-match: rm -r dir — recursive only, no force","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"rm -r dir"}},"expect":{"outcome":"none"}}
+{"name":"non-match: rm -f file — force only, no recursive","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"rm -f file"}},"expect":{"outcome":"none"}}
+{"name":"non-match: rm -i secret","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"rm -i secret"}},"expect":{"outcome":"none"}}
+{"name":"non-match: ls -rf","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"ls -rf"}},"expect":{"outcome":"none"}}
+{"name":"non-match: rmdir foo","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"rmdir foo"}},"expect":{"outcome":"none"}}
+{"name":"non-match: git rm -rf cached/ — CARVE-OUT: git rm is recoverable + routine","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git rm -rf cached/"}},"expect":{"outcome":"none"}}
+{"name":"non-match: git rm -r --cached x — CARVE-OUT: git rm --cached","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git rm -r --cached x"}},"expect":{"outcome":"none"}}
+{"name":"non-match: trm -rf x — not the rm command","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"trm -rf x"}},"expect":{"outcome":"none"}}

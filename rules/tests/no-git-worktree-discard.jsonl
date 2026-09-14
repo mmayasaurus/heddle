@@ -1,0 +1,20 @@
+{"name":"match: git checkout -- file.txt","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git checkout -- file.txt"}},"expect":{"outcome":"nudge","stdout_includes":"(would block)"}}
+{"name":"match: git checkout -- .","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git checkout -- ."}},"expect":{"outcome":"nudge","stdout_includes":"(would block)"}}
+{"name":"match: git checkout .","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git checkout ."}},"expect":{"outcome":"nudge","stdout_includes":"(would block)"}}
+{"name":"match: git checkout ./src","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git checkout ./src"}},"expect":{"outcome":"nudge","stdout_includes":"(would block)"}}
+{"name":"match: git clean -f","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git clean -f"}},"expect":{"outcome":"nudge","stdout_includes":"(would block)"}}
+{"name":"match: git clean -fd","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git clean -fd"}},"expect":{"outcome":"nudge","stdout_includes":"(would block)"}}
+{"name":"match: git clean -fdx","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git clean -fdx"}},"expect":{"outcome":"nudge","stdout_includes":"(would block)"}}
+{"name":"match: git clean -xdf","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git clean -xdf"}},"expect":{"outcome":"nudge","stdout_includes":"(would block)"}}
+{"name":"match: git clean --force","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git clean --force"}},"expect":{"outcome":"nudge","stdout_includes":"(would block)"}}
+{"name":"match: git -C /r checkout -- x — git -C form","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git -C /r checkout -- x"}},"expect":{"outcome":"nudge","stdout_includes":"(would block)"}}
+{"name":"non-match: git checkout main — branch switch","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git checkout main"}},"expect":{"outcome":"none"}}
+{"name":"non-match: git checkout -b feature","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git checkout -b feature"}},"expect":{"outcome":"none"}}
+{"name":"non-match: git checkout feature-branch","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git checkout feature-branch"}},"expect":{"outcome":"none"}}
+{"name":"non-match: git checkout --patch — --patch is interactive, not a discard","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git checkout --patch"}},"expect":{"outcome":"none"}}
+{"name":"non-match: git clean -n — dry-run","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git clean -n"}},"expect":{"outcome":"none"}}
+{"name":"non-match: git clean -nd — dry-run","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git clean -nd"}},"expect":{"outcome":"none"}}
+{"name":"non-match: git clean -ndx — dry-run","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git clean -ndx"}},"expect":{"outcome":"none"}}
+{"name":"non-match: git status","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git status"}},"expect":{"outcome":"none"}}
+{"name":"non-match: git stash drop — CARVE-OUT","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git stash drop"}},"expect":{"outcome":"none"}}
+{"name":"non-match: git worktree remove .worktrees/Y-x — CARVE-OUT: lossless removal","payload":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git worktree remove .worktrees/Y-x"}},"expect":{"outcome":"none"}}
