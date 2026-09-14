@@ -126,7 +126,7 @@ describe('worktree escape detection', () => {
       );
       expect(outcome.ok).toBe(true);
       expect(outcome.error ?? '').not.toContain('escape-warning:');
-      expect(ledger.recent(1)[0].error).toBeNull();
+      expect(ledger.recent(1)[0].error).toBe('billing-degraded:account-unregistered(unset)');
     } finally {
       if (previousRouting === undefined) delete process.env.HEDDLE_ROUTING;
       else process.env.HEDDLE_ROUTING = previousRouting;

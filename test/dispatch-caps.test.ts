@@ -272,7 +272,8 @@ describe('dispatch — structural caps', () => {
     const adapter: WorkerAdapter = { name: 'throwing', provider: 'codex', dispatch: async () => { throw new Error('adapter exploded'); } };
     const outcome = await dispatch({ taskClass: 'bulk-mechanical', prompt: 'x', cwd, identity: unbound }, ledger, () => adapter);
     expect(outcome).toMatchObject({ ok: false, error: 'adapter exploded' });
-    expect(ledger.recent(1)[0]).toMatchObject({ ok: 0, error: 'adapter exploded', finished_at: expect.any(String) });
+    expect(ledger.recent(1)[0]).toMatchObject({ ok: 0, error: expect.stringContaining('adapter exploded'), finished_at: expect.any(String) });
+    expect(ledger.recent(1)[0].error).toContain('billing-degraded:account-unregistered(unset)');
     expect(ledger.inFlight()).toEqual([]); expect(existsSync(join(cwd, 'AGENTS.md'))).toBe(false);
   });
 
