@@ -25,6 +25,7 @@ export interface AccountEnvRepoint {
   baseUrl: string;
   authTokenRef: string;
   service: string;
+  model?: string;
 }
 
 export interface Account {
@@ -135,7 +136,7 @@ function validateOverage(value: unknown, where: string, path: string): AccountOv
   return { posture };
 }
 
-function validateEnvRepoint(value: unknown, where: string, path: string): AccountEnvRepoint {
+export function validateEnvRepoint(value: unknown, where: string, path: string): AccountEnvRepoint {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error(`accounts.json at ${path}: ${where}.envRepoint must be an object`);
   }
@@ -157,7 +158,15 @@ function validateEnvRepoint(value: unknown, where: string, path: string): Accoun
   if (typeof envRepoint.service !== 'string' || !envRepoint.service) {
     throw new Error(`accounts.json at ${path}: ${where}.envRepoint.service must be a non-empty string (the env-repoint provider key)`);
   }
-  return { baseUrl: envRepoint.baseUrl, authTokenRef: envRepoint.authTokenRef, service: envRepoint.service };
+  if (envRepoint.model !== undefined && (typeof envRepoint.model !== 'string' || !envRepoint.model)) {
+    throw new Error(`accounts.json at ${path}: ${where}.envRepoint.model must be a non-empty string`);
+  }
+  return {
+    baseUrl: envRepoint.baseUrl,
+    authTokenRef: envRepoint.authTokenRef,
+    service: envRepoint.service,
+    ...(typeof envRepoint.model === 'string' ? { model: envRepoint.model } : {}),
+  };
 }
 
 function toAccount(value: unknown, provider: Provider, index: number, path: string): Account | null {

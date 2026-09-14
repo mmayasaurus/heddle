@@ -34,7 +34,7 @@ describe('dispatch — env-repoint credentials (HED-531)', () => {
     const { dispatch } = await import('../src/dispatch.js');
     const fake = fakeAdapter(undefined, { readAgents: false });
     const caps: ProviderCaps = {
-      provider: 'claude', source: 'fixture', stale: false, capturedAt: 1,
+      provider: 'claude', source: 'limits.json', stale: false, capturedAt: 1,
       fiveHour: { usedPercentage: 1, resetsAt: null }, sevenDay: { usedPercentage: null, resetsAt: null },
       windows: {}, noteCodes: [], activeAccount: 'kimi-free',
       accounts: [{ id: 'kimi-free', fiveHour: { usedPercentage: 1, resetsAt: null }, sevenDay: { usedPercentage: null, resetsAt: null }, windows: {}, noteCodes: [], limitReached: false, stale: false }],
@@ -53,6 +53,14 @@ describe('dispatch — env-repoint credentials (HED-531)', () => {
     expect(fake.calls).toHaveLength(0);
     expect(ledger.recent(1)[0]).toMatchObject({ refusal: 'env-repoint.missing-token' });
     expect(existsSync(join(home, '.claude', 'settings.json'))).toBe(false);
+
+    const { planDispatch, summarizePlan } = await import('../src/dispatch.js');
+    const preview = summarizePlan(planDispatch({
+      taskClass: 'research-summarize', prompt: 'x', cwd: tempDir(), identity: IDENTITIES.unbound,
+      accounts: [{ id: 'kimi-free', configDir: null, envRepoint: { baseUrl: 'https://kimi.example.test/anthropic', authTokenRef: 'MISSING_REPOINT_KEY', service: 'kimi' } }],
+      caps: { claude: caps },
+    }));
+    expect(preview.refusal).toMatchObject({ code: outcome.refusal?.code, reason: outcome.refusal?.reason });
   });
 
   it('resolves a synthetic secrets.env token into the selected Kimi worker environment only', async () => {
@@ -73,7 +81,7 @@ describe('dispatch — env-repoint credentials (HED-531)', () => {
     ]);
     const fake = fakeAdapter(undefined, { readAgents: false });
     const caps: ProviderCaps = {
-      provider: 'claude', source: 'fixture', stale: false, capturedAt: 1,
+      provider: 'claude', source: 'limits.json', stale: false, capturedAt: 1,
       fiveHour: { usedPercentage: 1, resetsAt: null }, sevenDay: { usedPercentage: null, resetsAt: null },
       windows: {}, noteCodes: [], activeAccount: 'kimi-free',
       accounts: [{ id: 'kimi-free', fiveHour: { usedPercentage: 1, resetsAt: null }, sevenDay: { usedPercentage: null, resetsAt: null }, windows: {}, noteCodes: [], limitReached: false, stale: false }],
@@ -89,8 +97,34 @@ describe('dispatch — env-repoint credentials (HED-531)', () => {
     expect(childEnv).toMatchObject({
       ANTHROPIC_BASE_URL: 'https://kimi.example.test/anthropic',
       ANTHROPIC_AUTH_TOKEN: 'synthetic-kimi-free-token',
-      ANTHROPIC_MODEL: 'kimi-k3-high',
     });
+    expect(childEnv.ANTHROPIC_MODEL).toBeUndefined();
     expect(existsSync(join(home, '.claude', 'settings.json'))).toBe(false);
+  });
+
+  it('refuses malformed env-repoint references without spawning or exposing the possible secret', async () => {
+    const { dispatch } = await import('../src/dispatch.js');
+    const fake = fakeAdapter(undefined, { readAgents: false });
+    const badRef = 'sk-abc.DEF/ghi';
+    const outcome = await dispatch({
+      taskClass: 'research-summarize', prompt: 'x', cwd: tempDir(), identity: IDENTITIES.unbound,
+      accounts: [{ id: 'bad-ref', configDir: null, envRepoint: { baseUrl: 'https://x.test', authTokenRef: badRef, service: 'glm' } }],
+      caps: { claude: { provider: 'claude', source: 'limits.json', stale: false, capturedAt: 1, fiveHour: { usedPercentage: 1, resetsAt: null }, sevenDay: { usedPercentage: null, resetsAt: null }, windows: {}, noteCodes: [], activeAccount: 'bad-ref', accounts: [] } },
+    }, tempLedger(), () => fake.adapter);
+    expect(outcome.refusal?.code).toBe('env-repoint.invalid-config');
+    expect(outcome.refusal?.reason).not.toContain(badRef);
+    expect(fake.calls).toHaveLength(0);
+  });
+
+  it('refuses structurally broken request-injected env-repoint accounts instead of native fallback', async () => {
+    const { dispatch } = await import('../src/dispatch.js');
+    const fake = fakeAdapter(undefined, { readAgents: false });
+    const outcome = await dispatch({
+      taskClass: 'research-summarize', prompt: 'x', cwd: tempDir(), identity: IDENTITIES.unbound,
+      accounts: [{ id: 'bad-url', configDir: null, envRepoint: { baseUrl: '', authTokenRef: 'SAFE_NAME', service: 'glm' } }],
+      caps: { claude: { provider: 'claude', source: 'limits.json', stale: false, capturedAt: 1, fiveHour: { usedPercentage: 1, resetsAt: null }, sevenDay: { usedPercentage: null, resetsAt: null }, windows: {}, noteCodes: [], activeAccount: 'bad-url', accounts: [] } },
+    }, tempLedger(), () => fake.adapter);
+    expect(outcome.refusal?.code).toBe('env-repoint.invalid-config');
+    expect(fake.calls).toHaveLength(0);
   });
 });

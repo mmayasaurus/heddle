@@ -7,7 +7,7 @@ import { buildLadder, tierOfProvider } from './ladder.js';
 import { bindingMeter, isFloored, type ClaudeFloors } from './floors.js';
 import { mcpAttachable, webCapable } from './mcp.js';
 import { bindingWindow, DISPATCH_SIGNAL_MAX_AGE_S, type CapsByProvider, type ProviderCaps } from './usage.js';
-import { isAccountModeledProvider, type Account, type AccountEnvRepoint } from './accounts.js';
+import { isAccountModeledProvider, validateEnvRepoint, type Account, type AccountEnvRepoint } from './accounts.js';
 
 /**
  * Cap-aware routing (HED-67) + Claude account advice (HED-68) — pure decisions over the caps that
@@ -480,21 +480,28 @@ export function readClaudeAccounts(path: string = process.env.HEDDLE_ACCOUNTS ??
     if (!existsSync(path)) return [];
     const raw = JSON.parse(readFileSync(path, 'utf8')) as { claude?: unknown };
     if (!Array.isArray(raw.claude)) return [];
-    return (raw.claude as Record<string, unknown>[])
-      .filter((a) => a && typeof a.id === 'string')
-      .map((a) => ({
+    return raw.claude.flatMap((value, index): ClaudeAccount[] => {
+      if (!value || typeof value !== 'object' || typeof (value as Record<string, unknown>).id !== 'string') return [];
+      const a = value as Record<string, unknown>;
+      let envRepoint: AccountEnvRepoint | undefined;
+      if (a.envRepoint !== undefined) {
+        try {
+          envRepoint = validateEnvRepoint(a.envRepoint, `claude[${index}]`, path);
+        } catch (err) {
+          process.stderr.write(`heddle: warning: accounts.json at ${path}: claude[${index}] has an invalid envRepoint (${err instanceof Error ? err.message : String(err)}); dropped\n`);
+          return [];
+        }
+      }
+      return [{
         id: a.id as string,
         configDir: typeof a.configDir === 'string' && a.configDir ? a.configDir : null,
         email: typeof a.email === 'string' ? a.email : undefined,
         note: typeof a.note === 'string' ? a.note : undefined,
         loggedIn: a.loggedIn === false ? false : undefined,
         ...(typeof a.overageEnabled === 'boolean' ? { overageEnabled: a.overageEnabled } : {}),
-        ...(a.envRepoint && typeof a.envRepoint === 'object'
-          && typeof (a.envRepoint as Record<string, unknown>).baseUrl === 'string'
-          && typeof (a.envRepoint as Record<string, unknown>).authTokenRef === 'string'
-          && typeof (a.envRepoint as Record<string, unknown>).service === 'string'
-          ? { envRepoint: a.envRepoint as AccountEnvRepoint } : {}),
-      }));
+        ...(envRepoint === undefined ? {} : { envRepoint }),
+      }];
+    });
   } catch {
     return [];
   }

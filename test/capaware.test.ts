@@ -118,6 +118,18 @@ describe('cap-aware routing', () => {
     expect(readClaudeAccounts(path)).toEqual([{ id: 'a', configDir: '/p', email: undefined, note: undefined }, { id: 'b', configDir: null, email: undefined, note: undefined }]);
     expect(readClaudeAccounts(join(tempDir(), 'missing.json'))).toEqual([]); writeFileSync(path, '{nope'); expect(readClaudeAccounts(path)).toEqual([]); writeFileSync(path, JSON.stringify({ claude: 'x' })); expect(readClaudeAccounts(path)).toEqual([]);
   });
+
+  it('drops only Claude rows with present but structurally invalid env-repoint configuration', () => {
+    const path = join(tempDir(), 'invalid-env-repoint-rows.json');
+    writeFileSync(path, JSON.stringify({ claude: [
+      { id: 'native', configDir: null },
+      { id: 'bad-service', configDir: null, envRepoint: { baseUrl: 'https://x.test', authTokenRef: 'NAME' } },
+      { id: 'bad-url', configDir: null, envRepoint: { baseUrl: 'not-a-url', authTokenRef: 'NAME', service: 'glm' } },
+      { id: 'valid', configDir: null, envRepoint: { baseUrl: 'https://x.test', authTokenRef: 'NAME', service: 'glm' } },
+    ] }));
+    expect(readClaudeAccounts(path).map((account) => account.id)).toEqual(['native', 'valid']);
+    expect(readClaudeAccounts(path).find((account) => account.id === 'native')).not.toHaveProperty('envRepoint');
+  });
 });
 
 describe('regression PR#HED-443 — Claude overage safeguards', () => {

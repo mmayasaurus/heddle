@@ -101,7 +101,7 @@ export interface DispatchRequest {
  * `refusal` column.
  */
 export interface DispatchRefusal {
-  code: 'claude-in-session' | 'no-dispatchable-account' | 'not-dispatchable' | 'depth-1' | 'max-children' | 'capability-denied' | 'metered-pool-exhausted' | 'same-provider-review' | 'override-reason-required' | 'fleet-paused' | 'billing.pay-per-token' | 'billing.open-billing-at-cap' | 'billing.prepaid-exhausted' | 'headless-claude-review-unreliable' | 'env-repoint.missing-token';
+  code: 'claude-in-session' | 'no-dispatchable-account' | 'not-dispatchable' | 'depth-1' | 'max-children' | 'capability-denied' | 'metered-pool-exhausted' | 'same-provider-review' | 'override-reason-required' | 'fleet-paused' | 'billing.pay-per-token' | 'billing.open-billing-at-cap' | 'billing.prepaid-exhausted' | 'headless-claude-review-unreliable' | 'env-repoint.missing-token' | 'env-repoint.invalid-config';
   reason: string;
   /** What to do instead, when there is a clear alternative. */
   instruction?: string;
@@ -225,6 +225,8 @@ export interface DispatchPlan {
   accountAdvice?: AccountAdvice;
   /** Money-safety refusal for the selected rich-registry account. */
   billingRefusal?: DispatchRefusal;
+  /** Env-repoint refusal for the selected Claude account, shared with runTarget. */
+  envRepointRefusal?: DispatchRefusal;
   /** Non-blocking bounded-prepaid warning when dispatch will consume the prepaid buffer. */
   billingAdvice?: string;
   /** HED-78: the Claude account a headless worker will run on. `undefined` = in-session/non-Claude;

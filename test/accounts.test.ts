@@ -97,6 +97,16 @@ describe('loadAccountRegistry', () => {
     });
   });
 
+  it('preserves an operator-supplied envRepoint model and omits it when absent', () => {
+    const path = writeAccounts('env-repoint-model.json', { claude: [
+      { id: 'with-model', envRepoint: { baseUrl: 'https://x.test', authTokenRef: 'NAME', service: 'kimi', model: 'synthetic-kimi-id' } },
+      { id: 'without-model', envRepoint: { baseUrl: 'https://x.test', authTokenRef: 'NAME', service: 'glm' } },
+    ] });
+    const [withModel, withoutModel] = loadAccountRegistry(path).accounts;
+    expect(withModel!.envRepoint).toMatchObject({ model: 'synthetic-kimi-id' });
+    expect(withoutModel!.envRepoint).not.toHaveProperty('model');
+  });
+
   it('stores envRepoint authTokenRef verbatim as a reference, never a token', () => {
     const path = writeAccounts('env-repoint-reference.json', {
       claude: [{ id: 'glm', envRepoint: { baseUrl: 'https://api.z.ai/api/anthropic', authTokenRef: 'GLM_API_KEY', service: 'glm' } }],

@@ -137,9 +137,11 @@ export class ClaudeAdapter implements WorkerAdapter {
     const caps = new Set(opts.capabilities ?? []);
     // Own-property lookup only: a bracket read on a plain object would resolve prototype keys
     // (model: 'toString' -> Object.prototype.toString, a FUNCTION in argv) — codeant, PR #107.
-    const modelId = Object.hasOwn(CLAUDE_MODEL_IDS, opts.model)
+    const routed = Object.hasOwn(CLAUDE_MODEL_IDS, opts.model)
       ? CLAUDE_MODEL_IDS[opts.model as ClaudeWorkerModel]
       : opts.model;
+    // TODO(HED-432): a verified per-service default model can slot in here; today model is operator-supplied via envRepoint.model.
+    const modelId = opts.envRepoint?.model ?? routed;
     // stream-json (+ --verbose, required by the CLI for -p stream-json; --include-partial-messages) emits
     // NDJSON events mid-turn so a long headless run is observable and B2's run() idle watchdog has liveness
     // to reset on. parseClaudeResult still extracts the terminal {type:"result"} line via lastResultJson —

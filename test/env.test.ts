@@ -125,15 +125,15 @@ describe('buildWorkerEnv — subscription-billing worker isolation (HED-30 allow
       expect(env.ANTHROPIC_AUTH_TOKEN).toBe('synthetic-glm-token');
     });
 
-    it('adds Kimi model routing and does not leak its per-call allowlist to a later worker', () => {
+    it('injects only endpoint credentials for Kimi and does not leak its per-call allowlist to a later worker', () => {
       const repointed = buildWorkerEnv({ envRepoint: {
         baseUrl: 'https://kimi.example.test/anthropic', authToken: 'synthetic-kimi-token', service: 'kimi',
       } });
       expect(repointed.env).toMatchObject({
         ANTHROPIC_BASE_URL: 'https://kimi.example.test/anthropic',
         ANTHROPIC_AUTH_TOKEN: 'synthetic-kimi-token',
-        ANTHROPIC_MODEL: 'kimi-k3-high',
       });
+      expect(repointed.env.ANTHROPIC_MODEL).toBeUndefined();
 
       const plain = buildWorkerEnv();
       expect(plain.env.ANTHROPIC_BASE_URL).toBeUndefined();

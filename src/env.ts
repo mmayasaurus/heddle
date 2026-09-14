@@ -108,12 +108,6 @@ export interface WorkerEnvOptions {
 
 const ENV_REPOINT_KEYS = ['ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN'] as const;
 
-const ENV_REPOINT_SERVICE_OVERRIDES: Record<string, Record<string, string>> = {
-  // HED-432/routing documents this model identifier, but not verified Anthropic-compatible ids for
-  // Kimi's default Sonnet/Opus/Haiku or subagent aliases. TODO(HED-531): add those exact ids when documented.
-  kimi: { ANTHROPIC_MODEL: 'kimi-k3-high' },
-};
-
 /**
  * Build the environment for a worker subprocess: the parent env minus every billing-switch variable
  * AND every vendor-credential namespace (HED-30), plus an ALLOW-LISTED set of overrides (account
@@ -130,7 +124,6 @@ export function buildWorkerEnv(opts: WorkerEnvOptions = {}): {
   const envRepointOverrides: Record<string, string> = opts.envRepoint === undefined ? {} : {
     [ENV_REPOINT_KEYS[0]]: opts.envRepoint.baseUrl,
     [ENV_REPOINT_KEYS[1]]: opts.envRepoint.authToken,
-    ...(ENV_REPOINT_SERVICE_OVERRIDES[opts.envRepoint.service] ?? {}),
   };
   // Scoped to this call: env-repoint permission must not change the module-level allowlist.
   const allowedOverrides = new Set([...OVERRIDE_ALLOWLIST, ...Object.keys(envRepointOverrides)]);
