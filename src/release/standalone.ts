@@ -62,23 +62,24 @@ export function assertCleanMainHead(
 }
 
 function generate(options: StandaloneOptions, outDir: string, tempDir: string, sourceCommit: string): StandaloneResult {
-  // Cut from the exact commit the invariant gate verified, NOT a re-resolution of the (mutable) source
-  // ref. assertCleanMainHead already resolved sourceRef -> this SHA and proved it is main's tip; archiving
-  // the pinned SHA closes the window where the ref could move between validation and the cut, and makes
-  // the archived tree and the recorded commit provably the same immutable object (HED-507 review:
-  // codeant/qodo TOCTOU). sourceRef is kept only as the human-facing label in RELEASE.json.
+  // sourceCommit is the immutable SHA the invariant gate resolved and proved to be main's tip
+  // (assertCleanMainHead). We cut from — and record — that exact pin, never a re-resolution of the
+  // mutable source ref: extractShipSet archives the pin, and every commit we write (README, RELEASE.json,
+  // the --init-git snapshot, the result) is the pin itself, so there is no second resolution to drift
+  // between validation and the cut (HED-507 review: codeant/qodo TOCTOU). sourceRef is kept only as the
+  // human-facing label in RELEASE.json.
   const sourceRef = options.sourceRef ?? 'HEAD';
   const extracted = extractShipSet(options.sourceDir ?? process.cwd(), sourceCommit);
   try {
     copyShipSet(extracted.dir, tempDir);
-    writeFileSync(join(tempDir, 'README.md'), standaloneReadme(version(tempDir), extracted.sourceCommit));
+    writeFileSync(join(tempDir, 'README.md'), standaloneReadme(version(tempDir), sourceCommit));
     const gate = checkStandaloneOutput(tempDir);
     if (!gate.ok) throw new Error(gate.issues.join('\n'));
-    const shipSetHash = writeRelease(tempDir, extracted.sourceCommit, sourceRef);
+    const shipSetHash = writeRelease(tempDir, sourceCommit, sourceRef);
     if (options.verify) verifySnapshot(tempDir);
-    if (options.initGit) initializeGit(tempDir, extracted.sourceCommit);
+    if (options.initGit) initializeGit(tempDir, sourceCommit);
     renameSync(tempDir, outDir);
-    return { ok: true, sourceCommit: extracted.sourceCommit, shipSetHash };
+    return { ok: true, sourceCommit, shipSetHash };
   } finally {
     rmSync(extracted.dir, { recursive: true, force: true });
   }

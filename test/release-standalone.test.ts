@@ -358,6 +358,41 @@ describe('HED-507 — headless-first main-HEAD invariant', () => {
       expect(result.commit).toMatch(/^[0-9a-f]{40}$/);
     }
   });
+
+  it('archives the gate-pinned SHA, not a re-resolution of the source ref', () => {
+    // Discriminating test (grok round 3): shim `git` on PATH to record every invocation, then assert the
+    // ship-set cut ran `git archive <40-hex>` — the SHA the gate validated — not `git archive HEAD`. A
+    // silent revert of generate to re-resolving the mutable ref would archive the symbolic ref and fail
+    // here, even though the gate-contract and positive tests would stay green.
+    const root = tempDir();
+    const source = snapshotSource(root);
+    const outDir = join(root, 'output');
+    const mainTip = execFileSync('git', ['rev-parse', 'refs/heads/main'], { cwd: source, encoding: 'utf8' }).trim();
+
+    // capture the real git path BEFORE shimming, then a proxy shim that logs argv and execs real git
+    const realGit = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
+    const bin = join(root, 'bin');
+    const argvLog = join(root, 'git-argv.log');
+    mkdirSync(bin);
+    const shim = join(bin, 'git');
+    writeFileSync(shim, `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(argvLog)}\nexec ${JSON.stringify(realGit)} "$@"\n`);
+    chmodSync(shim, 0o755);
+
+    const originalPath = process.env.PATH;
+    process.env.PATH = `${bin}${delimiter}${originalPath ?? ''}`;
+    try {
+      const result = releaseStandalone({ outDir, sourceDir: source });
+      expect(result.ok).toBe(true);
+      const archiveCalls = readFileSync(argvLog, 'utf8').split('\n').filter((line) => line.startsWith('archive '));
+      expect(archiveCalls).toHaveLength(1);
+      // the cut archived the pinned SHA (main's tip), never a symbolic ref like HEAD
+      expect(archiveCalls[0]).toContain(mainTip);
+      expect(archiveCalls[0]).not.toContain('HEAD');
+    } finally {
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+    }
+  }, 120_000);
 });
 
 function fileList(root: string, prefix = ''): string[] {
