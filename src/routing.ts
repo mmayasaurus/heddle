@@ -367,6 +367,24 @@ export function listTaskClasses(table: RoutingTable): string[] {
 }
 
 /**
+ * True ONLY for a non-dispatchable prefer-only class whose preference has no leading concrete route,
+ * so enumeration/config may tolerate it without resolution. HED-397 introduced that shape; HED-545
+ * reviewer findings require every other resolution failure (including malformed, held, and
+ * dispatchable tier-only classes) to surface normally.
+ */
+export function isPreferOnlyClass(table: RoutingTable, taskClass: string): boolean {
+  const node = table.taskClasses[taskClass] as Record<string, unknown> | undefined;
+  if (!node || node.dispatchable !== false) return false;
+  if (node.provider || node.model) return false;
+  try {
+    const prefer = parsePrefer(table, node, `task_classes.${taskClass}`);
+    return Array.isArray(prefer) && prefer.length > 0 && !('provider' in prefer[0]);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * The "code-editing class" classifier: does a dispatch of `taskClass` change files? Data-driven
  * from the table's `edits_code:` field — never inferred from the class name. Unknown classes and
  * direct routes (`direct:<provider>/<model>`) are NOT code-editing as far as the table knows.
@@ -416,13 +434,9 @@ export function describeTaskClasses(
 ): TaskClassDescription[] {
   const describeUnresolved = (taskClass: string): TaskClassDescription => {
     const node = table.taskClasses[taskClass] as Record<string, unknown> | undefined;
-    let prefer: string[] | undefined;
-    try {
-      prefer = parsePrefer(table, node, `task_classes.${taskClass}`)
-        ?.map((entry) => 'tier' in entry ? entry.tier : `${entry.provider}/${entry.model}`);
-    } catch {
-      prefer = undefined;
-    }
+    const where = `task_classes.${taskClass}`;
+    const prefer = parsePrefer(table, node, where)
+      ?.map((entry) => 'tier' in entry ? entry.tier : `${entry.provider}/${entry.model}`);
     return {
       task_class: taskClass,
       provider: null,
@@ -433,51 +447,46 @@ export function describeTaskClasses(
       opt_in_required: false,
       note: typeof node?.note === 'string' ? node.note : null,
       why: typeof node?.why === 'string' ? node.why : null,
-      skills: [],
-      mcp: [],
+      skills: listField(node, 'skills', where) ?? [],
+      mcp: listField(node, 'mcp', where) ?? [],
       edits_code: node?.edits_code === true,
       dispatchable: node?.dispatchable !== false,
       read_only: node?.read_only === true,
       auto_assess: node?.auto_assess === true,
-      reviewer_pool: [],
+      reviewer_pool: Array.isArray(node?.reviewer_pool)
+        ? (node.reviewer_pool as any[])
+          .filter((entry) => entry && typeof entry.provider === 'string' && typeof entry.model === 'string')
+          .map((entry) => `${entry.provider}/${entry.model}`)
+        : [],
       prefer,
     };
   };
 
   return listTaskClasses(table).map((c) => {
-    try {
-      const r = resolveRoute(table, c);
-      const execution = table.providers[r.provider]?.execution;
-      return {
-        task_class: c,
-        provider: r.provider,
-        model: r.model,
-        execution: typeof execution === 'string' ? execution : null,
-        effort: r.effort ?? null,
-        fallback: r.fallback ? `${r.fallback.provider}/${r.fallback.model}` : null,
-        opt_in_required: r.requiresExplicitOptIn ?? false,
-        note: r.note ?? null,
-        why: r.why ?? null,
-        // A non-dispatchable class never gets a worker, so no mandatory worker pack applies (matches
-        // the refusal path in dispatch.ts, which records no skills for it).
-        skills: r.dispatchable ? withMandatory(r.skills ?? []) : (r.skills ?? []),
-        mcp: r.mcp ?? [],
-        edits_code: r.editsCode,
-        dispatchable: r.dispatchable,
-        read_only: r.readOnly,
-        auto_assess: r.autoAssess,
-        reviewer_pool: (r.reviewerPool ?? []).map((e) => `${e.provider}/${e.model}`),
-        prefer: r.prefer?.map((entry) => 'tier' in entry ? entry.tier : `${entry.provider}/${entry.model}`),
-      };
-    } catch (err) {
-      // Tolerate ONLY a prefer-only class (no concrete declared route): HED-397 keeps orchestration
-      // resolvable via its leading literal, and a future tier-only prefer-only class stays enumerable.
-      // A CONCRETE class that fails to resolve (held/excluded provider, never_via_cursor, tier range)
-      // is a real config error → re-throw, so enumeration never silently masks a misconfigured route.
-      const node = table.taskClasses[c] as Record<string, unknown> | undefined;
-      if (node?.provider || node?.model) throw err;
-      return describeUnresolved(c);
-    }
+    if (isPreferOnlyClass(table, c)) return describeUnresolved(c);
+    const r = resolveRoute(table, c);
+    const execution = table.providers[r.provider]?.execution;
+    return {
+      task_class: c,
+      provider: r.provider,
+      model: r.model,
+      execution: typeof execution === 'string' ? execution : null,
+      effort: r.effort ?? null,
+      fallback: r.fallback ? `${r.fallback.provider}/${r.fallback.model}` : null,
+      opt_in_required: r.requiresExplicitOptIn ?? false,
+      note: r.note ?? null,
+      why: r.why ?? null,
+      // A non-dispatchable class never gets a worker, so no mandatory worker pack applies (matches
+      // the refusal path in dispatch.ts, which records no skills for it).
+      skills: r.dispatchable ? withMandatory(r.skills ?? []) : (r.skills ?? []),
+      mcp: r.mcp ?? [],
+      edits_code: r.editsCode,
+      dispatchable: r.dispatchable,
+      read_only: r.readOnly,
+      auto_assess: r.autoAssess,
+      reviewer_pool: (r.reviewerPool ?? []).map((e) => `${e.provider}/${e.model}`),
+      prefer: r.prefer?.map((entry) => 'tier' in entry ? entry.tier : `${entry.provider}/${entry.model}`),
+    };
   });
 }
 

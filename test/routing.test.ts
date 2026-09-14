@@ -310,12 +310,26 @@ describe('HED-545 — prefer-only classes during enumeration', () => {
     };
   }
 
-  it('describes a tier-only prefer-only class without resolving it', () => {
+  it('describes a tier-only prefer-only class without resolving it and preserves its guidance', () => {
     const table = tierOnlyTable();
+    (table.taskClasses as Record<string, unknown>).orchestration = {
+      prefer: ['T2'],
+      dispatchable: false,
+      edits_code: false,
+      skills: ['orchestrator-guide'],
+      mcp: ['memtrace'],
+      reviewer_pool: [{ provider: 'claude', model: 'haiku' }],
+    };
     expect(() => resolveRoute(table, 'orchestration')).toThrow(/missing provider or model/);
     expect(() => describeTaskClasses(table)).not.toThrow();
     expect(describeTaskClasses(table).find((row) => row.task_class === 'orchestration')).toMatchObject({
-      provider: null, model: null, prefer: ['T2'], dispatchable: false,
+      provider: null,
+      model: null,
+      prefer: ['T2'],
+      dispatchable: false,
+      skills: ['orchestrator-guide'],
+      mcp: ['memtrace'],
+      reviewer_pool: ['claude/haiku'],
     });
     expect(describeTaskClasses(table).find((row) => row.task_class === 'implementation')).toMatchObject({
       provider: 'claude', model: 'haiku',
@@ -328,6 +342,18 @@ describe('HED-545 — prefer-only classes during enumeration', () => {
     // The tolerance is ONLY for prefer-only classes; a concrete provider+model that resolveRoute
     // rejects (here: unknown provider) must still throw from enumeration, not be masked as prefer-only.
     expect(() => describeTaskClasses(table)).toThrow(/unknown provider/);
+  });
+
+  it('re-throws for a dispatchable tier-only class', () => {
+    const table = tierOnlyTable();
+    (table.taskClasses as Record<string, unknown>).dispatchableTierOnly = { prefer: ['T2'] };
+    expect(() => describeTaskClasses(table)).toThrow(/missing provider or model/);
+  });
+
+  it('re-throws for a malformed prefer-only-shaped class', () => {
+    const table = tierOnlyTable();
+    (table.taskClasses as Record<string, unknown>).malformed = { prefer: 'T2', dispatchable: false };
+    expect(() => describeTaskClasses(table)).toThrow(/prefer must be a non-empty list/);
   });
 
   it('keeps shipped orchestration on its concrete Fable route', () => {
@@ -350,6 +376,22 @@ describe('HED-545 — prefer-only classes during enumeration', () => {
       '',
     ].join('\n'));
     expect(() => targetModels('claude', path)).not.toThrow();
+  });
+
+  it('surfaces a real routing error while enumerating catalog targets', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'heddle-545-'));
+    dirs.push(dir);
+    const path = join(dir, 'routing.yaml');
+    writeFileSync(path, [
+      'version: 0',
+      'providers:',
+      '  claude: { models: [haiku] }',
+      'task_classes:',
+      '  orchestration: { prefer: [T2], dispatchable: false }',
+      '  broken: { provider: unknown, model: m1 }',
+      '',
+    ].join('\n'));
+    expect(() => targetModels('claude', path)).toThrow(/unknown provider/);
   });
 });
 
