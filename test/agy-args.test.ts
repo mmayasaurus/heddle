@@ -86,6 +86,44 @@ describe('AgyAdapter.buildArgs — invocation contract', () => {
   });
 });
 
+describe('HED-539 — per-dispatch permission-prompt opt-out (DispatchOptions.skipPermissions)', () => {
+  const base = { model: 'gemini-3.6-flash-low', cwd: '/tmp' } as const;
+
+  it('omitting skipPermissions keeps the constructed default — fleet workers still skip', () => {
+    // Default adapter (ctor skip=true) + no per-dispatch override → flag present, behavior unchanged.
+    expect(new AgyAdapter().buildArgs('go', base)).toContain('--dangerously-skip-permissions');
+  });
+
+  it('skipPermissions:false disables the flag even though the ctor default is true', () => {
+    const args = new AgyAdapter().buildArgs('go', { ...base, skipPermissions: false });
+    expect(args).not.toContain('--dangerously-skip-permissions');
+  });
+
+  it('skipPermissions:true forces the flag even when the ctor default is false', () => {
+    const args = new AgyAdapter('agy', false).buildArgs('go', { ...base, skipPermissions: true });
+    expect(args).toContain('--dangerously-skip-permissions');
+  });
+
+  it('a false opt-out is not reintroduced by extraFlags ordering — flag stays absent, extraFlags still appended', () => {
+    const args = new AgyAdapter().buildArgs('go', {
+      ...base, skipPermissions: false, extraFlags: ['--foo', 'bar'],
+    });
+    expect(args).not.toContain('--dangerously-skip-permissions');
+    expect(args.slice(-2)).toEqual(['--foo', 'bar']);
+  });
+
+  it('the opt-out carries through a spread of opts (retry-args rebuild) — exact argv for false + resume', () => {
+    // execute() rebuilds argv via buildArgs({ ...opts, timeoutMs }) on the contention retry, so a
+    // spread of opts must preserve skipPermissions. buildArgs is pure, so assert the full shape here.
+    const args = new AgyAdapter().buildArgs('go', { ...base, skipPermissions: false, resume: 'c-1' });
+    expect(args).toEqual([
+      '-p', 'go', '--output-format', 'stream-json', '--model', 'gemini-3.6-flash-low',
+      '--print-timeout', '9m',
+      '--conversation', 'c-1',
+    ]);
+  });
+});
+
 describe('regression HED-28 — reconcile effort override with agy slug-suffix effort', () => {
   // agy hard-errors on a suffixed slug + --effort ("invalid model selection … conflicts with
   // --effort", live-verified agy 1.1.15, 2026-08-19). So an explicit opts.effort (e.g. via
