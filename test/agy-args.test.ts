@@ -112,6 +112,16 @@ describe('HED-539 — per-dispatch permission-prompt opt-out (DispatchOptions.sk
     expect(args.slice(-2)).toEqual(['--foo', 'bar']);
   });
 
+  it('a false opt-out strips --dangerously-skip-permissions even when extraFlags carries it (authoritative — qodo #157)', () => {
+    // extraFlags is appended last, so a stray/conflicting skip flag there must NOT defeat a false
+    // opt-out — the permission-preserving guarantee is authoritative regardless of the flag's source.
+    const args = new AgyAdapter().buildArgs('go', {
+      ...base, skipPermissions: false, extraFlags: ['--dangerously-skip-permissions', '--foo'],
+    });
+    expect(args).not.toContain('--dangerously-skip-permissions');
+    expect(args).toContain('--foo');
+  });
+
   it('the opt-out carries through a spread of opts (retry-args rebuild) — exact argv for false + resume', () => {
     // execute() rebuilds argv via buildArgs({ ...opts, timeoutMs }) on the contention retry, so a
     // spread of opts must preserve skipPermissions. buildArgs is pure, so assert the full shape here.
