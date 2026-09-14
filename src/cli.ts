@@ -36,6 +36,7 @@ import { NativeCliRunner, type NativeProvider } from './wizard/cli-runner.js';
 import { ReadlinePrompter, ScriptedPrompter, type Prompter } from './wizard/prompt.js';
 import { runAccountsAdd } from './wizard/accounts-add.js';
 import { runHooksChoose, type HookRuleSelection } from './wizard/hooks-choose.js';
+import { PRESET_TIERS, resolvePreset, type SafetyPreset } from './wizard/presets.js';
 import { getProvider } from './provider-matrix.js';
 import { releaseStandalone } from './release/standalone.js';
 import { assembleTop, renderTopText } from './top.js';
@@ -96,7 +97,7 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
   heddle mode [desktop|mobile|away] [--note "<t>"] [--json]   operator mode (HED-336): no arg prints
                                  the current mode; a mode word sets it (~/.heddle/operator-mode.json —
                                  the pocket console and desktop app write the same file)
-  heddle init-project <dir> [--canonical <path>] [--name <n>] [--team <KEY>] [--agents A,B,…] [--room <#room>] [--launcher <script>] [--hook-rules <a,b>] [--enforce <a,b>] [--answers <file>] [--enforce-memtrace] [--dry-run] [--json] [--show-content]
+  heddle init-project <dir> [--canonical <path>] [--name <n>] [--team <KEY>] [--agents A,B,…] [--room <#room>] [--launcher <script>] [--preset <tier>] [--hook-rules <a,b>] [--enforce <a,b>] [--answers <file>] [--enforce-memtrace] [--dry-run] [--json] [--show-content]
   heddle whoami [--json]         this process's bound identity (HEDDLE_AGENT / FLEET_AGENT / .fleet-agent) + worker context
   heddle doctor [--json] [--provider <p>]   verify harnesses/accounts/config; --provider runs only that provider's checks plus global config checks (exit 1 on any fail)
   heddle release --standalone <outDir> [--source-ref <git ref>] [--init-git] [--verify] [--json]
@@ -999,12 +1000,19 @@ try {
     case 'init-project': {
       const dir = process.argv[3];
       if (!dir || dir.startsWith('--')) {
-        console.error('usage: heddle init-project <dir> [--canonical <path>] [--name <n>] [--team <KEY>] [--agents A,B,…] [--room <#room>] [--launcher <script>] [--hook-rules <a,b>] [--enforce <a,b>] [--answers <file>] [--enforce-memtrace] [--dry-run] [--json] [--show-content]');
+        console.error('usage: heddle init-project <dir> [--canonical <path>] [--name <n>] [--team <KEY>] [--agents A,B,…] [--room <#room>] [--launcher <script>] [--preset <tier>] [--hook-rules <a,b>] [--enforce <a,b>] [--answers <file>] [--enforce-memtrace] [--dry-run] [--json] [--show-content]');
         process.exit(2);
       }
       const catalogRoot = resolveRulesRoot([]);
       let hookRules: HookRuleSelection[] | undefined;
-      if (has('--hook-rules')) {
+      if (has('--preset')) {
+        if (has('--hook-rules')) throw new Error('--preset and --hook-rules are mutually exclusive; choose one');
+        if (has('--enforce')) throw new Error('--preset cannot be used with --enforce; presets never enforce');
+        const tier = arg('--preset');
+        if (tier === undefined || tier.startsWith('-')) throw new Error(`--preset needs one of: ${PRESET_TIERS.join(', ')}`);
+        if (!PRESET_TIERS.includes(tier as SafetyPreset)) throw new Error(`unknown safety preset '${tier}' (choose ${PRESET_TIERS.join(', ')})`);
+        hookRules = resolvePreset(tier as SafetyPreset, catalogRoot);
+      } else if (has('--hook-rules')) {
         const requested = commaIds('--hook-rules');
         const enforced = has('--enforce') ? commaIds('--enforce') : [];
         const catalog = new Map(loadRules(catalogRoot).map((rule) => [rule.id, rule]));
@@ -1025,7 +1033,10 @@ try {
             prompter = new ReadlinePrompter();
           }
           try {
-            hookRules = (await runHooksChoose({ catalogRoot }, { prompter, report: (line) => process.stderr.write(`${line}\n`) })).selected;
+            const choice = await prompter.select('Choose hook safety preset:', [...PRESET_TIERS, 'custom']);
+            hookRules = choice === 'custom'
+              ? (await runHooksChoose({ catalogRoot }, { prompter, report: (line) => process.stderr.write(`${line}\n`) })).selected
+              : resolvePreset(choice as SafetyPreset, catalogRoot);
           } finally {
             prompter.close();
           }
