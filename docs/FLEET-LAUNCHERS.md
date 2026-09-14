@@ -2,6 +2,8 @@
 
 `fleet/launchers/` is the vendored, source-controlled canon-to-be for Heddle fleet launchers. It is dark in this phase: installing the copies does not change any invocation path.
 
+For the separately installed bin-tool set and the fleet-wide parity manifest, see [Fleet bin tools](FLEET-BIN.md).
+
 Install the complete launcher set into the current user's Heddle home directory:
 
 ```sh
