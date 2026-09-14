@@ -87,7 +87,7 @@ describe('accounts add env-repoint wizard', () => {
     const path = join(tempDir(), 'shape.json');
     withHome(tempDir());
     await expect(runAccountsAdd({ provider: 'glm', registryPath: path }, {
-      prompter: new ScriptedPrompter([true, 'bad', 'global', '', 'sk-fake-test-literal']), runner: fakeRunner,
+      prompter: new ScriptedPrompter([true, 'bad', 'global', '', 'not-a-valid-env-name']), runner: fakeRunner,
     })).rejects.toThrow(/value, not a name/i);
     expect(existsSync(path)).toBe(false);
   });
@@ -165,6 +165,28 @@ describe('accounts add env-repoint wizard', () => {
     expect(summary).toMatchObject({ added: [], failed: ['glm-1'] });
     expect(loadAccountRegistry(path).accounts).toEqual([]);
     expect(report.join('\n')).toContain('FAIL glm glm-1');
+  });
+
+  it('does not offer local-runtime providers in the default wizard (never crashes envRepointHarness)', async () => {
+    const path = join(tempDir(), 'localruntime.json');
+    withHome(tempDir());
+    const prompter = new RecordingPrompter(new ScriptedPrompter(Array.from({ length: 16 }, () => false)));
+    const summary = await runAccountsAdd({ registryPath: path }, { prompter, runner: fakeRunner });
+    expect(prompter.questions).not.toContain('Do you have a Ollama account?');
+    expect(prompter.questions).not.toContain('Do you have a LM Studio account?');
+    expect(summary.added).toEqual([]);
+  });
+
+  it('refuses deferred provider surfaces (local-runtime, browser-oauth) via --provider', async () => {
+    const path = join(tempDir(), 'deferred.json');
+    withHome(tempDir());
+    await expect(runAccountsAdd({ provider: 'ollama', registryPath: path }, {
+      prompter: new ScriptedPrompter([]), runner: fakeRunner,
+    })).rejects.toThrow(/does not yet support/i);
+    await expect(runAccountsAdd({ provider: 'gemini', registryPath: path }, {
+      prompter: new ScriptedPrompter([]), runner: fakeRunner,
+    })).rejects.toThrow(/does not yet support/i);
+    expect(existsSync(path)).toBe(false);
   });
 
   it('rejects a custom provider slug that collides with a matrix key', async () => {

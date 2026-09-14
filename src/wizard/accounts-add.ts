@@ -24,6 +24,14 @@ function envRepointHarness(entry: ProviderMatrixEntry): 'claude' | 'codex' {
   throw new Error(`env-repoint provider ${entry.key} has unsupported harness style ${entry.harnessStyle}`);
 }
 
+// Slice-3 onboards only the KEYED env-repoint styles (anthropic-compat -> claude, openai-compat -> codex).
+// local-runtime (Ollama/LM Studio, HED-529) and browser-oauth (Gemini, HED-528) are deferred: offering
+// them here would crash envRepointHarness or misroute a non-native key into the native login path.
+const ENV_REPOINT_WIZARD_STYLES: ReadonlySet<ProviderMatrixEntry['harnessStyle']> = new Set(['anthropic-compat', 'openai-compat']);
+function envRepointWizardSupported(entry: ProviderMatrixEntry): boolean {
+  return entry.envRepoint && ENV_REPOINT_WIZARD_STYLES.has(entry.harnessStyle);
+}
+
 function validateId(id: string): void {
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id)) {
     throw new Error(`invalid account id ${JSON.stringify(id)} — use letters, digits, '.', '_', '-' (no path separators or '..')`);
@@ -236,24 +244,31 @@ export async function runAccountsAdd(
   const registryPath = opts.registryPath ?? process.env.HEDDLE_ACCOUNTS ?? join(homedir(), '.heddle', 'accounts.json');
   const summary: AccountsAddSummary = { added: [], failed: [], skipped: [] };
   const matrixProvider = opts.provider === undefined ? undefined : getProvider(opts.provider);
-  const selectedEnv = matrixProvider?.envRepoint ? matrixProvider : undefined;
-  if (opts.provider && opts.provider !== 'custom' && !matrixProvider && !providers.includes(opts.provider as NativeProvider)) {
-    throw new Error(`unknown accounts-add provider ${opts.provider}`);
+  if (opts.provider && opts.provider !== 'custom') {
+    const isNative = providers.includes(opts.provider as NativeProvider);
+    if (!matrixProvider && !isNative) throw new Error(`unknown accounts-add provider ${opts.provider}`);
+    // A matrix key that is neither a native CLI nor a wizard-supported env-repoint style is a deferred
+    // surface — refuse clearly instead of crashing envRepointHarness (local-runtime) or falling through
+    // to the native login path with an undefined service name (browser-oauth: gemini/copilot/amazonq).
+    if (matrixProvider && !isNative && !envRepointWizardSupported(matrixProvider)) {
+      throw new Error(`accounts-add does not yet support ${opts.provider} (${matrixProvider.harnessStyle}) — see HED-528 (browser-oauth), HED-529 (local-runtime), HED-530 (OpenCode)`);
+    }
   }
+  const selectedEnv = matrixProvider && envRepointWizardSupported(matrixProvider) ? matrixProvider : undefined;
   for (const provider of opts.provider && !selectedEnv && opts.provider !== 'custom' ? [opts.provider as NativeProvider] : opts.provider ? [] : providers) {
     if (!await deps.prompter.confirm(`Do you have a ${services[provider]} account?`, false)) { summary.skipped.push(provider); continue; }
     let ordinal = loadAccountRegistry(registryPath).accounts.filter((account) => account.provider === provider).length + 1;
     do { await addOne(provider, deps, ordinal++, registryPath, summary); }
     while (await deps.prompter.confirm(`Any other ${services[provider]} accounts to cycle through?`, false));
   }
-  const envProviders = selectedEnv && !selectedEnv.blocked ? [selectedEnv] : opts.provider ? [] : listEnvRepointProviders().filter((entry) => entry.wizardDefault && !entry.blocked);
+  const envProviders = selectedEnv && !selectedEnv.blocked ? [selectedEnv] : opts.provider ? [] : listEnvRepointProviders().filter((entry) => entry.wizardDefault && !entry.blocked && envRepointWizardSupported(entry));
   for (const entry of envProviders) {
     if (!await deps.prompter.confirm(`Do you have a ${entry.displayName} account?`, false)) continue;
     let ordinal = loadAccountRegistry(registryPath).accounts.filter((account) => account.envRepoint?.service === entry.key).length + 1;
     do { await addEnvRepointOne(entry, deps, ordinal++, registryPath, summary); }
     while (await deps.prompter.confirm(`Any other ${entry.displayName} accounts to cycle through?`, false));
   }
-  const blocked = selectedEnv?.blocked ? [selectedEnv] : opts.provider ? [] : listEnvRepointProviders().filter((entry) => entry.blocked);
+  const blocked = selectedEnv?.blocked ? [selectedEnv] : opts.provider ? [] : listEnvRepointProviders().filter((entry) => entry.blocked && envRepointWizardSupported(entry));
   for (const entry of blocked) {
     deps.report?.(`COMING ${entry.displayName}: ${entry.blocked!.reason}`);
     if (!await deps.prompter.confirm(`I already have a working ${entry.displayName} key — add it anyway?`, false)) continue;
