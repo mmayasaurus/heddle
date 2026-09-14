@@ -146,7 +146,7 @@ function wireDisciplineHooks(hooks: Record<string, any[]>, targets: Map<string, 
 // When the operator opts into hook rules (via the 471 chooser / 472 preset tiers), wire the compiled
 // bridge (src/hook.ts → dist/hook.js) into the CONSUMER project's settings so its seeded rules run at
 // hook time. Consumer-only: this never wires heddle's OWN repo — turning the fleet's own rules on is a
-// separate, Maya-gated decision. Selection-gated + inert when empty, so a merge with zero selected
+// separate, operator-gated decision. Selection-gated + inert when empty, so a merge with zero selected
 // rules is byte-identical to the pre-bridge installer.
 
 // The bridge is a sibling of this module in dist/ (`here` === dist/ at runtime), so it is
