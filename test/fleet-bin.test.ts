@@ -55,10 +55,10 @@ describe('fleet bin', () => {
     const installed = await runCli(['fleet', 'install-bin'], { home });
     expect(installed.code).toBe(0);
     expect(installed.stdout).toContain(`target: ${targetDir}`);
-    expect(readdirSync(targetDir)).toHaveLength(10);
+    expect(readdirSync(targetDir)).toHaveLength(21);
     const installedJson = await runCli(['fleet', 'install-bin', '--json'], { home });
     expect(JSON.parse(installedJson.stdout)).toEqual(expect.objectContaining({ dryRun: false, targetDir, files: expect.any(Array) }));
-    expect(JSON.parse(installedJson.stdout).files).toHaveLength(10);
+    expect(JSON.parse(installedJson.stdout).files).toHaveLength(21);
     writeFileSync(join(targetDir, 'lin.sh'), 'drift\n');
     const drift = await runCli(['fleet', 'bin-diff', '--json'], { home });
     expect(drift.code).toBe(1);
@@ -72,7 +72,7 @@ describe('fleet bin', () => {
     expect(dryRun.code).toBe(0);
     expect(dryRun.stdout).toContain(`target: ${join(dryRunHome, '.heddle', 'fleet', 'bin')}`);
     const dryRunLines = dryRun.stdout.split('\n').slice(1).filter(Boolean);
-    expect(dryRunLines).toHaveLength(10);
+    expect(dryRunLines).toHaveLength(21);
     expect(dryRunLines.every((line) => line.startsWith('would create '))).toBe(true);
     const dryRunJson = await runCli(['fleet', 'install-bin', '--dry-run', '--json'], { home: dryRunHome });
     expect(dryRunJson.code).toBe(0);
