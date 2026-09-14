@@ -326,7 +326,7 @@ export function buildCandidatePrompt(outDir: string, round: CorpusRound): string
   return path;
 }
 
-function judgePrompt(round: CorpusRound, candidateRaw: string): string {
+export function judgePrompt(round: CorpusRound, candidateRaw: string): string {
   return [
     'You are the judge for an adversarial-review quality bench. The DIFF below is the EXACT version the incumbent reviewer saw: it is reconstructed at the commit that was branch HEAD when the incumbent review ran, BEFORE any fixes for its findings were pushed. So every ACCEPTED incumbent finding describes a defect that IS present in this diff. Accepted incumbent findings are ground truth. Return STRICT JSON only, with no Markdown fences or prose:',
     '{"roundId": <dispatchId>,',
@@ -451,7 +451,7 @@ export function aggregateScoredRounds(candidate: string, rounds: ScoredRound[], 
   };
 }
 
-function buildCorpus(
+export function buildCorpus(
   out: string,
   opts: { limit?: number; pairs?: string[] },
   gh: GhRunner = defaultGh,
