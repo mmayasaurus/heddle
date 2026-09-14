@@ -23,7 +23,7 @@ import { DEFAULT_USAGE_DIR, readProviderCaps } from './usage.js';
 import { buildOauthUsageSidecar, pollClaudeUsage } from './claude-usage.js';
 import { formatUsageRemaining, readUsageRemaining } from './usage-remaining.js';
 import { installUsagePollLaunchd } from './usage-poll-launchd.js';
-import { resolveRulesRoot, runRuleCli } from './rules/lifecycle.js';
+import { resolveCatalogRoot, runRuleCli } from './rules/lifecycle.js';
 import { loadRules } from './rules/load.js';
 import { DOCTOR_PROVIDERS, formatDoctorReport, runDoctor } from './doctor.js';
 import { readOperatorMode, writeOperatorMode, isOperatorMode, OPERATOR_MODES } from './operator-mode.js';
@@ -1119,7 +1119,7 @@ try {
         console.error('usage: heddle init-project <dir> [--canonical <path>] [--name <n>] [--team <KEY>] [--agents A,B,…] [--room <#room>] [--launcher <script>] [--preset <tier>] [--hook-rules <a,b>] [--enforce <a,b>] [--answers <file>] [--enforce-memtrace] [--dry-run] [--json] [--show-content]');
         process.exit(2);
       }
-      const catalogRoot = resolveRulesRoot([]);
+      const catalogRoot = resolveCatalogRoot();
       let hookRules: HookRuleSelection[] | undefined;
       if (has('--preset')) {
         if (has('--hook-rules')) throw new Error('--preset and --hook-rules are mutually exclusive; choose one');
