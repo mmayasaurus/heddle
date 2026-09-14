@@ -43,13 +43,24 @@ describe('loadAccountRegistry', () => {
         id: 'claude', configDir: null, harness: 'custom-harness', billingClass: 'subscription-flat', tier: 'T2',
         fences: { readOnlyEnforceable: true, networkEnforceable: false, cwdEnforceable: true },
         lastVerified: '2026-09-05T00:00:00Z', note: 'legacy note', orgId: 'org', accountUuid: 'uuid', email: 'a@example.test', loggedIn: false,
+        region: 'us-east-1', trainsOnInputs: false, oneLoginAtATime: true,
       }],
     });
     expect(loadAccountRegistry(path).accounts[0]).toMatchObject({
       id: 'claude', harness: 'custom-harness', billingClass: 'subscription-flat', tier: 'T2', notes: 'legacy note',
       orgId: 'org', accountUuid: 'uuid', email: 'a@example.test', loggedIn: false,
+      region: 'us-east-1', trainsOnInputs: false, oneLoginAtATime: true,
       fences: { readOnlyEnforceable: true, networkEnforceable: false, cwdEnforceable: true },
     });
+  });
+
+  it('ignores non-boolean privacy and login metadata', () => {
+    const path = writeAccounts('invalid-boolean-metadata.json', {
+      claude: [{ id: 'claude', configDir: null, trainsOnInputs: 'no', oneLoginAtATime: 1 }],
+    });
+    const account = loadAccountRegistry(path).accounts[0]!;
+    expect(account).not.toHaveProperty('trainsOnInputs');
+    expect(account).not.toHaveProperty('oneLoginAtATime');
   });
 
   it('keeps a present notes field and prefers it over legacy note', () => {
@@ -79,16 +90,16 @@ describe('loadAccountRegistry', () => {
 
   it('carries an envRepoint through the unified model', () => {
     const path = writeAccounts('env-repoint.json', {
-      claude: [{ id: 'glm', envRepoint: { baseUrl: 'https://api.z.ai/api/anthropic', authTokenRef: 'GLM_API_KEY' } }],
+      claude: [{ id: 'glm', envRepoint: { baseUrl: 'https://api.z.ai/api/anthropic', authTokenRef: 'GLM_API_KEY', service: 'glm' } }],
     });
     expect(loadAccountRegistry(path).accounts[0]!.envRepoint).toEqual({
-      baseUrl: 'https://api.z.ai/api/anthropic', authTokenRef: 'GLM_API_KEY',
+      baseUrl: 'https://api.z.ai/api/anthropic', authTokenRef: 'GLM_API_KEY', service: 'glm',
     });
   });
 
   it('stores envRepoint authTokenRef verbatim as a reference, never a token', () => {
     const path = writeAccounts('env-repoint-reference.json', {
-      claude: [{ id: 'glm', envRepoint: { baseUrl: 'https://api.z.ai/api/anthropic', authTokenRef: 'GLM_API_KEY' } }],
+      claude: [{ id: 'glm', envRepoint: { baseUrl: 'https://api.z.ai/api/anthropic', authTokenRef: 'GLM_API_KEY', service: 'glm' } }],
     });
     expect(loadAccountRegistry(path).accounts[0]!.envRepoint!.authTokenRef).toBe('GLM_API_KEY');
   });
@@ -103,6 +114,8 @@ describe('loadAccountRegistry', () => {
     ['non-http baseUrl', { baseUrl: 'ftp://x', authTokenRef: 'NAME' }],
     ['missing authTokenRef', { baseUrl: 'https://x.test' }],
     ['empty authTokenRef', { baseUrl: 'https://x.test', authTokenRef: '' }],
+    ['missing service', { baseUrl: 'https://x.test', authTokenRef: 'NAME' }],
+    ['empty service', { baseUrl: 'https://x.test', authTokenRef: 'NAME', service: '' }],
   ])('rejects %s envRepoint with the file path', (_label, envRepoint) => {
     const path = writeAccounts(`bad-env-repoint-${_label}.json`, { claude: [{ id: 'a', envRepoint }] });
     expect(() => loadAccountRegistry(path)).toThrow(path);
@@ -110,9 +123,21 @@ describe('loadAccountRegistry', () => {
 
   it('tolerates and ignores unknown envRepoint keys', () => {
     const path = writeAccounts('future-env-repoint.json', {
-      claude: [{ id: 'a', envRepoint: { baseUrl: 'https://x.test', authTokenRef: 'NAME', futureField: 'x' } }],
+      claude: [{ id: 'a', envRepoint: { baseUrl: 'https://x.test', authTokenRef: 'NAME', service: 'glm', futureField: 'x' } }],
     });
-    expect(loadAccountRegistry(path).accounts[0]!.envRepoint).toEqual({ baseUrl: 'https://x.test', authTokenRef: 'NAME' });
+    expect(loadAccountRegistry(path).accounts[0]!.envRepoint).toEqual({ baseUrl: 'https://x.test', authTokenRef: 'NAME', service: 'glm' });
+  });
+
+  it('derives distinct credential references for env-repoint services on one harness', () => {
+    const path = writeAccounts('env-repoint-credential-refs.json', {
+      claude: [
+        { id: 'glm-1', configDir: null, envRepoint: { baseUrl: 'https://api.z.ai/api/anthropic', authTokenRef: 'GLM_API_KEY', service: 'glm' } },
+        { id: 'kimi-1', configDir: null, envRepoint: { baseUrl: 'https://api.moonshot.ai/anthropic', authTokenRef: 'KIMI_API_KEY', service: 'kimi' } },
+      ],
+    });
+    expect(loadAccountRegistry(path).accounts.map((account) => account.credentialRef)).toEqual([
+      'claude:glm:default', 'claude:kimi:default',
+    ]);
   });
 
   it.each([

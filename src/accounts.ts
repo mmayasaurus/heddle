@@ -24,6 +24,7 @@ export interface AccountOverage {
 export interface AccountEnvRepoint {
   baseUrl: string;
   authTokenRef: string;
+  service: string;
 }
 
 export interface Account {
@@ -46,6 +47,9 @@ export interface Account {
   preferUntil?: string;
   email?: string;
   loggedIn?: boolean;
+  region?: string;
+  trainsOnInputs?: boolean;
+  oneLoginAtATime?: boolean;
 }
 
 export interface AccountRegistry {
@@ -138,7 +142,10 @@ function validateEnvRepoint(value: unknown, where: string, path: string): Accoun
   if (typeof envRepoint.authTokenRef !== 'string' || !envRepoint.authTokenRef) {
     throw new Error(`accounts.json at ${path}: ${where}.envRepoint.authTokenRef must be a non-empty string (an env-var name or keychain ref, never the token)`);
   }
-  return { baseUrl: envRepoint.baseUrl, authTokenRef: envRepoint.authTokenRef };
+  if (typeof envRepoint.service !== 'string' || !envRepoint.service) {
+    throw new Error(`accounts.json at ${path}: ${where}.envRepoint.service must be a non-empty string (the env-repoint provider key)`);
+  }
+  return { baseUrl: envRepoint.baseUrl, authTokenRef: envRepoint.authTokenRef, service: envRepoint.service };
 }
 
 function toAccount(value: unknown, provider: Provider, index: number, path: string): Account | null {
@@ -175,7 +182,7 @@ function toAccount(value: unknown, provider: Provider, index: number, path: stri
     id: row.id as string,
     provider,
     harness: typeof row.harness === 'string' && row.harness ? row.harness : defaultHarness,
-    credentialRef: `${provider}:${pathValue ?? 'default'}`,
+    credentialRef: envRepoint ? `${provider}:${envRepoint.service}:${pathValue ?? 'default'}` : `${provider}:${pathValue ?? 'default'}`,
     ...(billingClass === undefined ? {} : { billingClass }),
     ...(tier === undefined ? {} : { tier }),
     ...(fences === undefined ? {} : { fences }),
@@ -188,6 +195,9 @@ function toAccount(value: unknown, provider: Provider, index: number, path: stri
     ...(optionalString(row, 'preferUntil') === undefined ? {} : { preferUntil: optionalString(row, 'preferUntil') }),
     ...(optionalString(row, 'email') === undefined ? {} : { email: optionalString(row, 'email') }),
     ...(typeof row.loggedIn === 'boolean' ? { loggedIn: row.loggedIn } : {}),
+    ...(optionalString(row, 'region') === undefined ? {} : { region: optionalString(row, 'region') }),
+    ...(typeof row.trainsOnInputs === 'boolean' ? { trainsOnInputs: row.trainsOnInputs } : {}),
+    ...(typeof row.oneLoginAtATime === 'boolean' ? { oneLoginAtATime: row.oneLoginAtATime } : {}),
   };
   if (provider === 'claude') account.configDir = pathValue;
   if (provider === 'codex') account.codexHome = pathValue;

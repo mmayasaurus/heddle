@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { appendFileSync, rmSync, writeFileSync, chmodSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { diffInstruction, pickReviewer, sameSnapshot, snapshotWorktree } from '../src/review.js';
+import { diffInstruction, embeddedDiff, pickReviewer, sameSnapshot, snapshotWorktree } from '../src/review.js';
 import { loadRouting, resolveRoute } from '../src/routing.js';
 import { mcpAttachable } from '../src/mcp.js';
 import { useTempResources } from './helpers.js';
@@ -154,5 +154,18 @@ describe('adversarial review helpers', () => {
     expect(instruction).toContain('git diff main...HEAD');
     expect(instruction).toContain('git log main..HEAD --oneline');
     expect(instruction.endsWith('\n\n')).toBe(true);
+  });
+
+  it('gives a tool-less reviewer a truthful no-diff message (not an unrunnable git command) when git fails', () => {
+    // codeant PR #138: when git fails (bad ref / not a repo) embeddedDiff must NOT fall back to the
+    // "run `git diff`" instruction for a tool-less HTTP reviewer that cannot execute it.
+    const cwd = tempDir(); // not a git repo → embeddedDiff's git calls throw → catch-block fallback
+    const toolless = embeddedDiff(cwd, 'main', undefined, false);
+    expect(toolless).not.toBe(diffInstruction('main'));
+    expect(toolless).not.toContain('run `git diff');
+    expect(toolless).toContain('cannot see the changes');
+    expect(toolless.endsWith('\n\n')).toBe(true);
+    // the file-tool variant (claude read-only) is unchanged — it keeps the run-it-yourself instruction
+    expect(embeddedDiff(cwd, 'main', undefined, true)).toBe(diffInstruction('main'));
   });
 });

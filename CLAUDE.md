@@ -40,6 +40,7 @@ Workflows, gate, and deterministic review: [docs/CI.md](docs/CI.md)
 ## Usage tap & window keeper
 
 Tap and keeper facts live in the dashboard repo: `/Users/mayatobi/Developer/heddle-dashboard/docs/USAGE_TAP.md`
+Fleet rotation policy (3-loaded/1-resting, Maya-ratified via HED-485 #123): workspace repo `.claude/rules/fleet-rotation.md`
 
 ## Session lifecycle
 
