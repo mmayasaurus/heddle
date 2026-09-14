@@ -390,6 +390,12 @@ export function asJudgeResult(value: unknown, round: CorpusRound): JudgeResult {
     }
     return finding as CandidateFinding;
   });
+  // Reject duplicate indices — a repeated idx would double-count TP/FP/NOVEL for a single candidate finding.
+  const seen = new Set<number>();
+  for (const finding of findings) {
+    if (seen.has(finding.idx)) throw new Error(`judge-${round.dispatchId}: duplicate candidate finding index ${finding.idx}`);
+    seen.add(finding.idx);
+  }
   return { roundId: data.roundId!, candidateFindings: findings, acceptedIncumbentMatchedCount: data.acceptedIncumbentMatchedCount! };
 }
 

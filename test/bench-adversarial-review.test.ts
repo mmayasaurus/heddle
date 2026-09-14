@@ -70,6 +70,11 @@ describe('adversarial review bench harness', () => {
     expect(asJudgeResult(good, round()).candidateFindings).toHaveLength(1);
     const badIdx = { roundId: 41, candidateFindings: [{ idx: 0, class: 'NOVEL', matchesAcceptedIncumbent: false, rationale: 'x' }], acceptedIncumbentMatchedCount: 0 };
     expect(() => asJudgeResult(badIdx, round())).toThrow(/finding 1 is invalid/);
+    const dupIdx = { roundId: 41, candidateFindings: [
+      { idx: 1, class: 'NOVEL', matchesAcceptedIncumbent: false, rationale: 'a' },
+      { idx: 1, class: 'FP', matchesAcceptedIncumbent: false, rationale: 'b' },
+    ], acceptedIncumbentMatchedCount: 0 };
+    expect(() => asJudgeResult(dupIdx, round())).toThrow(/duplicate candidate finding index/);
   });
 
   it('reconstructs the pre-fix diff at the last commit before the review started', () => {
