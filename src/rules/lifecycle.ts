@@ -26,7 +26,7 @@ function flag(argv: string[], name: string): string | undefined {
   return index < 0 ? undefined : argv[index + 1];
 }
 
-function resolveRulesRoot(argv: string[]): string {
+export function resolveRulesRoot(argv: string[]): string {
   return flag(argv, '--rules') ?? process.env.HEDDLE_RULES_DIR ?? (process.env.CLAUDE_PROJECT_DIR
     ? `${process.env.CLAUDE_PROJECT_DIR}/rules`
     : fileURLToPath(new URL('../../rules', import.meta.url)));

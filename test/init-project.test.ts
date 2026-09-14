@@ -3,8 +3,11 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSy
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { applyInstall, DISCIPLINE_WIRING, planInstall, redactReport } from '../src/init-project.js';
+import { parse as parseYaml } from 'yaml';
+import { applyInstall, DISCIPLINE_WIRING, planInstall, redactReport, renderHookRulesSteps } from '../src/init-project.js';
+import { loadRules } from '../src/rules/load.js';
 import { useTempResources } from './helpers.js';
+import { runCli } from './helpers/cli.js';
 
 const WIRED_HOOKS = [
   'agent-identity.py', 'agent-preflight.py', 'remind-owned-prs.py',
@@ -33,6 +36,14 @@ function sha(path: string): string {
 function entryShape(event: string, matcher: string, entry: any) {
   const match = entry.command.match(/python3 "([^"]+)\/hooks\/([^"]+)"(?: ([^;]+))?;/);
   return { event, matcher, hook: match?.[2], ...(match?.[3] ? { args: match[3] } : {}), timeout: entry.timeout };
+}
+
+function seedHookCatalog(root: string, id = 'synthetic-install-rule'): { id: string; fixture: string } {
+  const fixture = `${JSON.stringify({ name: 'synthetic match', payload: { hook_event_name: 'PreToolUse', tool_name: 'SyntheticShell' }, expect: { outcome: 'nudge' } })}\n`;
+  mkdirSync(join(root, 'tests'), { recursive: true });
+  writeFileSync(join(root, `${id}.yaml`), `# preserved synthetic comment\nid: ${id}\nevent: PreToolUse\nmatch:\n  tool: SyntheticShell\naction: block\nenforce: false\nsubagent_aware: false\nmessage: synthetic installer guidance\nfail_open: true\n`);
+  writeFileSync(join(root, 'tests', `${id}.jsonl`), fixture);
+  return { id, fixture };
 }
 
 describe('init-project', () => {
@@ -101,6 +112,55 @@ describe('init-project', () => {
     expect(existsSync(join(opts.homeDir, '.heddle'))).toBe(false);
     expect(plan.steps.some((step) => step.action === 'would-create')).toBe(true);
   });
+
+  it('plans and applies selected hook rules as create-only catalog copies', () => {
+    const opts = options(tempDir());
+    const catalog = tempDir();
+    const { id, fixture: catalogFixture } = seedHookCatalog(catalog);
+    const steps = renderHookRulesSteps(opts.dir, [{ id, enforce: true }], catalog, false);
+    expect(steps.map((step) => step.path)).toEqual([join(opts.dir, 'rules', `${id}.yaml`), join(opts.dir, 'rules', 'tests', `${id}.jsonl`)]);
+    expect(steps.map((step) => step.action)).toEqual(['create', 'create']);
+    expect(steps[0]?.content).toContain('# preserved synthetic comment');
+    expect(parseYaml(steps[0]?.content ?? '')).toMatchObject({ enforce: true });
+    expect(steps[1]?.content).toBe(catalogFixture);
+
+    const plan = planInstall({ ...opts, hookRules: [{ id, enforce: true }], hookCatalogRoot: catalog });
+    applyInstall(plan);
+    expect(readFileSync(join(opts.dir, 'rules', 'tests', `${id}.jsonl`), 'utf8')).toBe(catalogFixture);
+    expect(loadRules(join(opts.dir, 'rules')).find((rule) => rule.id === id)).toMatchObject({ enforce: true });
+    expect(renderHookRulesSteps(opts.dir, [{ id, enforce: false }], catalog, false).map((step) => step.action)).toEqual(['skip', 'skip']);
+  });
+
+  it('keeps hook-rule selection empty and dry-run hook seeds non-mutating', () => {
+    const opts = options(tempDir());
+    const catalog = tempDir();
+    const { id } = seedHookCatalog(catalog);
+    expect(renderHookRulesSteps(opts.dir, [], catalog, false)).toEqual([]);
+    const steps = renderHookRulesSteps(opts.dir, [{ id, enforce: false }], catalog, true);
+    expect(steps.map((step) => step.action)).toEqual(['would-create', 'would-create']);
+    expect(existsSync(join(opts.dir, 'rules', `${id}.yaml`))).toBe(false);
+  });
+
+  it('selects and enforces catalog ids from init-project flags, rejecting unknown ids', async () => {
+    const base = tempDir();
+    const { canonical, target } = fixture(base);
+    const catalog = tempDir();
+    const first = seedHookCatalog(catalog, 'synthetic-first').id;
+    const second = seedHookCatalog(catalog, 'synthetic-second').id;
+    const args = ['init-project', target, '--canonical', canonical, '--name', 'toy', '--team', 'NEW', '--agents', 'Z', '--room', '#toy', '--launcher', 'resume-toy.sh', '--hook-rules', `${first},${second}`, '--enforce', second, '--json'];
+    const result = await runCli(args, { home: join(base, 'cli-home'), env: { HEDDLE_RULES_DIR: catalog } });
+
+    expect(result).toMatchObject({ code: 0, stderr: '' });
+    expect(loadRules(join(target, 'rules')).map((rule) => ({ id: rule.id, enforce: rule.enforce }))).toEqual(expect.arrayContaining([
+      { id: first, enforce: false },
+      { id: second, enforce: true },
+    ]));
+    const unknownArgs = [...args];
+    unknownArgs[unknownArgs.indexOf('--hook-rules') + 1] = 'synthetic-missing';
+    const unknown = await runCli(unknownArgs, { home: join(base, 'cli-unknown-home'), env: { HEDDLE_RULES_DIR: catalog } });
+    expect(unknown.code).toBe(1);
+    expect(JSON.parse(unknown.stdout)).toMatchObject({ error: "unknown hook rule 'synthetic-missing'" });
+  }, 30_000);
 
   it('renders discipline wiring in the first matching group while preserving user hooks and groups', () => {
     const opts = options(tempDir());

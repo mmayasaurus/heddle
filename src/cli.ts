@@ -22,7 +22,8 @@ import { censusClaudeResidents } from './residents.js';
 import { DEFAULT_USAGE_DIR, readProviderCaps } from './usage.js';
 import { buildOauthUsageSidecar, pollClaudeUsage } from './claude-usage.js';
 import { formatUsageRemaining, readUsageRemaining } from './usage-remaining.js';
-import { runRuleCli } from './rules/lifecycle.js';
+import { resolveRulesRoot, runRuleCli } from './rules/lifecycle.js';
+import { loadRules } from './rules/load.js';
 import { DOCTOR_PROVIDERS, formatDoctorReport, runDoctor } from './doctor.js';
 import { readOperatorMode, writeOperatorMode, isOperatorMode, OPERATOR_MODES } from './operator-mode.js';
 import { runPrOwn } from './pr-own.js';
@@ -34,6 +35,7 @@ import { diffFleetHooks, diffFleetLaunchers, installFleetHooks, installFleetLaun
 import { NativeCliRunner, type NativeProvider } from './wizard/cli-runner.js';
 import { ReadlinePrompter, ScriptedPrompter, type Prompter } from './wizard/prompt.js';
 import { runAccountsAdd } from './wizard/accounts-add.js';
+import { runHooksChoose, type HookRuleSelection } from './wizard/hooks-choose.js';
 import { releaseStandalone } from './release/standalone.js';
 import { assembleTop, renderTopText } from './top.js';
 
@@ -91,7 +93,7 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
   heddle mode [desktop|mobile|away] [--note "<t>"] [--json]   operator mode (HED-336): no arg prints
                                  the current mode; a mode word sets it (~/.heddle/operator-mode.json —
                                  the pocket console and desktop app write the same file)
-  heddle init-project <dir> [--canonical <path>] [--name <n>] [--team <KEY>] [--agents A,B,…] [--room <#room>] [--launcher <script>] [--enforce-memtrace] [--dry-run] [--json] [--show-content]
+  heddle init-project <dir> [--canonical <path>] [--name <n>] [--team <KEY>] [--agents A,B,…] [--room <#room>] [--launcher <script>] [--hook-rules <a,b>] [--enforce <a,b>] [--answers <file>] [--enforce-memtrace] [--dry-run] [--json] [--show-content]
   heddle whoami [--json]         this process's bound identity (HEDDLE_AGENT / FLEET_AGENT / .fleet-agent) + worker context
   heddle doctor [--json] [--provider <p>]   verify harnesses/accounts/config; --provider runs only that provider's checks plus global config checks (exit 1 on any fail)
   heddle release --standalone <outDir> [--source-ref <git ref>] [--init-git] [--verify] [--json]
@@ -123,6 +125,13 @@ function arg(flag: string): string | undefined {
 }
 function has(flag: string): boolean {
   return process.argv.includes(flag);
+}
+function commaIds(flag: string): string[] {
+  const value = arg(flag);
+  if (!value || value.startsWith('--')) throw new Error(`${flag} needs a comma-separated list of rule ids`);
+  const ids = value.split(',').map((id) => id.trim()).filter(Boolean);
+  if (!ids.length || new Set(ids).size !== ids.length) throw new Error(`${flag} must name one or more unique rule ids`);
+  return ids;
 }
 function out(json: boolean, obj: unknown, text: () => string): void {
   console.log(json ? JSON.stringify(obj, null, 2) : text());
@@ -978,10 +987,39 @@ try {
     case 'init-project': {
       const dir = process.argv[3];
       if (!dir || dir.startsWith('--')) {
-        console.error('usage: heddle init-project <dir> [--canonical <path>] [--name <n>] [--team <KEY>] [--agents A,B,…] [--room <#room>] [--launcher <script>] [--enforce-memtrace] [--dry-run] [--json] [--show-content]');
+        console.error('usage: heddle init-project <dir> [--canonical <path>] [--name <n>] [--team <KEY>] [--agents A,B,…] [--room <#room>] [--launcher <script>] [--hook-rules <a,b>] [--enforce <a,b>] [--answers <file>] [--enforce-memtrace] [--dry-run] [--json] [--show-content]');
         process.exit(2);
       }
-      const plan = planInstall({ dir, canonical: arg('--canonical'), name: arg('--name'), team: arg('--team'), agents: arg('--agents'), room: arg('--room'), launcher: arg('--launcher'), enforceMemtrace: has('--enforce-memtrace'), dryRun: has('--dry-run'), showContent: has('--show-content') });
+      const catalogRoot = resolveRulesRoot([]);
+      let hookRules: HookRuleSelection[] | undefined;
+      if (has('--hook-rules')) {
+        const requested = commaIds('--hook-rules');
+        const enforced = has('--enforce') ? commaIds('--enforce') : [];
+        const catalog = new Map(loadRules(catalogRoot).map((rule) => [rule.id, rule]));
+        for (const id of [...requested, ...enforced]) if (!catalog.has(id)) throw new Error(`unknown hook rule '${id}'`);
+        if (enforced.some((id) => !requested.includes(id))) throw new Error('--enforce may name only selected hook rules');
+        hookRules = requested.map((id) => ({ id, enforce: enforced.includes(id) }));
+      } else {
+        if (has('--enforce')) throw new Error('--enforce requires --hook-rules');
+        const answersPath = arg('--answers');
+        if (has('--answers') && (answersPath === undefined || answersPath.startsWith('--'))) throw new Error('--answers needs a path to a JSON answer file');
+        if (answersPath !== undefined || process.stdin.isTTY) {
+          let prompter: Prompter;
+          if (answersPath !== undefined) {
+            const parsed: unknown = JSON.parse(readFileSync(answersPath, 'utf8'));
+            if (!Array.isArray(parsed)) throw new Error(`--answers file must contain a JSON array of answers (got ${parsed === null ? 'null' : typeof parsed})`);
+            prompter = new ScriptedPrompter(parsed);
+          } else {
+            prompter = new ReadlinePrompter();
+          }
+          try {
+            hookRules = (await runHooksChoose({ catalogRoot }, { prompter, report: (line) => process.stderr.write(`${line}\n`) })).selected;
+          } finally {
+            prompter.close();
+          }
+        }
+      }
+      const plan = planInstall({ dir, canonical: arg('--canonical'), name: arg('--name'), team: arg('--team'), agents: arg('--agents'), room: arg('--room'), launcher: arg('--launcher'), hookRules, hookCatalogRoot: catalogRoot, enforceMemtrace: has('--enforce-memtrace'), dryRun: has('--dry-run'), showContent: has('--show-content') });
       const report = applyInstall(plan, has('--dry-run'));
       const output = redactReport(report, has('--show-content'), plan.options.homeDir);
       out(json, output, () => [...report.steps.map((step) => `${step.action} ${step.step}: ${step.path}${step.reason ? ` (${step.reason})` : ''}`), ...report.humanSteps.map((step) => `- ${step}`)].join('\n'));
