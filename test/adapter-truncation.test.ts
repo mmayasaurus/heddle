@@ -30,6 +30,10 @@ describe('subprocess adapter truncation handling', () => {
 
     expect(result.ok).toBe(false);
     expect(result.error).toContain('claude produced no output for 456ms (idle watchdog SIGKILL)');
+    // Wiring: idleMs is run()'s 8th arg (index 7); maxStreamBytes (index 6) stays default (undefined).
+    // Guards against a regression that slotted idleMs into maxStreamBytes (7th arg) or dropped it.
+    expect(mockedRun.mock.lastCall![6]).toBeUndefined();
+    expect(mockedRun.mock.lastCall![7]).toBe(456);
   });
 
   it.each([

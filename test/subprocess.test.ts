@@ -190,10 +190,47 @@ describe('subprocess run() — the shared adapter runner', () => {
     }
   });
 
+  it.skipIf(process.platform === 'win32')('does not idle-kill or misreport a natural fast exit while the idle watchdog is armed', async () => {
+    const pidfile = join(tempDir(), 'idle-fastexit-grandchild.pid');
+    // Same fast-exit + detached-grandchild fixture (delayed 'close' → drain path), but with the idle
+    // watchdog ARMED (idleTimeoutMs=400 < the ~exit+GRACE_MS drain window, so a SURVIVING idle timer
+    // would fire during the drain). The child writes a chunk (arming/resetting idle), spawns the
+    // pipe-holding grandchild, then exits 0 immediately. run() must settle with the REAL exit status:
+    // the natural 'exit' cancels the now-moot idle timer, so no late idle fire can flip idleTimedOut.
+    const TIMEOUT_MS = 15_000;
+    const parent = [
+      "const { spawn } = require('node:child_process');",
+      "const fs = require('node:fs');",
+      "process.stdout.write('go');",
+      "const gc = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], { detached: true, stdio: 'inherit' });",
+      `fs.writeFileSync(${JSON.stringify(pidfile)}, String(gc.pid));`,
+      'process.exit(0);',
+    ].join(' ');
+    try {
+      const started = Date.now();
+      const r = await run(NODE, ['-e', parent], process.cwd(), TIMEOUT_MS, undefined, undefined, undefined, 400);
+      const elapsed = Date.now() - started;
+      expect(r.exitCode).toBe(0);
+      expect(r.idleTimedOut).toBe(false);
+      expect(r.timedOut).toBe(false);
+      expect(elapsed).toBeLessThan(TIMEOUT_MS);
+    } finally {
+      try {
+        if (existsSync(pidfile)) process.kill(Number(readFileSync(pidfile, 'utf8')), 'SIGKILL');
+      } catch {
+        // The grandchild has already exited.
+      }
+    }
+  });
+
   // NOTE: the timer's exit-at-deadline guard (child already exited when the timer fires → don't flag
   // timedOut) is a sub-millisecond race window that can't be hit deterministically from a unit test —
   // a tight timeout just makes the test itself flaky under load. The guard is exercised in spirit by
   // the clean-exit case above (fast exit → timedOut:false) and reasoned inline in subprocess.ts.
+  // The idle watchdog's analogous exit race (a late idle fire group-killing an already-dead child, or
+  // flipping idleTimedOut on a natural exit) is likewise not deterministically unit-testable; it is
+  // guarded by onIdle's `childExited` / `child.exitCode` / `child.signalCode` checks + the 'exit'
+  // handler clearing idleTimer, and exercised in spirit by the armed-idle fast-exit case above.
 
   it('settles once with a spawn error for a nonexistent binary (exitCode null, stderr names it)', async () => {
     const r = await run('heddle-no-such-binary-xyz', [], process.cwd(), 10_000);

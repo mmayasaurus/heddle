@@ -100,6 +100,10 @@ export function run(bin: string, args: string[], cwd: string, timeoutMs: number,
     let graceTimer: NodeJS.Timeout | undefined;
     let drainTimer: NodeJS.Timeout | undefined;
     let idleTimer: NodeJS.Timeout | undefined;
+    let childExited = false;
+    // Idle is enabled only when the hard deadline sits beyond a full idle window + its grace, so an idle
+    // kill can run its own grace net without racing the deadline. (Idle could fire for any timeoutMs >
+    // idleTimeoutMs; the + GRACE_MS margin only keeps the two kill paths from overlapping.)
     const idleEnabled = idleTimeoutMs !== undefined && idleTimeoutMs > 0 && timeoutMs > idleTimeoutMs + GRACE_MS;
     const finish = (exitCode: number | null, timedOut: boolean, idleTimedOut = false) => {
       if (settled) return;
@@ -124,7 +128,11 @@ export function run(bin: string, args: string[], cwd: string, timeoutMs: number,
       }, GRACE_MS);
     };
     const onIdle = () => {
-      if (settled || killReason !== null) return;
+      // Never idle-kill a child that already died on its own: a late idle fire would group-SIGKILL it
+      // (killing grandchildren the drain path spares) and could misreport a natural exit as idleTimedOut
+      // with a null exitCode. `childExited` catches it once 'exit' ran; exitCode/signalCode catch the
+      // sub-tick race where the OS-level exit precedes the 'exit' event.
+      if (settled || killReason !== null || childExited || child.exitCode !== null || child.signalCode !== null) return;
       killReason = 'idle';
       clearTimeout(timer);
       try {
@@ -153,7 +161,7 @@ export function run(bin: string, args: string[], cwd: string, timeoutMs: number,
       stdout = capped.acc;
       stdoutBytes = capped.accBytes;
       stdoutTruncated ||= capped.hit;
-      if (idleEnabled && killReason === null && !settled) {
+      if (idleEnabled && killReason === null && !settled && !childExited) {
         clearTimeout(idleTimer);
         idleTimer = setTimeout(onIdle, idleTimeoutMs!);
       }
@@ -175,7 +183,12 @@ export function run(bin: string, args: string[], cwd: string, timeoutMs: number,
       // drain; if 'close' has not settled by then, settle with the ACTUAL exit status rather than
       // waiting out the whole timeout and mislabeling a finished run as timedOut.
       if (killReason !== null || settled) return;
+      // The child is dead, so the idle watchdog is moot. Cancel it and mark exited so a post-'exit'
+      // buffered-stdout chunk cannot re-arm it — otherwise a late idle fire could group-kill the dead
+      // child or override the real exit status during this drain window.
+      childExited = true;
       clearTimeout(timer);
+      if (idleTimer !== undefined) clearTimeout(idleTimer);
       drainTimer = setTimeout(() => {
         if (settled) return;
         child.stdout.destroy();
