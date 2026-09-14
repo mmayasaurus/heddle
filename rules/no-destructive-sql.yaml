@@ -7,6 +7,9 @@ match:
 action: block
 enforce: false
 subagent_aware: true
-message: 'Destructive DDL — DROP TABLE / DATABASE / SCHEMA, or TRUNCATE TABLE — irreversibly deletes data and structure. Confirm you have a current backup and are pointed at the intended (non-production) database before running.'
+message: 'Destructive DDL — DROP TABLE / DATABASE / SCHEMA, or TRUNCATE TABLE —
+  irreversibly deletes data and structure. Confirm you have a current backup and
+  are pointed at the intended (non-production) database before running.'
 fail_open: true
 provenance: HED-535
+since: 2026-09-14

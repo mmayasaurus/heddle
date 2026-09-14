@@ -7,6 +7,11 @@ match:
 action: block
 enforce: false
 subagent_aware: true
-message: 'This rewrites or force-updates git history — reset --hard, force-push (including --force-with-lease), or branch -D — and can discard commits or overwrite a shared branch irreversibly. Confirm the commits are truly disposable and that no one else holds the branch. Force-pushing a shared branch is banned by default.'
+message: 'This rewrites or force-updates git history — reset --hard, force-push
+  (including --force-with-lease), or branch -D — and can discard commits or
+  overwrite a shared branch irreversibly. Confirm the commits are truly
+  disposable and that no one else holds the branch. Force-pushing a shared
+  branch is banned by default.'
 fail_open: true
 provenance: HED-535
+since: 2026-09-14

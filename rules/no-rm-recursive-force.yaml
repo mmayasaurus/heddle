@@ -1,0 +1,17 @@
+id: no-rm-recursive-force
+event: PreToolUse
+match:
+  tool: Bash
+  input:
+    command: '(?<!git
+      )\brm\b[^\n;|&]*?(?:-[A-Za-z]*(?:[rR][A-Za-z]*f|f[A-Za-z]*[rR])|(?:-[A-Za-z]*[rR]\b|--recursive)[^\n;|&]*?(?:-[A-Za-z]*f\b|--force)|(?:-[A-Za-z]*f\b|--force)[^\n;|&]*?(?:-[A-Za-z]*[rR]\b|--recursive))'
+action: block
+enforce: false
+subagent_aware: true
+message: 'Recursive + forced rm permanently destroys files with no undo. Confirm
+  every target path is truly disposable (a regenerable build, cache, or scratch
+  dir) before running — never a source tree, config, or anything unversioned.
+  Per the never-delete principle: if in doubt, do not.'
+fail_open: true
+provenance: HED-535
+since: 2026-09-14

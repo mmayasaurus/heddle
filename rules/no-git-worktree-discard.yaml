@@ -7,6 +7,10 @@ match:
 action: block
 enforce: false
 subagent_aware: true
-message: 'This discards uncommitted working-tree changes — git checkout -- / git checkout . / git clean -f — with no undo. Anything not committed is lost. If there is any chance the work matters, commit it to a wip/ branch first. (git clean -n previews without deleting.)'
+message: 'This discards uncommitted working-tree changes — git checkout -- / git
+  checkout . / git clean -f — with no undo. Anything not committed is lost. If
+  there is any chance the work matters, commit it to a wip/ branch first. (git
+  clean -n previews without deleting.)'
 fail_open: true
 provenance: HED-535
+since: 2026-09-14
