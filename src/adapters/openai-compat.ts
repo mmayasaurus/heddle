@@ -58,9 +58,18 @@ export const PROVIDER_REGISTRY: Record<'groq' | 'cerebras' | 'openrouter' | 'glm
   },
 };
 
-/** True for in-process HTTP providers (no filesystem/shell) — packs+diff must be embedded, not materialized. */
+/** True for the static OpenAI-compat registry providers (groq / cerebras / openrouter / glm). */
 export function isOpenAICompatProvider(provider: string): provider is 'groq' | 'cerebras' | 'openrouter' | 'glm' {
   return Object.prototype.hasOwnProperty.call(PROVIDER_REGISTRY, provider);
+}
+
+/**
+ * True for every in-process HTTP provider (no filesystem/shell): the OpenAI-compat registry plus the
+ * local LM Studio adapter. The dispatcher must EMBED packs + diff for these (they cannot run git or read
+ * a materialized AGENTS.md), so this — not `isOpenAICompatProvider` — is the correct `isHttp` test.
+ */
+export function isInProcessHttpProvider(provider: string): boolean {
+  return isOpenAICompatProvider(provider) || provider === 'local';
 }
 
 export interface ChatResponse {

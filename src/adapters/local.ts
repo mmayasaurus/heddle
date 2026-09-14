@@ -133,6 +133,9 @@ function normalizeBaseUrl(baseUrl: string): string {
 }
 
 function readPressureLevel(): number {
+  // macOS-only signal; on any other platform there is no equivalent, so treat it as "no pressure"
+  // (level 0) rather than spawning a missing/incompatible `sysctl`.
+  if (process.platform !== 'darwin') return 0;
   try {
     const stdout = execFileSync('sysctl', ['-n', 'kern.memorystatus_vm_pressure_level'], {
       encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
@@ -160,16 +163,26 @@ function isStructuredOutputValid(output: string, responseSchema: ResponseSchema)
   }
 }
 
+// A pragmatic JSON-Schema subset validator — enough to gate structured output from a local model. It
+// covers combinators (allOf/anyOf/oneOf/not), const/enum, type, object (required/properties/
+// additionalProperties:false), and the common string/number/array constraints. Keywords it does not model
+// (e.g. $ref, dependentRequired, patternProperties) are not enforced, so it can accept output a fuller
+// validator would reject — but it never rejects output that conforms.
 function matchesJsonSchema(value: unknown, schema: Record<string, unknown>): boolean {
   if (Array.isArray(schema.allOf) && !schema.allOf.every((entry) => isRecord(entry) && matchesJsonSchema(value, entry))) return false;
   if (Array.isArray(schema.anyOf) && !schema.anyOf.some((entry) => isRecord(entry) && matchesJsonSchema(value, entry))) return false;
   if (Array.isArray(schema.oneOf) && schema.oneOf.filter((entry) => isRecord(entry) && matchesJsonSchema(value, entry)).length !== 1) return false;
+  if (isRecord(schema.not) && matchesJsonSchema(value, schema.not)) return false;
   if (Object.hasOwn(schema, 'const') && value !== schema.const) return false;
   if (Array.isArray(schema.enum) && !schema.enum.some((entry) => value === entry)) return false;
 
   const types = Array.isArray(schema.type) ? schema.type : [schema.type];
   if (types[0] !== undefined && !types.some((type) => matchesType(value, type))) return false;
+
+  if (typeof value === 'string' && !matchesStringConstraints(value, schema)) return false;
+  if (typeof value === 'number' && !matchesNumberConstraints(value, schema)) return false;
   if (Array.isArray(value)) {
+    if (!matchesArrayConstraints(value, schema)) return false;
     const itemSchema = schema.items;
     return !isRecord(itemSchema) || value.every((entry) => matchesJsonSchema(entry, itemSchema));
   }
@@ -184,6 +197,31 @@ function matchesJsonSchema(value: unknown, schema: Record<string, unknown>): boo
   if (schema.additionalProperties === false && isRecord(schema.properties)) {
     return Object.keys(value).every((key) => Object.hasOwn(schema.properties!, key));
   }
+  return true;
+}
+
+function matchesStringConstraints(value: string, schema: Record<string, unknown>): boolean {
+  if (typeof schema.minLength === 'number' && value.length < schema.minLength) return false;
+  if (typeof schema.maxLength === 'number' && value.length > schema.maxLength) return false;
+  if (typeof schema.pattern === 'string') {
+    try { if (!new RegExp(schema.pattern).test(value)) return false; } catch { /* an unparseable pattern is left unenforced */ }
+  }
+  return true;
+}
+
+function matchesNumberConstraints(value: number, schema: Record<string, unknown>): boolean {
+  if (typeof schema.minimum === 'number' && value < schema.minimum) return false;
+  if (typeof schema.maximum === 'number' && value > schema.maximum) return false;
+  if (typeof schema.exclusiveMinimum === 'number' && value <= schema.exclusiveMinimum) return false;
+  if (typeof schema.exclusiveMaximum === 'number' && value >= schema.exclusiveMaximum) return false;
+  if (typeof schema.multipleOf === 'number' && schema.multipleOf > 0 && !Number.isInteger(value / schema.multipleOf)) return false;
+  return true;
+}
+
+function matchesArrayConstraints(value: unknown[], schema: Record<string, unknown>): boolean {
+  if (typeof schema.minItems === 'number' && value.length < schema.minItems) return false;
+  if (typeof schema.maxItems === 'number' && value.length > schema.maxItems) return false;
+  if (schema.uniqueItems === true && new Set(value.map((entry) => JSON.stringify(entry))).size !== value.length) return false;
   return true;
 }
 

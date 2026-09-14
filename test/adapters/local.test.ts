@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { defaultAdapterFor } from '../../src/dispatch.js';
 import { LocalAdapter } from '../../src/adapters/local.js';
+import { isInProcessHttpProvider } from '../../src/adapters/openai-compat.js';
 import { loadRouting } from '../../src/routing.js';
 
 const opts = { model: 'requested-model', cwd: '/tmp' };
@@ -113,5 +114,26 @@ describe('LocalAdapter', () => {
     expect(routing.providers.local).toMatchObject({ base_url: 'http://localhost:1234/v1' });
     expect(JSON.stringify(routing.laneDefaults)).not.toContain('"local"');
     expect(JSON.stringify(routing.taskClasses)).not.toContain('"local"');
+  });
+
+  it('is classified as an in-process HTTP provider so the dispatcher embeds packs+diff', () => {
+    expect(isInProcessHttpProvider('local')).toBe(true);
+    expect(isInProcessHttpProvider('glm')).toBe(true);
+    expect(isInProcessHttpProvider('codex')).toBe(false);
+  });
+
+  it('rejects structured output that violates a declared string constraint (minLength)', async () => {
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(modelsResponse([{ id: 'loaded-model' }]))
+      .mockResolvedValueOnce(completionResponse('{"answer":"hi"}'))
+      .mockResolvedValueOnce(completionResponse('{"answer":"no"}'));
+    const responseSchema = {
+      name: 'answer',
+      schema: { type: 'object', properties: { answer: { type: 'string', minLength: 5 } }, required: ['answer'] },
+    };
+    await expect(adapter(fetchImpl).dispatch('hello', { ...opts, responseSchema })).resolves.toMatchObject({
+      ok: false,
+      error: 'local: structured response was not valid JSON/schema after retry',
+    });
   });
 });
