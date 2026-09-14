@@ -46,7 +46,7 @@ Drift includes permission mode differences as well as byte differences. When byt
 
 ## `launchers-diff` scope
 
-`launchers-diff` compares only the `.sh` files present in the canon directory (discovered dynamically, like the hook set's `.py` discovery — the canon directory is git-controlled, so additions arrive only via reviewed commits); installed extras are ignored. No launcher filename appears in shipped source: the ship-set scrub rejects tenant fragments, and dynamic discovery keeps `src/fleet.ts` name-free.
+`launchers-diff` compares only the `.sh` files present in the canon directory (discovered dynamically, like the hook set's `.py` discovery — the canon directory is git-controlled, so additions arrive only via reviewed commits); installed extras are ignored. Dynamic discovery keeps `src/fleet.ts` name-free and the test fixtures use neutral names; this document is the one shipped file that names the launchers — its catalog lines are carried by line-keyed entries in the public-scrub allowlist.
 
 ## Cutover is separate
 

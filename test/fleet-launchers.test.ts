@@ -100,6 +100,22 @@ describe('fleet launchers', () => {
     expect(readdirSync(paths.targetDir).filter((name) => /\.tmp$/.test(name))).toEqual([]);
   });
 
+  it('reports planned files honestly when a fresh dry run fails partway', () => {
+    const paths = fixture(tempDir());
+    mkdirSync(paths.targetDir, { recursive: true });
+    mkdirSync(join(paths.targetDir, 'launcher-charlie.sh'));
+    let error: unknown;
+    try {
+      installFleetLaunchers({ ...paths, dryRun: true });
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain(`target exists and is not a regular file: ${join(paths.targetDir, 'launcher-charlie.sh')}`);
+    expect((error as Error).message).toContain('files written this run: none (dry run — planned: launcher-alpha.sh, launcher-bravo.sh); unchanged: none');
+    expect(readdirSync(paths.targetDir).filter((name) => name !== 'launcher-charlie.sh')).toEqual([]);
+  });
+
   it('cleans the temp file when the atomic rename itself fails mid-install', () => {
     const paths = fixture(tempDir());
     renameFault.pathSuffix = 'launcher-bravo.sh';
