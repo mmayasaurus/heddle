@@ -74,9 +74,10 @@ Catalog only: do not fix these in the installed-copy phase. Canon bugs route ups
 - `resume-sessions-v2.sh:801, 812-815` defaults Heddle-fleet sessions to `~/Developer/heddle` and forces R–Z into that cwd; `resume-sessions-v2.sh:1051-1074` recreates missing session/worktree directories and uses the hardcoded inner repository for `git worktree add`.
 - `resume-sessions-v2.sh:819-821, 885-892` launches every resumed session from the session-derived or forced project cwd, so successful resume depends on those workspace paths existing and matching Claude's cwd-scoped session storage.
 - `resume-sessions-v2.sh:997-1046` requires macOS `osascript` automation for iTerm2 or Terminal.app and defaults unrecognized terminal environments to iTerm2.
-- The remaining project wrapper (its line 23) and `fleet-relaunch.sh:90` hardcode an absolute consumer-pack path in `HEDDLE_PACKS`.
-- `resume-sessions-gpt.sh:23-27` requires the local `claudex` proxy harness/default store and fixes the numbered-fleet launch policy around it.
+- The remaining project wrapper (its line 23) and `fleet-relaunch.sh:115` hardcode an absolute consumer-pack path in `HEDDLE_PACKS`.
+- `resume-sessions-gpt.sh:23-28` requires the local `claudex` proxy harness/default store and fixes the numbered-fleet launch policy around it.
+- `fleet-relaunch.sh:41-53` reads and validates `FLEET_MAX` only for a numbered agent selector; letter selectors deliberately avoid that environment coupling, while numbered selectors additionally inherit the launcher's three-digit discovery ceiling.
 
 Line numbers above are current as of the launcher re-vendor; anchor by content when they drift.
 
-The wrapper `cd` calls (`resume-sessions-hed.sh:17`, `resume-sessions-gpt.sh:13`, the remaining wrapper's line 16, and `fleet-relaunch.sh:25`) intentionally resolve their shared files relative to the installed launcher directory. They require the five-file set to be installed together, but do not themselves assume the original workspace checkout path.
+The wrapper `cd` calls (`resume-sessions-hed.sh:17`, `resume-sessions-gpt.sh:13`, the remaining wrapper's line 16, and `fleet-relaunch.sh:28`) intentionally resolve their shared files relative to the installed launcher directory. They require the five-file set to be installed together, but do not themselves assume the original workspace checkout path.

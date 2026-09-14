@@ -6,14 +6,17 @@
 # so the invocation contract lives in exactly one place).
 #
 #   bash fleet-relaunch.sh S --account acct3            # relaunch Agent S pinned to acct3
-#   bash fleet-relaunch.sh Q                            # relaunch Agent Q on the default account
+#   bash fleet-relaunch.sh Q                            # relaunch Agent Q (no pin — the wrapper's ACCOUNT_MODE picks the account)
 #   bash fleet-relaunch.sh T --account acct2 --model claude-opus-4-8 --effort high
 #   bash fleet-relaunch.sh R --model claude-fable-5 --list  # inspect one-agent composition; opens nothing
 #
 # Semantics (all inherited from resume-sessions-v2.sh, the single engine):
 #   * Resumes the agent's EXISTING conversation (same --resume id) in a fresh iTerm tab with
 #     the same per-agent env (HEDDLE_AGENT, comms push + channels flag, LIN_TEAM via the
-#     letter's fleet), differing only in CLAUDE_CONFIG_DIR when --account is given.
+#     letter's fleet). The account (CLAUDE_CONFIG_DIR) is chosen by the owning wrapper's
+#     ACCOUNT_MODE when no --account is given (HED: spread even-split, resume-sessions-hed.sh
+#     :20-24; SPI: picker), so a relaunch WITHOUT --account can land the agent on a different
+#     account than its home — pass --account to pin a specific one.
 #   * --account preflights via heddle-account-share.sh registry checks (refuses unregistered/
 #     unshared/logged-out dirs) — the same guarantees as a full-fleet launch.
 #   * Does NOT kill the agent's old process/tab. The caller (rotator supervisor, or a human)
@@ -24,11 +27,33 @@
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
-usage() { sed -n '3,20p' "${BASH_SOURCE[0]}"; exit 2; }
+usage() { sed -n '3,26p' "${BASH_SOURCE[0]}"; exit 2; }
 [ $# -ge 1 ] || usage
 LETTER=$(printf '%s' "$1" | tr '[:lower:]' '[:upper:]'); shift
-if ! [[ "$LETTER" =~ ^([A-Z]|[0-9]+)$ ]]; then
-  echo "fleet-relaunch: first arg must be an agent letter (A-Z) or number, got '$LETTER'" >&2; exit 2
+# Validate the agent selector at parse time so a bad one is an EARLY clear reject, not a late
+# "no matching session" after routing. Numbered agents mirror resume-sessions-v2.sh discovery:
+# ~L674 caps a label at 1..3 chars, and ~L680-683 keeps only label == str(int(label)) with
+# 1 <= n <= FLEET_MAX (no 0, no leading zeros). So the effective ceiling is min(FLEET_MAX, 999) and a
+# >3-digit selector is undiscoverable. FLEET_MAX is consulted ONLY in the numbered branch (v2 never
+# parses ambient FLEET_MAX for letter fleets).
+if [[ "$LETTER" =~ ^[A-Z]$ ]]; then
+  :   # single agent letter A-Z — routed to the SPI/HED wrapper below
+elif [[ "$LETTER" =~ ^[1-9][0-9]*$ ]]; then
+  # Length cap first (discovery-independent of FLEET_MAX): v2 (~L674) ignores any label >3 chars, so a
+  # >3-digit selector would pass here only to be dropped at discovery — the late failure this guards against.
+  if [ "${#LETTER}" -gt 3 ]; then
+    echo "fleet-relaunch: numbered agent must be at most 3 digits — resume-sessions-v2.sh discovery ignores longer labels, got '$LETTER'" >&2; exit 2
+  fi
+  fm="${FLEET_MAX:-6}"   # numbered (claudex) fleet is 1..FLEET_MAX; resume-sessions-gpt.sh uses the same ${FLEET_MAX:-6}
+  [[ "$fm" =~ ^[1-9][0-9]*$ ]] || { echo "fleet-relaunch: FLEET_MAX must be a positive integer (got '$fm')" >&2; exit 2; }
+  # Compare only when FLEET_MAX is itself <=3 digits: if it is >=1000, every <=3-digit selector (<=999)
+  # is in range — matching discovery's arbitrary-precision int — and skipping avoids a bash-int overflow
+  # on a huge FLEET_MAX. Both operands are then <=999, so this -le can never overflow or error.
+  if [ "${#fm}" -le 3 ]; then
+    [ "$LETTER" -le "$fm" ] || { echo "fleet-relaunch: numbered agent must be 1..$fm (the claudex fleet), got '$LETTER'" >&2; exit 2; }
+  fi
+else
+  echo "fleet-relaunch: first arg must be an agent letter (A-Z) or a numbered agent 1..${FLEET_MAX:-6} (claudex), got '$LETTER'" >&2; exit 2
 fi
 
 ACCOUNT=""; MODEL=""; EFFORT=""; LIST_MODE=""
