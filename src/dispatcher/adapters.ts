@@ -3,6 +3,7 @@ import { CodexAdapter } from '../adapters/codex.js';
 import { CursorAdapter } from '../adapters/cursor.js';
 import { ClaudeAdapter } from '../adapters/claude.js';
 import { OpenAICompatAdapter } from '../adapters/openai-compat.js';
+import { LocalAdapter } from '../adapters/local.js';
 import type { WorkerAdapter } from '../types.js';
 
 export function defaultAdapterFor(provider: string): WorkerAdapter {
@@ -15,6 +16,7 @@ export function defaultAdapterFor(provider: string): WorkerAdapter {
     case 'cerebras': return new OpenAICompatAdapter('cerebras');
     case 'openrouter': return new OpenAICompatAdapter('openrouter');
     case 'glm': return new OpenAICompatAdapter('glm');
+    case 'local': return new LocalAdapter();
     default:
       throw new Error(`no adapter for provider "${provider}"`);
   }
