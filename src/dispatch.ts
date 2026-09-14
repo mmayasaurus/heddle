@@ -245,14 +245,31 @@ export async function dispatch(
         // A CLAUDE capability-fit fallback needs its OWN headroom-based account pick, exactly like the
         // class fallback below (REV-3): without it ctx.account stays the primary's stale binding and the
         // runTarget billing gate would classify the WRONG account. forFable so a fable fallback is picked
-        // by Fable headroom. A non-empty registry with no addressable account must not inherit the
-        // caller's login — the capability fallback cannot run, so return the primary's capability refusal.
+        // by Fable headroom. pickClaudeAccount THROWS on a bad pin (unknown / logged-out / excluded), so
+        // wrap it exactly like the class fallback — a stale accountPin (never validated at plan time for a
+        // non-claude primary) must annotate the already-ledgered capability refusal, not throw bare out of
+        // dispatch. A non-empty registry with no addressable account must not inherit the caller's login
+        // either: annotate + return the primary's capability refusal rather than run the fallback blind.
         const fallbackAccounts = req.accounts ?? readClaudeAccounts();
-        ctx.claudeAccount = pickClaudeAccount(ctx.providerCaps?.claude, fallbackAccounts,
-          { pin: req.accountPin, routeAwayAtPct: capAwarePolicy(table).routeAwayAtPct, forFable: fallback.model === 'fable' }) ?? null;
-        ctx.account = ctx.claudeAccount?.account.id ?? null;
-        if (fallbackAccounts.length > 0 && ctx.claudeAccount === null) return primary;
-        if (ctx.claudeAccount) ctx.routeReason += `; ${ctx.claudeAccount.reason}`;
+        try {
+          ctx.claudeAccount = pickClaudeAccount(ctx.providerCaps?.claude, fallbackAccounts,
+            { pin: req.accountPin, routeAwayAtPct: capAwarePolicy(table).routeAwayAtPct, forFable: fallback.model === 'fable' }) ?? null;
+          ctx.account = ctx.claudeAccount?.account.id ?? null;
+          if (fallbackAccounts.length > 0 && ctx.claudeAccount === null) {
+            const note = `claude capability-fit fallback blocked: no dispatchable account — ${noDispatchableClaudeAccountReason(fallbackAccounts.length)}`;
+            const base = primary.error?.trim() ? primary.error : '';
+            primary.error = base ? `${base}; ${note}` : note;
+            try { ledger.annotateError(primary.ledgerId, note); } catch { /* best-effort: a ledger write failure must not abort or misclassify the dispatch */ }
+            return primary;
+          }
+          if (ctx.claudeAccount) ctx.routeReason += `; ${ctx.claudeAccount.reason}`;
+        } catch (err) {
+          const note = `claude capability-fit fallback blocked: ${err instanceof Error ? err.message : String(err)}`;
+          const base = primary.error?.trim() ? primary.error : '';
+          primary.error = base ? `${base}; ${note}` : note;
+          try { ledger.annotateError(primary.ledgerId, note); } catch { /* best-effort: a ledger write failure must not abort or misclassify the dispatch */ }
+          return primary;
+        }
       }
       return runTarget(fallback, req, ctx, route, `${route.provider}/${route.model} (capability-unenforceable)`);
     }

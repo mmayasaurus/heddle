@@ -13,9 +13,26 @@
  * meter, one JSON typo → fleet-wide dispatch outage) is FORBIDDEN.
  */
 import { loadAccountRegistry, type Account, type AccountRegistry } from '../accounts.js';
-import { accountCapState } from '../capaware.js';
+import { accountCapState, type CapState } from '../capaware.js';
 import type { ProviderCaps } from '../usage.js';
 import type { DispatchRefusal } from './types.js';
+
+/**
+ * Cap state for the BILLING decision (HED-395 REV-2): a STALE PROVIDER snapshot makes the reading
+ * unknowable for SPEND even if a per-account row looks fresh — a limits.json row shares the provider's
+ * capture, so once the provider mirror is stale it must not authorize paid overage. This is a
+ * BILLING-ONLY tightening (spend authorization is conservative-for-MONEY). It deliberately does NOT
+ * touch the shared accountCapState, which stays ROW-level so detectOverageAlert (HED-443,
+ * conservative-for-DANGER) and the usage display still surface a fresh per-account reading THROUGH a
+ * stale provider — the earlier "fix at the source (row.stale)" approach regressed exactly those two
+ * consumers (see usage-remaining.test.ts + capaware.ts detectOverageAlert). Notes: `caps` undefined →
+ * accountCapState already returns 'unknown'; a `source:'none'` provider already carries stale:true, so
+ * both collapse to 'unknown' consistently.
+ */
+function billingCapState(caps: ProviderCaps | undefined, accountId: string): CapState {
+  if (caps?.stale) return 'unknown';
+  return accountCapState(caps, accountId);
+}
 
 /** The one override lever the operator can flip; named verbatim in every REFUSE message so the
  *  operator can act from the message alone. */
@@ -84,7 +101,7 @@ function classify(account: Account, caps: ProviderCaps | undefined, permitPayPer
   // cap state is UNKNOWABLE (stale/missing/null caps row) — an unmetered spend we cannot rule out is
   // treated as real-money risk (F3). OPEN-BILLING ONLY.
   if (posture === 'open-billing') {
-    const capState = accountCapState(caps, account.id);
+    const capState = billingCapState(caps, account.id);
     if (capState === 'over') {
       return { refusal: {
         code: 'billing.open-billing-at-cap',
@@ -110,7 +127,7 @@ function classify(account: Account, caps: ProviderCaps | undefined, permitPayPer
         instruction: `No switch overrides exhausted prepaid credit; ${PAY_PER_TOKEN_PERMIT} is the exact pay-per-token permit lever and does not replenish this account. Add prepaid credit or select another account.`,
       } };
     }
-    const capState = accountCapState(caps, account.id);
+    const capState = billingCapState(caps, account.id);
     // A stale/missing caps row does NOT refuse here (unlike open-billing): the provider hard-stops at
     // exhaustion by construction, so refusing would be over-strict. Loud-degrade-to-allow (F6).
     if (capState === 'unknown') {

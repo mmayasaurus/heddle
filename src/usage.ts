@@ -219,16 +219,6 @@ export function readLimitsMirror(usageDir: string, nowS: number): CapsByProvider
   const out: CapsByProvider = {};
   for (const L of raw.limits as Record<string, unknown>[]) {
     if (!L || typeof L.provider !== 'string') continue;
-    // Per-provider freshness: the contract carries capturedAt + staleAfterSecs per provider — a
-    // provider snapshot can be past ITS OWN freshness window while the mirror file as a whole is fresh.
-    // Computed BEFORE the accounts map so the per-account rows inherit it too (HED-395 REV-2): an
-    // aged-out snapshot must mark its rows stale, not just the provider — otherwise a codex/cursor row
-    // keeps stale=false over a dead usedPercentage, accountCapState returns a false 'under', and an
-    // open-billing account would spend paid overage on stale data. Keeps "row.stale=false ⇒ genuinely
-    // fresh" true for limits.json too (claude tap/keeper/oauth rows are already age-guarded per file).
-    const capturedAt = num(L.capturedAt);
-    const staleAfter = num(L.staleAfterSecs);
-    const pastOwnWindow = capturedAt !== null && staleAfter !== null && nowS - capturedAt > staleAfter;
     const accounts: AccountCaps[] = Array.isArray(L.accounts)
       ? (L.accounts as Record<string, unknown>[]).filter((a) => a && typeof a === 'object').map((a) => ({
           id: typeof a.id === 'string' ? a.id : (typeof a.label === 'string' ? a.label : 'unknown'),
@@ -238,7 +228,7 @@ export function readLimitsMirror(usageDir: string, nowS: number): CapsByProvider
           windows: windowsById(a.windows, nowS),
           noteCodes: strList(a.noteCodes),
           limitReached: a.limitReached === true,
-          stale: a.stale === true || pastOwnWindow,
+          stale: a.stale === true,
           // Cursor is the only provider that publishes overage in its payload; null-safe parse
           // (detail.onDemand may be absent or explicitly null) so one bad row never throws out of
           // readLimitsMirror and starves every provider of caps (HED-443 review, finding 2).
@@ -247,6 +237,11 @@ export function readLimitsMirror(usageDir: string, nowS: number): CapsByProvider
           fableWeeklySamples: num(a.fableWeeklySamples),
         }))
       : [];
+    // Per-provider freshness: the contract carries capturedAt + staleAfterSecs per provider — a
+    // provider row can be past ITS OWN freshness window while the mirror file as a whole is fresh.
+    const capturedAt = num(L.capturedAt);
+    const staleAfter = num(L.staleAfterSecs);
+    const pastOwnWindow = capturedAt !== null && staleAfter !== null && nowS - capturedAt > staleAfter;
     out[L.provider] = {
       provider: L.provider,
       source: 'limits.json',

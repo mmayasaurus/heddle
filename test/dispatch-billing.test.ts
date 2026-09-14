@@ -25,9 +25,12 @@ import type { CapsByProvider, ProviderCaps } from '../src/usage.js';
 import { fakeAdapter, IDENTITIES, useTempResources } from './helpers.js';
 
 const savedAccountsPath = process.env.HEDDLE_ACCOUNTS;
+const savedRouting = process.env.HEDDLE_ROUTING;
 afterEach(() => {
   if (savedAccountsPath === undefined) delete process.env.HEDDLE_ACCOUNTS;
   else process.env.HEDDLE_ACCOUNTS = savedAccountsPath;
+  if (savedRouting === undefined) delete process.env.HEDDLE_ROUTING;
+  else process.env.HEDDLE_ROUTING = savedRouting;
 });
 
 describe('dispatch billing enforcement (HED-395)', () => {
@@ -72,6 +75,36 @@ describe('dispatch billing enforcement (HED-395)', () => {
       windows: {}, noteCodes: [], activeAccount: active ?? rows[0]?.id ?? null,
       accounts: rows.map(({ id, used, stale = false }) => ({ id, fiveHour: { usedPercentage: used, resetsAt: null }, sevenDay: { usedPercentage: null, resetsAt: null }, windows: {}, noteCodes: [], limitReached: used !== null && used >= 100, stale })),
     } };
+  }
+
+  // A custom operator routing table: cursor PRIMARY → claude FALLBACK. This is the ONLY shape that can
+  // reach REV-3's claude capability-fit rebind — no built-in class does (the two built-in claude
+  // fallbacks are codex→claude, where codex enforces every capability claude does and so never refuses
+  // 'unenforceable', and claude→claude, where the fallback is equally unable to enforce). Cursor
+  // enforces NOTHING (capabilities.ts ENFORCEABLE.cursor === []), so a cursor primary asked for `browse`
+  // refuses 'capability-denied'/'unenforceable' while the claude fallback CAN enforce it → capability-fit
+  // fallback to claude fires. HEDDLE_ROUTING points dispatch()'s loadRouting at this table.
+  function cursorClaudeRouting(): void {
+    const yaml = `${tempDir()}/cursor-claude.yaml`;
+    writeFileSync(yaml, [
+      'version: 0', 'providers:',
+      '  claude: { auth: anthropic-subscription, execution: headless, models: [haiku] }',
+      '  cursor: { auth: cursor-subscription, execution: headless, models: [cursor-grok-4.6-high] }',
+      'task_classes:', '  cap-fit-billing:',
+      '    provider: cursor', '    model: cursor-grok-4.6-high',
+      '    fallback: { provider: claude, model: haiku }', '',
+    ].join('\n'));
+    process.env.HEDDLE_ROUTING = yaml;
+  }
+
+  // A fresh, under-cap claude provider snapshot with one row for `id` (so pickClaudeAccount selects it).
+  function claudeCapsFor(id: string): ProviderCaps {
+    return {
+      provider: 'claude', source: 'claude-tap', stale: false, capturedAt: 1,
+      fiveHour: { usedPercentage: 10, resetsAt: null }, sevenDay: { usedPercentage: null, resetsAt: null },
+      windows: {}, noteCodes: [], activeAccount: id,
+      accounts: [{ id, fiveHour: { usedPercentage: 10, resetsAt: null }, sevenDay: { usedPercentage: null, resetsAt: null }, windows: {}, noteCodes: [], limitReached: false, stale: false }],
+    };
   }
 
   it('dispatches a subscription account unchanged', async () => {
@@ -308,42 +341,92 @@ describe('dispatch billing enforcement (HED-395)', () => {
     expect(classifierDispatch).not.toHaveBeenCalled();
   });
 
-  it('allows open-billing on a FRESH under-cap row even when the provider snapshot is stale (REV-2 / HED-443)', async () => {
+  it('keys the billing gate on the CLAUDE capability-fit fallback account, not the primary (REV-3)', async () => {
+    // cursor PRIMARY (enforces nothing) asked for `browse` → capability-denied/unenforceable → the class's
+    // claude FALLBACK (which CAN enforce browse) runs. REV-3 rebinds ctx.account to the picked claude
+    // account BEFORE runTarget's billing gate reads it. The claude fallback account is pay-per-token, so
+    // the gate must REFUSE it — proving the gate keyed the claude account, not the cursor primary's binding.
+    cursorClaudeRouting();
+    writeRegistry({ claude: [{ id: 'claude-metered', configDir: null, billingClass: 'pay-per-token' }] });
+    const fake = fakeAdapter(undefined, { readAgents: false });
+    const outcome = await dispatch({
+      taskClass: 'cap-fit-billing', capabilities: ['browse'], prompt: 'x', cwd: tempDir(), identity: unbound,
+      accounts: [{ id: 'claude-metered', configDir: null, loggedIn: true }], caps: { claude: claudeCapsFor('claude-metered') },
+    }, tempLedger(), () => fake.adapter);
+    expect(outcome.account).toBe('claude-metered');
+    expect(outcome.refusal?.code).toBe('billing.pay-per-token');
+    expect(fake.calls).toHaveLength(0);
+    // Red if REV-3's claude rebind is removed: ctx.account stays the cursor primary's binding (null here),
+    // the gate cannot classify it and loud-degrades-to-ALLOW, and the pay-per-token claude worker SPAWNS
+    // (fake.calls === 1, no refusal) — a metered account billed without the gate ever seeing it.
+  });
+
+  it('annotates the capability refusal instead of throwing when the CLAUDE fallback pin is bad (REV-3 try/catch)', async () => {
+    // pickClaudeAccount THROWS on a bad pin. A cursor primary skips plan-time claude-pin validation
+    // (plan.ts only validates the pin for a claude PRIMARY), so a stale accountPin first throws inside the
+    // capability-fit fallback. REV-3 wraps it exactly like the class fallback: the (already-ledgered)
+    // capability refusal is returned with the blocked-fallback note appended — never a bare throw out of
+    // dispatch. Red if the try/catch is removed: this await REJECTS instead of resolving.
+    cursorClaudeRouting();
+    writeRegistry({ claude: [{ id: 'claude-metered', configDir: null, billingClass: 'subscription-quota' }] });
+    const fake = fakeAdapter(undefined, { readAgents: false });
+    const outcome = await dispatch({
+      taskClass: 'cap-fit-billing', capabilities: ['browse'], prompt: 'x', cwd: tempDir(), identity: unbound, accountPin: 'nonexistent',
+      accounts: [{ id: 'claude-metered', configDir: null, loggedIn: true }], caps: { claude: claudeCapsFor('claude-metered') },
+    }, tempLedger(), () => fake.adapter);
+    expect(outcome.refusal?.code).toBe('capability-denied');   // primary capability refusal preserved
+    expect(outcome.error).toContain('claude capability-fit fallback blocked: account_pin "nonexistent"');
+    expect(fake.calls).toHaveLength(0);                        // neither cursor primary nor claude fallback spawned
+  });
+
+  it('refuses open-billing when the PROVIDER snapshot is stale, even on a fresh-looking row (REV-2)', async () => {
+    // Spend authorization is conservative-for-MONEY: once the provider mirror is stale, a limits.json
+    // row (which shares the provider's capture) must NOT authorize paid overage even if its own `stale`
+    // flag reads fresh. billingCapState maps a stale provider → 'unknown' → open-billing refuses (F3),
+    // WITHOUT touching the shared accountCapState. The row-level trust the accountCapState unit test
+    // above pins (a fresh row → 'under' through a stale provider) is DELIBERATELY preserved for
+    // detectOverageAlert (HED-443, conservative-for-DANGER) and `usage --remaining` (display) — this
+    // test proves the billing gate is STRICTER than those read-only consumers, which is the whole point.
     registry({ id: 'open', billingClass: 'subscription-quota', overage: { posture: 'open-billing' } });
     const req = request('open');
-    // Provider snapshot stale, but the per-account row is FRESH (row.stale=false) and under cap. A fresh
-    // row is trusted THROUGH a stale provider mirror (that is how a fresh RED row is still detected), so
-    // the billing gate must ALLOW here — refusing on provider-level staleness alone would be over-strict
-    // and contradict the row-level trust HED-443 relies on. (Contrast: the limits.json SOURCE now marks
-    // rows stale when the snapshot is past its OWN window — see the readLimitsMirror test below.)
     req.caps = { codex: {
       provider: 'codex', source: 'limits.json', stale: true, capturedAt: 1,
       fiveHour: { usedPercentage: null, resetsAt: null }, sevenDay: { usedPercentage: null, resetsAt: null },
       windows: {}, noteCodes: [], activeAccount: 'open',
       accounts: [{ id: 'open', fiveHour: { usedPercentage: 40, resetsAt: null }, sevenDay: { usedPercentage: null, resetsAt: null }, windows: {}, noteCodes: [], limitReached: false, stale: false }],
     } } as unknown as CapsByProvider;
-    expect(planDispatch(req).billingRefusal).toBeUndefined();
+    // F7 parity: the preview refuses on the same provider-stale path.
+    const preview = planDispatch(req);
+    expect(preview.billingRefusal?.code).toBe('billing.open-billing-at-cap');
+    expect(preview.billingRefusal?.reason).toContain('cap state unknown');
+    // Spawn level: refuses with NO spawn. Red if billingCapState is reverted to plain accountCapState —
+    // the fresh row then reads 'under' and the account SPAWNS into unmetered paid overage on stale data.
     const fake = fakeAdapter();
     const outcome = await dispatch(req, tempLedger(), () => fake.adapter);
-    expect(fake.calls).toHaveLength(1);
-    expect(outcome.refusal).toBeUndefined();
+    expect(fake.calls).toHaveLength(0);
+    expect(outcome.refusal?.code).toBe('billing.open-billing-at-cap');
+    expect(outcome.refusal?.reason).toContain('cap state unknown');
   });
 
-  it('marks limits.json account rows stale when the provider snapshot is past its own window (REV-2 source fix)', () => {
-    // An aged-out limits.json PROVIDER snapshot (nowS - capturedAt > staleAfterSecs) must mark its
-    // per-account rows stale too — not just the provider — so accountCapState returns 'unknown' and an
-    // open-billing account REFUSES rather than reading a dead usedPercentage as a fresh 'under'. The file
-    // itself is fresh (writtenAt=nowS) so it is not dropped wholesale; only the provider window aged out.
+  it('keeps a FRESH limits.json account row row-level even under a stale provider mirror (HED-443 source contract)', () => {
+    // readLimitsMirror must NOT fold provider staleness into a per-account row: a row carries its OWN
+    // `stale` (the dashboard sets it from the account's own tap capture), so a fresh row (stale:false)
+    // stays fresh even when the PROVIDER mirror is stale. That is exactly what lets detectOverageAlert
+    // (HED-443) still see a fresh RED row and `usage --remaining` show a live account window THROUGH a
+    // stale provider. The money-safety tightening for a stale provider lives in billingCapState (the
+    // billing gate) — NOT here. A prior "fix at source (row inherits provider staleness)" attempt broke
+    // both consumers (usage-remaining.test.ts caught it); this pins the reverted, correct behavior.
+    // Fixture mirrors usage-remaining's: provider stale:true (upstream-flagged), fresh under-window row.
     const dir = tempDir();
     writeFileSync(`${dir}/limits.json`, JSON.stringify({
       writtenAt: 5000,
-      limits: [{ provider: 'codex', capturedAt: 1000, staleAfterSecs: 300, stale: false,
+      limits: [{ provider: 'codex', capturedAt: 4900, staleAfterSecs: 300, stale: true,
         fiveHour: { usedPercentage: 40 },
         accounts: [{ id: 'open', stale: false, fiveHour: { usedPercentage: 40 } }] }],
     }));
-    const caps = readLimitsMirror(dir, 5000)!;               // nowS 5000 − capturedAt 1000 = 4000 > 300
-    expect(caps.codex.stale).toBe(true);                     // provider aged out (pre-existing behavior)
-    expect(caps.codex.accounts[0].stale).toBe(true);         // REV-2: the ROW inherits pastOwnWindow
-    expect(accountCapState(caps.codex, 'open')).toBe('unknown'); // → open-billing refuses (F3), no dead 'under'
+    const caps = readLimitsMirror(dir, 5000)!;
+    expect(caps.codex.stale).toBe(true);                     // provider is stale (upstream-flagged)
+    expect(caps.codex.accounts[0].stale).toBe(false);        // the ROW stays row-level fresh (NOT inherited)
+    expect(accountCapState(caps.codex, 'open')).toBe('under'); // row-level: trusted for detection + display
   });
 });
