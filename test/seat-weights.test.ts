@@ -41,4 +41,14 @@ describe('seat weights mirror', () => {
     expect(weights.weightOf('anything')).toBe(1);
     expect(warnings.join('')).toMatch(/warning: .*seat weights mirror/i);
   });
+
+  it('returns the default for inherited object keys like constructor/toString, never a prototype value', () => {
+    const homeDir = tempDir();
+    writeSeatWeightsMirror(seatWeightsFrom(lanes({ default: 1, by_agent: { R: 2.5 } })), { homeDir });
+    const { weightOf } = readSeatWeights({ homeDir });
+    for (const key of ['constructor', 'toString', 'hasOwnProperty', 'valueOf', '__proto__']) {
+      expect(weightOf(key)).toBe(1); // a raw plain-object lookup would return an inherited function/object here
+    }
+    expect(weightOf('R')).toBe(2.5);
+  });
 });

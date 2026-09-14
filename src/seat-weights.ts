@@ -75,5 +75,8 @@ export function readSeatWeights(deps: SeatWeightsDeps = {}): { weightOf: (letter
     return fallback(deps, 'malformed per-agent weight');
   }
   const defaultWeight = record.default;
-  return { weightOf: (letter) => (byAgent[letter] as number | undefined) ?? defaultWeight };
+  // Object.hasOwn, not `?? defaultWeight`: a plain-object lookup on an inherited key like `constructor`
+  // or `toString` returns a function (truthy, not nullish), which would poison weighted placement with a
+  // non-number. Only OWN, validated numeric weights count; every other letter is the default. (codeant HED-514)
+  return { weightOf: (letter) => (Object.hasOwn(byAgent, letter) ? (byAgent[letter] as number) : defaultWeight) };
 }

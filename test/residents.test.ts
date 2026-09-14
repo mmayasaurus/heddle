@@ -93,4 +93,34 @@ describe('censusClaudeResidents', () => {
     expect(viaEnv).toEqual(expected);
     expect(exec).not.toHaveBeenCalled();
   });
+
+  it('attributes by exact config dir — never a same-basename neighbour — and invalidates an unlisted or non-unique dir', () => {
+    // Two accounts share basename `.claude`. A session on y must attribute to y (a basename matcher would
+    // have taken the first match, x); a session on an UNLISTED same-basename dir must invalidate (null),
+    // not silently mis-map (codeant HED-514).
+    const collided = [{ id: 'x', configDir: '/home/x/.claude' }, { id: 'y', configDir: '/home/y/.claude' }];
+    expect(censusClaudeResidents({
+      accounts: collided, weightOf, exec: execFrom(['701'], { 701: 'claude HEDDLE_AGENT=R CLAUDE_CONFIG_DIR=/home/y/.claude' }),
+    })).toEqual(new Map([['y', { count: 1, weight: 2.5 }]]));
+
+    const warnings: string[] = [];
+    expect(censusClaudeResidents({
+      accounts: collided, weightOf, stderr: { write: (m: string) => (warnings.push(m), true) },
+      exec: execFrom(['702'], { 702: 'claude HEDDLE_AGENT=R CLAUDE_CONFIG_DIR=/home/z/.claude' }),
+    })).toBeNull();
+    expect(warnings.join('')).toMatch(/maps to no single account/);
+
+    // Two registry rows on the SAME normalized dir → a matched session is ambiguous, never the first row.
+    const dup = [{ id: 'a', configDir: '/home/dup/.claude' }, { id: 'b', configDir: '/home/dup/.claude' }];
+    expect(censusClaudeResidents({
+      accounts: dup, weightOf, stderr: { write: () => true },
+      exec: execFrom(['703'], { 703: 'claude CLAUDE_CONFIG_DIR=/home/dup/.claude' }),
+    })).toBeNull();
+  });
+
+  it('normalizes a trailing slash so a session dir still matches its registry entry', () => {
+    expect(censusClaudeResidents({
+      accounts, weightOf, exec: execFrom(['801'], { 801: 'claude HEDDLE_AGENT=S CLAUDE_CONFIG_DIR=/accounts/other/' }),
+    })).toEqual(new Map([['other', { count: 1, weight: 1 }]]));
+  });
 });

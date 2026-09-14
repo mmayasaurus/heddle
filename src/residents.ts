@@ -1,5 +1,7 @@
 import { execFileSync } from 'node:child_process';
-import { currentClaudeAccount, readClaudeAccounts, type ClaudeAccount } from './capaware.js';
+import { homedir } from 'node:os';
+import { resolve } from 'node:path';
+import { readClaudeAccounts, type ClaudeAccount } from './capaware.js';
 
 export interface ResidentLoad {
   count: number;
@@ -41,9 +43,16 @@ function parseFixture(raw: string | undefined): string[] | null {
   }
 }
 
+/** Normalize a config dir for exact registry matching: expand a leading ~, then path.resolve (which
+ *  collapses ./.. and any trailing slash). Deliberately NOT realpath — see the byNormalizedDir note below. */
+function normalizeConfigDir(dir: string): string {
+  const expanded = dir === '~' ? homedir() : dir.startsWith('~/') ? `${homedir()}/${dir.slice(2)}` : dir;
+  return resolve(expanded);
+}
+
 /**
  * Census live INTERACTIVE Claude sessions per account, weighted, for batch placement. This mirrors the
- * counted set of heddle-window-keeper.py's `live_census` byte-for-byte (same source, skips, config-dir
+ * counted set of heddle-window-keeper.py's `live_census` byte-for-byte (same source, skips, exact config-dir
  * attribution, and invalidation — so keeper and picker never disagree) and ADDS a per-session weight
  * from HEDDLE_AGENT (the letter is only the weight-table index; a session with no letter is a plain 1.0
  * seat). Sessions are keyed by ACCOUNT, not by letter.
@@ -94,14 +103,28 @@ export function censusClaudeResidents(deps: ResidentsDeps = {}): Map<string, Res
   if (surviving.length === 0) return new Map();
 
   const defaults = accounts.filter((account) => account.configDir === null);
+  // Exact normalized config-dir → account(s), so a matched session attributes to the RIGHT account (or
+  // invalidates), never to a same-basename neighbour (codeant HED-514). This maps like the keeper's
+  // config_to_id dict. We normalize with path.resolve, NOT realpath: realpath would collapse a
+  // symlink-aliased pair (the known acct1≡acct3 case) into one key and null the census exactly when both
+  // are resident, whereas resolve keeps distinct dirs distinct.
+  const byNormalizedDir = new Map<string, ClaudeAccount[]>();
+  for (const account of accounts) {
+    if (account.configDir === null) continue;
+    const key = normalizeConfigDir(account.configDir);
+    const list = byNormalizedDir.get(key);
+    if (list) list.push(account); else byNormalizedDir.set(key, [account]);
+  }
   const residents = new Map<string, ResidentLoad>();
   for (const line of surviving) {
     const configDir = /(?:^|\s)CLAUDE_CONFIG_DIR=([^\s]+)/.exec(line)?.[1]?.replace(/^["']|["']$/g, '');
     const letter = /(?:^|\s)HEDDLE_AGENT=([A-Za-z0-9_-]+)/.exec(line)?.[1];
-    // config-dir → account (the established registry mapping); env-less → the single default account
-    // IFF exactly one exists (0 or >1 → ambiguous). Any unattributable session invalidates the census.
+    // config-dir → account by UNIQUE exact match; env-less → the single default account IFF exactly one
+    // exists. Zero matches (unmapped dir), a non-unique match, or 0/>1 defaults are all ambiguous, and
+    // ANY unattributable session invalidates the whole census (never a partial or guessed count).
+    const matches = configDir ? byNormalizedDir.get(normalizeConfigDir(configDir)) ?? [] : [];
     const account = configDir
-      ? currentClaudeAccount(accounts, { CLAUDE_CONFIG_DIR: configDir })
+      ? (matches.length === 1 ? matches[0] : null)
       : (defaults.length === 1 ? defaults[0] : null);
     if (!account) {
       warn(deps, `session on ${configDir ?? 'the default config dir'} maps to no single account`);
