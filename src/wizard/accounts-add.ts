@@ -12,7 +12,9 @@ const services: Record<NativeProvider, string> = { claude: 'Claude', codex: 'Cod
 
 export interface AccountsAddDeps { prompter: Prompter; runner: CliRunner; now?: () => Date; report?: (line: string) => void; }
 export interface AccountsAddSummary { added: string[]; failed: string[]; skipped: NativeProvider[]; }
-type AccountsAddProvider = NativeProvider | 'custom' | string;
+// A NativeProvider ('claude'|'codex'|'cursor'), the 'custom' sentinel, or any provider-matrix key —
+// validated at runtime in runAccountsAdd. (Kept as `string` because the literal union is subsumed by it.)
+type AccountsAddProvider = string;
 
 function pathFor(provider: NativeProvider, id: string): string {
   return join(homedir(), '.heddle', 'accounts', provider, id);
