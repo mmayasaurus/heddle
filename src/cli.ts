@@ -35,6 +35,7 @@ import { loadAccountRegistry } from './accounts.js';
 import { DEFAULT_ACCOUNTS_PATH } from './capaware.js';
 import { migrateConfigFile } from './config-migrations.js';
 import { diffFleetBin, diffFleetHooks, diffFleetLaunchers, installFleetBin, installFleetHooks, installFleetLaunchers } from './fleet.js';
+import { uninstall } from './uninstall.js';
 import { NativeCliRunner, type NativeProvider } from './wizard/cli-runner.js';
 import { ReadlinePrompter, ScriptedPrompter, type Prompter } from './wizard/prompt.js';
 import { runAccountsAdd } from './wizard/accounts-add.js';
@@ -99,6 +100,7 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
   heddle fleet install-bin [--dry-run] [--json]  install vendored fleet bin tools under ~/.heddle/fleet/bin
   heddle fleet bin-diff [--json]  compare installed fleet bin tools with the vendored canon
   heddle upgrade [--dry-run] [--force] [--json]  migrate config schemas and refresh missing fleet assets without overwriting local edits
+  heddle uninstall [--dry-run] [--json]  remove only fleet assets still byte-identical to the shipped canon (preserves anything modified)
   heddle mode [desktop|mobile|away] [--note "<t>"] [--json]   operator mode (HED-336): no arg prints
                                  the current mode; a mode word sets it (~/.heddle/operator-mode.json —
                                  the pocket console and desktop app write the same file)
@@ -178,7 +180,7 @@ const json = has('--json');
  * `--dry-run` preview especially must observe, not mutate.
  * Best-effort — a hygiene failure must never break the command the operator actually ran.
  */
-if (cmd !== 'mode' && cmd !== 'pr' && cmd !== 'comms' && cmd !== 'fleet' && cmd !== 'top' && cmd !== 'upgrade' && !(cmd === 'ledger' && (process.argv[3] === 'sweep' || process.argv[3] === 'finish')) && !(cmd === 'usage' && (process.argv[3] === 'poll-claude' || process.argv[3] === 'install-poll-launchd'))) {
+if (cmd !== 'mode' && cmd !== 'pr' && cmd !== 'comms' && cmd !== 'fleet' && cmd !== 'top' && cmd !== 'upgrade' && cmd !== 'uninstall' && !(cmd === 'ledger' && (process.argv[3] === 'sweep' || process.argv[3] === 'finish')) && !(cmd === 'usage' && (process.argv[3] === 'poll-claude' || process.argv[3] === 'install-poll-launchd'))) {
   try {
     const { closed } = new Ledger().sweepOrphans();
     if (closed > 0) console.error(`heddle: closed ${closed} orphaned in-flight dispatch row${closed === 1 ? '' : 's'} (heddle ledger --json shows outcome='orphaned')`);
@@ -1056,6 +1058,27 @@ try {
         // Both remain preserved by default; --force refreshes the canonical shipset.
         'Note: stale shipped assets and user edits are both preserved by default; use --force to refresh canonical assets.',
       ].join('\n'));
+      break;
+    }
+
+    case 'uninstall': {
+      // This mutates user-scoped files, so reject every unrecognized or positional argument first.
+      const unknownArgs = process.argv.slice(3).filter((arg) => !['--dry-run', '--json'].includes(arg));
+      if (unknownArgs.length > 0) {
+        const error = `heddle uninstall: unknown argument${unknownArgs.length === 1 ? '' : 's'} ${unknownArgs.join(', ')} — allowed: --dry-run, --json`;
+        // Under --json, emit a machine-readable error to stdout (draining before exit) so a --json
+        // caller never parses empty stdout; otherwise a plain message to stderr (matches heddle doctor).
+        if (json) process.stdout.write(`${JSON.stringify({ ok: false, error })}\n`, () => process.exit(2));
+        else { console.error(error); process.exit(2); }
+        break;
+      }
+      const report = uninstall({ dryRun: has('--dry-run') });
+      out(json, report, () => [
+        ...report.removed.map((path) => `${report.dryRun ? 'would remove' : 'removed'} ${path}`),
+        ...report.preserved.map((path) => `preserved (modified — not removed) ${path}`),
+        ...report.warnings.map((warning) => `warning: ${warning}`),
+        report.removed.length || report.preserved.length || report.warnings.length ? '' : '(nothing to uninstall)',
+      ].filter(Boolean).join('\n'));
       break;
     }
 
