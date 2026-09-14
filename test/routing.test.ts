@@ -3,7 +3,8 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { loadRouting, listTaskClasses, resolveRoute, directRoute, neverViaCursorPrefixes, isNeverViaCursor, providerExecution, type Route } from '../src/routing.js';
+import { describeTaskClasses, loadRouting, listTaskClasses, resolveRoute, directRoute, neverViaCursorPrefixes, isNeverViaCursor, providerExecution, type Route } from '../src/routing.js';
+import { targetModels } from '../src/health/parse.js';
 import { mcpAttachable, webCapable } from '../src/mcp.js';
 import { ENFORCEABLE } from '../src/capabilities.js';
 import { normalizeProvider, pickReviewer } from '../src/review.js';
@@ -286,6 +287,69 @@ describe('resolveRoute / directRoute — policy fences', () => {
     expect(r.skills).toEqual(['worker-role']);
     expect(r.mcp).toEqual(['memtrace']);
     expect(r.fallback).toBeUndefined();
+  });
+});
+
+describe('HED-545 — prefer-only classes during enumeration', () => {
+  const dirs: string[] = [];
+
+  afterEach(() => {
+    for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
+    dirs.length = 0;
+  });
+
+  function tierOnlyTable() {
+    return {
+      version: 0,
+      policy: {},
+      providers: { claude: { models: ['haiku'] } },
+      taskClasses: {
+        orchestration: { prefer: ['T2'], dispatchable: false, edits_code: false },
+        implementation: { provider: 'claude', model: 'haiku', edits_code: true },
+      },
+    };
+  }
+
+  it('describes a tier-only prefer-only class without resolving it', () => {
+    const table = tierOnlyTable();
+    expect(() => resolveRoute(table, 'orchestration')).toThrow(/missing provider or model/);
+    expect(() => describeTaskClasses(table)).not.toThrow();
+    expect(describeTaskClasses(table).find((row) => row.task_class === 'orchestration')).toMatchObject({
+      provider: null, model: null, prefer: ['T2'], dispatchable: false,
+    });
+    expect(describeTaskClasses(table).find((row) => row.task_class === 'implementation')).toMatchObject({
+      provider: 'claude', model: 'haiku',
+    });
+  });
+
+  it('re-throws for a CONCRETE class that fails to resolve — never masks a misconfig as prefer-only', () => {
+    const table = tierOnlyTable();
+    (table.taskClasses as Record<string, unknown>).broken = { provider: 'nonexistent', model: 'x' };
+    // The tolerance is ONLY for prefer-only classes; a concrete provider+model that resolveRoute
+    // rejects (here: unknown provider) must still throw from enumeration, not be masked as prefer-only.
+    expect(() => describeTaskClasses(table)).toThrow(/unknown provider/);
+  });
+
+  it('keeps shipped orchestration on its concrete Fable route', () => {
+    const orchestration = describeTaskClasses(loadRouting(TABLE_PATH))
+      .find((row) => row.task_class === 'orchestration');
+    expect(orchestration).toMatchObject({ provider: 'claude', model: 'fable' });
+  });
+
+  it('skips a tier-only prefer-only class while enumerating catalog targets', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'heddle-545-'));
+    dirs.push(dir);
+    const path = join(dir, 'routing.yaml');
+    writeFileSync(path, [
+      'version: 0',
+      'providers:',
+      '  claude: { models: [haiku] }',
+      'task_classes:',
+      '  orchestration: { prefer: [T2], dispatchable: false, edits_code: false }',
+      '  implementation: { provider: claude, model: haiku }',
+      '',
+    ].join('\n'));
+    expect(() => targetModels('claude', path)).not.toThrow();
   });
 });
 

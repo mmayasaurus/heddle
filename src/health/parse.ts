@@ -99,7 +99,12 @@ export function targetModels(
   };
 
   for (const taskClass of listTaskClasses(routing)) {
-    const route = resolveRoute(routing, taskClass);
+    let route;
+    try {
+      route = resolveRoute(routing, taskClass);
+    } catch {
+      continue;
+    }
 
     for (const target of [route, route.fallback].filter(Boolean) as RouteTarget[]) {
       addTarget(taskClass, target);
