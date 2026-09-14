@@ -326,7 +326,7 @@ export function buildCandidatePrompt(outDir: string, round: CorpusRound): string
   return path;
 }
 
-function judgePrompt(round: CorpusRound, candidateRaw: string): string {
+export function judgePrompt(round: CorpusRound, candidateRaw: string): string {
   return [
     'You are the judge for an adversarial-review quality bench. The DIFF below is the EXACT version the incumbent reviewer saw: it is reconstructed at the commit that was branch HEAD when the incumbent review ran, BEFORE any fixes for its findings were pushed. So every ACCEPTED incumbent finding describes a defect that IS present in this diff. Accepted incumbent findings are ground truth. Return STRICT JSON only, with no Markdown fences or prose:',
     '{"roundId": <dispatchId>,',
@@ -414,6 +414,12 @@ export function asJudgeResult(value: unknown, round: CorpusRound): JudgeResult {
     if (seen.has(finding.idx)) throw new Error(`judge-${round.dispatchId}: duplicate candidate finding index ${finding.idx}`);
     seen.add(finding.idx);
   }
+  // A matched accepted finding IS a TP (line above ties class TP to matchesAcceptedIncumbent), so a positive
+  // matched count with zero TP findings is self-contradictory — reject it rather than persist fabricated recall
+  // (matched/findingsAccepted > 0 for a candidate that caught nothing).
+  if (data.acceptedIncumbentMatchedCount! > 0 && !findings.some((finding) => finding.class === 'TP')) {
+    throw new Error(`judge-${round.dispatchId}: acceptedIncumbentMatchedCount is ${data.acceptedIncumbentMatchedCount} but no candidate finding is classified TP`);
+  }
   return { roundId: data.roundId!, candidateFindings: findings, acceptedIncumbentMatchedCount: data.acceptedIncumbentMatchedCount! };
 }
 
@@ -451,7 +457,7 @@ export function aggregateScoredRounds(candidate: string, rounds: ScoredRound[], 
   };
 }
 
-function buildCorpus(
+export function buildCorpus(
   out: string,
   opts: { limit?: number; pairs?: string[] },
   gh: GhRunner = defaultGh,

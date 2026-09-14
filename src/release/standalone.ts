@@ -5,6 +5,7 @@ import { join, resolve } from 'node:path';
 import { standaloneReadme } from './readme.js';
 import { copyShipSet, extractShipSet } from './shipset.js';
 import { credentialPatterns, licenseCopyrightExemption, scanFiles, scrubExemptions } from './scrub.js';
+import { gitEnv } from './git-env.js';
 
 export type StandaloneOptions = {
   outDir: string; sourceRef?: string; initGit?: boolean; verify?: boolean; sourceDir?: string;
@@ -12,31 +13,73 @@ export type StandaloneOptions = {
 export type StandaloneResult = { ok: boolean; error?: string; sourceCommit?: string; shipSetHash?: string };
 
 export function releaseStandalone(options: StandaloneOptions): StandaloneResult {
+  // The invariant is about the SOURCE, so it gates first: a stale outDir/tempDir must not mask an
+  // off-main or dirty source (HED-507 review F5). Nothing below depends on this order.
+  const invariant = assertCleanMainHead(options.sourceDir ?? process.cwd(), options.sourceRef ?? 'HEAD');
+  if (!invariant.ok) return { ok: false, error: invariant.error };
   const outDir = resolve(options.outDir);
   if (existsSync(outDir)) return { ok: false, error: `destination already exists: ${outDir}` };
   const tempDir = `${outDir}.tmp-${process.pid}`;
   if (existsSync(tempDir)) return { ok: false, error: `temporary destination already exists: ${tempDir}` };
   try {
-    return generate(options, outDir, tempDir);
+    return generate(options, outDir, tempDir, invariant.commit);
   } catch (error) {
     rmSync(tempDir, { recursive: true, force: true });
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
 }
 
-function generate(options: StandaloneOptions, outDir: string, tempDir: string): StandaloneResult {
+// The headless-first invariant (HED-507, docs/ARCHITECTURE.md#headless-first-invariant): a standalone
+// artifact must be cut from a clean checkout whose source ref is main's current HEAD — not merely an
+// ancestor of main. An ancestor (e.g. `--source-ref main~3` or a merged side branch) would ship a tree
+// that diverges from the source of truth while looking legitimate, which is exactly what this prevents.
+export function assertCleanMainHead(
+  sourceDir: string,
+  sourceRef: string,
+): { ok: true; commit: string } | { ok: false; error: string } {
+  const git = (args: string[]) => spawnSync('git', args, { cwd: sourceDir, encoding: 'utf8', env: gitEnv() });
+  const mainRef = git(['rev-parse', '--verify', '--quiet', 'refs/heads/main']);
+  if (mainRef.status !== 0) {
+    return { ok: false, error: "release: the source has no local 'main' branch — the standalone must be cut from a clean main checkout (headless-first invariant, HED-507; docs/ARCHITECTURE.md#headless-first-invariant)" };
+  }
+  const mainHead = (mainRef.stdout ?? '').trim();
+  const porcelain = git(['status', '--porcelain']);
+  if (porcelain.status !== 0) {
+    return { ok: false, error: 'release: could not read the source working-tree status (not a git checkout?) — the standalone must be cut from a clean main checkout (headless-first invariant, HED-507)' };
+  }
+  if ((porcelain.stdout ?? '').trim() !== '') {
+    return { ok: false, error: 'release: the source working tree is not clean — commit or stash changes; the standalone must be cut from a clean main checkout (headless-first invariant, HED-507)' };
+  }
+  const rev = git(['rev-parse', '--verify', `${sourceRef}^{commit}`]);
+  if (rev.status !== 0) {
+    return { ok: false, error: `release: could not resolve source ref '${sourceRef}' (headless-first invariant, HED-507)` };
+  }
+  const commit = (rev.stdout ?? '').trim();
+  if (commit !== mainHead) {
+    return { ok: false, error: `release: source commit ${commit.slice(0, 12)} is not main's HEAD ${mainHead.slice(0, 12)} — check out main and pull (headless-first invariant, HED-507)` };
+  }
+  return { ok: true, commit };
+}
+
+function generate(options: StandaloneOptions, outDir: string, tempDir: string, sourceCommit: string): StandaloneResult {
+  // sourceCommit is the immutable SHA the invariant gate resolved and proved to be main's tip
+  // (assertCleanMainHead). We cut from — and record — that exact pin, never a re-resolution of the
+  // mutable source ref: extractShipSet archives the pin, and every commit we write (README, RELEASE.json,
+  // the --init-git snapshot, the result) is the pin itself, so there is no second resolution to drift
+  // between validation and the cut (HED-507 review: codeant/qodo TOCTOU). sourceRef is kept only as the
+  // human-facing label in RELEASE.json.
   const sourceRef = options.sourceRef ?? 'HEAD';
-  const extracted = extractShipSet(options.sourceDir ?? process.cwd(), sourceRef);
+  const extracted = extractShipSet(options.sourceDir ?? process.cwd(), sourceCommit);
   try {
     copyShipSet(extracted.dir, tempDir);
-    writeFileSync(join(tempDir, 'README.md'), standaloneReadme(version(tempDir), extracted.sourceCommit));
+    writeFileSync(join(tempDir, 'README.md'), standaloneReadme(version(tempDir), sourceCommit));
     const gate = checkStandaloneOutput(tempDir);
     if (!gate.ok) throw new Error(gate.issues.join('\n'));
-    const shipSetHash = writeRelease(tempDir, extracted.sourceCommit, sourceRef);
+    const shipSetHash = writeRelease(tempDir, sourceCommit, sourceRef);
     if (options.verify) verifySnapshot(tempDir);
-    if (options.initGit) initializeGit(tempDir, extracted.sourceCommit);
+    if (options.initGit) initializeGit(tempDir, sourceCommit);
     renameSync(tempDir, outDir);
-    return { ok: true, sourceCommit: extracted.sourceCommit, shipSetHash };
+    return { ok: true, sourceCommit, shipSetHash };
   } finally {
     rmSync(extracted.dir, { recursive: true, force: true });
   }
@@ -98,12 +141,13 @@ function hashFile(path: string): string {
 }
 
 function initializeGit(root: string, sourceCommit: string): void {
-  execFileSync('git', ['init', '-b', 'main'], { cwd: root, stdio: 'ignore' });
-  execFileSync('git', ['add', '.'], { cwd: root, stdio: 'ignore' });
+  const env = gitEnv();
+  execFileSync('git', ['init', '-b', 'main'], { cwd: root, stdio: 'ignore', env });
+  execFileSync('git', ['add', '.'], { cwd: root, stdio: 'ignore', env });
   execFileSync('git', [
     '-c', 'user.name=heddle', '-c', 'user.email=heddle@localhost',
     'commit', '-m', `heddle standalone snapshot ${sourceCommit}`,
-  ], { cwd: root, stdio: 'ignore' });
+  ], { cwd: root, stdio: 'ignore', env });
 }
 
 function verifySnapshot(root: string): void {

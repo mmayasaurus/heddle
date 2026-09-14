@@ -5,7 +5,7 @@
  */
 import { materializeAgentsMd, readPack, composePacks } from '../skillpacks.js';
 import { materializeWorkerMcp, validateWorkerMcp, codexMcpFlags, claudeMcpConfigFile, webCapable } from '../mcp.js';
-import { isOpenAICompatProvider, readSecretsEnvValue } from '../adapters/openai-compat.js';
+import { isInProcessHttpProvider, readSecretsEnvValue } from '../adapters/openai-compat.js';
 import { assessResult, type ResultAssessment } from '../classify.js';
 import { snapshotWorktree, sameSnapshot, diffInstruction, embeddedDiff } from '../review.js';
 import { parentCheckoutOf, checkoutFingerprint, escapedPaths, destroyedWork } from '../worktree.js';
@@ -131,6 +131,7 @@ export async function runTarget(
     provider: target.provider,
     caps: ctx.providerCaps?.[target.provider],
     permitPayPerToken: capAwarePolicy(ctx.table).permitPayPerToken,
+    table: ctx.table,
   });
   const gateChecks: Array<() => DispatchRefusal | null> = [
     () => billing.refusal ?? null, // HED-395 billing/overage — money-safety, first
@@ -208,7 +209,7 @@ export async function runTarget(
   // --mcp-config file — nothing is written into the worktree — and run under the chosen account's
   // CLAUDE_CONFIG_DIR (unset for the default login).
   const isClaude = target.provider === 'claude';
-  const isHttp = isOpenAICompatProvider(target.provider);
+  const isHttp = isInProcessHttpProvider(target.provider);
   const acct = isClaude ? ctx.claudeAccount ?? null : null;
   const rotation = (target.provider === 'codex' || target.provider === 'cursor') ? ctx.rotationAccount ?? null : null;
   let restoreSkills: () => void = () => {};
@@ -287,6 +288,7 @@ export async function runTarget(
       systemPromptAppend,
       mcpConfigPath,
       readOnly: route.readOnly,
+      skipPermissions: req.skipPermissions,
       mcpServers: isClaude ? mcp : undefined,
     });
   } catch (err) {

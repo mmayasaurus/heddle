@@ -1,8 +1,9 @@
-import { execFileSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
+import { promisify } from 'node:util';
 import type { ClaudeAccount } from './capaware.js';
 
 /**
@@ -171,10 +172,18 @@ export interface TokenReaderDeps {
   homeDir?: string;
   keychainTimeoutMs?: number;
   /** Return the raw `-w` secret (a JSON blob) or throw. Default: `security find-generic-password`. */
-  readKeychain?: (service: string, timeoutMs: number) => string;
+  readKeychain?: (service: string, timeoutMs: number) => Promise<string>;
   /** Return the credentials.json contents, or null when absent/unreadable. Default: node:fs. */
   readCredentialsFile?: (path: string) => string | null;
 }
+
+const resolveClaudeConfigDir = (configDir: string | null, homeDir: string): string => {
+  const input = configDir ?? join(homeDir, '.claude');
+  const expanded = input === '~' ? homeDir : input.startsWith('~/') ? join(homeDir, input.slice(2)) : input;
+  // Strip trailing slashes, but preserve the filesystem root: `resolve('/')` is `/`, and stripping its
+  // slash would collapse it to '' — which then reads cwd-relative and mis-hashes the keychain service.
+  return (resolve(expanded).replace(/\/+$/, '') || '/').normalize('NFC');
+};
 
 /**
  * The macOS keychain generic-password SERVICE that stores a config dir's Claude OAuth credential.
@@ -183,9 +192,8 @@ export interface TokenReaderDeps {
  * `absPath` is the absolute dir NFC-normalized with no trailing slash.
  */
 export function claudeKeychainService(configDir: string | null, homeDir: string = homedir()): string {
-  const normalize = (p: string): string => p.replace(/\/+$/, '').normalize('NFC');
-  const abs = normalize(configDir ?? join(homeDir, '.claude'));
-  const dflt = normalize(join(homeDir, '.claude'));
+  const abs = resolveClaudeConfigDir(configDir, homeDir);
+  const dflt = resolveClaudeConfigDir(null, homeDir);
   if (abs === dflt) return 'Claude Code-credentials';
   return `Claude Code-credentials-${createHash('sha256').update(abs).digest('hex').slice(0, 8)}`;
 }
@@ -199,8 +207,12 @@ const extractAccessToken = (blob: string): string | null => {
   }
 };
 
-const defaultReadKeychain = (service: string, timeoutMs: number): string =>
-  execFileSync('security', ['find-generic-password', '-w', '-s', service], { timeout: timeoutMs, encoding: 'utf8' });
+const execFileAsync = promisify(execFile);
+
+const defaultReadKeychain = async (service: string, timeoutMs: number): Promise<string> => {
+  const { stdout } = await execFileAsync('security', ['find-generic-password', '-w', '-s', service], { timeout: timeoutMs, encoding: 'utf8' });
+  return stdout;
+};
 
 const defaultReadCredentialsFile = (path: string): string | null => {
   try {
@@ -217,10 +229,10 @@ const defaultReadCredentialsFile = (path: string): string | null => {
  * not the expected path — the login keychain is unlocked here). A keychain that returns without a
  * token → `no-token` (this dir is not logged in). Never throws.
  */
-export function readClaudeAccessToken(configDir: string | null, deps: TokenReaderDeps = {}): TokenRead {
+export async function readClaudeAccessToken(configDir: string | null, deps: TokenReaderDeps = {}): Promise<TokenRead> {
   const homeDir = deps.homeDir ?? homedir();
   const timeoutMs = deps.keychainTimeoutMs ?? CLAUDE_KEYCHAIN_TIMEOUT_MS;
-  const dir = configDir ?? join(homeDir, '.claude');
+  const dir = resolveClaudeConfigDir(configDir, homeDir);
   const readCredentialsFile = deps.readCredentialsFile ?? defaultReadCredentialsFile;
   const credRaw = readCredentialsFile(join(dir, '.credentials.json'));
   if (credRaw !== null) {
@@ -228,11 +240,11 @@ export function readClaudeAccessToken(configDir: string | null, deps: TokenReade
     if (tok) return { ok: true, token: tok, source: 'credentials.json' };
     // present but tokenless → fall through to the keychain rather than declaring no-token early
   }
-  const service = claudeKeychainService(configDir, homeDir);
+  const service = claudeKeychainService(dir, homeDir);
   const readKeychain = deps.readKeychain ?? defaultReadKeychain;
   let blob: string;
   try {
-    blob = readKeychain(service, timeoutMs);
+    blob = await readKeychain(service, timeoutMs);
   } catch (err) {
     return { ok: false, reason: 'keychain-unavailable', error: shortError(err) };
   }
@@ -354,7 +366,7 @@ export interface ClaudePollDeps extends TokenReaderDeps {
   /** Loud-warning sink (default: process.stderr). Injected so tests can assert warnings fired. */
   warn?: (message: string) => void;
   /** Full token-read override (default: readClaudeAccessToken with the token deps). */
-  readToken?: (configDir: string | null) => TokenRead;
+  readToken?: (configDir: string | null) => Promise<TokenRead>;
 }
 
 const authHeaders = (token: string, userAgent: string): Record<string, string> => ({
@@ -428,7 +440,15 @@ export async function pollClaudeAccountUsage(account: ClaudeAccount, deps: Claud
   const capturedAt = (deps.now?.() ?? new Date()).toISOString();
   const base = { id: account.id, configDir: account.configDir, loggedIn: account.loggedIn, capturedAt };
   const readToken = deps.readToken ?? ((cd: string | null) => readClaudeAccessToken(cd, deps));
-  const tokenRead = readToken(account.configDir);
+  // Preserve the "Never throws" contract even if readToken REJECTS. The default reader never throws
+  // (readClaudeAccessToken catches internally), but readToken is injectable and now async — a rejection
+  // must become a first-class keychain-unavailable UNKNOWN row, never a Promise.all abort in pollClaudeUsage.
+  let tokenRead: TokenRead;
+  try {
+    tokenRead = await readToken(account.configDir);
+  } catch (err) {
+    tokenRead = { ok: false, reason: 'keychain-unavailable', error: shortError(err) };
+  }
   if (!tokenRead.ok) {
     return {
       ...base,
