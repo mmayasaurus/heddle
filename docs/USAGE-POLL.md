@@ -33,10 +33,20 @@ the headless producer can self-resolve where the dashboard window-keeper had to 
 
 Exactly one scheduler may write the usage sidecars. `install-poll-launchd` **refuses** (exit 1) when
 `io.heddle.window-keeper` is already loaded — on a keeper-equipped machine the keeper is the producer.
-The reciprocal guard on the keeper installer is tracked separately.
+The keeper installer carries the reciprocal guard (it refuses if this producer is already loaded), so
+the either/or holds regardless of install order (HED-552).
 
 ## Activation is a manual step
 
 Running the command is the activation: it loads the job immediately. Nothing loads it silently. Use
 `--dry-run` to preview the plist action (`would-create` / `would-update` / `would-skip`) without
 writing or loading anything.
+
+## Troubleshooting
+
+If polling silently stops after a Node upgrade, re-run `heddle usage install-poll-launchd`. The plist
+bakes the absolute path of the Node that was running at install time (`process.execPath`); a version
+manager (fnm/nvm) that removes that exact version leaves the job pointing at a now-missing binary — the
+poll then errors into `~/.heddle/usage-poll-claude.launchd.err` (no bad data is written). Re-running the
+installer re-resolves the current Node and rewrites the plist. This is inherent to launchd's minimal
+PATH; the trade-off is shared with the window-keeper's baked `HEDDLE_BIN`.
