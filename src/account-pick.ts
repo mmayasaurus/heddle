@@ -25,7 +25,10 @@ export interface ClaudeAccountRow {
   dispatchExcluded: boolean;
   overage: boolean;
   excluded: boolean;
+  /** Resident count remains the HED-261 low-headroom-cap input. */
   residents: number;
+  /** Weighted resident load is the LPT placement input. */
+  residentWeight: number;
 }
 
 export function usableClaudeCaps(caps: ProviderCaps | undefined, nowS = Math.floor(Date.now() / 1000)):
@@ -55,7 +58,7 @@ function valuesFor(caps: ProviderCaps, id: string): { usedPct5h: number | null; 
 }
 
 export function claudeAccountRows(
-  caps: ProviderCaps, accounts: ClaudeAccount[], floors: ClaudeFloors, residentsByAccount: ReadonlyMap<string, number> = new Map(),
+  caps: ProviderCaps, accounts: ClaudeAccount[], floors: ClaudeFloors, residentsByAccount: ReadonlyMap<string, ResidentLoad> = new Map(),
 ): ClaudeAccountRow[] {
   return accounts.map((account) => {
     const { usedPct5h, usedPct7d } = valuesFor(caps, account.id);
@@ -78,52 +81,41 @@ export function claudeAccountRows(
       dispatchExcluded,
       overage,
       excluded: floored || loggedOut || dispatchExcluded || overage,
-      residents: residentsByAccount.get(account.id) ?? 0,
+      residents: residentsByAccount.get(account.id)?.count ?? 0,
+      residentWeight: residentsByAccount.get(account.id)?.weight ?? 0,
     };
   });
 }
 
 export type BatchAssignment = ClaudePickData | { refused: true; reason: string };
+export interface ResidentLoad { count: number; weight: number; }
 
 /**
- * Deterministic residency-aware placement. Callers inject the live non-batch census when one exists;
- * this command currently starts at zero because no account-bound session census is available yet.
+ * Deterministic weighted-LPT placement. Counts are retained only for the HED-261 low-headroom cap.
  */
 export function pickClaudeAccountsBatch(
   caps: ProviderCaps, accounts: ClaudeAccount[], floors: ClaudeFloors, agents: readonly string[],
-  residentsByAccount: ReadonlyMap<string, number> = new Map(),
+  residentsByAccount: ReadonlyMap<string, ResidentLoad> = new Map(),
+  weightOf: (letter: string) => number = () => 1,
 ): { assignments: Record<string, BatchAssignment>; accounts: ClaudeAccountRow[] } {
-  // HED-340 (deferred): seed residents from the live pid-env census once it exposes Claude account
-  // bindings — that reader is not built yet, so batch currently starts every account at zero residents.
-  const residents = new Map(residentsByAccount);
+  const residents = new Map([...residentsByAccount].map(([account, load]) => [account, { ...load }]));
   const rows = claudeAccountRows(caps, accounts, floors, residents);
   const accountById = new Map(accounts.map((account) => [account.id, account]));
   const assignments: Record<string, BatchAssignment> = {};
-  // Spread ceiling reflects TOTAL load — existing residents (the injected census, HED-340) PLUS the new
-  // agents — divided across every account. Dividing only the new agents let a populated census sit above
-  // a tiny ceiling and refuse the whole batch even with ample headroom (codeant HED-446).
-  const existingResidents = accounts.reduce((sum, account) => sum + (residents.get(account.id) ?? 0), 0);
-  const ceiling = accounts.length === 0 ? 0 : Math.ceil((existingResidents + agents.length) / accounts.length);
   // INCLUSIVE boundary, matching the ratified floor (HED-261, R nod 2026-08-22): the ticket's
   // "≤10%-remaining accounts carry max N" → headroom ≤ residency_cap_below_pct triggers the cap. The
   // field name reads exclusive but the ratified semantic wins, exactly as never_below_pct is inclusive.
   const isAtLowHeadroomCap = (row: ClaudeAccountRow): boolean => row.headroomPct !== null && row.headroomPct <= floors.residencyCapBelowPct &&
-    (residents.get(row.account) ?? 0) >= floors.residencyMax;
-  const isAtCeiling = (row: ClaudeAccountRow): boolean => ceiling > 0 && (residents.get(row.account) ?? 0) >= ceiling;
-  const isAtCap = (row: ClaudeAccountRow): boolean => isAtCeiling(row) || isAtLowHeadroomCap(row);
+    (residents.get(row.account)?.count ?? 0) >= floors.residencyMax;
   const otherwiseEligible = (row: ClaudeAccountRow): boolean => !row.excluded && row.headroomPct !== null;
 
-  for (const agent of agents) {
-    const candidates = rows.filter((row) => !row.excluded && row.headroomPct !== null && !isAtCap(row));
+  for (const agent of [...agents].sort((a, b) => weightOf(b) - weightOf(a) || a.localeCompare(b))) {
+    const candidates = rows.filter((row) => otherwiseEligible(row) && !isAtLowHeadroomCap(row));
     if (candidates.length === 0) {
       const eligibleRows = rows.filter(otherwiseEligible);
-      if (eligibleRows.length > 0 && eligibleRows.every(isAtCeiling)) {
+      if (eligibleRows.length > 0 && eligibleRows.every(isAtLowHeadroomCap)) {
         const placed = Object.values(assignments).filter((assignment) => !('refused' in assignment)).length;
-        // The only event that frees a slot is a FLOORED account (and floored is its ONLY barrier)
-        // re-entering eligibility when its window resets — that adds a fresh account's worth of ceiling.
-        // An at-ceiling account's own reset restores headroom, not a resident slot, so naming it would
-        // promise an unblock that never comes (cursor HED-446). Name the soonest-resetting such account;
-        // with none, the batch simply exceeds the spread ceiling and no reset changes that.
+        // A floored account becoming healthy is the only reset event that can add a new eligible bin.
         const unblocker = rows
           .filter((row) => row.floored && !row.loggedOut && !row.dispatchExcluded && !row.overage)
           .map((row) => ({ account: row.account, reset: valuesFor(caps, row.account).resetsAt }))
@@ -132,7 +124,7 @@ export function pickClaudeAccountsBatch(
           refused: true,
           reason: unblocker
             ? `only ${placed} of ${agents.length} agents placeable until ${unblocker.account} resets ${unblocker.reset ?? 'unknown'}`
-            : `only ${placed} of ${agents.length} agents placeable: every usable account is at the spread ceiling (${ceiling} per account) and no reset frees a slot`,
+            : `no eligible Claude account: all metered, non-excluded accounts are at the residency cap`,
         };
         continue;
       }
@@ -142,7 +134,7 @@ export function pickClaudeAccountsBatch(
         else if (row.dispatchExcluded) dispatchExcluded++;
         else if (row.overage) overage++;
         else if (row.floored) floored++;
-        else if (isAtCap(row)) capped++;
+        else if (isAtLowHeadroomCap(row)) capped++;
         else if (row.headroomPct === null) unmetered++;
       }
       assignments[agent] = {
@@ -152,13 +144,13 @@ export function pickClaudeAccountsBatch(
       continue;
     }
     candidates.sort((a, b) =>
-      (residents.get(a.account) ?? 0) - (residents.get(b.account) ?? 0) ||
+      (residents.get(a.account)?.weight ?? 0) - (residents.get(b.account)?.weight ?? 0) ||
       (b.headroomPct ?? -Infinity) - (a.headroomPct ?? -Infinity) ||
       a.account.localeCompare(b.account));
     const selected = candidates[0];
     const account = accountById.get(selected.account)!;
     const { usedPct5h, usedPct7d, resetsAt } = valuesFor(caps, account.id);
-    const currentResidents = residents.get(account.id) ?? 0;
+    const currentResidents = residents.get(account.id) ?? { count: 0, weight: 0 };
     assignments[agent] = {
       account: account.id,
       configDir: account.configDir,
@@ -167,11 +159,13 @@ export function pickClaudeAccountsBatch(
       usedPct7d,
       bindingMeter: bindingMeter(usedPct5h, usedPct7d),
       resetsAt,
-      reason: `account:${account.id} batch placement${rows.filter(otherwiseEligible).length === 1 ? ' (DEGENERATE: every other account floored/vetoed — not a spread)' : ''} (residents ${currentResidents}, headroom ${selected.headroomPct === null ? 'unknown' : `${selected.headroomPct.toFixed(0)}%`})`,
+      reason: `account:${account.id} batch placement${rows.filter(otherwiseEligible).length === 1 ? ' (DEGENERATE: every other account floored/vetoed — not a spread)' : ''} (residents ${currentResidents.count}, weighted load ${currentResidents.weight}, headroom ${selected.headroomPct === null ? 'unknown' : `${selected.headroomPct.toFixed(0)}%`})`,
       for: agent,
     };
-    residents.set(account.id, currentResidents + 1);
-    selected.residents = currentResidents + 1;
+    const next = { count: currentResidents.count + 1, weight: currentResidents.weight + weightOf(agent) };
+    residents.set(account.id, next);
+    selected.residents = next.count;
+    selected.residentWeight = next.weight;
   }
   return { assignments, accounts: rows };
 }

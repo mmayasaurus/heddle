@@ -208,6 +208,24 @@ describe('dispatch — structural caps', () => {
     expect((summary.refusal as { code?: string } | null)?.code).toBe('capability-denied');
   });
 
+  it('dry run surfaces the headless Claude opus adversarial-review refusal without refusing sonnet', () => {
+    const accounts = [{ id: 'test', configDir: null }];
+    const caps = {
+      claude: {
+        provider: 'claude' as const, source: 'limits.json' as const, stale: false, capturedAt: 1,
+        fiveHour: { usedPercentage: null, resetsAt: null }, sevenDay: { usedPercentage: null, resetsAt: null },
+        windows: {}, noteCodes: [], activeAccount: null,
+        accounts: [{ id: 'test', fiveHour: { usedPercentage: 1, resetsAt: null }, sevenDay: { usedPercentage: null, resetsAt: null }, windows: {}, noteCodes: [], limitReached: false, stale: false }],
+      },
+    };
+    const request = { taskClass: 'adversarial-review', provider: 'claude', authorProvider: 'codex', prompt: 'review', cwd: tempDir(), identity: unbound, accounts, caps };
+    const opus = summarizePlan(planDispatch({ ...request, model: 'opus' }));
+    expect(opus.would_run).toBeNull();
+    expect((opus.refusal as { code?: string } | null)?.code).toBe('headless-claude-review-unreliable');
+    const sonnet = summarizePlan(planDispatch({ ...request, model: 'sonnet' }));
+    expect(sonnet.would_run).toBe('claude/sonnet');
+  });
+
   it('dry run does NOT surface a capability refusal for an in-session Claude route — dispatch returns the in-session instruction first (cubic #76)', async () => {
     const yamlPath = join(tempDir(), 'routing.yaml');
     const { writeFileSync } = await import('node:fs');
@@ -254,7 +272,8 @@ describe('dispatch — structural caps', () => {
     const adapter: WorkerAdapter = { name: 'throwing', provider: 'codex', dispatch: async () => { throw new Error('adapter exploded'); } };
     const outcome = await dispatch({ taskClass: 'bulk-mechanical', prompt: 'x', cwd, identity: unbound }, ledger, () => adapter);
     expect(outcome).toMatchObject({ ok: false, error: 'adapter exploded' });
-    expect(ledger.recent(1)[0]).toMatchObject({ ok: 0, error: 'adapter exploded', finished_at: expect.any(String) });
+    expect(ledger.recent(1)[0]).toMatchObject({ ok: 0, error: expect.stringContaining('adapter exploded'), finished_at: expect.any(String) });
+    expect(ledger.recent(1)[0].error).toContain('billing-degraded:account-unregistered(unset)');
     expect(ledger.inFlight()).toEqual([]); expect(existsSync(join(cwd, 'AGENTS.md'))).toBe(false);
   });
 

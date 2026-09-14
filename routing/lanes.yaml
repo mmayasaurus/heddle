@@ -27,6 +27,8 @@ floors:
   claude: {never_below_pct: 3, residency_cap_below_pct: 10, residency_max: 2}
   cooling_minutes: 30        # unmetered lane rest after a rate-limit refusal
   menial_verify_days: 7      # no routing without live-verification <=7 days
+# Resolved fleet policy: interactive=1.0, Fable=2.0, and an orchestrator adds 0.5.
+seat_weights: {default: 1.0, by_agent: {R: 2.5, Y: 2.0}}
 caps:
   openrouter_credits_weekly_usd: 10   # operator-adjustable
 guards:

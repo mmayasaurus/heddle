@@ -46,7 +46,7 @@ describe('pickClaudeAccount', () => {
   });
 });
 
-describe('pickClaudeAccountsBatch — spread-first residency ceiling', () => {
+describe('pickClaudeAccountsBatch — weighted residency spread', () => {
   const floors: ClaudeFloors = { neverBelowPct: 3, residencyCapBelowPct: 10, residencyMax: 2 };
   const accounts = (count: number): ClaudeAccount[] => Array.from({ length: count }, (_, index) => ({
     id: `acct${index + 1}`, configDir: index === 0 ? null : `/x/.claude-acct${index + 1}`,
@@ -75,25 +75,20 @@ describe('pickClaudeAccountsBatch — spread-first residency ceiling', () => {
     expect(placedCounts(result)).toEqual({ acct1: 1, acct2: 1, acct3: 1, acct4: 1 });
   });
 
-  it('spreads nine agents across four accounts within the hard ceiling', () => {
+  it('spreads nine unit-weight agents across four accounts', () => {
     const result = pickClaudeAccountsBatch(caps(accounts(4).map((account) => ({ id: account.id, used: 20 }))), accounts(4), floors, agents(9));
     const counts = Object.values(placedCounts(result)).sort((a, b) => b - a);
     expect(counts).toEqual([3, 2, 2, 2]);
     expect(Math.max(...counts) - Math.min(...counts)).toBeLessThanOrEqual(1);
   });
 
-  it('places six then honestly refuses three when the two usable accounts hit the all-account ceiling', () => {
+  it('retires the spread ceiling: one eligible account accepts the whole batch', () => {
     const result = pickClaudeAccountsBatch(caps([
       { id: 'acct1', used: 98, reset: 900 }, { id: 'acct2', used: 99, reset: 800 },
       { id: 'acct3', used: 20, reset: 700 }, { id: 'acct4', used: 30, reset: 600 },
     ]), accounts(4), floors, agents(9));
-    expect(placedCounts(result)).toEqual({ acct3: 3, acct4: 3 });
-    const refusals = Object.values(result.assignments).filter((assignment) => 'refused' in assignment);
-    expect(refusals).toHaveLength(3);
-    // acct3/acct4 are the at-ceiling usable accounts; rolling THEIR window restores headroom, not a
-    // resident slot. The reset that frees a slot is the soonest FLOORED account re-entering eligibility —
-    // acct2 (800), sooner than acct1 (900) (cursor HED-446).
-    expect(refusals.every((assignment) => assignment.reason === 'only 6 of 9 agents placeable until acct2 resets 800')).toBe(true);
+    expect(placedCounts(result)).toEqual({ acct3: 5, acct4: 4 });
+    expect(Object.values(result.assignments).some((assignment) => 'refused' in assignment)).toBe(false);
   });
 
   it('narrates a one-fresh-account placement as degenerate', () => {
@@ -112,16 +107,52 @@ describe('pickClaudeAccountsBatch — spread-first residency ceiling', () => {
     expect(result.assignments.agent1).not.toHaveProperty('refused');
   });
 
-  it('counts existing residents in the ceiling so a populated census still places new agents (codeant HED-446)', () => {
-    // Old ceil(new / accounts) = ceil(2/4) = 1 would treat every account (2 residents) as over-ceiling
-    // and refuse the whole batch; ceil((8 existing + 2 new) / 4) = 3 leaves room, so both new agents place.
-    const census = new Map([['acct1', 2], ['acct2', 2], ['acct3', 2], ['acct4', 2]]);
+  it('uses existing resident weight as the starting weighted load', () => {
+    const census = new Map([['acct1', { count: 2, weight: 2 }], ['acct2', { count: 2, weight: 2 }], ['acct3', { count: 2, weight: 2 }], ['acct4', { count: 2, weight: 2 }]]);
     const result = pickClaudeAccountsBatch(
       caps(accounts(4).map((account) => ({ id: account.id, used: 20 }))), accounts(4), floors, agents(2), census,
     );
     const placed = Object.values(result.assignments).filter((assignment) => !('refused' in assignment));
     expect(placed).toHaveLength(2);
     expect(Object.values(result.assignments).some((assignment) => 'refused' in assignment)).toBe(false);
+  });
+
+  it('uses LPT so weighted load range is bounded by the largest incoming weight', () => {
+    const weightOf = (agent: string) => ({ R: 2.5, Y: 2, S: 1, T: 1 }[agent] ?? 1);
+    const result = pickClaudeAccountsBatch(
+      caps(accounts(4).map((account) => ({ id: account.id, used: 20 }))), accounts(4), floors, ['S', 'R', 'T', 'Y'], new Map(), weightOf,
+    );
+    const loads = result.accounts.map((row) => row.residentWeight);
+    expect(Math.max(...loads) - Math.min(...loads)).toBeLessThanOrEqual(2.5);
+  });
+
+  it('keeps tonight\'s Fable-weighted R apart from S and T', () => {
+    const result = pickClaudeAccountsBatch(
+      caps(accounts(4).map((account) => ({ id: account.id, used: 20 }))), accounts(4), floors, ['R', 'S', 'T'], new Map(), (agent) => agent === 'R' ? 2.5 : 1,
+    );
+    expect(result.assignments.R).toMatchObject({ account: 'acct1' });
+    expect(result.assignments.S).toMatchObject({ account: 'acct2' });
+    expect(result.assignments.T).toMatchObject({ account: 'acct3' });
+    expect(Math.max(...result.accounts.map((row) => row.residentWeight))).toBeLessThanOrEqual(2.5);
+  });
+
+  it('never selects a floored account and refuses only when all remaining bins are count-capped', () => {
+    const census = new Map([
+      ['acct1', { count: 0, weight: 0 }], ['acct2', { count: 3, weight: 3 }], ['acct3', { count: 3, weight: 3 }], ['acct4', { count: 3, weight: 3 }],
+    ]);
+    const result = pickClaudeAccountsBatch(caps([
+      { id: 'acct1', used: 98 }, { id: 'acct2', used: 20 }, { id: 'acct3', used: 20 }, { id: 'acct4', used: 20 },
+    ]), accounts(4), floors, ['new'], census);
+    expect(result.assignments.new).toMatchObject({ account: 'acct2' });
+
+    const capFloors: ClaudeFloors = { neverBelowPct: 0, residencyCapBelowPct: 10, residencyMax: 2 };
+    const capped = pickClaudeAccountsBatch(caps([
+      { id: 'acct1', used: 100, reset: 800 }, { id: 'acct2', used: 90 }, { id: 'acct3', used: 90 }, { id: 'acct4', used: 90 },
+    ]), accounts(4), capFloors, ['new'], census);
+    expect(capped.assignments.new).toEqual({
+      refused: true,
+      reason: 'only 0 of 1 agents placeable until acct1 resets 800',
+    });
   });
 
   it('ignores overageEnabled on a STALE caps row and does not exclude for overage (codeant HED-446)', () => {

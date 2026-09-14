@@ -12,7 +12,7 @@ function result(overrides: Record<string, unknown> = {}): string {
 describe('ClaudeAdapter invocation and result contracts', () => {
   it('builds the default headless invocation with the complete safe tool allowlist', () => {
     const args = new ClaudeAdapter().buildArgs('do it', { model: 'haiku', cwd: '/tmp' });
-    expect(args.slice(0, 6)).toEqual(['-p', 'do it', '--output-format', 'json', '--model', 'claude-haiku-4-5-20251001']);
+    expect(args.slice(0, 8)).toEqual(['-p', 'do it', '--output-format', 'stream-json', '--verbose', '--include-partial-messages', '--model', 'claude-haiku-4-5-20251001']);
     expect(pair(args, '--permission-mode', 'acceptEdits')).toEqual(['--permission-mode', 'acceptEdits']);
     expect(args.slice(args.indexOf('--allowedTools') + 1)).toEqual([...DEFAULT_CLAUDE_ALLOWED_TOOLS]);
     expect(args).not.toContain('--dangerously-skip-permissions');

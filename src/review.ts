@@ -221,27 +221,43 @@ export function sameSnapshot(before: WorktreeSnapshot, after: WorktreeSnapshot):
 }
 
 /**
- * The diff itself, embedded for reviewers that CANNOT run git (claude read-only workers: their
- * `--tools Read Grep Glob` set has no Bash — see src/adapters/claude.ts). Output is size-capped so
- * argv stays far under ARG_MAX; the reviewer is told to Read the files for anything truncated.
+ * The diff itself, embedded for reviewers that CANNOT run git. `hasTools` defaults to true for the
+ * Claude Read/Grep/Glob reviewer; false describes the tool-less HTTP provider variant. Output is
+ * size-capped so argv stays far under ARG_MAX.
  * Falls back to the run-it-yourself instruction when git fails (bad ref / not a repo).
  */
-export function embeddedDiff(cwd: string, diffBase: string, maxBytes = 65_536): string {
+export function embeddedDiff(cwd: string, diffBase: string, maxBytes = 65_536, hasTools = true): string {
   try {
     const log = gitOut(cwd, ['log', `${diffBase}..HEAD`, '--oneline']);
     let diff = gitOut(cwd, ['diff', `${diffBase}...HEAD`]);
     let note = '';
     if (diff.length > maxBytes) {
       diff = diff.slice(0, maxBytes);
-      note = `\n[diff truncated at ${maxBytes} bytes — read the files with Read/Grep for the rest]`;
+      note = hasTools
+        ? `\n[diff truncated at ${maxBytes} bytes — read the files with Read/Grep for the rest]`
+        : `\n[diff truncated at ${maxBytes} bytes — you cannot see the rest; if that affects your review, say so explicitly]`;
     }
-    return 'Review the changes on this branch relative to `' + diffBase + '`. You cannot run shell ' +
-      'commands; the diff is embedded below — read the surrounding code with Read/Grep/Glob as ' +
-      'needed. Do not modify anything.\n\n' +
+    const preamble = hasTools
+      ? 'Review the changes on this branch relative to `' + diffBase + '`. You cannot run shell ' +
+        'commands; the diff is embedded below — read the surrounding code with Read/Grep/Glob as ' +
+        'needed. Do not modify anything.\n\n'
+      : 'Review the changes on this branch relative to `' + diffBase + '`. You have no tools and no ' +
+        'filesystem access — everything you can review is embedded below. Do not modify anything.\n\n';
+    return preamble +
       'Commits (git log ' + diffBase + '..HEAD --oneline):\n' + log +
       '\nDiff (git diff ' + diffBase + '...HEAD):\n```diff\n' + diff + '\n```' + note + '\n\n';
   } catch {
-    return diffInstruction(diffBase);
+    // git failed (bad ref / not a repo). embeddedDiff is only reached for reviewers that cannot run
+    // git themselves — claude read-only (hasTools: has Read/Grep/Glob to inspect the working tree) and
+    // the tool-less HTTP provider (hasTools=false: nothing). diffInstruction tells the reviewer to run
+    // `git diff`, which a tool-less HTTP reviewer cannot execute (codeant, PR #138). Hand the tool-less
+    // variant a truthful "diff unavailable — you cannot review this" instead of an unrunnable command;
+    // the file-tool variant keeps the run-it-yourself / read-the-code instruction unchanged.
+    if (hasTools) return diffInstruction(diffBase);
+    return 'Review the changes on this branch relative to `' + diffBase + '`. You have no tools and no ' +
+      'filesystem access, and the diff could not be computed (git failed for `' + diffBase + '`), so it ' +
+      'is NOT embedded below — you cannot see the changes and therefore cannot review them. Say so ' +
+      'explicitly; do not fabricate findings. Do not modify anything.\n\n';
   }
 }
 
