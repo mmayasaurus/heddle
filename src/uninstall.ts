@@ -16,7 +16,7 @@ export interface UninstallReport {
  * ~/.heddle/fleet — no registries, secrets, databases, or generated state. Destructive removal
  * of user-scoped data (a `--purge`-style flag) is intentionally out of scope: ~/.heddle
  * interleaves secrets, non-regenerable historical databases, user config, and regenerable state,
- * so its purge set is an operator (Maya) decision, tracked as a separate needs-Maya follow-up.
+ * so its purge set is an operator decision, tracked as a separate operator-gated follow-up.
  */
 export function uninstall(options: UninstallOptions = {}): UninstallReport {
   const dryRun = options.dryRun === true;
