@@ -17,6 +17,8 @@ import { pickClaudeAccount, readClaudeAccounts } from './capaware.js';
 import { claudeAccountRows, pickClaudeAccountsBatch, usableClaudeCaps } from './account-pick.js';
 import { bindingMeter, claudeFloorsFrom } from './floors.js';
 import { loadLanes } from './lanes.js';
+import { readSeatWeights, seatWeightsFrom, writeSeatWeightsMirror } from './seat-weights.js';
+import { censusClaudeResidents } from './residents.js';
 import { DEFAULT_USAGE_DIR, readProviderCaps } from './usage.js';
 import { buildOauthUsageSidecar, pollClaudeUsage } from './claude-usage.js';
 import { formatUsageRemaining, readUsageRemaining } from './usage-remaining.js';
@@ -99,6 +101,7 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
   heddle usage poll-claude [--json]  poll Claude OAuth usage and atomically write per-account sidecars
   heddle top [--once] [--json]  one disk-only dashboard snapshot (watch mode is Slice 2)
   heddle account pick [--for <letter[,letter...]>] [--json] [--explain]   healthiest addressable Claude account for a fleet relaunch
+  heddle account seat-weights sync   atomically refresh ~/.heddle/seat-weights.json from routing/lanes.yaml
   heddle pr own <whoami|claim|check|release|mine> [<pr#>] [--json]       coordinate ownership of a GitHub PR
   heddle pr sweep <pr#> [--json]       sweep all GitHub PR review channels and report mechanical gates
   heddle pr watch <pr#> [--repo <owner/repo>] [--seed] [--reset] [--json]  one read-only PR review/CI poll pass
@@ -245,13 +248,24 @@ try {
     }
 
     case 'account': {
+      if (process.argv[3] === 'seat-weights') {
+        if (process.argv[4] !== 'sync' || process.argv.length !== 5) {
+          console.error('usage: heddle account seat-weights sync');
+          process.exit(2);
+        }
+        writeSeatWeightsMirror(seatWeightsFrom(loadLanes()));
+        break;
+      }
       if (process.argv[3] !== 'pick') {
-        console.error('usage: heddle account pick [--for <letter[,letter...]>] [--json] [--explain]');
+        console.error('usage: heddle account pick [--for <letter[,letter...]>] [--json] [--explain]\n       heddle account seat-weights sync');
         process.exit(2);
       }
       const accounts = readClaudeAccounts();
       const caps = readProviderCaps();
-      const floors = claudeFloorsFrom(loadLanes());
+      const lanes = loadLanes();
+      const floors = claudeFloorsFrom(lanes);
+      writeSeatWeightsMirror(seatWeightsFrom(lanes));
+      const { weightOf } = readSeatWeights();
       const forAgent = arg('--for');
       if (has('--for') && (!forAgent || forAgent.startsWith('--'))) {
         console.error('usage: heddle account pick [--for <letter[,letter...]>] [--json] [--explain]');
@@ -277,6 +291,12 @@ try {
         process.exit(2);
       }
       const agents = [...new Set(requestedAgents)];
+      // Single-account picks retain their long-standing cap-aware path; residency is batch placement state.
+      // An unavailable census (null) degrades to residency-unaware placement rather than a partial count
+      // that would under-fill an account into a stack — the census already warned why on stderr.
+      const residentsByAccount = (agents.length > 1
+        ? censusClaudeResidents({ accounts, weightOf })
+        : null) ?? new Map<string, { count: number; weight: number }>();
       if (agents.length > 1) {
         const warnings: string[] = [];
         if (agents.length !== requestedAgents.length) {
@@ -284,7 +304,7 @@ try {
           warnings.push(warning);
           console.error(warning);
         }
-        const batch = pickClaudeAccountsBatch(claudeCaps, accounts, floors, agents);
+        const batch = pickClaudeAccountsBatch(claudeCaps, accounts, floors, agents, residentsByAccount, weightOf);
         const data = {
           assignments: batch.assignments,
           warnings,
@@ -296,7 +316,8 @@ try {
       }
       const pick = pickClaudeAccount(claudeCaps, accounts, { floors });
       // Keep the singleton explain payload byte-stable: residents is batch-only context.
-      const accountRows = claudeAccountRows(claudeCaps, accounts, floors).map(({ residents: _residents, ...row }) => row);
+      const accountRows = claudeAccountRows(claudeCaps, accounts, floors, residentsByAccount)
+        .map(({ residents: _residents, residentWeight: _residentWeight, ...row }) => row);
       if (!pick) {
         if (accounts.length === 0) {
           console.error('heddle: refusing Claude account pick: no accounts registered in ~/.heddle/accounts.json');
