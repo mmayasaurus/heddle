@@ -4,7 +4,6 @@ import { withMandatoryPacks } from './skillpacks.js';
 import { classifyEffort } from './classify.js';
 import { normalizeProvider } from './review.js';
 import { fleetPauseStatus } from './fleet-pause.js';
-import { decideCapabilities, capabilityPolicy } from './capabilities.js';
 import { resolveIdentity, attributeDispatch } from './identity.js';
 import { readProviderCaps } from './usage.js';
 import { readClaudeAccounts, pickClaudeAccount, capAwarePolicy, hardRefusal } from './capaware.js';
@@ -14,7 +13,7 @@ import { defaultAdapterFor } from './dispatcher/adapters.js';
 import { refusalOutcome, refuseDepth1, refuseNotDispatchable, refuseInSession, refuseBilling } from './dispatcher/refusals.js';
 import { overrideReasonGate } from './dispatcher/override-gate.js';
 import { monocultureNote, formatMonocultureWarning } from './dispatcher/monoculture.js';
-import { planDispatch, resolveRotationAccount, hasNoDispatchableClaudeAccount, noDispatchableClaudeAccountReason } from './dispatcher/plan.js';
+import { planDispatch, resolveRotationAccount, hasNoDispatchableClaudeAccount, noDispatchableClaudeAccountReason, capabilityFitFallbackEligible } from './dispatcher/plan.js';
 import { runTarget } from './dispatcher/run.js';
 import type { AdapterFactory, DispatchContext, DispatchRequest, DispatchOutcome } from './dispatcher/types.js';
 
@@ -154,14 +153,18 @@ export async function dispatch(
   // account. plan.billingRefusal is set (plan.ts) ONLY when the dispatch reaches runTarget and the primary
   // account is refused (undefined for in-session previews / unclassifiable degrade), and it comes from the
   // same pure billingVerdict the runTarget gate and the dry-run preview use (F7 parity).
-  // F1 (HED-395): SKIP this plan-level gate ONLY when the primary would capability-fail AND a fallback
-  // is available — runTarget then denies the primary, the capability-fit fallback rebinds (REV-3), and
-  // runTarget's OWN billing gate bills the REBOUND account. Skipping here lets that safe fallback run
-  // instead of refusing the pay-per-token PRIMARY before it is ever reached (the regression the re-review
-  // caught). With no fallback, or an enforceable primary (primaryCapabilityUnenforceable === false), the
-  // gate fires exactly as before — preserving REV-1 (a refused primary never spends a classifier) and the
-  // authoritative runTarget gate still enforces every rebound account.
-  if (plan.billingRefusal && !(plan.primaryCapabilityUnenforceable && plan.fallback)) {
+  // F1 (HED-395): SKIP this plan-level gate ONLY when the run will actually REBIND to a capability-fit
+  // fallback (plan.capabilityFitRebinds) — runTarget then denies the primary on capability, the fallback
+  // rebinds (REV-3), and runTarget's OWN billing gate bills the REBOUND account. capabilityFitRebinds
+  // mirrors the runtime rebind conditions EXACTLY (capabilityFitFallbackEligible: !noFallback, a fallback
+  // that CAN enforce, a non-in-session fallback, a different-family reviewer — plus the primary being
+  // unenforceable), so this skip can never be broader than the rebind it protects. When the rebind will
+  // NOT happen (no eligible fallback, an in-session/same-family/non-enforcing fallback, or an enforceable
+  // primary) the gate fires HERE — before the auto-effort classifier below, preserving REV-1 (a refused
+  // primary never spends a classifier). The over-broad "&& plan.fallback" skip let a billing-refused
+  // primary whose fallback could NOT rebind reach the classifier and return capability-denied instead of
+  // the billing refusal (the re-review + Bugbot finding). The runTarget gate still enforces every rebound account.
+  if (plan.billingRefusal && !plan.capabilityFitRebinds) {
     return refuseBilling(ctx, req, route.taskClass, target, skillsForRefusal, plan.billingRefusal);
   }
 
@@ -253,51 +256,50 @@ export async function dispatch(
   // the class declares a fallback whose provider CAN enforce every requested capability, route there
   // — that's fit-routing, same spirit as the model fallback. Caller/operator errors stay terminal;
   // for a review class the fallback must still not be the author's family.
+  // Conditions 1 (the primary's own unenforceable capability refusal from runTarget) + the shared
+  // capabilityFitFallbackEligible predicate (conditions 2–6). The predicate is a type guard, so `fallback`
+  // narrows to non-undefined for the whole block; it is the SAME predicate the plan-level billing gate and
+  // its preview key on (via plan.capabilityFitRebinds), so the gate's skip can never be broader than this rebind.
   if (primary.refusal?.code === 'capability-denied' && primary.capabilityRefusalKind === 'unenforceable'
-      && !req.noFallback && fallback
-      && !(route.reviewerPool && normalizeProvider(fallback.provider) === normalizeProvider(req.authorProvider))) {
-    const fallbackCapabilities = [...new Set([...(fallback.capabilities ?? []), ...(req.capabilities ?? [])])];
-    const fbCaps = decideCapabilities(fallback.provider, fallbackCapabilities, req.optIn === true, capabilityPolicy(table));
-    if (!fbCaps.refusal && providerExecution(table, fallback.provider) !== 'in-session-subagent') {
-      const targetCapabilities = [...new Set([...(target.capabilities ?? []), ...(req.capabilities ?? [])])];
-      ctx.routeReason = `${plan.decision.routeReason}; capability-fit fallback: ${target.provider} cannot enforce [${targetCapabilities.join(', ')}] → ${fallback.provider}/${fallback.model}`;
-      if (fallback.provider === 'codex' || fallback.provider === 'cursor') {
-        const registry = req.rotationAccounts ?? readRotationAccounts();
-        ctx.rotationAccount = resolveRotationAccount(fallback, req, registry, readCooling(req.coolingPath ?? DEFAULT_COOLING_PATH));
-        ctx.account = ctx.rotationAccount?.id ?? (fallback.provider === 'codex' && req.env?.CODEX_HOME ? basename(req.env.CODEX_HOME) : null);
-        if (ctx.rotationAccount) ctx.routeReason += `; ${ctx.rotationAccount.reason}`;
-      } else if (fallback.provider === 'claude') {
-        // A CLAUDE capability-fit fallback needs its OWN headroom-based account pick, exactly like the
-        // class fallback below (REV-3): without it ctx.account stays the primary's stale binding and the
-        // runTarget billing gate would classify the WRONG account. forFable so a fable fallback is picked
-        // by Fable headroom. pickClaudeAccount THROWS on a bad pin (unknown / logged-out / excluded), so
-        // wrap it exactly like the class fallback — a stale accountPin (never validated at plan time for a
-        // non-claude primary) must annotate the already-ledgered capability refusal, not throw bare out of
-        // dispatch. A non-empty registry with no addressable account must not inherit the caller's login
-        // either: annotate + return the primary's capability refusal rather than run the fallback blind.
-        const fallbackAccounts = req.accounts ?? readClaudeAccounts();
-        try {
-          ctx.claudeAccount = pickClaudeAccount(ctx.providerCaps?.claude, fallbackAccounts,
-            { pin: req.accountPin, routeAwayAtPct: capAwarePolicy(table).routeAwayAtPct, forFable: fallback.model === 'fable' }) ?? null;
-          ctx.account = ctx.claudeAccount?.account.id ?? null;
-          if (fallbackAccounts.length > 0 && ctx.claudeAccount === null) {
-            const note = `claude capability-fit fallback blocked: no dispatchable account — ${noDispatchableClaudeAccountReason(fallbackAccounts.length)}`;
-            const base = primary.error?.trim() ? primary.error : '';
-            primary.error = base ? `${base}; ${note}` : note;
-            try { ledger.annotateError(primary.ledgerId, note); } catch { /* best-effort: a ledger write failure must not abort or misclassify the dispatch */ }
-            return primary;
-          }
-          if (ctx.claudeAccount) ctx.routeReason += `; ${ctx.claudeAccount.reason}`;
-        } catch (err) {
-          const note = `claude capability-fit fallback blocked: ${err instanceof Error ? err.message : String(err)}`;
+      && capabilityFitFallbackEligible(fallback, req, route, table)) {
+    const targetCapabilities = [...new Set([...(target.capabilities ?? []), ...(req.capabilities ?? [])])];
+    ctx.routeReason = `${plan.decision.routeReason}; capability-fit fallback: ${target.provider} cannot enforce [${targetCapabilities.join(', ')}] → ${fallback.provider}/${fallback.model}`;
+    if (fallback.provider === 'codex' || fallback.provider === 'cursor') {
+      const registry = req.rotationAccounts ?? readRotationAccounts();
+      ctx.rotationAccount = resolveRotationAccount(fallback, req, registry, readCooling(req.coolingPath ?? DEFAULT_COOLING_PATH));
+      ctx.account = ctx.rotationAccount?.id ?? (fallback.provider === 'codex' && req.env?.CODEX_HOME ? basename(req.env.CODEX_HOME) : null);
+      if (ctx.rotationAccount) ctx.routeReason += `; ${ctx.rotationAccount.reason}`;
+    } else if (fallback.provider === 'claude') {
+      // A CLAUDE capability-fit fallback needs its OWN headroom-based account pick, exactly like the
+      // class fallback below (REV-3): without it ctx.account stays the primary's stale binding and the
+      // runTarget billing gate would classify the WRONG account. forFable so a fable fallback is picked
+      // by Fable headroom. pickClaudeAccount THROWS on a bad pin (unknown / logged-out / excluded), so
+      // wrap it exactly like the class fallback — a stale accountPin (never validated at plan time for a
+      // non-claude primary) must annotate the already-ledgered capability refusal, not throw bare out of
+      // dispatch. A non-empty registry with no addressable account must not inherit the caller's login
+      // either: annotate + return the primary's capability refusal rather than run the fallback blind.
+      const fallbackAccounts = req.accounts ?? readClaudeAccounts();
+      try {
+        ctx.claudeAccount = pickClaudeAccount(ctx.providerCaps?.claude, fallbackAccounts,
+          { pin: req.accountPin, routeAwayAtPct: capAwarePolicy(table).routeAwayAtPct, forFable: fallback.model === 'fable' }) ?? null;
+        ctx.account = ctx.claudeAccount?.account.id ?? null;
+        if (fallbackAccounts.length > 0 && ctx.claudeAccount === null) {
+          const note = `claude capability-fit fallback blocked: no dispatchable account — ${noDispatchableClaudeAccountReason(fallbackAccounts.length)}`;
           const base = primary.error?.trim() ? primary.error : '';
           primary.error = base ? `${base}; ${note}` : note;
           try { ledger.annotateError(primary.ledgerId, note); } catch { /* best-effort: a ledger write failure must not abort or misclassify the dispatch */ }
           return primary;
         }
+        if (ctx.claudeAccount) ctx.routeReason += `; ${ctx.claudeAccount.reason}`;
+      } catch (err) {
+        const note = `claude capability-fit fallback blocked: ${err instanceof Error ? err.message : String(err)}`;
+        const base = primary.error?.trim() ? primary.error : '';
+        primary.error = base ? `${base}; ${note}` : note;
+        try { ledger.annotateError(primary.ledgerId, note); } catch { /* best-effort: a ledger write failure must not abort or misclassify the dispatch */ }
+        return primary;
       }
-      return runTarget(fallback, req, ctx, route, `${route.provider}/${route.model} (capability-unenforceable)`);
     }
+    return runTarget(fallback, req, ctx, route, `${route.provider}/${route.model} (capability-unenforceable)`);
   }
   // A read-only MANDATE VIOLATION is a policy failure of the reviewer, not a provider failure — never
   // "retry" it on the fallback (that would re-run in an already-mutated tree and mask the violation).

@@ -91,6 +91,33 @@ export function resolveRotationAccount(target: RouteTarget, req: DispatchRequest
 }
 
 /**
+ * HED-395 F1: is the capability-fit fallback (dispatch.ts) ELIGIBLE to rebind for this dispatch? These
+ * are runTarget's rebind conditions 2–6 EXACTLY, EXCEPT the primary's own `unenforceable` capability
+ * refusal (condition 1 = `primaryCapabilityUnenforceable`, computed from the SAME decideCapabilities the
+ * run uses). ONE predicate shared by the runtime rebind (dispatch.ts), the plan-level billing gate, and
+ * that gate's dry-run preview (summarizePlan) — so a "skip the billing gate" decision can never drift
+ * from the rebind it is meant to protect (the F1 bug was exactly that drift: the gate skipped whenever a
+ * fallback merely EXISTED, but the rebind also needs !noFallback, an enforcing fallback, a non-in-session
+ * fallback, and a different-family reviewer — when those fail the run spent a classifier and returned
+ * capability-denied instead of the billing refusal). A type guard so `fallback` narrows to non-undefined
+ * in the SAME `&&` chain the runtime rebind uses.
+ */
+export function capabilityFitFallbackEligible(
+  fallback: RouteTarget | undefined, req: DispatchRequest, route: Route, table: RoutingTable,
+): fallback is RouteTarget {
+  if (req.noFallback || !fallback) return false;
+  // HED-3: a review class's fallback is never the author's own family.
+  if (route.reviewerPool && normalizeProvider(fallback.provider) === normalizeProvider(req.authorProvider)) return false;
+  // The fallback provider must actually enforce every requested capability (class defaults ∪ caller's) —
+  // the SAME union and decideCapabilities the runtime rebind (and runTarget) use, so plan and run agree.
+  const fallbackCapabilities = [...new Set([...(fallback.capabilities ?? []), ...(req.capabilities ?? [])])];
+  if (decideCapabilities(fallback.provider, fallbackCapabilities, req.optIn === true, capabilityPolicy(table)).refusal) return false;
+  // An in-session fallback returns the in-session instruction, never a spawned rebind — so it does not
+  // relieve the billing gate (dispatch()'s in-session refusal precedes the fallback path).
+  return providerExecution(table, fallback.provider) !== 'in-session-subagent';
+}
+
+/**
  * The dry-run half of dispatch(): resolves the class/route contract (HED-1), applies cap-aware
  * routing (HED-67) and Claude account advice (HED-68) — no ledger row, no worker. Used by
  * dispatch() itself and by `heddle route` / the `plan_dispatch` MCP tool.
@@ -329,14 +356,17 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
   const dryReqCaps = [...new Set([...(target.capabilities ?? []), ...(req.capabilities ?? [])])];
   const dryCaps = decideCapabilities(target.provider, dryReqCaps, req.optIn === true, capabilityPolicy(table));
   const capabilityRefusal = reachesRunTarget && dryCaps.refusal && dryCaps.refusal.kind !== 'unenforceable' ? dryCaps.refusal.reason : undefined;
-  // HED-395 F1: the PRIMARY cannot enforce a requested capability ('unenforceable' — NOT a terminal
-  // refusal). runTarget will deny it and dispatch()'s capability-fit fallback (~L712) rebinds to a
-  // provider that CAN enforce, billing the REBOUND account. Surfaced so dispatch()'s plan-level billing
-  // gate does NOT preempt that safe fallback: a pay-per-token primary that would capability-fail must
-  // REACH runTarget (which bills the rebound account), not be refused billing.* here before the fallback
-  // can run. dispatch() still fires the gate when there is no fallback to rebind to (an enforceable
-  // primary leaves this false, so the gate fires there too).
+  // HED-395 F1: would the run deny the PRIMARY on an unenforceable capability ('unenforceable' — NOT a
+  // terminal refusal) AND rebind to a capability-fit fallback (dispatch.ts)? primaryCapabilityUnenforceable
+  // is condition 1 (the SAME decideCapabilities the run uses, so plan and run agree); capabilityFitRebinds
+  // ANDs it with capabilityFitFallbackEligible — the EXACT remaining runtime rebind conditions (!noFallback,
+  // an enforcing fallback, a non-in-session fallback, a different-family reviewer). dispatch()'s plan-level
+  // billing gate reads capabilityFitRebinds to skip ONLY when that safe rebind will actually happen: a
+  // billing-refused primary that would capability-fail-then-rebind must REACH runTarget (which bills the
+  // REBOUND account), but one whose fallback CANNOT rebind is still refused here, before the auto-effort
+  // classifier spends a dispatch (the REV-1 invariant the over-broad "&& plan.fallback" skip had broken).
   const primaryCapabilityUnenforceable = reachesRunTarget && dryCaps.refusal?.kind === 'unenforceable';
+  const capabilityFitRebinds = primaryCapabilityUnenforceable && capabilityFitFallbackEligible(fallback, req, route, table);
   const requiresWebRefusal = reachesRunTarget && !dryCaps.refusal && route.requiresWeb && !webCapable(target.provider, dryCaps.granted)
     ? webRefusalReason(route.taskClass, target.provider)
     : undefined;
@@ -351,16 +381,23 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
       + `claude -p --output-format json is silent until completion, so a substantial review that overruns `
       + `SIGKILLs at its timeout with zero output (HED-511: 6/6 such dispatches died this way).`
     : undefined;
-  return { route, target, fallback, origin, execution, decision, skillsForRefusal, account, accountAdvice, accountPick, rotationAccount, claudeAccountCount, notDispatchable, reviewerPick, sameProviderReview, pinnedExcludedAccount, overrideReasonRequired, billingRefusal, billingAdvice, capabilityRefusal, requiresWebRefusal, primaryCapabilityUnenforceable, headlessClaudeReviewRefusal };
+  return { route, target, fallback, origin, execution, decision, skillsForRefusal, account, accountAdvice, accountPick, rotationAccount, claudeAccountCount, notDispatchable, reviewerPick, sameProviderReview, pinnedExcludedAccount, overrideReasonRequired, billingRefusal, billingAdvice, capabilityRefusal, requiresWebRefusal, capabilityFitRebinds, headlessClaudeReviewRefusal };
 }
 
 /** One shared dry-run summary for `heddle route` and the `plan_dispatch` MCP tool (identical fields). */
 export function summarizePlan(plan: DispatchPlan): Record<string, unknown> {
   const notDispatchable = plan.notDispatchable;
   const noDispatchableAccount = hasNoDispatchableClaudeAccount(plan);
+  // HED-395 F1 preview parity: when the run would rebind to a capability-fit fallback (dispatch.ts), the
+  // billing-refused PRIMARY never runs — the run reaches runTarget, denies the primary on capability, and
+  // bills the REBOUND account. So the preview must NOT advertise the primary's billing refusal here; it
+  // keys on capabilityFitRebinds, which mirrors the runtime rebind conditions exactly (F7). would_run still
+  // shows the PRIMARY (the rebound fallback is named in remaining_fallback — preview-shows-primary is the
+  // HED-275 boundary, same as the `unenforceable` capabilityRefusal exclusion above).
+  const previewBilling = plan.capabilityFitRebinds ? undefined : plan.billingRefusal;
   return {
     task_class: plan.route.taskClass,
-    would_run: notDispatchable || plan.decision.refusal || plan.billingRefusal || plan.sameProviderReview || plan.pinnedExcludedAccount || noDispatchableAccount || plan.headlessClaudeReviewRefusal || plan.overrideReasonRequired || plan.capabilityRefusal || plan.requiresWebRefusal ? null : `${plan.target.provider}/${plan.target.model}`,
+    would_run: notDispatchable || plan.decision.refusal || previewBilling || plan.sameProviderReview || plan.pinnedExcludedAccount || noDispatchableAccount || plan.headlessClaudeReviewRefusal || plan.overrideReasonRequired || plan.capabilityRefusal || plan.requiresWebRefusal ? null : `${plan.target.provider}/${plan.target.model}`,
     execution: plan.execution ?? null,
     in_session: plan.execution === 'in-session-subagent',
     routed_away_for_cap: plan.decision.routedAwayForCap,
@@ -374,8 +411,8 @@ export function summarizePlan(plan: DispatchPlan): Record<string, unknown> {
       ? { code: 'same-provider-review', reason: plan.sameProviderReview }
       : plan.decision.refusal
       ? plan.decision.refusal
-      : plan.billingRefusal
-      ? plan.billingRefusal
+      : previewBilling
+      ? previewBilling
       : plan.pinnedExcludedAccount
       ? { code: 'no-dispatchable-account', reason: plan.pinnedExcludedAccount.reason }
       : noDispatchableAccount

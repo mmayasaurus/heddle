@@ -98,6 +98,23 @@ describe('dispatch billing enforcement (HED-395)', () => {
     process.env.HEDDLE_ROUTING = yaml;
   }
 
+  // A cursor PRIMARY → cursor FALLBACK table (F1 no-rebind shape): the FALLBACK provider also enforces
+  // NOTHING, so a `browse` request makes BOTH the primary and the capability-fit fallback refuse
+  // 'unenforceable' → capabilityFitFallbackEligible is false → NO rebind. The plan-level billing gate must
+  // therefore still refuse a pay-per-token cursor primary here — the case the over-broad "&& plan.fallback"
+  // skip wrongly let through (it reached runTarget, spent the classifier, and returned capability-denied).
+  function cursorCursorRouting(): void {
+    const yaml = `${tempDir()}/cursor-cursor.yaml`;
+    writeFileSync(yaml, [
+      'version: 0', 'providers:',
+      '  cursor: { auth: cursor-subscription, execution: headless, models: [cursor-grok-4.6-high] }',
+      'task_classes:', '  cap-fit-billing:',
+      '    provider: cursor', '    model: cursor-grok-4.6-high',
+      '    fallback: { provider: cursor, model: cursor-grok-4.6-high }', '',
+    ].join('\n'));
+    process.env.HEDDLE_ROUTING = yaml;
+  }
+
   // A fresh, under-cap claude provider snapshot with one row for `id` (so pickClaudeAccount selects it).
   function claudeCapsFor(id: string): ProviderCaps {
     return {
@@ -454,7 +471,8 @@ describe('dispatch billing enforcement (HED-395)', () => {
     expect(fake.calls).toHaveLength(1);
     // Red if F1 is reverted (unconditional `if (plan.billingRefusal)`): dispatch refuses
     // billing.pay-per-token on the cursor primary with NO spawn (fake.calls === 0), never reaching the
-    // fallback — plan.primaryCapabilityUnenforceable && plan.fallback is exactly what lets it through.
+    // fallback — plan.capabilityFitRebinds (the primary is unenforceable AND the claude fallback is
+    // ELIGIBLE to rebind) is exactly what lets it through.
   });
 
   it('previews decision.refusal (metered-pool) ahead of billingRefusal, matching runtime order (F2)', () => {
@@ -473,5 +491,71 @@ describe('dispatch billing enforcement (HED-395)', () => {
     // preview must agree. Red if the F2 swap is reverted (billingRefusal listed first) → previews billing.*.
     plan.decision.refusal = { code: 'metered-pool-exhausted', reason: 'metered pool exhausted (test)' };
     expect((summarizePlan(plan).refusal as { code: string }).code).toBe('metered-pool-exhausted');
+  });
+
+  it('refuses a pay-per-token PRIMARY (no classifier) when the capability-fit fallback cannot rebind (F1 no-rebind)', async () => {
+    classifierDispatch.mockClear();
+    // cursor PRIMARY (pay-per-token) asked for `browse` → 'unenforceable'. Its class fallback is ALSO
+    // cursor, which likewise enforces nothing, so the capability-fit rebind CANNOT fire. The plan-level
+    // billing gate must therefore still refuse the pay-per-token primary — and BEFORE the auto-effort
+    // classifier (REV-1). This is exactly the gap the over-broad "&& plan.fallback" skip opened: the gate
+    // was skipped whenever a fallback merely EXISTED, so the metered primary reached the classifier and
+    // returned capability-denied instead of the billing refusal (the re-review + Bugbot finding).
+    cursorCursorRouting();
+    writeRegistry({ cursor: [{ id: 'cursor-metered', keyFile: null, billingClass: 'pay-per-token' }] });
+    const fake = fakeAdapter(undefined, { readAgents: false });
+    const outcome = await dispatch({
+      taskClass: 'cap-fit-billing', capabilities: ['browse'], prompt: 'x', cwd: tempDir(), identity: unbound, autoEffort: true,
+      rotationAccounts: { codex: [], cursor: [{ id: 'cursor-metered', keyFile: null }] },
+    }, tempLedger(), () => fake.adapter);
+    expect(outcome.refusal?.code).toBe('billing.pay-per-token');   // NOT capability-denied
+    expect(fake.calls).toHaveLength(0);                            // no worker spawn
+    expect(classifierDispatch).not.toHaveBeenCalled();             // no classifier spent (REV-1 preserved)
+    // Red if the skip is reverted to bare `plan.fallback`: the gate is skipped, the cursor primary reaches
+    // runTarget + auto-effort, the rebind cannot fire (cursor fallback can't enforce browse), and dispatch
+    // returns capability-denied with the classifier already spent.
+  });
+
+  it('previews the capability-fit rebind, not the primary billing refusal (F1 preview parity — rebind)', () => {
+    // Same shape as the F1 rebind test, asserting the PREVIEW (summarizePlan / `heddle route`). The run
+    // rebinds to the SUBSCRIPTION claude fallback and spawns it, so the preview must NOT advertise the
+    // cursor primary's billing.pay-per-token refusal. would_run shows the PRIMARY (the rebound fallback is
+    // named in remaining_fallback — preview-shows-primary is the HED-275 boundary), and refusal is null.
+    cursorClaudeRouting();
+    writeRegistry({
+      cursor: [{ id: 'cursor-metered', keyFile: null, billingClass: 'pay-per-token' }],
+      claude: [{ id: 'claude-sub', configDir: null, billingClass: 'subscription-quota' }],
+    });
+    const plan = planDispatch({
+      taskClass: 'cap-fit-billing', capabilities: ['browse'], prompt: 'x', cwd: tempDir(), identity: unbound,
+      accounts: [{ id: 'claude-sub', configDir: null, loggedIn: true }],
+      caps: { claude: claudeCapsFor('claude-sub') },
+      rotationAccounts: { codex: [], cursor: [{ id: 'cursor-metered', keyFile: null }] },
+    });
+    expect(plan.billingRefusal?.code).toBe('billing.pay-per-token');   // the primary IS billing-refused…
+    expect(plan.capabilityFitRebinds).toBe(true);                      // …but the run rebinds to a fit fallback
+    const summary = summarizePlan(plan);
+    expect(summary.refusal).toBeNull();                                // so the preview advertises NO refusal
+    expect(summary.would_run).toBe('cursor/cursor-grok-4.6-high');     // primary shown; fallback in remaining_fallback
+    expect(summary.remaining_fallback).toBe('claude/haiku');
+    // Red if the preview parity fix is reverted (summarizePlan keys on plan.billingRefusal directly):
+    // refusal shows billing.pay-per-token and would_run is null — a refusal the rebinding run never makes.
+  });
+
+  it('previews the billing refusal when the capability-fit fallback cannot rebind (F1 preview parity — no-rebind)', () => {
+    // The mirror of the rebind preview: cursor→cursor, so NO rebind is possible. The run refuses
+    // billing.pay-per-token, and the preview must AGREE — capabilityFitRebinds is false, so summarizePlan
+    // still surfaces billingRefusal. Guards the parity fix against OVER-suppressing (nulling the refusal
+    // whenever a fallback merely exists).
+    cursorCursorRouting();
+    writeRegistry({ cursor: [{ id: 'cursor-metered', keyFile: null, billingClass: 'pay-per-token' }] });
+    const plan = planDispatch({
+      taskClass: 'cap-fit-billing', capabilities: ['browse'], prompt: 'x', cwd: tempDir(), identity: unbound,
+      rotationAccounts: { codex: [], cursor: [{ id: 'cursor-metered', keyFile: null }] },
+    });
+    expect(plan.billingRefusal?.code).toBe('billing.pay-per-token');
+    expect(plan.capabilityFitRebinds).toBe(false);
+    expect((summarizePlan(plan).refusal as { code: string }).code).toBe('billing.pay-per-token');
+    expect(summarizePlan(plan).would_run).toBeNull();
   });
 });

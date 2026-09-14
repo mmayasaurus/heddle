@@ -34,7 +34,7 @@ Repo: `github.com/<your fork>` (private). Runtime: Node 22 + TypeScript, zero-na
 
 ## 1. Hard constraints & the trilemma
 
-1. **Never metered overage.** Every execution path bills against a subscription OR a no-overage key pool (free-tier / prepaid-credit / subscription-quota) — never per-token API billing. Enforced in code (`src/env.ts` gates by billing class, allowing subscription + free-tier/prepaid/subscription-quota and refusing pay-per-token; strips inherited billing-switch vars from worker processes because each vendor treats an API key as a silent switch off the subscription, with no prompt in headless mode).
+1. **Never metered overage.** Every execution path bills against a subscription OR a no-overage key pool (free-tier / prepaid-credit / subscription-quota) — never per-token API billing. Enforced in code (`src/dispatcher/billing.ts`'s `billingVerdict` — the one pure classifier the dry-run preview and the spawn-time gate share — allows subscription + free-tier/prepaid/subscription-quota and refuses pay-per-token *by default*; the sole exception is an explicit operator opt-in for a single account via `policy.cap_aware_routing.permit_pay_per_token: true`, default off. `src/env.ts` additionally strips inherited billing-switch vars from worker processes because each vendor treats an API key as a silent switch off the subscription, with no prompt in headless mode).
 2. **Official vendor CLIs as subprocesses only.** We drive each vendor's own sanctioned binary. We
    REJECTED the omp/OpenChamber approach (a third-party client reimplementing provider OAuth) on
    ToS/ban-risk grounds — it's the pattern that got the Gemini OAuth plugin's users banned, and

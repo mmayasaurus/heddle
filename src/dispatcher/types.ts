@@ -242,10 +242,13 @@ export interface DispatchPlan {
   /** HED-239: set when a requiresWeb class's effective target can't web — the dry run mirrors the
    *  runtime guard so plan_dispatch never advertises a web-research route the real dispatch refuses. */
   requiresWebRefusal?: string;
-  /** HED-395 F1: the PRIMARY's requested capability is unenforceable on its provider (NOT terminal —
-   *  a capability-fit fallback may rebind to a provider that enforces it). dispatch()'s plan-level
-   *  billing gate reads this to avoid preempting that safe fallback for a pay-per-token primary. */
-  primaryCapabilityUnenforceable?: boolean;
+  /** HED-395 F1: the run would deny the PRIMARY on an unenforceable capability AND a capability-fit
+   *  fallback is ELIGIBLE to rebind (dispatch.ts capabilityFitFallbackEligible) — this mirrors the
+   *  runtime rebind conditions EXACTLY, not just "the primary is unenforceable and some fallback exists".
+   *  dispatch()'s plan-level billing gate reads it to avoid preempting that safe fallback for a
+   *  billing-refused primary (the run bills the REBOUND account), and summarizePlan reads it so the
+   *  preview never advertises a billing refusal the rebinding run never makes (F7 parity). */
+  capabilityFitRebinds?: boolean;
   /** HED-519: set when a HEADLESS claude opus/fable adversarial-review would be refused (empirically
    *  unreliable — json-mode is silent till completion, so it SIGKILLs at timeout with zero output).
    *  Computed in planDispatch so summarizePlan (preview) and dispatch() agree. Holds the reason string. */
