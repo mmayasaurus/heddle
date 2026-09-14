@@ -1,9 +1,9 @@
-import { lastResultJson } from './parse.js';
+import { failIfTruncated, lastResultJson } from './parse.js';
 import { run } from './subprocess.js';
 import type { DispatchOptions, WorkerAdapter, WorkerResult, TokenUsage } from '../types.js';
 
 /**
- * Claude Code adapter — `claude -p --output-format json` (HED-78, operator's request to "build the auto account
+ * Claude Code adapter — `claude -p --output-format stream-json` (HED-78, operator's request to "build the auto account
  * switching", 2026-08-15).
  *
  * Two ways heddle can run Claude work:
@@ -15,9 +15,10 @@ import type { DispatchOptions, WorkerAdapter, WorkerResult, TokenUsage } from '.
  *    with the most 5h headroom — which is what makes account rotation automatic.
  *
  * Invocation contract (verified live 2026-08-15, Claude Code 2.1.232 — docs/LANDMINES.md):
- *  - `--output-format json` prints ONE JSON object: {type:"result", subtype:"success"|…, is_error,
- *    result, session_id, duration_ms, num_turns, usage:{input_tokens, output_tokens,
- *    cache_read_input_tokens, cache_creation_input_tokens, output_tokens_details:{thinking_tokens}}}.
+ *  - `--output-format stream-json --verbose --include-partial-messages` prints an NDJSON event stream
+ *    (system, stream_event/content_block_delta, assistant, then one terminal {type:"result", subtype,
+ *    is_error, result, session_id, duration_ms, usage:{…}} line); lastResultJson extracts that terminal
+ *    line (no parse change). subprocess.ts caps each raw stream-json output at 32 MiB, including tool blocks.
  *  - `--resume <session_id>` continues a session (cwd-scoped; `--mcp-config` etc. must be re-passed
  *    on every call — heddle always re-passes). `--no-session-persistence` is NOT used (it kills resume).
  *  - `--permission-mode auto` ABORTS a headless session after repeated classifier blocks (LANDMINES),
@@ -33,6 +34,11 @@ import type { DispatchOptions, WorkerAdapter, WorkerResult, TokenUsage } from '.
  *  - stdin is closed ('ignore'); exit 0 with empty stdout is a FAILURE, never success.
  */
 export const CLAUDE_WORKER_PROTOCOL_VERSION = 1;
+
+// A Claude worker running its own long tool call (for example `npx vitest run`, observed at ~128s)
+// emits no stream events for the tool's duration. Five minutes leaves margin for healthy tool calls,
+// catches genuinely hung turns, and remains well below the default 600s hard deadline.
+export const DEFAULT_CLAUDE_IDLE_TIMEOUT_MS = 300_000;
 
 /** Task classes the routing table sends to Claude, for reference by generators. */
 export type ClaudeWorkerModel = 'fable' | 'opus' | 'sonnet' | 'haiku';
@@ -134,7 +140,11 @@ export class ClaudeAdapter implements WorkerAdapter {
     const modelId = Object.hasOwn(CLAUDE_MODEL_IDS, opts.model)
       ? CLAUDE_MODEL_IDS[opts.model as ClaudeWorkerModel]
       : opts.model;
-    const args = ['-p', prompt, '--output-format', 'json', '--model', modelId];
+    // stream-json (+ --verbose, required by the CLI for -p stream-json; --include-partial-messages) emits
+    // NDJSON events mid-turn so a long headless run is observable and B2's run() idle watchdog has liveness
+    // to reset on. parseClaudeResult still extracts the terminal {type:"result"} line via lastResultJson —
+    // no parse change. Probe-verified flag set (test/fixtures capture below).
+    const args = ['-p', prompt, '--output-format', 'stream-json', '--verbose', '--include-partial-messages', '--model', modelId];
     // classify_effort can emit 'minimal' (codex vocabulary); claude accepts low|medium|high|xhigh|max.
     const effort = opts.effort === 'minimal' ? 'low' : opts.effort;
     if (effort) args.push('--effort', effort);
@@ -185,15 +195,18 @@ export class ClaudeAdapter implements WorkerAdapter {
     }
     const started = Date.now();
     const timeoutMs = opts.timeoutMs ?? 600_000;
-    const { stdout, stderr, exitCode, timedOut } = await run(this.bin, args, opts.cwd, timeoutMs, opts.env, opts.envUnset);
+    const idleMs = opts.idleTimeoutMs ?? DEFAULT_CLAUDE_IDLE_TIMEOUT_MS;
+    const { stdout, stderr, exitCode, timedOut, idleTimedOut, stdoutTruncated } = await run(this.bin, args, opts.cwd, timeoutMs, opts.env, opts.envUnset, undefined, idleMs);
     const parsed = parseClaudeResult(stdout, exitCode);
     // A timeout must be tellable apart from a crash: SIGKILL alone reports only a null exit.
     if (timedOut) parsed.error = `claude timed out after ${timeoutMs}ms (SIGKILL)` + (parsed.error ? `; ${parsed.error}` : '');
+    else if (idleTimedOut) parsed.error = `claude produced no output for ${idleMs}ms (idle watchdog SIGKILL) — likely a hung turn` + (parsed.error ? `; ${parsed.error}` : '');
     // stderr often carries the useful context even when a result JSON WAS parsed (e.g. error
     // subtypes with an empty result) — attach the tail on every failure.
     if (!parsed.ok && parsed.error && stderr.trim().length) {
       parsed.error += `; stderr tail: ${stderr.slice(-400)}`;
     }
-    return { ...parsed, durationMs: parsed.durationMs ?? Date.now() - started };
+    const final = failIfTruncated(parsed, stdoutTruncated, 'claude', stderr);
+    return { ...final, durationMs: final.durationMs ?? Date.now() - started };
   }
 }

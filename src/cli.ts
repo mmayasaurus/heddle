@@ -17,6 +17,8 @@ import { pickClaudeAccount, readClaudeAccounts } from './capaware.js';
 import { claudeAccountRows, pickClaudeAccountsBatch, usableClaudeCaps } from './account-pick.js';
 import { bindingMeter, claudeFloorsFrom } from './floors.js';
 import { loadLanes } from './lanes.js';
+import { readSeatWeights, seatWeightsFrom, writeSeatWeightsMirror } from './seat-weights.js';
+import { censusClaudeResidents } from './residents.js';
 import { DEFAULT_USAGE_DIR, readProviderCaps } from './usage.js';
 import { buildOauthUsageSidecar, pollClaudeUsage } from './claude-usage.js';
 import { formatUsageRemaining, readUsageRemaining } from './usage-remaining.js';
@@ -28,7 +30,11 @@ import { runPrSweep } from './pr-sweep.js';
 import { runPrWatch } from './pr-watch.js';
 import { bootstrapComms } from './comms/bootstrap.js';
 import { loadAccountRegistry } from './accounts.js';
-import { diffFleetHooks, installFleetHooks } from './fleet.js';
+import { diffFleetHooks, diffFleetLaunchers, installFleetHooks, installFleetLaunchers } from './fleet.js';
+import { NativeCliRunner, type NativeProvider } from './wizard/cli-runner.js';
+import { ReadlinePrompter, ScriptedPrompter, type Prompter } from './wizard/prompt.js';
+import { runAccountsAdd } from './wizard/accounts-add.js';
+import { getProvider } from './provider-matrix.js';
 import { releaseStandalone } from './release/standalone.js';
 import { assembleTop, renderTopText } from './top.js';
 
@@ -77,9 +83,12 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
   heddle projects [--json]       registered projects and their fleets (~/.heddle/projects.json; HED-160)
   heddle accounts list [--json]  registered Claude, Codex, and Cursor accounts
   heddle accounts verify         verify local credential paths and recorded Claude login state
+  heddle accounts add [--provider <p>] [--answers <file>]  add native-login or env-repoint accounts interactively
   heddle comms init [--json]     initialize the comms database, operator token, and registered project rooms
   heddle fleet install-hooks [--dry-run] [--json]  install vendored fleet hooks under ~/.heddle/fleet/hooks
   heddle fleet hooks-diff [--json]  compare installed fleet hooks with the vendored canon
+  heddle fleet install-launchers [--dry-run] [--json]  install vendored fleet launchers under ~/.heddle/fleet/launchers
+  heddle fleet launchers-diff [--json]  compare installed fleet launchers with the vendored canon
   heddle mode [desktop|mobile|away] [--note "<t>"] [--json]   operator mode (HED-336): no arg prints
                                  the current mode; a mode word sets it (~/.heddle/operator-mode.json —
                                  the pocket console and desktop app write the same file)
@@ -96,9 +105,10 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
   heddle ledger report-in-session <id> (--ok | --failed) [--error "<why>"] [--input-tokens N] [--cached-input-tokens N] [--output-tokens N] [--reasoning-tokens N] [--duration-ms N] [--json]  administrative path: may report any orchestrator's handoff
   heddle usage [--since <iso>] [--json]    per-provider totals
   heddle usage --remaining [--account <id>] [--json]  per-account quota headroom
-  heddle usage poll-claude [--json]  poll Claude OAuth usage and atomically write per-account sidecars
+  heddle usage poll-claude [--account <id>] [--json]  poll Claude OAuth usage and atomically write per-account sidecars
   heddle top [--once] [--json]  one disk-only dashboard snapshot (watch mode is Slice 2)
   heddle account pick [--for <letter[,letter...]>] [--json] [--explain]   healthiest addressable Claude account for a fleet relaunch
+  heddle account seat-weights sync   atomically refresh ~/.heddle/seat-weights.json from routing/lanes.yaml
   heddle pr own <whoami|claim|check|release|mine> [<pr#>] [--json]       coordinate ownership of a GitHub PR
   heddle pr sweep <pr#> [--json]       sweep all GitHub PR review channels and report mechanical gates
   heddle pr watch <pr#> [--repo <owner/repo>] [--seed] [--reset] [--json]  one read-only PR review/CI poll pass
@@ -233,10 +243,16 @@ try {
       out(json, summary, () =>
         `${plan.route.taskClass}` +
         (summary.reviewer_pick ? `\n  reviewer: ${summary.reviewer_pick}` : '') +
-        (summary.refusal ? `\n  ✗ WOULD REFUSE (${summary.refusal.code}): ${summary.refusal.reason}`
+        (summary.refusal ? `\n  ✗ WOULD REFUSE (${summary.refusal.code}): ${summary.refusal.reason}` +
+            // The instruction names the fix (e.g. the exact billing override lever) — a preview that
+            // omits it hides how to act on the refusal (HED-395 F7). Printed when present; older
+            // refusal branches carry no instruction and skip the line.
+            (summary.refusal.instruction ? `\n    ${summary.refusal.instruction}` : '')
           : `\n  → ${summary.would_run}${summary.in_session ? '  [in-session: use your Agent tool]' : ''}` +
             (summary.routed_away_for_cap ? '  (routed away for cap)' : '')) +
         `\n  reason: ${summary.route_reason}` +
+        (summary.symbol ? `\n  preference: ${summary.symbol}` : '') +
+        (summary.resolution_walk?.length ? `\n  resolution:\n    - ${summary.resolution_walk.join('\n    - ')}` : '') +
         (summary.remaining_fallback ? `\n  fallback if it fails: ${summary.remaining_fallback}` : '') +
         (summary.account_pick ? `\n  ${summary.account_pick.reason}` : '') +
         (summary.account_advice ? `\n  ${summary.account_advice}` : '') +
@@ -245,13 +261,22 @@ try {
     }
 
     case 'account': {
+      if (process.argv[3] === 'seat-weights') {
+        if (process.argv[4] !== 'sync' || process.argv.length !== 5) {
+          console.error('usage: heddle account seat-weights sync');
+          process.exit(2);
+        }
+        writeSeatWeightsMirror(seatWeightsFrom(loadLanes()));
+        break;
+      }
       if (process.argv[3] !== 'pick') {
-        console.error('usage: heddle account pick [--for <letter[,letter...]>] [--json] [--explain]');
+        console.error('usage: heddle account pick [--for <letter[,letter...]>] [--json] [--explain]\n       heddle account seat-weights sync');
         process.exit(2);
       }
       const accounts = readClaudeAccounts();
       const caps = readProviderCaps();
-      const floors = claudeFloorsFrom(loadLanes());
+      const lanes = loadLanes();
+      const floors = claudeFloorsFrom(lanes);
       const forAgent = arg('--for');
       if (has('--for') && (!forAgent || forAgent.startsWith('--'))) {
         console.error('usage: heddle account pick [--for <letter[,letter...]>] [--json] [--explain]');
@@ -277,6 +302,24 @@ try {
         process.exit(2);
       }
       const agents = [...new Set(requestedAgents)];
+      // Refresh the dumb seat-weight mirror from lanes policy, then read it back as the picker's weight
+      // lookup — and only AFTER every usage/caps/arg gate above, so a validation exit never leaves this
+      // side effect behind. The refresh is best-effort: `account pick` was read-only before HED-514 and
+      // resume-sessions-v2 calls it at fleet launch, so an unwritable ~/.heddle must degrade to unit
+      // weights (readSeatWeights already fails open) rather than crash the pick. `account seat-weights
+      // sync` keeps its loud failure instead — writing the mirror IS that command's whole job.
+      try {
+        writeSeatWeightsMirror(seatWeightsFrom(lanes));
+      } catch (error) {
+        console.error(`heddle: warning: could not refresh the seat-weights mirror (${(error as Error).message}); using the last-written or unit weights`);
+      }
+      const { weightOf } = readSeatWeights();
+      // Single-account picks retain their long-standing cap-aware path; residency is batch placement state.
+      // An unavailable census (null) degrades to residency-unaware placement rather than a partial count
+      // that would under-fill an account into a stack — the census already warned why on stderr.
+      const residentsByAccount = (agents.length > 1
+        ? censusClaudeResidents({ accounts, weightOf })
+        : null) ?? new Map<string, { count: number; weight: number }>();
       if (agents.length > 1) {
         const warnings: string[] = [];
         if (agents.length !== requestedAgents.length) {
@@ -284,7 +327,7 @@ try {
           warnings.push(warning);
           console.error(warning);
         }
-        const batch = pickClaudeAccountsBatch(claudeCaps, accounts, floors, agents);
+        const batch = pickClaudeAccountsBatch(claudeCaps, accounts, floors, agents, residentsByAccount, weightOf);
         const data = {
           assignments: batch.assignments,
           warnings,
@@ -296,7 +339,8 @@ try {
       }
       const pick = pickClaudeAccount(claudeCaps, accounts, { floors });
       // Keep the singleton explain payload byte-stable: residents is batch-only context.
-      const accountRows = claudeAccountRows(claudeCaps, accounts, floors).map(({ residents: _residents, ...row }) => row);
+      const accountRows = claudeAccountRows(claudeCaps, accounts, floors, residentsByAccount)
+        .map(({ residents: _residents, residentWeight: _residentWeight, ...row }) => row);
       if (!pick) {
         if (accounts.length === 0) {
           console.error('heddle: refusing Claude account pick: no accounts registered in ~/.heddle/accounts.json');
@@ -446,6 +490,7 @@ try {
         (r.edits_code ? '  [edits code]' : '') +
         (r.read_only ? '  [read-only]' : '') +
         (r.reviewer_pool.length ? `  pool: ${r.reviewer_pool.join(' → ')}` : '') +
+        (r.prefer?.length ? `  prefer: ${r.prefer.join(' → ')}` : '') +
         `\n${''.padEnd(23)}skills: ${r.skills.join(', ') || '(none)'}` +
         (r.mcp.length ? `  mcp: ${r.mcp.join(', ')}` : '') +
         (r.why ? `\n${''.padEnd(23)}why: ${r.why}` : '')).join('\n'));
@@ -676,7 +721,23 @@ try {
 
     case 'usage': {
       if (process.argv[3] === 'poll-claude') {
-        const accounts = readClaudeAccounts();
+        const account = arg('--account');
+        if (has('--account') && (!account || account.startsWith('--'))) {
+          console.error('usage: heddle usage poll-claude [--account <id>] [--json]');
+          process.exit(2);
+        }
+        let accounts = readClaudeAccounts();
+        if (account) {
+          // A single requested id selects a SINGLE account (mirrors the `.find` id-lookup at the
+          // `account pick` path): a duplicate-id registry must not poll one account repeatedly and
+          // let its sidecar be overwritten by duplicate results (CodeAnt #140).
+          const match = accounts.find((row) => row.id === account);
+          if (!match) {
+            console.error(`heddle usage poll-claude: no registry account with id "${account}"`);
+            process.exit(1);
+          }
+          accounts = [match];
+        }
         const result = await pollClaudeUsage(accounts);
         const usageDir = process.env.HEDDLE_USAGE_DIR ?? DEFAULT_USAGE_DIR;
         mkdirSync(usageDir, { recursive: true });
@@ -762,6 +823,31 @@ try {
 
     case 'accounts': {
       const action = process.argv[3];
+      if (action === 'add') {
+        const requested = arg('--provider');
+        if (has('--provider') && (requested === undefined || requested.startsWith('--'))) throw new Error('--provider needs a value: a matrix provider key or custom');
+        if (requested && requested !== 'custom' && !getProvider(requested)) throw new Error(`--provider must be a known matrix provider key or custom (got ${requested})`);
+        const answersPath = arg('--answers');
+        if (has('--answers') && (answersPath === undefined || answersPath.startsWith('--'))) throw new Error('--answers needs a path to a JSON answer file');
+        let prompter: Prompter;
+        if (answersPath !== undefined) {
+          const parsed: unknown = JSON.parse(readFileSync(answersPath, 'utf8'));
+          if (!Array.isArray(parsed)) throw new Error(`--answers file must contain a JSON array of answers (got ${parsed === null ? 'null' : typeof parsed})`);
+          prompter = new ScriptedPrompter(parsed);
+        } else {
+          prompter = new ReadlinePrompter();
+        }
+        try {
+          const summary = await runAccountsAdd(
+            requested ? { provider: requested } : {},
+            { prompter, runner: new NativeCliRunner(), report: (line) => process.stderr.write(`${line}\n`) },
+          );
+          process.stdout.write(`${JSON.stringify(summary)}\n`);
+        } finally {
+          prompter.close();
+        }
+        break;
+      }
       const registry = loadAccountRegistry();
       if (action === 'list') {
         out(json, registry, () => {
@@ -815,7 +901,7 @@ try {
         if (fail) process.exitCode = 1;
         break;
       }
-      console.error('usage: heddle accounts <list|verify> [--json]');
+      console.error('usage: heddle accounts <list|verify|add> [--json]');
       process.exitCode = 2;
       break;
     }
@@ -838,8 +924,10 @@ try {
 
     case 'fleet': {
       const action = process.argv[3];
-      if (action === 'install-hooks') {
-        const report = installFleetHooks({ dryRun: has('--dry-run') });
+      if (action === 'install-hooks' || action === 'install-launchers') {
+        const report = action === 'install-hooks'
+          ? installFleetHooks({ dryRun: has('--dry-run') })
+          : installFleetLaunchers({ dryRun: has('--dry-run') });
         out(json, report, () => [
           `target: ${report.targetDir}`,
           ...report.files.map((file) => {
@@ -853,13 +941,13 @@ try {
         ].join('\n'));
         break;
       }
-      if (action === 'hooks-diff') {
-        const report = diffFleetHooks();
+      if (action === 'hooks-diff' || action === 'launchers-diff') {
+        const report = action === 'hooks-diff' ? diffFleetHooks() : diffFleetLaunchers();
         out(json, report, () => report.clean ? 'clean' : report.files.map((file) => `${file.action} ${file.name}`).join('\n'));
         if (!report.clean) process.exitCode = 1;
         break;
       }
-      console.error('usage: heddle fleet <install-hooks|hooks-diff> [--dry-run] [--json]');
+      console.error('usage: heddle fleet <install-hooks|hooks-diff|install-launchers|launchers-diff> [--dry-run] [--json]');
       process.exitCode = 2;
       break;
     }

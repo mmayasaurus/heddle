@@ -76,8 +76,8 @@ function capAppend(acc: string, accBytes: number, chunk: string, cap: number):
 
 export function run(bin: string, args: string[], cwd: string, timeoutMs: number,
                     envOverrides?: Record<string, string>, envUnset?: string[],
-                    maxStreamBytes = DEFAULT_MAX_STREAM_BYTES):
-  Promise<{ stdout: string; stderr: string; exitCode: number | null; timedOut: boolean; truncated: boolean }> {
+                    maxStreamBytes = DEFAULT_MAX_STREAM_BYTES, idleTimeoutMs?: number):
+  Promise<{ stdout: string; stderr: string; exitCode: number | null; timedOut: boolean; idleTimedOut: boolean; stdoutTruncated: boolean; stderrTruncated: boolean }> {
   return new Promise((resolve) => {
     // stdin 'ignore' is load-bearing — every subprocess adapter must close stdin.
     const { env } = buildWorkerEnv({ overrides: envOverrides, unset: envUnset });
@@ -92,22 +92,59 @@ export function run(bin: string, args: string[], cwd: string, timeoutMs: number,
     let stderr = '';
     let stdoutBytes = 0;
     let stderrBytes = 0;
-    let truncated = false;
+    let stdoutTruncated = false;
+    let stderrTruncated = false;
     // 'error' and 'close' can BOTH fire (e.g. spawn failure then close) — settle exactly once.
     let settled = false;
-    let killedByTimer = false;
+    let killReason: 'deadline' | 'idle' | null = null;
     let graceTimer: NodeJS.Timeout | undefined;
     let drainTimer: NodeJS.Timeout | undefined;
-    const finish = (exitCode: number | null, timedOut: boolean) => {
+    let idleTimer: NodeJS.Timeout | undefined;
+    let childExited = false;
+    // Idle is enabled only when the hard deadline sits beyond a full idle window + its grace, so an idle
+    // kill can run its own grace net without racing the deadline. (Idle could fire for any timeoutMs >
+    // idleTimeoutMs; the + GRACE_MS margin only keeps the two kill paths from overlapping.)
+    const idleEnabled = idleTimeoutMs !== undefined && idleTimeoutMs > 0 && timeoutMs > idleTimeoutMs + GRACE_MS;
+    const finish = (exitCode: number | null, timedOut: boolean, idleTimedOut = false) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       if (graceTimer !== undefined) clearTimeout(graceTimer);
       if (drainTimer !== undefined) clearTimeout(drainTimer);
-      resolve({ stdout, stderr, exitCode, timedOut, truncated });
+      if (idleTimer !== undefined) clearTimeout(idleTimer);
+      resolve({ stdout, stderr, exitCode, timedOut, idleTimedOut, stdoutTruncated, stderrTruncated });
+    };
+    const armGrace = () => {
+      graceTimer = setTimeout(() => {
+        if (settled) return;
+        // unref so a still-alive child the kill could not reach (e.g. EPERM) does not keep the event
+        // loop open via its process handle after we force-settle — destroying the streams frees only
+        // those, not the process handle. (The natural-'exit' drain path needs no unref: the child has
+        // already exited there, so its handle is gone and unref would be a no-op.)
+        child.unref();
+        child.stdout.destroy();
+        child.stderr.destroy();
+        finish(null, killReason === 'deadline', killReason === 'idle');
+      }, GRACE_MS);
+    };
+    const onIdle = () => {
+      // Never idle-kill a child that already died on its own: a late idle fire would group-SIGKILL it
+      // (killing grandchildren the drain path spares) and could misreport a natural exit as idleTimedOut
+      // with a null exitCode. `childExited` catches it once 'exit' ran; exitCode/signalCode catch the
+      // sub-tick race where the OS-level exit precedes the 'exit' event.
+      if (settled || killReason !== null || childExited || child.exitCode !== null || child.signalCode !== null) return;
+      killReason = 'idle';
+      clearTimeout(timer);
+      try {
+        killGroupOrChild(child);
+      } finally {
+        armGrace();
+      }
     };
     const timer = setTimeout(() => {
-      killedByTimer = true;
+      if (settled || killReason !== null) return;
+      killReason = 'deadline';
+      if (idleTimer !== undefined) clearTimeout(idleTimer);
       try {
         killGroupOrChild(child);
       } finally {
@@ -115,30 +152,25 @@ export function run(bin: string, args: string[], cwd: string, timeoutMs: number,
         // by GRACE_MS (an escaped setsid/double-fork grandchild still holding the inherited pipes, or a
         // kill that could not land), destroy the streams and force-settle as timedOut, so run() can
         // never outlast timeoutMs + GRACE_MS.
-        graceTimer = setTimeout(() => {
-          if (settled) return;
-          // unref so a still-alive child the kill could not reach (e.g. EPERM) does not keep the event
-          // loop open via its process handle after we force-settle — destroying the streams frees only
-          // those, not the process handle. (The natural-'exit' drain path needs no unref: the child has
-          // already exited there, so its handle is gone and unref would be a no-op.)
-          child.unref();
-          child.stdout.destroy();
-          child.stderr.destroy();
-          finish(null, true);
-        }, GRACE_MS);
+        armGrace();
       }
     }, timeoutMs);
+    if (idleEnabled) idleTimer = setTimeout(onIdle, idleTimeoutMs!);
     child.stdout.on('data', (d: string) => {
       const capped = capAppend(stdout, stdoutBytes, d, maxStreamBytes);
       stdout = capped.acc;
       stdoutBytes = capped.accBytes;
-      truncated ||= capped.hit;
+      stdoutTruncated ||= capped.hit;
+      if (idleEnabled && killReason === null && !settled && !childExited) {
+        clearTimeout(idleTimer);
+        idleTimer = setTimeout(onIdle, idleTimeoutMs!);
+      }
     });
     child.stderr.on('data', (d: string) => {
       const capped = capAppend(stderr, stderrBytes, d, maxStreamBytes);
       stderr = capped.acc;
       stderrBytes = capped.accBytes;
-      truncated ||= capped.hit;
+      stderrTruncated ||= capped.hit;
     });
     child.on('exit', (code) => {
       // 'exit' (the process ended) is the ONLY signal that the child is truly dead, so it is the sole
@@ -150,8 +182,13 @@ export function run(bin: string, args: string[], cwd: string, timeoutMs: number,
       // inherited streams open, 'close' may never fire. Cancel the now-moot deadline and arm a short
       // drain; if 'close' has not settled by then, settle with the ACTUAL exit status rather than
       // waiting out the whole timeout and mislabeling a finished run as timedOut.
-      if (killedByTimer || settled) return;
+      if (killReason !== null || settled) return;
+      // The child is dead, so the idle watchdog is moot. Cancel it and mark exited so a post-'exit'
+      // buffered-stdout chunk cannot re-arm it — otherwise a late idle fire could group-kill the dead
+      // child or override the real exit status during this drain window.
+      childExited = true;
       clearTimeout(timer);
+      if (idleTimer !== undefined) clearTimeout(idleTimer);
       drainTimer = setTimeout(() => {
         if (settled) return;
         child.stdout.destroy();
@@ -161,13 +198,13 @@ export function run(bin: string, args: string[], cwd: string, timeoutMs: number,
     });
     child.on('close', (code, signal) => {
       // Decide timedOut from the outcome signal, not a pre-kill guess.
-      finish(code, killedByTimer && signal === 'SIGKILL');
+      finish(code, killReason === 'deadline' && signal === 'SIGKILL', killReason === 'idle' && signal === 'SIGKILL');
     });
     child.on('error', (err) => {
       // A post-spawn kill error (e.g. EPERM surfacing asynchronously after the timer fired) can land
       // here; it must NOT masquerade as a spawn failure or steal the timedOut result. When the timer
       // already fired, keep the diagnostic in stderr and let the grace net settle as timedOut.
-      if (killedByTimer) {
+      if (killReason !== null) {
         stderr = `${stderr}\nkill error: ${String(err)}`;
         return;
       }

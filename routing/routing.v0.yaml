@@ -179,8 +179,7 @@ lane_defaults:
 #               author's provider (`author_provider`) — a reviewer must be a DIFFERENT family.
 task_classes:
   orchestration:            # decompose, integrate, judge, land — the orchestrator itself
-    provider: claude
-    model: fable
+    prefer: [claude/fable, claude/opus, T2]
     why: decompose, integrate, judge, land — the orchestrator's own in-session work; never dispatched to a subprocess
     skills: []
     edits_code: false

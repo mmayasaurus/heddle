@@ -50,10 +50,12 @@ flags churn monthly.
   orchestrator (shared prompt cache, same account, native per-agent `skills`/`mcpServers`/
   `permissionMode`; `dispatch_worker(in_session: true)`), and the default **headless `claude -p`
   worker** under `CLAUDE_CONFIG_DIR=<account dir>` picked for headroom (src/adapters/claude.ts).
-- **Headless contract (live-verified 2026-08-15, Claude Code 2.1.232):** `claude -p <prompt>
-  --output-format json` prints ONE JSON object `{type:"result", subtype:"success"|…, is_error,
-  result, session_id, duration_ms, num_turns, total_cost_usd, usage:{input_tokens, output_tokens,
-  cache_read_input_tokens, cache_creation_input_tokens, output_tokens_details:{thinking_tokens}}}`;
+- **Headless contract (live-verified 2026-08-15, Claude Code 2.1.232; adapter default updated for
+  HED-523):** `claude -p <prompt> --output-format stream-json --verbose --include-partial-messages`
+  emits NDJSON events mid-turn and one terminal `{type:"result", subtype:"success"|…, is_error, result,
+  session_id, duration_ms, num_turns, total_cost_usd, usage:{input_tokens, output_tokens,
+  cache_read_input_tokens, cache_creation_input_tokens, output_tokens_details:{thinking_tokens}}}`; the
+  adapter's `lastResultJson` extracts that terminal result line;
   `--effort low|medium|high|xhigh|max`; `--model <concrete id>` — the CLI also accepts bare
   aliases (fable|opus|sonnet|haiku) but resolves them to the NEWEST family model ('opus'
   became claude-opus-5, forbidden) so heddle NEVER passes an alias: buildArgs pins every
@@ -300,3 +302,5 @@ flags churn monthly.
 - Output schemas are all different — one parser per adapter, no shared "result JSON" assumption.
 - All model IDs in this repo are snapshots. Adapters must tolerate unknown-model errors and fall
   back per the routing table.
+- **Provider billing class must be verified per-account:** A "free" tier can silently become metered; check the account's real billing status before classing it as free-tier/prepaid.
+- **Env-repoint providers (GLM/Kimi):** These providers run Claude Code under `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN`. Today `src/env.ts` STRIPS both from every worker env (they are in `BILLING_SWITCH_VARS` and under the `ANTHROPIC_` namespace strip) and REFUSES them as an override (not in `OVERRIDE_ALLOWLIST`) — so no execution path passes an env-repoint token to a worker yet, and they are never inherited from the environment or configured via `settings.json`. The per-dispatch override that will re-inject them for an explicitly selected env-repoint account is **not yet wired** (HED-531, building on the `AccountEnvRepoint` foundation HED-525); until it lands, treat env-repoint as strip-only.

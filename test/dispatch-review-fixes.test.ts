@@ -100,7 +100,8 @@ describe('dispatch — review fixes', () => {
       expect(fake.calls).toHaveLength(1);
       const [newest, older] = ledger.recent(2);
       expect(newest).toMatchObject({ refusal: 'claude-in-session', fell_back_from: 'codex/m1' });
-      expect(older).toMatchObject({ ok: 0, error: 'primary down' });
+      expect(older).toMatchObject({ ok: 0, error: expect.stringContaining('primary down') });
+      expect(older.error).toContain('billing-degraded:account-unregistered(unset)');
     } finally {
       if (previous === undefined) delete process.env.HEDDLE_ROUTING;
       else process.env.HEDDLE_ROUTING = previous;

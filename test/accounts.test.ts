@@ -1,8 +1,8 @@
-import { writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { readClaudeAccounts } from '../src/capaware.js';
-import { loadAccountRegistry } from '../src/accounts.js';
+import { loadAccountRegistry, upsertAccount, writeAccountRegistry } from '../src/accounts.js';
 import { readRotationAccounts } from '../src/rotation.js';
 import { useTempResources } from './helpers.js';
 
@@ -43,13 +43,24 @@ describe('loadAccountRegistry', () => {
         id: 'claude', configDir: null, harness: 'custom-harness', billingClass: 'subscription-flat', tier: 'T2',
         fences: { readOnlyEnforceable: true, networkEnforceable: false, cwdEnforceable: true },
         lastVerified: '2026-09-05T00:00:00Z', note: 'legacy note', orgId: 'org', accountUuid: 'uuid', email: 'a@example.test', loggedIn: false,
+        region: 'us-east-1', trainsOnInputs: false, oneLoginAtATime: true,
       }],
     });
     expect(loadAccountRegistry(path).accounts[0]).toMatchObject({
       id: 'claude', harness: 'custom-harness', billingClass: 'subscription-flat', tier: 'T2', notes: 'legacy note',
       orgId: 'org', accountUuid: 'uuid', email: 'a@example.test', loggedIn: false,
+      region: 'us-east-1', trainsOnInputs: false, oneLoginAtATime: true,
       fences: { readOnlyEnforceable: true, networkEnforceable: false, cwdEnforceable: true },
     });
+  });
+
+  it('ignores non-boolean privacy and login metadata', () => {
+    const path = writeAccounts('invalid-boolean-metadata.json', {
+      claude: [{ id: 'claude', configDir: null, trainsOnInputs: 'no', oneLoginAtATime: 1 }],
+    });
+    const account = loadAccountRegistry(path).accounts[0]!;
+    expect(account).not.toHaveProperty('trainsOnInputs');
+    expect(account).not.toHaveProperty('oneLoginAtATime');
   });
 
   it('keeps a present notes field and prefers it over legacy note', () => {
@@ -79,16 +90,16 @@ describe('loadAccountRegistry', () => {
 
   it('carries an envRepoint through the unified model', () => {
     const path = writeAccounts('env-repoint.json', {
-      claude: [{ id: 'glm', envRepoint: { baseUrl: 'https://api.z.ai/api/anthropic', authTokenRef: 'GLM_API_KEY' } }],
+      claude: [{ id: 'glm', envRepoint: { baseUrl: 'https://api.z.ai/api/anthropic', authTokenRef: 'GLM_API_KEY', service: 'glm' } }],
     });
     expect(loadAccountRegistry(path).accounts[0]!.envRepoint).toEqual({
-      baseUrl: 'https://api.z.ai/api/anthropic', authTokenRef: 'GLM_API_KEY',
+      baseUrl: 'https://api.z.ai/api/anthropic', authTokenRef: 'GLM_API_KEY', service: 'glm',
     });
   });
 
   it('stores envRepoint authTokenRef verbatim as a reference, never a token', () => {
     const path = writeAccounts('env-repoint-reference.json', {
-      claude: [{ id: 'glm', envRepoint: { baseUrl: 'https://api.z.ai/api/anthropic', authTokenRef: 'GLM_API_KEY' } }],
+      claude: [{ id: 'glm', envRepoint: { baseUrl: 'https://api.z.ai/api/anthropic', authTokenRef: 'GLM_API_KEY', service: 'glm' } }],
     });
     expect(loadAccountRegistry(path).accounts[0]!.envRepoint!.authTokenRef).toBe('GLM_API_KEY');
   });
@@ -103,6 +114,8 @@ describe('loadAccountRegistry', () => {
     ['non-http baseUrl', { baseUrl: 'ftp://x', authTokenRef: 'NAME' }],
     ['missing authTokenRef', { baseUrl: 'https://x.test' }],
     ['empty authTokenRef', { baseUrl: 'https://x.test', authTokenRef: '' }],
+    ['missing service', { baseUrl: 'https://x.test', authTokenRef: 'NAME' }],
+    ['empty service', { baseUrl: 'https://x.test', authTokenRef: 'NAME', service: '' }],
   ])('rejects %s envRepoint with the file path', (_label, envRepoint) => {
     const path = writeAccounts(`bad-env-repoint-${_label}.json`, { claude: [{ id: 'a', envRepoint }] });
     expect(() => loadAccountRegistry(path)).toThrow(path);
@@ -110,9 +123,21 @@ describe('loadAccountRegistry', () => {
 
   it('tolerates and ignores unknown envRepoint keys', () => {
     const path = writeAccounts('future-env-repoint.json', {
-      claude: [{ id: 'a', envRepoint: { baseUrl: 'https://x.test', authTokenRef: 'NAME', futureField: 'x' } }],
+      claude: [{ id: 'a', envRepoint: { baseUrl: 'https://x.test', authTokenRef: 'NAME', service: 'glm', futureField: 'x' } }],
     });
-    expect(loadAccountRegistry(path).accounts[0]!.envRepoint).toEqual({ baseUrl: 'https://x.test', authTokenRef: 'NAME' });
+    expect(loadAccountRegistry(path).accounts[0]!.envRepoint).toEqual({ baseUrl: 'https://x.test', authTokenRef: 'NAME', service: 'glm' });
+  });
+
+  it('derives distinct credential references for env-repoint services on one harness', () => {
+    const path = writeAccounts('env-repoint-credential-refs.json', {
+      claude: [
+        { id: 'glm-1', configDir: null, envRepoint: { baseUrl: 'https://api.z.ai/api/anthropic', authTokenRef: 'GLM_API_KEY', service: 'glm' } },
+        { id: 'kimi-1', configDir: null, envRepoint: { baseUrl: 'https://api.moonshot.ai/anthropic', authTokenRef: 'KIMI_API_KEY', service: 'kimi' } },
+      ],
+    });
+    expect(loadAccountRegistry(path).accounts.map((account) => account.credentialRef)).toEqual([
+      'claude:glm:default', 'claude:kimi:default',
+    ]);
   });
 
   it.each([
@@ -196,5 +221,59 @@ describe('loadAccountRegistry', () => {
       .toEqual(readClaudeAccounts(path).map(({ id, configDir }) => ({ id, configDir })));
     expect(registry.accounts.filter((account) => account.provider === 'codex').map(({ id, codexHome }) => ({ id, codexHome })))
       .toEqual(readRotationAccounts(path).codex.map(({ id, codexHome }) => ({ id, codexHome })));
+  });
+});
+
+describe('account registry writes', () => {
+  const { tempDir } = useTempResources('heddle-account-writes-test-');
+
+  it('round-trips an account without persisting its derived credential reference', () => {
+    const path = join(tempDir(), 'round-trip.json');
+    const registry = upsertAccount({ schemaVersion: 2, accounts: [] }, {
+      id: 'claude-pro', provider: 'claude', harness: 'claude-code', credentialRef: 'claude:/tmp/claude-pro',
+      billingClass: 'subscription-quota', tier: 'T2', configDir: '/tmp/claude-pro', loggedIn: true,
+    });
+    writeAccountRegistry(registry, path);
+    expect(JSON.parse(readFileSync(path, 'utf8')).claude[0]).not.toHaveProperty('credentialRef');
+    expect(loadAccountRegistry(path)).toEqual(registry);
+  });
+
+  it('upserts by provider and id while preserving raw top-level and row fields', () => {
+    const path = join(tempDir(), 'preserve.json');
+    writeFileSync(path, JSON.stringify({
+      schemaVersion: 2, _doc: 'keep this', claude: [{ id: 'same', configDir: '/old', futureField: 'kept' }],
+    }));
+    const updated = upsertAccount(loadAccountRegistry(path), {
+      id: 'same', provider: 'claude', harness: 'claude-code', credentialRef: 'claude:/new', configDir: '/new', tier: 'T1',
+    });
+    writeAccountRegistry(updated, path);
+    const raw = JSON.parse(readFileSync(path, 'utf8'));
+    expect(raw._doc).toBe('keep this');
+    expect(raw.claude).toHaveLength(1);
+    expect(raw.claude[0]).toMatchObject({ id: 'same', configDir: '/new', tier: 'T1', futureField: 'kept' });
+  });
+
+  it('uses an atomic temporary file and leaves no temporary files behind', () => {
+    const path = join(tempDir(), 'atomic.json');
+    writeAccountRegistry({ schemaVersion: 2, accounts: [] }, path);
+    expect(existsSync(path)).toBe(true);
+    expect(readdirSync(tempDir()).filter((name) => name.includes('.tmp'))).toEqual([]);
+  });
+
+  it('preserves a concurrently-added row the in-memory registry never saw (upsert-only)', () => {
+    const path = join(tempDir(), 'concurrent.json');
+    // This process loads an empty registry...
+    const loadedEarly = loadAccountRegistry(path);
+    // ...then a concurrent writer adds a codex row and persists it.
+    writeAccountRegistry(upsertAccount(loadAccountRegistry(path), {
+      id: 'cx', provider: 'codex', harness: 'codex-cli', credentialRef: 'codex:default', codexHome: null,
+    }), path);
+    // This process, still holding the stale (empty) registry, adds its own claude row and writes.
+    writeAccountRegistry(upsertAccount(loadedEarly, {
+      id: 'cl', provider: 'claude', harness: 'claude-code', credentialRef: 'claude:default', configDir: null,
+    }), path);
+    // The concurrent codex row survives instead of being clobbered by the stale write.
+    expect(loadAccountRegistry(path).accounts.map((account) => `${account.provider}:${account.id}`).sort())
+      .toEqual(['claude:cl', 'codex:cx']);
   });
 });

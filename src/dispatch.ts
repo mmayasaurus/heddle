@@ -4,17 +4,16 @@ import { withMandatoryPacks } from './skillpacks.js';
 import { classifyEffort } from './classify.js';
 import { normalizeProvider } from './review.js';
 import { fleetPauseStatus } from './fleet-pause.js';
-import { decideCapabilities, capabilityPolicy } from './capabilities.js';
 import { resolveIdentity, attributeDispatch } from './identity.js';
 import { readProviderCaps } from './usage.js';
 import { readClaudeAccounts, pickClaudeAccount, capAwarePolicy, hardRefusal } from './capaware.js';
 import { classifyRotationRefusal, DEFAULT_COOLDOWN_S, DEFAULT_COOLING_PATH, readCooling, readRotationAccounts, writeCooling } from './rotation.js';
 import { basename } from 'node:path';
 import { defaultAdapterFor } from './dispatcher/adapters.js';
-import { refusalOutcome, refuseDepth1, refuseNotDispatchable, refuseInSession } from './dispatcher/refusals.js';
+import { refusalOutcome, refuseDepth1, refuseNotDispatchable, refuseInSession, refuseBilling } from './dispatcher/refusals.js';
 import { overrideReasonGate } from './dispatcher/override-gate.js';
 import { monocultureNote, formatMonocultureWarning } from './dispatcher/monoculture.js';
-import { planDispatch, resolveRotationAccount, hasNoDispatchableClaudeAccount, noDispatchableClaudeAccountReason } from './dispatcher/plan.js';
+import { planDispatch, resolveRotationAccount, hasNoDispatchableClaudeAccount, noDispatchableClaudeAccountReason, capabilityFitFallbackEligible } from './dispatcher/plan.js';
 import { runTarget } from './dispatcher/run.js';
 import type { AdapterFactory, DispatchContext, DispatchRequest, DispatchOutcome } from './dispatcher/types.js';
 
@@ -111,6 +110,7 @@ export async function dispatch(
 
   const plan = planDispatch(req, table);
   ctx.routeReason = plan.decision.routeReason;
+  ctx.symbol = plan.symbol;
   ctx.account = plan.account;
   ctx.claudeAccount = plan.accountPick;
   ctx.rotationAccount = plan.rotationAccount;
@@ -144,6 +144,31 @@ export async function dispatch(
     });
   }
 
+  // ---- Money-safety billing/overage (HED-395): plan-level gate for the PRIMARY account -----------
+  // The AUTHORITATIVE gate is at the spawn chokepoint (runTarget), keyed on the FINAL bound account so it
+  // covers every rebound path (capability-fit fallback, account-failover, class fallback) the plan never
+  // saw. But runTarget runs AFTER the auto-effort classifier below — so without this, a billing-refused
+  // PRIMARY would spend a classifier dispatch before the runTarget gate could veto it. This plan-level
+  // check refuses the primary FIRST, restoring the "a refused dispatch never spends a classifier"
+  // invariant (see the auto-effort comment below); the runTarget gate still enforces every rebound
+  // account. plan.billingRefusal is set (plan.ts) ONLY when the dispatch reaches runTarget and the primary
+  // account is refused (undefined for in-session previews / unclassifiable degrade), and it comes from the
+  // same pure billingVerdict the runTarget gate and the dry-run preview use (F7 parity).
+  // F1 (HED-395): SKIP this plan-level gate ONLY when the run will actually REBIND to a capability-fit
+  // fallback (plan.capabilityFitRebinds) — runTarget then denies the primary on capability, the fallback
+  // rebinds (REV-3), and runTarget's OWN billing gate bills the REBOUND account. capabilityFitRebinds
+  // mirrors the runtime rebind conditions EXACTLY (capabilityFitFallbackEligible: !noFallback, a fallback
+  // that CAN enforce, a non-in-session fallback, a different-family reviewer — plus the primary being
+  // unenforceable), so this skip can never be broader than the rebind it protects. When the rebind will
+  // NOT happen (no eligible fallback, an in-session/same-family/non-enforcing fallback, or an enforceable
+  // primary) the gate fires HERE — before the auto-effort classifier below, preserving REV-1 (a refused
+  // primary never spends a classifier). The over-broad "&& plan.fallback" skip let a billing-refused
+  // primary whose fallback could NOT rebind reach the classifier and return capability-denied instead of
+  // the billing refusal (the re-review + Bugbot finding). The runTarget gate still enforces every rebound account.
+  if (plan.billingRefusal && !plan.capabilityFitRebinds) {
+    return refuseBilling(ctx, req, route.taskClass, target, skillsForRefusal, plan.billingRefusal);
+  }
+
   // ---- Claude-primary → structured, ledgered in-session refusal (HED-18) ----------------------
   if (plan.execution === 'in-session-subagent') {
     // The class's declared fallback rides along even on the explicit path — the instruction can still
@@ -170,6 +195,24 @@ export async function dispatch(
       code: 'no-dispatchable-account',
       reason: noDispatchableClaudeAccountReason(plan.claudeAccountCount),
       instruction: 'An operator must restore a Claude account before this can dispatch.',
+    });
+  }
+
+  // ---- HED-519: headless claude opus/fable is unreliable for adversarial-review -----------------
+  // Computed in planDispatch (so `heddle route` / plan_dispatch preview and this dispatch agree).
+  if (plan.headlessClaudeReviewRefusal) {
+    return refusalOutcome(ctx, req, route.taskClass, target, skillsForRefusal, {
+      code: 'headless-claude-review-unreliable',
+      reason: plan.headlessClaudeReviewRefusal,
+      // HED-519 finding 5: don't send a cursor-authored review in a loop. "omit provider/model → cursor
+      // default" only works when a NON-cursor provider authored the change; when cursor authored it,
+      // pickReviewer re-picks a pool entry (can land back on claude) and "name cursor" is same-provider.
+      // The in-session claude path is the universal escape (no headless wall, and it isn't cursor).
+      instruction: `Route substantial adversarial reviews to cursor — this class's default cursor/grok-4.6-high `
+        + `ran the identical review in ~575s: omit provider/model to take the cursor class default (works when a `
+        + `non-cursor provider authored the change). For claude specifically, or when cursor authored the change `
+        + `under review (cursor can't review its own work), use an in-session subagent (in_session:true) — it has `
+        + `no headless timeout wall.`,
     });
   }
 
@@ -201,6 +244,10 @@ export async function dispatch(
   }
 
   // ---- Run (capabilities + max-children are decided per target inside runTarget) --------------
+  // HED-395: snapshot provider caps ONCE, HERE — after every plan-level refusal gate above (each of
+  // which must stay a zero-disk-read no-op) and before any runTarget — then thread it via ctx so the
+  // billing gate and the fallback hard-guard below read the SAME snapshot, never a fresh per-attempt read.
+  ctx.providerCaps = req.caps ?? readProviderCaps();
   // A fully-cooled codex/cursor pool is NOT skipped preemptively: cooling is advisory (a heuristic from a
   // prior rate-limit that may already have reset), and a preemptive jump to the class fallback bypassed
   // both that fallback's own account selection and the HED-261 floor. Run the primary as usual — a real
@@ -210,22 +257,50 @@ export async function dispatch(
   // the class declares a fallback whose provider CAN enforce every requested capability, route there
   // — that's fit-routing, same spirit as the model fallback. Caller/operator errors stay terminal;
   // for a review class the fallback must still not be the author's family.
+  // Conditions 1 (the primary's own unenforceable capability refusal from runTarget) + the shared
+  // capabilityFitFallbackEligible predicate (conditions 2–6). The predicate is a type guard, so `fallback`
+  // narrows to non-undefined for the whole block; it is the SAME predicate the plan-level billing gate and
+  // its preview key on (via plan.capabilityFitRebinds), so the gate's skip can never be broader than this rebind.
   if (primary.refusal?.code === 'capability-denied' && primary.capabilityRefusalKind === 'unenforceable'
-      && !req.noFallback && fallback
-      && !(route.reviewerPool && normalizeProvider(fallback.provider) === normalizeProvider(req.authorProvider))) {
-    const fallbackCapabilities = [...new Set([...(fallback.capabilities ?? []), ...(req.capabilities ?? [])])];
-    const fbCaps = decideCapabilities(fallback.provider, fallbackCapabilities, req.optIn === true, capabilityPolicy(table));
-    if (!fbCaps.refusal && providerExecution(table, fallback.provider) !== 'in-session-subagent') {
-      const targetCapabilities = [...new Set([...(target.capabilities ?? []), ...(req.capabilities ?? [])])];
-      ctx.routeReason = `${plan.decision.routeReason}; capability-fit fallback: ${target.provider} cannot enforce [${targetCapabilities.join(', ')}] → ${fallback.provider}/${fallback.model}`;
-      if (fallback.provider === 'codex' || fallback.provider === 'cursor') {
-        const registry = req.rotationAccounts ?? readRotationAccounts();
-        ctx.rotationAccount = resolveRotationAccount(fallback, req, registry, readCooling(req.coolingPath ?? DEFAULT_COOLING_PATH));
-        ctx.account = ctx.rotationAccount?.id ?? (fallback.provider === 'codex' && req.env?.CODEX_HOME ? basename(req.env.CODEX_HOME) : null);
-        if (ctx.rotationAccount) ctx.routeReason += `; ${ctx.rotationAccount.reason}`;
+      && capabilityFitFallbackEligible(fallback, req, route, table)) {
+    const targetCapabilities = [...new Set([...(target.capabilities ?? []), ...(req.capabilities ?? [])])];
+    ctx.routeReason = `${plan.decision.routeReason}; capability-fit fallback: ${target.provider} cannot enforce [${targetCapabilities.join(', ')}] → ${fallback.provider}/${fallback.model}`;
+    if (fallback.provider === 'codex' || fallback.provider === 'cursor') {
+      const registry = req.rotationAccounts ?? readRotationAccounts();
+      ctx.rotationAccount = resolveRotationAccount(fallback, req, registry, readCooling(req.coolingPath ?? DEFAULT_COOLING_PATH));
+      ctx.account = ctx.rotationAccount?.id ?? (fallback.provider === 'codex' && req.env?.CODEX_HOME ? basename(req.env.CODEX_HOME) : null);
+      if (ctx.rotationAccount) ctx.routeReason += `; ${ctx.rotationAccount.reason}`;
+    } else if (fallback.provider === 'claude') {
+      // A CLAUDE capability-fit fallback needs its OWN headroom-based account pick, exactly like the
+      // class fallback below (REV-3): without it ctx.account stays the primary's stale binding and the
+      // runTarget billing gate would classify the WRONG account. forFable so a fable fallback is picked
+      // by Fable headroom. pickClaudeAccount THROWS on a bad pin (unknown / logged-out / excluded), so
+      // wrap it exactly like the class fallback — a stale accountPin (never validated at plan time for a
+      // non-claude primary) must annotate the already-ledgered capability refusal, not throw bare out of
+      // dispatch. A non-empty registry with no addressable account must not inherit the caller's login
+      // either: annotate + return the primary's capability refusal rather than run the fallback blind.
+      const fallbackAccounts = req.accounts ?? readClaudeAccounts();
+      try {
+        ctx.claudeAccount = pickClaudeAccount(ctx.providerCaps?.claude, fallbackAccounts,
+          { pin: req.accountPin, routeAwayAtPct: capAwarePolicy(table).routeAwayAtPct, forFable: fallback.model === 'fable' }) ?? null;
+        ctx.account = ctx.claudeAccount?.account.id ?? null;
+        if (fallbackAccounts.length > 0 && ctx.claudeAccount === null) {
+          const note = `claude capability-fit fallback blocked: no dispatchable account — ${noDispatchableClaudeAccountReason(fallbackAccounts.length)}`;
+          const base = primary.error?.trim() ? primary.error : '';
+          primary.error = base ? `${base}; ${note}` : note;
+          try { ledger.annotateError(primary.ledgerId, note); } catch { /* best-effort: a ledger write failure must not abort or misclassify the dispatch */ }
+          return primary;
+        }
+        if (ctx.claudeAccount) ctx.routeReason += `; ${ctx.claudeAccount.reason}`;
+      } catch (err) {
+        const note = `claude capability-fit fallback blocked: ${err instanceof Error ? err.message : String(err)}`;
+        const base = primary.error?.trim() ? primary.error : '';
+        primary.error = base ? `${base}; ${note}` : note;
+        try { ledger.annotateError(primary.ledgerId, note); } catch { /* best-effort: a ledger write failure must not abort or misclassify the dispatch */ }
+        return primary;
       }
-      return runTarget(fallback, req, ctx, route, `${route.provider}/${route.model} (capability-unenforceable)`);
     }
+    return runTarget(fallback, req, ctx, route, `${route.provider}/${route.model} (capability-unenforceable)`);
   }
   // A read-only MANDATE VIOLATION is a policy failure of the reviewer, not a provider failure — never
   // "retry" it on the fallback (that would re-run in an already-mutated tree and mask the violation).
@@ -288,8 +363,9 @@ export async function dispatch(
     );
   }
   // The never-on-demand HARD guard applies to the runtime fallback too: a below-threshold primary
-  // failing over to cursor must not bypass an on-demand stop the plan never evaluated for it.
-  const fbSnap = req.caps ?? readProviderCaps();
+  // failing over to cursor must not bypass an on-demand stop the plan never evaluated for it. Reuses
+  // the ctx snapshot threaded above (HED-395) — the same one runTarget's billing gate reads.
+  const fbSnap = ctx.providerCaps ?? readProviderCaps();
   const fbHard = hardRefusal(fallback, fbSnap);
   if (fbHard) {
     return refusalOutcome(ctx, req, route.taskClass, fallback, skillsForRefusal, {

@@ -1,4 +1,5 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
 import { DEFAULT_ACCOUNTS_PATH } from './capaware.js';
 
 export const ACCOUNTS_SCHEMA_VERSION = 2;
@@ -23,6 +24,7 @@ export interface AccountOverage {
 export interface AccountEnvRepoint {
   baseUrl: string;
   authTokenRef: string;
+  service: string;
 }
 
 export interface Account {
@@ -45,6 +47,9 @@ export interface Account {
   preferUntil?: string;
   email?: string;
   loggedIn?: boolean;
+  region?: string;
+  trainsOnInputs?: boolean;
+  oneLoginAtATime?: boolean;
 }
 
 export interface AccountRegistry {
@@ -53,6 +58,18 @@ export interface AccountRegistry {
 }
 
 type Provider = Account['provider'];
+/**
+ * The provider identities that appear DIRECTLY as an `Account.provider` — the native harness logins
+ * heddle can prove present or absent from accounts.json. Env-repoint providers (glm, groq, gemini, …)
+ * are deliberately NOT here: they ride a native harness account via `envRepoint.service`
+ * (provider-matrix.ts), so a routing target naming one is not registry-decidable and must not be gated
+ * on account presence (HED-397 C2). Runtime mirror of `Account['provider']`, `satisfies`-checked so it
+ * cannot hold a provider the type does not.
+ */
+export const ACCOUNT_PROVIDERS = ['claude', 'codex', 'cursor'] as const satisfies readonly Account['provider'][];
+const modeledProviderSet = new Set<string>(ACCOUNT_PROVIDERS);
+/** Does this routing-target provider appear directly as an `Account.provider` (a native harness login)? */
+export const isAccountModeledProvider = (provider: string): boolean => modeledProviderSet.has(provider);
 type Row = Record<string, unknown>;
 
 const billingClasses = new Set<BillingClass>([
@@ -60,6 +77,21 @@ const billingClasses = new Set<BillingClass>([
 ]);
 const tiers = new Set<AccountTier>(['T0', 'T1', 'T2', 'T3']);
 const overagePostures = new Set<OveragePosture>(['hard-stop', 'bounded-prepaid', 'open-billing']);
+
+let atomicWriteSequence = 0;
+
+// Mirrors init-project's temp-in-the-same-directory write so a registry is never half-written.
+function atomicWriteFile(path: string, content: string): void {
+  mkdirSync(dirname(path), { recursive: true });
+  const temporary = join(dirname(path), `.${basename(path)}.${process.pid}.${atomicWriteSequence++}.tmp`);
+  try {
+    writeFileSync(temporary, content, { mode: 0o600 });
+    if (existsSync(path)) chmodSync(temporary, statSync(path).mode);
+    renameSync(temporary, path);
+  } finally {
+    try { if (existsSync(temporary)) unlinkSync(temporary); } catch { /* preserve original failure */ }
+  }
+}
 
 function normalizedPath(row: Row, key: 'configDir' | 'codexHome' | 'keyFile'): string | null {
   return typeof row[key] === 'string' && row[key] ? row[key] : null;
@@ -122,7 +154,10 @@ function validateEnvRepoint(value: unknown, where: string, path: string): Accoun
   if (typeof envRepoint.authTokenRef !== 'string' || !envRepoint.authTokenRef) {
     throw new Error(`accounts.json at ${path}: ${where}.envRepoint.authTokenRef must be a non-empty string (an env-var name or keychain ref, never the token)`);
   }
-  return { baseUrl: envRepoint.baseUrl, authTokenRef: envRepoint.authTokenRef };
+  if (typeof envRepoint.service !== 'string' || !envRepoint.service) {
+    throw new Error(`accounts.json at ${path}: ${where}.envRepoint.service must be a non-empty string (the env-repoint provider key)`);
+  }
+  return { baseUrl: envRepoint.baseUrl, authTokenRef: envRepoint.authTokenRef, service: envRepoint.service };
 }
 
 function toAccount(value: unknown, provider: Provider, index: number, path: string): Account | null {
@@ -159,7 +194,7 @@ function toAccount(value: unknown, provider: Provider, index: number, path: stri
     id: row.id as string,
     provider,
     harness: typeof row.harness === 'string' && row.harness ? row.harness : defaultHarness,
-    credentialRef: `${provider}:${pathValue ?? 'default'}`,
+    credentialRef: envRepoint ? `${provider}:${envRepoint.service}:${pathValue ?? 'default'}` : `${provider}:${pathValue ?? 'default'}`,
     ...(billingClass === undefined ? {} : { billingClass }),
     ...(tier === undefined ? {} : { tier }),
     ...(fences === undefined ? {} : { fences }),
@@ -172,6 +207,9 @@ function toAccount(value: unknown, provider: Provider, index: number, path: stri
     ...(optionalString(row, 'preferUntil') === undefined ? {} : { preferUntil: optionalString(row, 'preferUntil') }),
     ...(optionalString(row, 'email') === undefined ? {} : { email: optionalString(row, 'email') }),
     ...(typeof row.loggedIn === 'boolean' ? { loggedIn: row.loggedIn } : {}),
+    ...(optionalString(row, 'region') === undefined ? {} : { region: optionalString(row, 'region') }),
+    ...(typeof row.trainsOnInputs === 'boolean' ? { trainsOnInputs: row.trainsOnInputs } : {}),
+    ...(typeof row.oneLoginAtATime === 'boolean' ? { oneLoginAtATime: row.oneLoginAtATime } : {}),
   };
   if (provider === 'claude') account.configDir = pathValue;
   if (provider === 'codex') account.codexHome = pathValue;
@@ -226,10 +264,63 @@ export function loadAccountRegistry(path: string = process.env.HEDDLE_ACCOUNTS ?
   // _doc strings, unlike the strict project registry shape.
   return {
     schemaVersion: ACCOUNTS_SCHEMA_VERSION,
-    accounts: [
-      ...accountsFor(raw, 'claude', path),
-      ...accountsFor(raw, 'codex', path),
-      ...accountsFor(raw, 'cursor', path),
-    ],
+    // Single source of truth for the native provider set (shared with isAccountModeledProvider); order
+    // preserved (claude, codex, cursor) so the concatenation is byte-identical to the prior spread.
+    accounts: ACCOUNT_PROVIDERS.flatMap((provider) => accountsFor(raw, provider, path)),
   };
+}
+
+/** Replace an account by its stable provider/id identity without duplicating it. */
+export function upsertAccount(registry: AccountRegistry, account: Account): AccountRegistry {
+  const index = registry.accounts.findIndex((candidate) => candidate.provider === account.provider && candidate.id === account.id);
+  const accounts = [...registry.accounts];
+  if (index === -1) accounts.push(account);
+  else accounts[index] = { ...accounts[index], ...account };
+  return { schemaVersion: ACCOUNTS_SCHEMA_VERSION, accounts };
+}
+
+function accountRow(account: Account): Row {
+  const { provider: _provider, credentialRef: _credentialRef, ...fields } = account;
+  return Object.fromEntries(Object.entries(fields).filter(([, value]) => value !== undefined)) as Row;
+}
+
+function existingRaw(path: string): Record<string, unknown> {
+  if (!existsSync(path)) return {};
+  try {
+    const value = JSON.parse(readFileSync(path, 'utf8'));
+    return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Writes the provider-keyed on-disk shape. This writer is UPSERT-ONLY — it never removes a row:
+ * unknown top-level keys and matching-row fields are retained so forward-compatible metadata survives
+ * a wizard rerun, and any row present on disk that this in-memory registry never saw (a concurrent
+ * writer added it after we loaded) is preserved verbatim rather than clobbered. That closes the
+ * data-loss window in the read-modify-write; it is not a lock — a true compare-and-swap against
+ * concurrent writers is a follow-up (HED-503). A caller that must delete a row cannot use this function.
+ */
+export function writeAccountRegistry(
+  registry: AccountRegistry,
+  path: string = process.env.HEDDLE_ACCOUNTS ?? DEFAULT_ACCOUNTS_PATH,
+): void {
+  const raw = existingRaw(path);
+  const output: Record<string, unknown> = { ...raw, schemaVersion: ACCOUNTS_SCHEMA_VERSION };
+  for (const provider of ['claude', 'codex', 'cursor'] as const) {
+    const priorRows = (Array.isArray(raw[provider]) ? raw[provider] : [])
+      .filter((row): row is Row => Boolean(row) && typeof row === 'object' && !Array.isArray(row) && typeof row.id === 'string');
+    const byId = new Map(priorRows.map((row) => [row.id as string, row]));
+    const mineIds = new Set(registry.accounts.filter((account) => account.provider === provider).map((account) => account.id));
+    output[provider] = [
+      ...registry.accounts
+        .filter((account) => account.provider === provider)
+        .map((account) => ({ ...byId.get(account.id), ...accountRow(account) })),
+      // A row on disk this registry never saw — a concurrent writer added it after we loaded — survives
+      // verbatim (appended, not dropped), keeping the writer upsert-only.
+      ...priorRows.filter((row) => !mineIds.has(row.id as string)),
+    ];
+  }
+  atomicWriteFile(path, JSON.stringify(output, null, 2) + '\n');
 }

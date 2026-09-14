@@ -381,7 +381,8 @@ describe('regression PR#250 — Claude dispatches require an addressable registe
       const persisted = ledger.get(outcome.ledgerId)?.error;
 
       expect(outcome.error).toMatch(/^claude fallback blocked: no dispatchable account — no dispatchable Claude account/);
-      expect(outcome.error).toBe(persisted);
+      expect(persisted).toContain(outcome.error);
+      expect(persisted).toContain('billing-degraded:account-unregistered(unset)');
       expect(outcome.error).not.toMatch(/^;\s/);
     } finally {
       if (previousRouting === undefined) delete process.env.HEDDLE_ROUTING; else process.env.HEDDLE_ROUTING = previousRouting;

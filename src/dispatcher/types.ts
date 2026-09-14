@@ -10,6 +10,7 @@ import type { ReviewerPick } from '../review.js';
 import type { attributeDispatch, BoundIdentity } from '../identity.js';
 import type { CapsByProvider } from '../usage.js';
 import type { RouteDecision, ClaudeAccount, AccountAdvice, AccountPick } from '../capaware.js';
+import type { Account } from '../accounts.js';
 import type { RotationAccounts } from '../rotation.js';
 import type { WorkerAdapter, WorkerResult } from '../types.js';
 
@@ -70,6 +71,8 @@ export interface DispatchRequest {
   caps?: CapsByProvider;
   /** Claude account registry; read from ~/.heddle/accounts.json when omitted (tests inject). */
   accounts?: ClaudeAccount[];
+  /** Full registry used by tier-symbol availability; tests may supply a synthetic registry. */
+  accountRegistry?: Account[];
   /**
    * Claude-primary classes: return the structured `claude-in-session` instruction (run it as your
    * own Agent-tool subagent, shared prompt cache + same account) instead of spawning a headless
@@ -98,7 +101,7 @@ export interface DispatchRequest {
  * `refusal` column.
  */
 export interface DispatchRefusal {
-  code: 'claude-in-session' | 'no-dispatchable-account' | 'not-dispatchable' | 'depth-1' | 'max-children' | 'capability-denied' | 'metered-pool-exhausted' | 'same-provider-review' | 'override-reason-required' | 'fleet-paused';
+  code: 'claude-in-session' | 'no-dispatchable-account' | 'not-dispatchable' | 'depth-1' | 'max-children' | 'capability-denied' | 'metered-pool-exhausted' | 'same-provider-review' | 'override-reason-required' | 'fleet-paused' | 'billing.pay-per-token' | 'billing.open-billing-at-cap' | 'billing.prepaid-exhausted' | 'headless-claude-review-unreliable';
   reason: string;
   /** What to do instead, when there is a clear alternative. */
   instruction?: string;
@@ -152,6 +155,13 @@ export interface DispatchOutcome extends WorkerResult {
   assessment?: ResultAssessment;
   /** Set on capability-denied refusals: which check failed (`unenforceable` means a fallback may fit). */
   capabilityRefusalKind?: 'unknown-token' | 'operator-gate' | 'opt-in' | 'unenforceable';
+  /**
+   * HED-395 loud-degrade-to-ALLOW: the billing gate could not classify the bound account for spend
+   * (unregistered id, unreadable registry, or a stale bounded-prepaid caps row) and ALLOWED the run
+   * rather than refuse or silently skip. `reason` is the machine-greppable `billing-degraded:<reason>`
+   * note also written to the dispatch's ledger row — queryable/scored, never stderr-only.
+   */
+  billingDegraded?: { reason: string };
 }
 
 /** Resolves a provider name to its adapter. Injectable into dispatch() so tests can run the full
@@ -168,7 +178,13 @@ export interface DispatchContext {
   caps: StructuralCaps;
   /** Set once the cap-aware decision is made; recorded on every row of this dispatch. */
   routeReason?: string;
+  /** The preference symbol that selected the concrete route, if any. */
+  symbol?: string;
   account?: string | null;
+  /** HED-395: the provider-caps snapshot (`req.caps ?? readProviderCaps()`), computed ONCE in
+   *  dispatch() and threaded so runTarget's billing gate reads the SAME snapshot the fallback
+   *  hard-guard uses — never a fresh per-attempt read. */
+  providerCaps?: CapsByProvider;
   /** HED-78: the Claude account (env) a headless claude worker runs under. */
   claudeAccount?: AccountPick | null;
   /** Selected non-Claude account env, resolved with the route alongside Claude account selection. */
@@ -194,6 +210,10 @@ export interface DispatchPlan {
   route: Route;
   /** What would run (already swapped to the fallback when the cap-aware decision routed away). */
   target: RouteTarget;
+  /** Preference symbol that selected `target`, when tier-symbol routing participated. */
+  symbol?: string;
+  /** Ordered preference/ladder narration for `heddle route` and the ledger. */
+  resolutionWalk?: string[];
   /** The class fallback still available for a failure retry (undefined once consumed). */
   fallback?: RouteTarget;
   origin: InSessionOrigin;
@@ -203,6 +223,10 @@ export interface DispatchPlan {
   /** Account the run bills to / is advised (see DispatchOutcome.account). */
   account: string | null;
   accountAdvice?: AccountAdvice;
+  /** Money-safety refusal for the selected rich-registry account. */
+  billingRefusal?: DispatchRefusal;
+  /** Non-blocking bounded-prepaid warning when dispatch will consume the prepaid buffer. */
+  billingAdvice?: string;
   /** HED-78: the Claude account a headless worker will run on. `undefined` = in-session/non-Claude;
    *  `null` = a registry was consulted but none is addressable (or it has no entries). */
   accountPick?: AccountPick | null;
@@ -227,6 +251,17 @@ export interface DispatchPlan {
   /** HED-239: set when a requiresWeb class's effective target can't web — the dry run mirrors the
    *  runtime guard so plan_dispatch never advertises a web-research route the real dispatch refuses. */
   requiresWebRefusal?: string;
+  /** HED-395 F1: the run would deny the PRIMARY on an unenforceable capability AND a capability-fit
+   *  fallback is ELIGIBLE to rebind (dispatch.ts capabilityFitFallbackEligible) — this mirrors the
+   *  runtime rebind conditions EXACTLY, not just "the primary is unenforceable and some fallback exists".
+   *  dispatch()'s plan-level billing gate reads it to avoid preempting that safe fallback for a
+   *  billing-refused primary (the run bills the REBOUND account), and summarizePlan reads it so the
+   *  preview never advertises a billing refusal the rebinding run never makes (F7 parity). */
+  capabilityFitRebinds?: boolean;
+  /** HED-519: set when a HEADLESS claude opus/fable adversarial-review would be refused (empirically
+   *  unreliable — json-mode is silent till completion, so it SIGKILLs at timeout with zero output).
+   *  Computed in planDispatch so summarizePlan (preview) and dispatch() agree. Holds the reason string. */
+  headlessClaudeReviewRefusal?: string;
 }
 
 /** How the in-session route was chosen — the refusal reason must not misstate the YAML policy. */

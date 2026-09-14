@@ -1,8 +1,9 @@
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { runCli } from './helpers/cli.js';
 import { useTempResources } from './helpers.js';
+import { loadAccountRegistry } from '../src/accounts.js';
 
 describe('heddle accounts', () => {
   const { tempDir } = useTempResources('heddle-cli-accounts-');
@@ -46,5 +47,30 @@ describe('heddle accounts', () => {
     expect(result.stdout).toContain('INFO  missing-path (codex): burning prepaid buffer $12 of $39 — rotate soon');
     expect(result.stdout).toMatch(/heddle doctor.*HED-399/i);
     expect(existsSync(configDir)).toBe(true);
+  });
+
+  it('adds an empty v2 registry from a non-interactive answer script', async () => {
+    const answers = join(tempDir(), 'answers.json');
+    const accounts = join(tempDir(), 'added.json');
+    writeFileSync(answers, JSON.stringify(Array.from({ length: 16 }, () => false)));
+    const result = await runCli(['accounts', 'add', '--answers', answers], { env: { HEDDLE_ACCOUNTS: accounts } });
+    expect(result.code).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual({ added: [], failed: [], skipped: ['claude', 'codex', 'cursor'] });
+    expect(loadAccountRegistry(accounts)).toEqual({ schemaVersion: 2, accounts: [] });
+  });
+
+  it('adds a GLM env-repoint account from a non-interactive answer script', async () => {
+    const answers = join(tempDir(), 'glm-answers.json');
+    const accounts = join(tempDir(), 'glm-added.json');
+    writeFileSync(answers, JSON.stringify([true, 'glm-cli', 'global', '', 'CLI_GLM_TEST_KEY', 'paid', 'T1', false]));
+    const result = await runCli(['accounts', 'add', '--provider', 'glm', '--answers', answers], {
+      env: { HEDDLE_ACCOUNTS: accounts, CLI_GLM_TEST_KEY: 'FAKE_CLI_GLM_SENTINEL' },
+    });
+    expect(result.code).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({ added: ['glm-cli'] });
+    expect(loadAccountRegistry(accounts).accounts[0]).toMatchObject({
+      provider: 'claude', envRepoint: { service: 'glm', authTokenRef: 'CLI_GLM_TEST_KEY' },
+    });
+    expect(`${result.stdout}\n${result.stderr}\n${readFileSync(accounts, 'utf8')}`).not.toContain('FAKE_CLI_GLM_SENTINEL');
   });
 });

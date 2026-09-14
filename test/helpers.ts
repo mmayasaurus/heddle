@@ -19,7 +19,10 @@ export function useTempResources(prefix = 'heddle-test-') {
         // A test may explicitly close a ledger before resource cleanup.
       }
     }
-    for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
+    // maxRetries/retryDelay ride out a transient ENOTEMPTY/EBUSY when a temp dir holds a git repo
+    // (e.g. release-standalone's source/.git): a recursive rm can race the OS releasing .git entries
+    // under load. Retries engage only with recursive:true (Node fs). — HED-505
+    for (const dir of dirs) rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     dirs.length = 0;
     ledgers.length = 0;
   });
@@ -81,7 +84,12 @@ export const HERMETIC_GIT_ENV: NodeJS.ProcessEnv = (() => {
 })();
 
 export function hermeticGit(cwd: string, ...args: string[]): void {
-  execFileSync('git', args, { cwd, stdio: ['ignore', 'pipe', 'pipe'], env: HERMETIC_GIT_ENV });
+  // maintenance.auto=false / gc.auto=0: `git commit` (and other object-creating ops) otherwise fork a
+  // detached `git maintenance run --auto` that keeps writing into .git AFTER the command returns,
+  // racing fixture teardown's recursive rm → ENOTEMPTY on .git. maintenance.auto=false is the actual
+  // lever (verified: gc.auto=0 alone does NOT stop the detached fork); gc.auto=0 is the belt. This is
+  // the root cause #136's teardown retry could not outlast. — HED-520
+  execFileSync('git', ['-c', 'maintenance.auto=false', '-c', 'gc.auto=0', ...args], { cwd, stdio: ['ignore', 'pipe', 'pipe'], env: HERMETIC_GIT_ENV });
 }
 
 /**
