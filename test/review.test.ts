@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { appendFileSync, mkdirSync, rmSync, writeFileSync, chmodSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { diffInstruction, embeddedDiff, pickReviewer, sameSnapshot, snapshotWorktree } from '../src/review.js';
 import { loadRouting, resolveRoute } from '../src/routing.js';
@@ -149,32 +149,41 @@ describe('adversarial review helpers', () => {
   //            parallel-fork CI runner can exceed 45s (HED-211). It hangs on nothing — a generous
   //            ceiling beats a tight bound that intermittently reds CI; not masking a hang.
 
-  it('excludes tool-runtime directories but still hashes ordinary and similarly named files', () => {
+  it('excludes only untracked daemon churn under the top-level runtime prefixes, catching everything else (HED-550 round-3)', () => {
     const cwd = tempDir();
     git(cwd, 'init', '-q');
     mkdirSync(join(cwd, 'src'));
     writeFileSync(join(cwd, 'src', 'x.ts'), 'export const x = 1;\n');
     git(cwd, 'add', 'src/x.ts');
     commit(cwd, 'init');
+    const writeAt = (rel: string, body: string) => {
+      mkdirSync(dirname(join(cwd, rel)), { recursive: true });
+      writeFileSync(join(cwd, rel), body);
+    };
 
+    // Daemon churn under the three top-level runtime dirs is excluded — the false positive HED-550 fixes.
     const baseline = snapshotWorktree(cwd);
-    for (const [dir, file] of [['.memdb', 'daemon-state.json'], ['.memtrace', 'fts'], ['.serena', 'cache']]) {
-      mkdirSync(join(cwd, dir));
-      writeFileSync(join(cwd, dir, file), 'machine-local');
+    for (const rel of ['.memdb/daemon-state.json', '.memtrace/fts/index', '.serena/cache/typescript/sym.pkl']) {
+      writeAt(rel, 'machine-local');
     }
     expect(sameSnapshot(baseline, snapshotWorktree(cwd))).toBe(true);
 
+    // But a reviewer write OUTSIDE that narrow zone still flips the digest: a nested fake runtime dir
+    // (round-2 was a silent write zone, F2) and serena AUTHORED content (only .serena/cache/ is daemon
+    // churn — .serena/project.yml and .serena/memories/ are user/agent content, F1).
+    for (const rel of ['src/.serena/cache/backdoor.ts', '.serena/project.yml', '.serena/memories/note.md']) {
+      const prev = snapshotWorktree(cwd);
+      writeAt(rel, 'reviewer write');
+      expect(sameSnapshot(prev, snapshotWorktree(cwd))).toBe(false);
+      rmSync(join(cwd, rel));
+    }
+
+    // .memtraceignore is tracked configuration, never a runtime artifact.
     writeFileSync(join(cwd, '.memtraceignore'), 'tracked configuration');
     expect(sameSnapshot(baseline, snapshotWorktree(cwd))).toBe(false);
-
-    const withConfig = snapshotWorktree(cwd);
-    writeFileSync(join(cwd, 'src', 'x.ts'), 'export const x = 2;\n');
-    expect(sameSnapshot(withConfig, snapshotWorktree(cwd))).toBe(false);
-    writeFileSync(join(cwd, 'note.txt'), 'ordinary untracked content');
-    expect(sameSnapshot(withConfig, snapshotWorktree(cwd))).toBe(false);
   });
 
-  it('still hashes a TRACKED file under a tool-runtime dir (a committed .serena/project.yml)', () => {
+  it('still hashes a TRACKED file under a runtime dir, and excludes only untracked .serena/cache churn (HED-550)', () => {
     const cwd = tempDir();
     git(cwd, 'init', '-q');
     mkdirSync(join(cwd, '.serena'));
@@ -183,14 +192,15 @@ describe('adversarial review helpers', () => {
     commit(cwd, 'init');
 
     const baseline = snapshotWorktree(cwd);
-    // An unstaged edit to the TRACKED config must change the digest — the exclusion is untracked-only,
-    // so a reviewer cannot edit committed .serena config unseen (qodo #1).
+    // .serena/project.yml is authored config, not daemon cache — an edit is ALWAYS hashed (tracked or
+    // not), so a reviewer cannot change committed serena config unseen (qodo #1 / round-3 F1).
     writeFileSync(join(cwd, '.serena', 'project.yml'), 'name: proj-edited\n');
     expect(sameSnapshot(baseline, snapshotWorktree(cwd))).toBe(false);
 
-    // An UNTRACKED cache write beside it stays excluded.
+    // An untracked daemon cache write under .serena/cache/ stays excluded.
     const withEdit = snapshotWorktree(cwd);
-    writeFileSync(join(cwd, '.serena', 'cache.bin'), 'machine-local');
+    mkdirSync(join(cwd, '.serena', 'cache'), { recursive: true });
+    writeFileSync(join(cwd, '.serena', 'cache', 'symbols.pkl'), 'machine-local');
     expect(sameSnapshot(withEdit, snapshotWorktree(cwd))).toBe(true);
   });
 
