@@ -43,7 +43,7 @@ describe('accounts add wizard', () => {
   it('writes a valid empty v2 registry when all providers are declined', async () => {
     const path = join(tempDir(), 'empty.json');
     const summary = await runAccountsAdd({ registryPath: path }, {
-      prompter: new ScriptedPrompter([false, false, false, false]), runner: fakeRunner,
+      prompter: new ScriptedPrompter(Array.from({ length: 16 }, () => false)), runner: fakeRunner,
     });
     expect(summary).toEqual({ added: [], failed: [], skipped: ['claude', 'codex', 'cursor'] });
     expect(existsSync(path)).toBe(true);

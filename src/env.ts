@@ -9,6 +9,8 @@
  * per-token with no visible signal. Workers get these stripped, always.
  */
 const BILLING_SWITCH_VARS = [
+  // TODO(HED-484/HED-395): when Account.envRepoint lands, ANTHROPIC_BASE_URL/AUTH_TOKEN become
+  // dispatch-scoped overrides for that selected account; inherited values remain stripped here.
   'ANTHROPIC_API_KEY',
   'ANTHROPIC_AUTH_TOKEN',
   'ANTHROPIC_BASE_URL', // repoints Claude off the subscription endpoint entirely
