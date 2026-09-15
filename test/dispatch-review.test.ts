@@ -9,6 +9,7 @@ import type { CapsByProvider } from '../src/usage.js';
 import type { WorkerAdapter } from '../src/types.js';
 import { fakeAdapter, IDENTITIES, initRepoFixture, useTempResources } from './helpers.js';
 import { assessResult } from '../src/classify.js';
+import { loadRouting, structuralCaps } from '../src/routing.js';
 
 // HED-601: mock assessResult to a spy so the auto-assess-on-violation guard is proven by INVOCATION
 // (not merely the absence of an assessment field — which a classifier that throws would also produce).
@@ -175,6 +176,23 @@ describe('adversarial review dispatch', () => {
       expect(outcome.quarantine).toBeUndefined(); expect(outcome.output).toBe('done');
       expect(ledger.recent(1)[0].error).toContain('read-only mandate:');
     } finally { restore(); }
+  });
+
+  it('HED-609: hard-fails a linked-worktree write when the only same-cwd peer is a stale orphan', async () => {
+    const restore = reviewRouting(tempDir); const { worktree: cwd } = linkedWorktree(tempDir); const ledger = tempLedger();
+    const staleAfterMs = structuralCaps(loadRouting()).staleAfterMs;
+    vi.useFakeTimers();
+    try {
+      const now = Date.now();
+      vi.setSystemTime(new Date(now - staleAfterMs - 1));
+      ledger.start({ orchestrator: null, taskClass: 'peer', provider: 'cursor', model: 'm', skills: null, issue: null, pr: null, cwd, promptPreview: 'peer', sessionId: null, fellBackFrom: null });
+      vi.useRealTimers();
+      const writer: WorkerAdapter = { name: 'writer', provider: 'codex', dispatch: async (_prompt, opts) => { writeFileSync(join(opts.cwd, 'tracked-probe.txt'), 'after'); return { ok: true, output: 'done', exitCode: 0 }; } };
+      const outcome = await dispatch({ taskClass: 'adversarial-review', authorProvider: 'claude', prompt: 'review', cwd, identity: unbound }, ledger, () => writer);
+      expect(outcome.ok).toBe(false);
+      expect(outcome.review?.mandateOk).toBe(false); expect(ledger.getReview(outcome.ledgerId)?.mandate_ok).toBe(0);
+      expect(outcome.quarantine).toMatchObject({ reason: 'mandate-violation', output: 'done', ledgerId: outcome.ledgerId });
+    } finally { vi.useRealTimers(); restore(); }
   });
 
   it('HED-601: quarantines the findings and HARD-fails an exclusive linked-worktree write mandate violation without reverting files', async () => {

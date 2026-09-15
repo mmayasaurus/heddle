@@ -328,6 +328,7 @@ export async function runTarget(
   let restoreMcp: () => void = () => {};
   let before: ReturnType<typeof snapshotWorktree> | null = null;
   let after: ReturnType<typeof snapshotWorktree> | null = null;
+  let afterAt: string | undefined;
   // HED-98: workers dispatched into <repo>/.worktrees/<agent> can resolve "the project root" by
   // walking up (a linked worktree's .git is a FILE pointing at the parent) and write into the
   // CANONICAL checkout. No provider offers a verified write-confinement flag, so heddle DETECTS:
@@ -420,7 +421,7 @@ export async function runTarget(
   } catch (err) {
     result = { ok: false, output: '', exitCode: null, error: err instanceof Error ? err.message : String(err) };
   } finally {
-    if (before) after = snapshotWorktree(req.cwd); // BEFORE restore — see the baseline comment above
+    if (before) { after = snapshotWorktree(req.cwd); afterAt = new Date().toISOString(); } // BEFORE restore — see the baseline comment above
     // Restore is best-effort and must never keep the row from being finished (a restore failure is
     // reported in the outcome error instead).
     for (const restore of [restoreMcp, restoreSkills]) {
@@ -489,7 +490,8 @@ export async function runTarget(
   if (before && after) {
     mandateOk = sameSnapshot(before, after);
     if (mandateOk === false) {
-      const attributable = wt !== null && !ctx.ledger.overlappingByCwd(req.cwd, ledgerId);
+      // Attribute only peers live within the snapshot window; later starts cannot have caused this diff.
+      const attributable = wt !== null && !ctx.ledger.overlappingByCwd(req.cwd, ledgerId, { windowEnd: afterAt!, staleAfterMs: ctx.caps.staleAfterMs });
       if (attributable) {
         // HED-601: a reviewer that changed the worktree did NOT do the job it was given —
         // a read-only MANDATE VIOLATION is a HARD failure whose output is QUARANTINED, never auto-trusted.
