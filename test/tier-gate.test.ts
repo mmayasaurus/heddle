@@ -63,36 +63,67 @@ describe('tierReadOnlyVerdict (HED-404 structural read-only tier gate)', () => {
     expect(v.refusal).toBeUndefined();
   });
 
-  describe('env-repoint accounts', () => {
-    const envRepoint = {
-      service: 'glm',
-      baseUrl: 'https://example.test/v1',
-      authTokenRef: 'GLM_KEY',
-    };
+});
 
-    it('REFUSES a T0 env-repoint account on a non-read-only service route', () => {
-      const v = tierReadOnlyVerdict({
-        accountId: 'glm-1', provider: 'glm', readOnly: false,
-        loadRegistry: load([{ id: 'glm-1', provider: 'codex', tier: 'T0', envRepoint }]),
-      });
-      expect(v.refusal?.code).toBe('tier-read-only');
-    });
+const envRepoint = { service: 'glm', baseUrl: 'https://example.test/v1', authTokenRef: 'GLM_KEY' };
 
-    it('ALLOWS the same T0 env-repoint account on a read-only service route', () => {
-      const v = tierReadOnlyVerdict({
-        accountId: 'glm-1', provider: 'glm', readOnly: true,
-        loadRegistry: load([{ id: 'glm-1', provider: 'codex', tier: 'T0', envRepoint }]),
-      });
-      expect(v.refusal).toBeUndefined();
+describe('tierReadOnlyVerdict — env-repoint accounts (HED-573 gate logic)', () => {
+  it('REFUSES a T0 env-repoint account on a non-read-only service route', () => {
+    const v = tierReadOnlyVerdict({
+      accountId: 'glm-1', provider: 'glm', readOnly: false,
+      loadRegistry: load([{ id: 'glm-1', provider: 'codex', tier: 'T0', envRepoint }]),
     });
+    expect(v.refusal?.code).toBe('tier-read-only');
+  });
 
-    it('ALLOWS a non-T0 env-repoint account on a non-read-only service route', () => {
-      const v = tierReadOnlyVerdict({
-        accountId: 'glm-1', provider: 'glm', readOnly: false,
-        loadRegistry: load([{ id: 'glm-1', provider: 'codex', tier: 'T1', envRepoint }]),
-      });
-      expect(v.refusal).toBeUndefined();
+  it('ALLOWS the same T0 env-repoint account on a read-only service route', () => {
+    const v = tierReadOnlyVerdict({
+      accountId: 'glm-1', provider: 'glm', readOnly: true,
+      loadRegistry: load([{ id: 'glm-1', provider: 'codex', tier: 'T0', envRepoint }]),
     });
+    expect(v.refusal).toBeUndefined();
+  });
+
+  it('ALLOWS a non-T0 env-repoint account on a non-read-only service route', () => {
+    const v = tierReadOnlyVerdict({
+      accountId: 'glm-1', provider: 'glm', readOnly: false,
+      loadRegistry: load([{ id: 'glm-1', provider: 'codex', tier: 'T1', envRepoint }]),
+    });
+    expect(v.refusal).toBeUndefined();
+  });
+
+  // qodo/codacy #205: a NATIVE (provider,id) match must win over an env-repoint row from a DIFFERENT
+  // provider that names this provider as its service and shares the id — ids are unique only WITHIN a
+  // provider, so without native precedence a colliding env-repoint row could shadow the real account
+  // and let a T0 dispatch bypass the gate.
+  it('resolves the NATIVE account first — a colliding env-repoint row cannot shadow a native T0 (no bypass)', () => {
+    const v = tierReadOnlyVerdict({
+      accountId: 'x', provider: 'claude', readOnly: false,
+      loadRegistry: load([
+        { id: 'x', provider: 'codex', tier: 'T1', envRepoint: { service: 'claude', baseUrl: 'https://example.test/v1', authTokenRef: 'K' } },
+        { id: 'x', provider: 'claude', tier: 'T0' },
+      ]),
+    });
+    expect(v.refusal?.code).toBe('tier-read-only');
+  });
+
+  it('resolves the NATIVE account first regardless of registry order (native T1 → allow, not shadowed)', () => {
+    const v = tierReadOnlyVerdict({
+      accountId: 'x', provider: 'claude', readOnly: false,
+      loadRegistry: load([
+        { id: 'x', provider: 'claude', tier: 'T1' },
+        { id: 'x', provider: 'codex', tier: 'T0', envRepoint: { service: 'claude', baseUrl: 'https://example.test/v1', authTokenRef: 'K' } },
+      ]),
+    });
+    expect(v.refusal).toBeUndefined();
+  });
+
+  it('falls back to the env-repoint account only when there is NO native match', () => {
+    const v = tierReadOnlyVerdict({
+      accountId: 'glm-1', provider: 'glm', readOnly: false,
+      loadRegistry: load([{ id: 'glm-1', provider: 'codex', tier: 'T0', envRepoint }]),
+    });
+    expect(v.refusal?.code).toBe('tier-read-only');
   });
 });
 
