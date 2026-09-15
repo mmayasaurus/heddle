@@ -1,4 +1,9 @@
+---
 # heddle Codacy configuration.
+#
+# The YAML document-start marker (---) MUST be the first line: Codacy requires it
+# (https://docs.codacy.com/repositories-configure/codacy-configuration-file/ — "The file must start
+# with a line containing a triple dash"). Keep these comments BELOW it, never above.
 #
 # fleet/ holds DARK-VENDORED, byte-parity copies of the workspace canon bin tools
 # (fleet/bin mirrors the workspace .claude/bin, pinned by fleet/MANIFEST.sha256). They are NOT
@@ -11,6 +16,5 @@
 # NOTE: a repo .codacy.yaml REPLACES the Codacy dashboard "Ignored files" settings entirely (it does
 # not merge). Confirmed with the account owner (Maya, firsthand 2026-09-15): no existing UI ignores
 # to preserve. (HED-578)
----
 exclude_paths:
   - "fleet/**"
