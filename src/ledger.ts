@@ -1,5 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join } from 'node:path';
 import { homedir } from 'node:os';
 import { makePsProbe, type OwnerProbe } from './ledger-ps.js';
@@ -292,14 +292,18 @@ export class Ledger {
   private outputDir: string;
 
   constructor(path: string = DEFAULT_LEDGER_PATH) {
-    mkdirSync(dirname(path), { recursive: true });
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     this.outputDir = join(dirname(path), 'outputs');
     this.db = new DatabaseSync(path);
+    chmodSync(path, 0o600);
     // Several heddle processes (one MCP server per orchestrator session, CLIs, the dashboard) share
     // this file; wait briefly for a writer instead of failing with SQLITE_BUSY. Set FIRST so it also
     // covers the WAL switch and the migration window below (check, then ALTER).
     this.db.exec('PRAGMA busy_timeout = 5000;');
     this.db.exec('PRAGMA journal_mode = WAL;');
+    for (const sibling of [`${path}-wal`, `${path}-shm`]) {
+      if (existsSync(sibling)) chmodSync(sibling, 0o600);
+    }
     this.db.exec('PRAGMA foreign_keys = ON;'); // reviews.dispatch_id must be a real dispatch
     // One IMMEDIATE transaction around schema + migrations + trigger: concurrent openers of a
     // pre-migration db serialize here instead of interleaving ALTERs (busy_timeout covers the wait;

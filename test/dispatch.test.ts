@@ -42,6 +42,22 @@ describe('dispatch — class + explicit route, and in-session refusal', () => {
     expect(ledger.recent(1)[0].ok).toBe(0);
   });
 
+  it('redacts an adapter error before returning and persisting it', async () => {
+    const token = 'sk-ant-EXAMPLE0000';
+    const fake = fakeAdapter({ ok: false, output: '', exitCode: 1, error: `provider stderr: Authorization: Bearer ${token}` });
+    const ledger = tempLedger();
+
+    const outcome = await dispatch(
+      { taskClass: 'bulk-mechanical', provider: 'codex', model: 'gpt-5.6-sol', prompt: 'x', cwd: tempDir() },
+      ledger, () => fake.adapter,
+    );
+
+    expect(outcome.error).toContain('[redacted]');
+    expect(outcome.error).not.toContain(token);
+    expect(ledger.recent(1)[0].error).toContain('[redacted]');
+    expect(ledger.recent(1)[0].error).not.toContain(token);
+  });
+
   it('enforces a class opt-in gate before invoking an explicitly selected route', async () => {
     const fake = fakeAdapter();
     await expect(dispatch(

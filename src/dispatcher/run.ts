@@ -22,6 +22,7 @@ import { billingVerdict } from './billing.js';
 import { tierReadOnlyVerdict } from './tier-gate.js';
 import type { DispatchContext, DispatchRequest, DispatchOutcome, DispatchRefusal } from './types.js';
 import { validateEnvRepoint, type AccountEnvRepoint } from '../accounts.js';
+import { redactSecrets } from '../redact.js';
 
 export type EnvRepointResolution =
   | { kind: 'none' }
@@ -332,6 +333,8 @@ export async function runTarget(
       }
     }
   }
+
+  if (result.error) result.error = redactSecrets(result.error);
 
   // HED-98 worktree confinement: did anything change in the PARENT checkout while this worker ran?
   // Reported as a WARNING, not a failure: the work product may be perfectly good and destroying it
