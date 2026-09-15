@@ -86,6 +86,14 @@ function pathStillExists(cwd: string, rel: string): boolean {
   catch { return false; }
 }
 
+/** The repo top level for `cwd`. `git status` emits paths relative to it, so root-relative status
+ * paths must be joined against this, never a (possibly nested) cwd. Falls back to `cwd` when the top
+ * level cannot be resolved (e.g. a bare repo); a genuinely broken repo then fails at the first git op. */
+function repoTopLevel(cwd: string): string {
+  try { return git(cwd, ['rev-parse', '--show-toplevel']).trim() || cwd; }
+  catch { return cwd; }
+}
+
 /** Git repository identity for cwd-based policy decisions; null outside a readable Git repository. */
 export interface GitRepository {
   /** The checkout `cwd` is inside — for a LINKED worktree, the worktree's own path. */
@@ -181,12 +189,9 @@ export function checkoutFingerprint(root: string): CheckoutFingerprint | null {
     let head = '(no HEAD)';
     try { head = git(root, ['rev-parse', 'HEAD']).trim(); } catch { /* fresh repo, no commits */ }
     // git status emits REPO-ROOT-relative paths regardless of the directory it runs in, so join them
-    // back onto the repo top level — NOT `root`, which may be a nested cwd — else a nested-cwd
+    // back onto the repo top level, NOT `root` (which may be a nested cwd) — else a nested-cwd
     // fingerprint hashes the wrong path and every digest degrades to '<missing>' (codex P2 review).
-    // Falls back to `root` if the top level is unreadable (e.g. a bare repo); the status read below
-    // then decides overall readability.
-    let base = root;
-    try { base = git(root, ['rev-parse', '--show-toplevel']).trim() || root; } catch { /* keep root */ }
+    const base = repoTopLevel(root);
     // -z: NUL-separated records, so paths with spaces/newlines/quotes parse correctly.
     // -uall lists untracked FILES individually. Without it git collapses an untracked directory to
     // a single `dir/` entry, so deleting one file inside pre-existing untracked work would leave the
@@ -371,15 +376,9 @@ export function autoWipCommit(
   // (verified), so under a nested cwd `pathStillExists` and the `git add`/`reset` pathspecs would
   // resolve each path against the wrong base (cwd/<root-rel-path>) and silently drop every safe path
   // as "vanished" — the opt-in then fails to rescue exactly the safe new-file-only case it exists for
-  // (codex P2 review). Resolve the repo top level once and run all path-based git ops and existence
-  // checks against it; the final newFp stays at `cwd` so it matches the caller's preFp/postFp basis.
-  let base: string;
-  try {
-    base = git(cwd, ['rev-parse', '--show-toplevel']).trim();
-    if (!base) throw new Error('empty --show-toplevel');
-  } catch (err) {
-    return { committed: false, reason: `could not resolve the repo top level: ${gitErrorMessage(err)}` };
-  }
+  // (codex P2 review). Run all path-based git ops and existence checks against the repo top level; the
+  // final newFp stays at `cwd` so it matches the caller's preFp/postFp basis.
+  const base = repoTopLevel(cwd);
 
   // Pin every HEAD reference to one captured value (codex finding 1). commit-tree re-resolving HEAD
   // plus an unconditional update-ref would clobber a HEAD that advanced concurrently: the new tree is
