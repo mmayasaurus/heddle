@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import type { HookRuleSelection } from '../wizard/hooks-choose.js';
 import type { Rule } from './schema.js';
 
@@ -20,6 +20,12 @@ function isRuleSelection(value: unknown): value is HookRuleSelection {
 export function loadRulesPolicy(path: string): RulesPolicyLoadResult {
   if (!existsSync(path)) return { warning: `rules policy not found at ${path}; using catalog enforcement` };
   try {
+    // Guard the synchronous read against a non-regular file: a char device (/dev/zero) or a FIFO at this
+    // path would make readFileSync read forever and HANG the per-tool-call hook — worse than a crash. statSync
+    // (which follows symlinks but never hangs) → fall open to catalog enforcement if it is not a regular file.
+    if (!statSync(path).isFile()) {
+      return { warning: `rules policy at ${path} is not a regular file; using catalog enforcement` };
+    }
     const parsed: unknown = JSON.parse(readFileSync(path, 'utf8'));
     if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
       return { warning: `rules policy at ${path} is not a v1 policy object; using catalog enforcement` };

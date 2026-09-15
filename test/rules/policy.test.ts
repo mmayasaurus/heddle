@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applyPolicy, type RulesPolicy } from '../../src/rules/policy.js';
+import { applyPolicy, loadRulesPolicy, type RulesPolicy } from '../../src/rules/policy.js';
 import { parseRule, type Rule } from '../../src/rules/schema.js';
 
 function rule(id: string, enforce: boolean): Rule {
@@ -47,5 +47,15 @@ describe('applyPolicy', () => {
     expect(result.map(({ id }) => id)).toEqual(['first-rule', 'second-rule']);
     expect(result.map(({ enforce }) => enforce)).toEqual([false, true]);
     expect(source.map(({ enforce }) => enforce)).toEqual([true, true]);
+  });
+});
+
+describe('loadRulesPolicy', () => {
+  it('fails open (never hangs) on a non-regular policy file', () => {
+    // /dev/zero is an endless char device — readFileSync would read forever. The regular-file guard must
+    // return a warning + catalog fallback FAST, never hang the per-tool-call hook (vitest would time out).
+    const result = loadRulesPolicy('/dev/zero');
+    expect(result.warning).toBeDefined();
+    expect(result.policy).toBeUndefined();
   });
 });
