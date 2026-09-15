@@ -760,10 +760,58 @@ export class Ledger {
     `).run(r.dispatchId, r.authorProvider, r.authorModel, r.authorDispatchId, r.reviewerProvider, r.reviewerModel, new Date().toISOString());
   }
 
-  /** The read-only mandate check result (null = could not judge, e.g. not a git repo). */
+  /** The read-only mandate check result (null = could not judge: not a git repo, or a detected change de-attributed because a concurrent same-cwd writer was possible — HED-609). */
   setReviewMandate(dispatchId: number, mandateOk: boolean | null): void {
     this.db.prepare('UPDATE reviews SET mandate_ok = ? WHERE dispatch_id = ?')
       .run(mandateOk === null ? null : mandateOk ? 1 : 0, dispatchId);
+  }
+
+  /**
+   * Whether another dispatch was a LIVE concurrent writer sharing this cwd during this dispatch's
+   * run window [self.started_at, windowEnd]. The read-only mandate check (HED-609) uses it to decide
+   * whether a detected tree change is ATTRIBUTABLE to this worker; a false "peer present" would mask a
+   * real exclusive-worktree violation (HED-601), so rows that could not have written the tree are excluded:
+   *  - refusals (refusal IS NOT NULL): a structural refusal never ran, and an unconfirmed in-session
+   *    handoff is not a spawned writer — same CONFIRMED-only convention as reviewPairStats.
+   *  - classifier rows (execution_mode='classification'): auto-effort/auto-assess LLM calls, no cwd write
+   *    (CLASSIFICATION_EXCLUDED — NULL execution_mode still counts as a worker dispatch).
+   *  - administratively-closed rows (outcome IS NOT NULL): the orphan sweep (or a manual close) proved the
+   *    worker dead and stamped outcome='orphaned' + a fresh finished_at; that finished_at is NOT a real
+   *    work-end, so the row must not count as a live writer. `outcome` is sweep-owned; a real finish() sets
+   *    outcome=NULL. This catches even a RECENTLY-started swept orphan (pid-dead, so started_at is inside
+   *    the stale window).
+   *  - stale rows (started before now-staleAfterMs): no dispatch outlives staleAfterMs, so a row that
+   *    started earlier is a dead/orphaned worker even if not yet swept (finished_at still NULL). Same window
+   *    isInFlight/inFlightCount use (structural_caps.in_flight_stale_after_ms, default 3h).
+   * windowEnd is the AFTER-snapshot time, not the check time: a peer that started after the content digest
+   * froze cannot have caused the observed diff.
+   *
+   * Residual (documented, not fixed here): `heddle ledger finish` (cli.ts:701) closes a row WITHOUT
+   * stamping outcome, so a manual close of a RECENT in-flight row (outcome NULL, started_at within the
+   * stale window) is still counted -> warning. Defensible: unlike the sweep's pid proof-of-death, a manual
+   * close carries no evidence the recently-in-flight worker did not write, so counting it is conservative;
+   * it also needs a deliberate operator race on the exact exclusive-worktree cwd mid-review. Optional
+   * one-line consistency fix: pass { outcome: 'orphaned' } at cli.ts:701.
+   */
+  overlappingByCwd(
+    cwd: string, excludeId: number, opts: { windowEnd: string; staleAfterMs: number },
+  ): boolean {
+    const self = this.db.prepare('SELECT started_at FROM dispatches WHERE id = ?')
+      .get(excludeId) as { started_at: string } | undefined;
+    if (!self) return false;
+    const staleCutoff = new Date(Date.now() - opts.staleAfterMs).toISOString();
+    const row = this.db.prepare(`
+      SELECT 1 FROM dispatches
+       WHERE cwd = ? AND id != ?
+         AND refusal IS NULL
+         AND ${CLASSIFICATION_EXCLUDED}
+         AND outcome IS NULL
+         AND started_at >= ?
+         AND started_at <= ?
+         AND (finished_at IS NULL OR finished_at >= ?)
+       LIMIT 1
+    `).get(cwd, excludeId, staleCutoff, opts.windowEnd, self.started_at);
+    return row !== undefined;
   }
 
   /** The follow-up: how many of the reviewer's findings the author accepted (the score that tunes reviewer pairs). */
