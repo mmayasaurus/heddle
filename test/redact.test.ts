@@ -246,10 +246,9 @@ describe('redactSecrets — shapes-only decorated credentials (HED-651)', () => 
   });
 
   it('redacts a GLM key with an over-long contiguous run glued to it — the shapes-only dotted rule is unbounded (no {64} ceiling)', () => {
-    // Round-2 adversarial MEDIUM: the shared full-mode GLM rule caps each side at {20,64}; with the opaque
-    // backstop OFF, a decorated key whose contiguous alnum run exceeds 64 on either side outran that ceiling
-    // and leaked (the lookbehind pins the ONLY valid start at the run head, so backtracking never reaches
-    // the dot). Shapes-only lifts the cap to {20,}/{12,}; the pinned start keeps it linear (ReDoS test above).
+    // HED-663 removed the shared full-mode cap, so both dotted rules are unbounded now. This shapes-only
+    // arm remains distinct for its relaxed lookbehind, while the opaque backstop is OFF in this mode.
+    // The pinned start keeps it linear (ReDoS test above).
     const glm = 'abcdef0123456789abcdef0123456789.abcdef0123456789'; // <32>.<16>, scrub/gitleaks-safe
     for (const input of [
       '?? ' + 'p'.repeat(33) + glm, // left run 65 = 33 filler + 32 — leaks on the pre-fix HEAD
@@ -261,6 +260,29 @@ describe('redactSecrets — shapes-only decorated credentials (HED-651)', () => 
       expect(out).toBe('?? [redacted]');
       expect(out).not.toContain('abcdef0123456789');
     }
+  });
+
+  it('redacts a GLM key with an over-long contiguous run in FULL mode — shared dotted ceiling removed (HED-663)', () => {
+    // HED-663: full mode relied on the shared {20,64} rule; a >=65 left run outran it and the opaque
+    // backstop left the 16-char tail (<24) exposed. Ceilings removed -> the dotted pair redacts as a unit.
+    const glm = 'abcdef0123456789abcdef0123456789.abcdef0123456789'; // <32>.<16>, scrub/gitleaks-safe
+    for (const input of [
+      '?? ' + 'p'.repeat(33) + glm, // left run 65 = 33 + 32 — LEAKED on pre-fix HEAD (the HED-663 case)
+      '?? ' + 'p'.repeat(35) + glm, // left run 67
+      '?? ' + glm + 'q'.repeat(49), // right run 65
+      '?? ' + 'p'.repeat(32) + glm, // left run 64 — ceiling edge, must still redact (no regression)
+    ]) {
+      const out = redactSecrets(input);
+      expect(out).toBe('?? [redacted]');
+      expect(out).not.toContain('abcdef0123456789');
+    }
+  });
+
+  it('redacts an all-letter over-long dotted run in FULL mode (previously survived both rules) — HED-663', () => {
+    // Pre-fix: the dotted rule couldn't span >64, and the opaque backstop's lookahead needs a digit/_/-,
+    // so a pure-alpha over-long dotted run survived WHOLE. Widened ceiling now redacts it as a unit.
+    const input = '?? ' + 'a'.repeat(65) + '.' + 'b'.repeat(16);
+    expect(redactSecrets(input)).toBe('?? [redacted]');
   });
 
   it('preserves ordinary filenames whose names merely contain an sk-/dotted substring', () => {
@@ -277,7 +299,7 @@ describe('redactSecrets — shapes-only decorated credentials (HED-651)', () => 
   });
 
   it('full mode is byte-identical: the opaque backstop, not a changed prefix rule, catches the decorated token', () => {
-    // The SHARED chain is untouched, so full mode redacts the WHOLE decorated run via the opaque rule →
+    // The shared PREFIX rule / opaque backstop are untouched, so full mode redacts the WHOLE decorated run via the opaque rule →
     // "[redacted]" (a changed shared prefix rule would instead give "backup_[redacted]"). This assertion
     // fails if the shared chain drifts.
     expect(redactSecrets('?? backup_' + 'sk-' + 'DEADBEEF1234567890')).toBe('?? [redacted]');

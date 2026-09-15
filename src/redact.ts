@@ -64,9 +64,10 @@ export function redactSecrets(text: string, opts: { credential?: string; shapesO
       // Dotted token pairs (e.g. the GLM <32>.<16> key) — redact as a unit BEFORE the opaque catch-all,
       // which would otherwise split on the dot and leave the second half exposed. The lookbehind excludes
       // A-Za-z0-9_- but NOT '/', so a path/URL-nested key (src/<32>.<16>, //host-shaped) is still caught —
-      // the {20,64}.{12,64} floor sits far above ordinary path segments (run.ts, foo.json), so the only
+      // the {20,}.{12,} floor sits far above ordinary path segments (run.ts, foo.json), so the only
       // over-redaction this admits is a rare long dotted hostname label, which is the accepted direction.
-      .replace(/(?<![A-Za-z0-9_-])[A-Za-z0-9]{20,64}\.[A-Za-z0-9]{12,64}(?![A-Za-z0-9])/g, '[redacted]');
+      // (HED-663: ceilings removed so an over-long run glued to the key can't outrun them and leak; same behavior in both modes now.)
+      .replace(/(?<![A-Za-z0-9_-])[A-Za-z0-9]{20,}\.[A-Za-z0-9]{12,}(?![A-Za-z0-9])/g, '[redacted]');
 
     // Opaque tokens: 24+ chars containing a digit/underscore/dash — a HEURISTIC backstop for credential
     // shapes with no recognizable prefix (session tokens, JWT segments, Digest nonce/response). It cannot
@@ -89,10 +90,9 @@ export function redactSecrets(text: string, opts: { credential?: string; shapesO
       //     LETTER (EMBEDDED_SK_RULE = (?<![A-Za-z]) + the shared SK_PREFIX_ARM) — _/digit/boundary-
       //     decorated (backup_sk-, v2sk-) are caught, the English words survive;
       //   • the GLM-dotted pair, lookbehind relaxed to (?<![A-Za-z0-9]) so a leading _/- is allowed
-      //     (the shared rule's lookbehind excludes _ and misses backup_<32>.<16>), and UNBOUNDED
-      //     ({20,}/{12,}, not the shared rule's {20,64}/{12,64}) so an over-long contiguous alnum run
-      //     glued to the key can't outrun a ceiling and leak; the lookbehind still pins the single match
-      //     start, so it stays linear. Over-redaction direction: a rare ordinary <20+>.<12+> alnum name.
+      //     (the shared rule's lookbehind excludes _ and misses backup_<32>.<16>); the shared rule is now
+      //     also unbounded (HED-663), so this arm's DISTINCT job is only that relaxed lookbehind. The pinned
+      //     start keeps it linear. Over-redaction direction: a rare ordinary <20+>.<12+> alnum name.
       // Residuals (accepted, same class as the prefix-less opaque token this mode already preserves):
       //   (1) a recognized prefix decorated with a LETTER (xsk-…) is indistinguishable from an ordinary
       //       word;
