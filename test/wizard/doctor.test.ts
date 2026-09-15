@@ -249,24 +249,26 @@ describe('createDoctorStep (HED-476 wizard finish = read-only `heddle doctor`)',
     expect(existsSync(secretsPath)).toBe(false); // read the relocated (absent) secrets, created none
   });
 
-  it('the REAL sweep OPENS the home-scoped registry when no accounts path is injected (#204 MED)', async () => {
-    // The spy tests above prove homePaths is CALLED and its result threaded into runDoctor; this proves
-    // the REAL runDoctor actually OPENS the home-derived registry end-to-end. We inject fakeDeps' hermetic
-    // seams but OMIT paths.accounts, so createDoctorStep's homePaths(ctx.homeDir) is the sole supplier of
-    // that path — exactly the composed wiring. A valid registry is written at <home>/.heddle/accounts.json;
-    // config:claude-accounts must report it OK, NOT the "no Claude account registry" warn it would give for
-    // the absent fixture default. If homePaths (or the step's use of it) regressed, this flips to that warn.
+  it('the REAL sweep OPENS the home-scoped registry, proven by its distinctive parse outcome (#204 MED)', async () => {
+    // The spy tests prove homePaths is CALLED and threaded; this proves the REAL runDoctor OPENS the
+    // home-derived file end-to-end, DETERMINISTICALLY — independent of the tester's real ~/.heddle.
+    // Trick: write a DISTINCTIVELY MALFORMED registry at <home>/.heddle/accounts.json (claude is not an
+    // array). accountResult then reports `fail` "accounts.json has no claude[] array" — an outcome the
+    // fall-through target can NEVER produce: on a homePaths regression, resolveDoctorPaths falls through
+    // to DEFAULT_ACCOUNTS_PATH (the real ~/.heddle/accounts.json), which on any real machine is either
+    // absent (→ warn) or a VALID registry (→ ok), never this `fail`. A count-based "1 Claude account"
+    // assertion could pass spuriously off that real registry (and is a substring of "11 Claude
+    // accounts"); this outcome-based one cannot. So `fail` + "no claude[] array" here ⟹ the sweep read
+    // OUR home-scoped file.
     const base = fakeDeps();
     const home = tempDir();
     mkdirSync(join(home, '.heddle'), { recursive: true });
-    writeFileSync(
-      join(home, '.heddle', 'accounts.json'),
-      JSON.stringify({ claude: [{ id: 'acct-home', configDir: null, loggedIn: true }] }),
-    );
-    // Drop accounts from the INJECTED paths (so homePaths supplies it — an injected `undefined` would
-    // instead override homePaths and fall through to the real ~/.heddle). Keep every other seam hermetic
-    // and set secrets to an absent temp path so freshnessCheck never reads the operator's real ~/.heddle.
-    const { accounts: _homeScoped, ...restPaths } = base.paths!;
+    writeFileSync(join(home, '.heddle', 'accounts.json'), JSON.stringify({ claude: 'not-an-array' }));
+    // Drop accounts from the injected paths so homePaths(ctx.homeDir) is the SOLE supplier. Keep every
+    // other seam hermetic; set secrets to an absent temp path so freshnessCheck never reads the real
+    // ~/.heddle/secrets.env.
+    const restPaths = { ...base.paths! };
+    delete restPaths.accounts;
     const secretsPath = join(tempDir(), 'secrets.env');
     const deps = { ...base, paths: { ...restPaths, secrets: secretsPath } };
     let rep: DoctorReport | undefined;
@@ -278,9 +280,8 @@ describe('createDoctorStep (HED-476 wizard finish = read-only `heddle doctor`)',
 
     expect(rep).toBeDefined();
     const accountsCheck = check(rep!, 'config:claude-accounts');
-    expect(accountsCheck.outcome).toBe('ok'); // read the registry we wrote under <home>/.heddle …
-    expect(accountsCheck.detail).toContain('1 Claude account'); // … and counted its one account
-    expect(accountsCheck.detail).not.toContain('no Claude account registry'); // not the absent-default warn
+    expect(accountsCheck.outcome).toBe('fail'); // parsed OUR malformed home file — not the valid/absent default
+    expect(accountsCheck.detail).toContain('no claude[] array');
   });
 
   it('returns failed (never throws) even when the runner rejects with a non-Error throwable', async () => {

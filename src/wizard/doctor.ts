@@ -65,8 +65,10 @@ export interface DoctorStepDeps {
   /** Override the doctor runner (tests return a canned report; default = the real runDoctor). */
   runDoctor?: (opts: { provider?: string }, partial: Partial<DoctorDeps>) => Promise<DoctorReport>;
   /**
-   * DoctorDeps overrides for a HERMETIC integration test. Injected paths win over the composed
-   * step's home-scoped base paths; ctx.now still wins over any injected `now` (the wizard owns the
+   * DoctorDeps overrides for a HERMETIC integration test. Injected paths win over the composed step's
+   * home-scoped base paths — but a key set to `undefined` is treated as NOT provided (it does not
+   * clobber the base, which would otherwise let resolveDoctorPaths fall through to the process-home
+   * DEFAULT rather than ctx.homeDir); ctx.now still wins over any injected `now` (the wizard owns the
    * run clock).
    */
   doctorDeps?: Partial<DoctorDeps>;
@@ -88,11 +90,21 @@ export function createDoctorStep(injected: DoctorStepDeps = {}): WizardStep {
       try {
         // Verify the account registry the composed wizard wrote under ctx.homeDir. homePaths reads the
         // SAME env the doctor resolves against (deps.env defaults to process.env — src/doctor.ts), so
-        // its HEDDLE_ACCOUNTS-first resolution matches accountsStep's. Hermetic path overrides still
-        // win over the home-scoped base; ctx.now remains authoritative for the wizard's run clock.
+        // its HEDDLE_ACCOUNTS-first resolution matches accountsStep's. ctx.now remains authoritative
+        // for the wizard's run clock.
+        const env = injected.doctorDeps?.env ?? process.env;
+        // Hermetic injected paths OVERRIDE the home-scoped base, but a key explicitly set to `undefined`
+        // must NOT clobber it: resolveDoctorPaths would then fall through to the process-home DEFAULT
+        // (real ~/.heddle), NOT ctx.homeDir. So a provided-undefined is treated as "not provided",
+        // letting callers pass `{ ...base.paths, accounts: maybeUnset }` safely. (Production doctorStep
+        // injects no paths; this hardens the test seam — #204 review.)
+        const paths: DoctorDeps['paths'] = { ...homePaths(ctx.homeDir, env) };
+        for (const [key, value] of Object.entries(injected.doctorDeps?.paths ?? {})) {
+          if (value !== undefined) paths[key as keyof DoctorDeps['paths']] = value;
+        }
         report = await run({}, {
           ...injected.doctorDeps,
-          paths: { ...homePaths(ctx.homeDir, injected.doctorDeps?.env ?? process.env), ...injected.doctorDeps?.paths },
+          paths,
           now: () => ctx.now(),
         });
       } catch (error) {
