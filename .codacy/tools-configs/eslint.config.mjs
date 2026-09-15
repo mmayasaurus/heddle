@@ -16,10 +16,17 @@ import globals from "globals";
 import tseslint from "typescript-eslint";
 
 export default tseslint.config(
-  { ignores: ["dist/**", "build/**", "node_modules/**", "coverage/**", ".codacy/**"] },
+  // fleet/** holds DARK-VENDORED, byte-parity copies of the workspace canon bin tools (pinned by
+  // fleet/MANIFEST.sha256). A finding in a vendored copy cannot be fixed without breaking parity —
+  // the canon is linted at its real home in the workspace repo. Already excluded from Codacy in
+  // .codacy.yaml + codacy.config.json; the Verity gate needs the same exclusion now that the files
+  // glob below covers .mjs/.cjs (fleet/bin has .mjs) — otherwise the gate lints unfixable copies (HED-659).
+  { ignores: ["dist/**", "build/**", "node_modules/**", "coverage/**", ".codacy/**", "fleet/**"] },
   {
     extends: [js.configs.recommended, ...tseslint.configs.recommended],
-    files: ["**/*.{ts,tsx,js,jsx}"],
+    // .mjs/.cjs added so the gate lints scripts/fleet-manifest.mjs (and future ESM/CJS scripts),
+    // which the ts/tsx/js/jsx glob silently skipped (HED-659).
+    files: ["**/*.{ts,tsx,js,jsx,mjs,cjs}"],
     languageOptions: {
       ecmaVersion: 2022,
       sourceType: "module",
