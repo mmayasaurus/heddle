@@ -1,5 +1,5 @@
 import { beforeAll, describe, expect, it } from 'vitest';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { chmodSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ensureBuilt, PROJECT_ROOT } from '../helpers/cli.js';
@@ -89,6 +89,30 @@ describe('heddle-hook bin', () => {
     writeFileSync(join(rules, 'sample-block.yaml'), rule('sample-block', 'PreToolUse', 'block', true, 'denied'));
     writePolicy(home, { schemaVersion: 1, rules: [{ id: 'sample-block', enforce: false }] }, 0o644);
     const r = await runHook(rules, JSON.stringify({ hook_event_name: 'PreToolUse' }), { HOME: home });
+    expect(JSON.parse(r.stdout).hookSpecificOutput.permissionDecision).toBe('deny');
+    expect(r.stderr).toContain('rules policy');
+    expect(r.stderr).not.toContain('FAILED OPEN');
+  });
+  it('does NOT hang and warns LOUDLY when the policy path is a FIFO (secure-fs O_NONBLOCK guard)', async () => {
+    // Round-3 adversarial HIGH: a FIFO at rules.json would block secureReadFile in open() (waiting for a
+    // writer) WITHOUT O_NONBLOCK, hanging the hook on EVERY tool call. Assert the hook returns FAST (the
+    // kill-timer FAILS this test if it hangs AND reaps the child, so a regression leaves no orphan blocked
+    // in open()), warns loudly (present-but-unusable), and still denies (catalog enforcement preserved).
+    const rules = tempDir(); const home = tempDir();
+    writeFileSync(join(rules, 'sample-block.yaml'), rule('sample-block', 'PreToolUse', 'block', true, 'denied'));
+    const policyDir = join(home, '.heddle', 'policy');
+    mkdirSync(policyDir, { recursive: true, mode: 0o700 });
+    execFileSync('mkfifo', [join(policyDir, 'rules.json')]); // Node has no mkfifo
+    const r = await new Promise<{ stdout: string; stderr: string; code: number; timedOut: boolean }>((resolve, reject) => {
+      const child = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', 'dist/hook.js', '--rules', rules], { cwd: PROJECT_ROOT, env: { PATH: process.env.PATH ?? '', HOME: home }, stdio: ['pipe', 'pipe', 'pipe'] });
+      let stdout = ''; let stderr = ''; child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8');
+      child.stdout.on('data', (s) => { stdout += s; }); child.stderr.on('data', (s) => { stderr += s; });
+      const timer = setTimeout(() => { child.kill('SIGKILL'); resolve({ stdout, stderr, code: -1, timedOut: true }); }, 4000);
+      child.once('error', (e) => { clearTimeout(timer); reject(e); });
+      child.once('close', (code) => { clearTimeout(timer); resolve({ stdout, stderr, code: code ?? 1, timedOut: false }); });
+      child.stdin.end(JSON.stringify({ hook_event_name: 'PreToolUse' }));
+    });
+    expect(r.timedOut).toBe(false); // the hook must NOT hang on the FIFO policy path
     expect(JSON.parse(r.stdout).hookSpecificOutput.permissionDecision).toBe('deny');
     expect(r.stderr).toContain('rules policy');
     expect(r.stderr).not.toContain('FAILED OPEN');

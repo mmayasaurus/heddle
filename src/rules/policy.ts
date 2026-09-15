@@ -23,10 +23,12 @@ function isRuleSelection(value: unknown): value is HookRuleSelection {
 }
 
 export function loadRulesPolicy(path: string): RulesPolicyLoadResult {
-  // Operator-domain read (the HED-218/586 secure-fs pattern): O_NOFOLLOW + fstat-on-the-fd rejects a
-  // symlink, a non-regular/special file (which would otherwise HANG a synchronous read — /dev/zero, a
-  // FIFO), a foreign-owned file, and a group/other-permissioned file, closing the check-then-read TOCTOU.
-  // The wizard writes ~/.heddle/policy/rules.json 0600 in a 0700 dir (atomicWriteFile), so this is a clean fit.
+  // Operator-domain read (the HED-218/586 secure-fs pattern): O_NOFOLLOW + O_NONBLOCK open + fstat-on-the-fd
+  // rejects a symlink, a non-regular/special file (a char device like /dev/zero, or a FIFO — either would
+  // otherwise hang the per-tool-call hook: /dev/zero on the read, a FIFO in open() itself, which O_NONBLOCK
+  // makes return so fstat can refuse it), a foreign-owned file, and a group/other-permissioned file — closing
+  // the check-then-read TOCTOU. The wizard writes ~/.heddle/policy/rules.json 0600 in a 0700 dir
+  // (atomicWriteFile), so this is a clean fit.
   let contents: string;
   try {
     contents = secureReadFile(path);
