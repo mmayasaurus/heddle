@@ -1,8 +1,9 @@
-import { writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
-import { evenSplit, runSpreadPolicy } from '../../src/wizard/spread-policy.js';
-import { ScriptedPrompter } from '../../src/wizard/prompt.js';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { evenSplit, runSpreadPolicy, spreadStep } from '../../src/wizard/spread-policy.js';
+import { ScriptedPrompter, type Prompter } from '../../src/wizard/prompt.js';
+import type { WizardContext, WizardIO } from '../../src/wizard/step.js';
 import { useTempResources } from '../helpers.js';
 
 interface RegistryRow { id: string; loggedIn?: boolean; }
@@ -134,5 +135,102 @@ describe('runSpreadPolicy', () => {
     });
     expect(result).toEqual({ policy: { strategy: 'even-spread', provider: 'claude', accounts: [], capPerAccount: 0 } });
     expect(lines.some((l) => l.includes('Could not read the account registry'))).toBe(true);
+  });
+});
+
+// The spreadStep wrapper reads the registry from <home>/.heddle/accounts.json (where the accounts step
+// writes it), so seed it there rather than flat in tempDir().
+function seedRegistryUnderHome(homeDir: string, rows: RegistryRows): void {
+  const dir = join(homeDir, '.heddle');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'accounts.json'), JSON.stringify({ schemaVersion: 2, ...rows }, null, 2));
+}
+
+function makeCtx(homeDir: string, dryRun = false): WizardContext {
+  return { homeDir, dryRun, now: () => new Date('2026-09-15T00:00:00Z'), results: new Map() };
+}
+
+function makeIo(prompter: Prompter): { io: WizardIO; lines: string[] } {
+  const lines: string[] = [];
+  return { io: { prompter, report: (l) => lines.push(l) }, lines };
+}
+
+const policyFileIn = (homeDir: string) => join(homeDir, '.heddle', 'policy', 'spread.json');
+
+describe('spreadStep', () => {
+  const { tempDir } = useTempResources('hed579-');
+  const savedEnv = process.env.HEDDLE_ACCOUNTS;
+  // The step derives the registry path from ctx.homeDir unless HEDDLE_ACCOUNTS overrides it; clear the
+  // env for the home-derived cases so a value in the runner env cannot silently redirect the read.
+  beforeEach(() => { delete process.env.HEDDLE_ACCOUNTS; });
+  afterEach(() => { if (savedEnv === undefined) delete process.env.HEDDLE_ACCOUNTS; else process.env.HEDDLE_ACCOUNTS = savedEnv; });
+
+  it('writes the captured policy to <home>/.heddle/policy/spread.json and reports done', async () => {
+    const home = tempDir();
+    seedRegistryUnderHome(home, threeClaudeAccounts);
+    const { io } = makeIo(new ScriptedPrompter([true, true, true, '7', '2', true]));
+    const result = await spreadStep.run(makeCtx(home), io);
+    expect(result.status).toBe('done');
+    expect(result.summary).toContain('even-spread');
+    expect(result.summary).toContain('cap 2/account');
+    expect(existsSync(policyFileIn(home))).toBe(true);
+    expect(JSON.parse(readFileSync(policyFileIn(home), 'utf8'))).toEqual({
+      strategy: 'even-spread', provider: 'claude', accounts: ['acct1', 'acct2', 'acct3'], capPerAccount: 2,
+    });
+  });
+
+  it('prompts for nothing and writes nothing under --dry-run, returning skipped', async () => {
+    const home = tempDir();
+    seedRegistryUnderHome(home, threeClaudeAccounts);
+    // Empty script: ScriptedPrompter throws "answer script exhausted" if the step prompts at all, so a
+    // passing test proves dry-run consumed zero prompts.
+    const { io, lines } = makeIo(new ScriptedPrompter([]));
+    const result = await spreadStep.run(makeCtx(home, true), io);
+    expect(result.status).toBe('skipped');
+    expect(lines.some((l) => l.includes('dry-run'))).toBe(true);
+    expect(existsSync(policyFileIn(home))).toBe(false);
+  });
+
+  it('writes no policy file and reports skipped when the operator declines to save', async () => {
+    const home = tempDir();
+    seedRegistryUnderHome(home, threeClaudeAccounts);
+    const { io } = makeIo(new ScriptedPrompter([true, true, true, '3', '1', false]));
+    const result = await spreadStep.run(makeCtx(home), io);
+    expect(result.status).toBe('skipped');
+    expect(existsSync(policyFileIn(home))).toBe(false);
+  });
+
+  it('writes no policy file and reports skipped when no Claude accounts are registered', async () => {
+    const home = tempDir();
+    seedRegistryUnderHome(home, { codex: [{ id: 'cod1' }] });
+    const { io } = makeIo(new ScriptedPrompter([]));
+    const result = await spreadStep.run(makeCtx(home), io);
+    expect(result.status).toBe('skipped');
+    expect(existsSync(policyFileIn(home))).toBe(false);
+  });
+
+  it('honors HEDDLE_ACCOUNTS for the registry while writing the policy under ctx.homeDir', async () => {
+    const home = tempDir();
+    const registryHome = tempDir();
+    seedRegistryUnderHome(registryHome, threeClaudeAccounts);
+    process.env.HEDDLE_ACCOUNTS = join(registryHome, '.heddle', 'accounts.json');
+    const { io } = makeIo(new ScriptedPrompter([true, true, true, '3', '1', true]));
+    const result = await spreadStep.run(makeCtx(home), io);
+    expect(result.status).toBe('done');
+    // Registry read from HEDDLE_ACCOUNTS; policy written under ctx.homeDir, NOT the registry's home.
+    expect(existsSync(policyFileIn(home))).toBe(true);
+    expect(existsSync(policyFileIn(registryHome))).toBe(false);
+  });
+
+  it('replaces the prior policy on a re-run (single-owner file, not a merge)', async () => {
+    const home = tempDir();
+    seedRegistryUnderHome(home, threeClaudeAccounts);
+    // First run: all three accounts, cap 2.
+    await spreadStep.run(makeCtx(home), makeIo(new ScriptedPrompter([true, true, true, '7', '2', true])).io);
+    // Second run: only acct1, cap 1 — must fully REPLACE the first policy, not merge the account lists.
+    await spreadStep.run(makeCtx(home), makeIo(new ScriptedPrompter([true, false, false, '1', '1', true])).io);
+    expect(JSON.parse(readFileSync(policyFileIn(home), 'utf8'))).toEqual({
+      strategy: 'even-spread', provider: 'claude', accounts: ['acct1'], capPerAccount: 1,
+    });
   });
 });
