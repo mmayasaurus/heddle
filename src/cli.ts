@@ -196,7 +196,12 @@ const json = has('--json');
  * `--dry-run` preview especially must observe, not mutate.
  * Best-effort — a hygiene failure must never break the command the operator actually ran.
  */
-if (cmd !== 'mode' && cmd !== 'pr' && cmd !== 'comms' && cmd !== 'setup' && cmd !== 'fleet' && cmd !== 'top' && cmd !== 'upgrade' && cmd !== 'uninstall' && cmd !== 'ambient-cred-vars' && !(cmd === 'ledger' && (process.argv[3] === 'sweep' || process.argv[3] === 'finish')) && !(cmd === 'usage' && (process.argv[3] === 'poll-claude' || process.argv[3] === 'install-poll-launchd'))) {
+// Commands that skip orphan-hygiene / ledger startup (read-only, setup, or background — see above).
+// Declarative so a new such command is a one-line add here, not another '&&' conjunct that is easy to
+// forget (HED-680). The ledger/usage sub-commands stay as compound conditions below because they gate
+// on process.argv[3], not just the top-level command.
+const HYGIENE_SKIPPED_COMMANDS = new Set(['mode', 'pr', 'comms', 'setup', 'fleet', 'top', 'upgrade', 'uninstall', 'ambient-cred-vars']);
+if (!HYGIENE_SKIPPED_COMMANDS.has(cmd ?? '') && !(cmd === 'ledger' && (process.argv[3] === 'sweep' || process.argv[3] === 'finish')) && !(cmd === 'usage' && (process.argv[3] === 'poll-claude' || process.argv[3] === 'install-poll-launchd'))) {
   try {
     const { closed } = new Ledger().sweepOrphans();
     if (closed > 0) console.error(`heddle: closed ${closed} orphaned in-flight dispatch row${closed === 1 ? '' : 's'} (heddle ledger --json shows outcome='orphaned')`);
