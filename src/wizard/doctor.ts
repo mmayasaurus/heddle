@@ -1,12 +1,23 @@
 // HED-476: the setup wizard's FINISH step — run `heddle doctor` as read-only verification.
 //
-// The wizard's last step PROVES setup is complete (never claims it): it runs the same full-system
-// `heddle doctor` sweep (accounts/logins, MCP + comms, hooks, packs, gate mappings, artifact drift)
-// and maps the report to a WizardStepResult for the finish screen. It is the read-only EXCEPTION to
-// HED-564's "each step owns its config write" rule — this step WRITES NOTHING; runDoctor only reads.
-// "Re-runnable forever" follows from that: the whole sweep is side-effect-free, so re-running
-// `heddle setup` (or `heddle doctor`) always reflects current truth rather than a one-time claim.
-import { join } from 'node:path';
+// The wizard's last step PROVES setup rather than claiming it: it runs the same full-system
+// `heddle doctor` sweep and maps the report to a WizardStepResult for the finish screen. The sweep
+// covers (per src/doctor.ts assembleChecks): each provider harness (binary present / logged in /
+// model catalog), the routing + lanes + projects + accounts config, comms readiness, artifact drift
+// (dashboard source vs installed), and provider catalog freshness. It does NOT check hook rules or
+// skill packs — those wizard steps carry their own results.
+//
+// It verifies the REAL resolved environment, exactly as `heddle doctor` does: it passes NO path
+// overrides, so every path resolves uniformly through runDoctor (HEDDLE_* env → ~/.heddle default).
+// Relocating only some paths under ctx.homeDir would split the view (drift under one root, accounts
+// under another); relocating all of them would diverge from what `heddle doctor` reports and clobber
+// the operator's HEDDLE_* env. A hermetic test relocates the whole tree via injected doctorDeps.
+//
+// This is HED-564's read-only step: it makes NO config changes of its own. runDoctor is a read-only
+// probe with one incidental exception — opening an EXISTING older comms.db applies the standard
+// schema migration on construction (idempotent; a current-version db is a no-op; an absent db is not
+// created). Because the sweep changes no config, re-running `heddle setup` (or `heddle doctor`)
+// always reflects current truth rather than a one-time claim.
 import type { WizardStep, WizardContext, WizardIO, WizardStepResult, WizardStepStatus } from './step.js';
 import { runDoctor as realRunDoctor, formatDoctorReport, type DoctorReport, type DoctorDeps } from '../doctor.js';
 
@@ -19,7 +30,13 @@ import { runDoctor as realRunDoctor, formatDoctorReport, type DoctorReport, type
 export interface DoctorStepDeps {
   /** Override the doctor runner (tests return a canned report; default = the real runDoctor). */
   runDoctor?: (opts: { provider?: string }, partial: Partial<DoctorDeps>) => Promise<DoctorReport>;
-  /** Extra DoctorDeps overrides (paths/env/execFile) for integration tests; the step's own paths.heddle wins unless overridden. */
+  /**
+   * DoctorDeps overrides for a HERMETIC integration test — relocate the WHOLE config tree
+   * (paths.{routing,lanes,projects,accounts,comms,operatorToken,heddle,repoRoot}) plus
+   * execFile/readFileBytes/gitBehindOriginMain, so no real ~/.heddle is read and no binary is
+   * spawned. The step imposes NO paths of its own; ctx.now still wins over any injected `now`
+   * (the wizard owns the run clock).
+   */
   doctorDeps?: Partial<DoctorDeps>;
 }
 
@@ -29,40 +46,36 @@ export function createDoctorStep(injected: DoctorStepDeps = {}): WizardStep {
   return {
     id: 'doctor',
     title: 'Verify setup',
-    // No `applies` — doctor is the finish gate, so it always runs. targetDir is unused (global sweep).
+    // No `applies` — doctor is the finish gate, so it always runs. targetDir is unused (global sweep),
+    // and homeDir is intentionally NOT used to relocate config (see the header): the step verifies the
+    // real resolved environment like `heddle doctor`.
     async run(ctx: WizardContext, io: WizardIO): Promise<WizardStepResult> {
       try {
-        const { paths: pathsOverride, ...restDeps } = injected.doctorDeps ?? {};
-        const report = await run(
-          {},
-          {
-            // Integration seams (execFile/env/gitBehindOriginMain/...) thread through first, but the
-            // wizard owns the run clock and the home root: ctx.now and the ctx.homeDir-derived
-            // .heddle path are spread AFTER restDeps so they stay authoritative. ctx.homeDir is the
-            // wizard's source of truth for ~ (in production === homedir(), so doctor's env/default-
-            // resolved routing/accounts/... paths line up); an explicit doctorDeps.paths.heddle
-            // (integration tests) still wins over the derived default via the inner spread.
-            ...restDeps,
-            now: () => ctx.now(),
-            paths: { heddle: join(ctx.homeDir, '.heddle'), ...pathsOverride },
-          },
-        );
+        // Verify the real resolved config: pass no path overrides (like `heddle doctor`). A hermetic
+        // test threads the whole tree through doctorDeps; ctx.now stays authoritative (wizard clock),
+        // spread AFTER doctorDeps so an injected `now` can never override the wizard's run clock.
+        const report = await run({}, { ...injected.doctorDeps, now: () => ctx.now() });
         const text = formatDoctorReport(report);
         // WizardIO.report is a per-LINE progress sink — emit each table row, not one multi-line blob.
         for (const line of text.split('\n')) io.report(line);
         const { ok, warn, fail, skipped } = report.summary;
         const ran = ok + warn + fail;
-        const status: WizardStepStatus = fail > 0 ? 'failed' : 'done';
+        // ran===0 (nothing verified) maps to `failed`, not a hollow-green `done` — a finish screen that
+        // keys off status (not the prose) must never paint success when nothing was proven. This branch
+        // is unreachable with the real runDoctor (configChecks pushes 4 unconditional ok/fail
+        // definitions → ran>=4); the guard covers the injected-runner / degenerate-report path.
+        const status: WizardStepStatus = fail > 0 || ran === 0 ? 'failed' : 'done';
+        const skippedSuffix = skipped > 0 ? ` (${skipped} skipped)` : '';
         const summary =
           fail > 0
             ? `setup NOT proven — ${fail} check(s) failing (${ok} ok, ${warn} warn, ${skipped} skipped)`
             : ran === 0
-              // Nothing actually ran (all skipped, or an empty report). Never claim "verified" when
-              // nothing was proven — a hollow green finish is exactly what HED-476 exists to prevent.
-              ? `no checks ran — nothing verified${skipped > 0 ? ` (${skipped} skipped)` : ''}`
+              ? `setup NOT verified — no checks ran${skippedSuffix}`
               : warn > 0
                 ? `setup verified with ${warn} warning(s) (${ok} ok, ${skipped} skipped)`
-                : `setup verified — all ${ok} checks pass`;
+                : skipped > 0
+                  ? `setup verified — ${ok} checks pass (${skipped} skipped)`
+                  : `setup verified — all ${ok} checks pass`;
         return { id: 'doctor', status, summary, detail: text };
       } catch (error) {
         // A thrown doctor run must not abort the wizard — report it as a failed verification instead.

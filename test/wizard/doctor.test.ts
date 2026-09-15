@@ -2,10 +2,11 @@ import { mkdirSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { createDoctorStep } from '../../src/wizard/doctor.js';
-import { formatDoctorReport, type DoctorReport, type DoctorDeps } from '../../src/doctor.js';
+import { runDoctor as realRunDoctor, formatDoctorReport, type DoctorReport, type DoctorDeps } from '../../src/doctor.js';
 import { ScriptedPrompter } from '../../src/wizard/prompt.js';
 import type { WizardContext, WizardIO } from '../../src/wizard/step.js';
 import { useTempResources } from '../helpers.js';
+import { fakeDeps } from '../doctor-fixtures.js';
 
 const FIXED = new Date('2026-09-14T00:00:00.000Z');
 
@@ -60,54 +61,64 @@ describe('createDoctorStep (HED-476 wizard finish = read-only `heddle doctor`)',
     expect(result.summary).toBe('setup verified with 2 warning(s) (3 ok, 0 skipped)');
   });
 
-  it('never claims "verified" when nothing ran (all-skipped / empty report) — the HED-476 hollow-green guard', async () => {
-    // A report where every check was skipped (e.g. no harnesses installed) has fail=0 but proves
-    // NOTHING — the finish step must not paint a hollow "setup verified". done is still fine (no
-    // failure), but the summary tells the truth.
-    const rep = report({ skipped: 3 });
+  it('drops "all" and shows the skipped count when checks passed but some were skipped (F2)', async () => {
+    // A full sweep always includes skipped checks (e.g. login:gemini has no login harness; artifact
+    // drift skips without a dashboard dir). "all N pass" would hide them — cursor F2.
+    const rep = report({ ok: 3, skipped: 2 });
     const step = createDoctorStep({ runDoctor: async () => rep });
     const result = await step.run(makeCtx(tempDir()), makeIO().io);
     expect(result.status).toBe('done');
-    expect(result.summary).toBe('no checks ran — nothing verified (3 skipped)');
-    expect(result.summary).not.toContain('setup verified'); // not the ok/warn "setup verified …" phrasing
+    expect(result.summary).toBe('setup verified — 3 checks pass (2 skipped)');
+    expect(result.summary).not.toContain('all '); // never "all N pass" when checks were skipped
   });
 
-  it('passes ctx.now and the homeDir-derived .heddle path into the doctor runner (behavioral wiring)', async () => {
-    const home = tempDir();
+  it('maps ran===0 (all-skipped) to FAILED — a status-keyed finish screen must not paint hollow green (F3)', async () => {
+    // fail=0 but nothing was actually verified. done would let a status-keyed UI show success for a
+    // vacuous run — the hollow-green case HED-476 exists to stop.
+    const rep = report({ skipped: 3 });
+    const step = createDoctorStep({ runDoctor: async () => rep });
+    const result = await step.run(makeCtx(tempDir()), makeIO().io);
+    expect(result.status).toBe('failed');
+    expect(result.summary).toBe('setup NOT verified — no checks ran (3 skipped)');
+  });
+
+  it('maps an empty report (nothing ran, nothing skipped) to FAILED with no skipped suffix (F6)', async () => {
+    // The all-zero report is the other ran===0 shape; the suffix must be absent, not "(0 skipped)".
+    const rep = report({});
+    const step = createDoctorStep({ runDoctor: async () => rep });
+    const result = await step.run(makeCtx(tempDir()), makeIO().io);
+    expect(result.status).toBe('failed');
+    expect(result.summary).toBe('setup NOT verified — no checks ran');
+  });
+
+  it('runs a FULL sweep (no provider filter) with the wizard clock, imposing no path overrides (F1/F7)', async () => {
     const spy = vi.fn(async (_opts: { provider?: string }, _partial: Partial<DoctorDeps>) => report({ ok: 1 }));
     const step = createDoctorStep({ runDoctor: spy });
-    await step.run(makeCtx(home), makeIO().io);
+    await step.run(makeCtx(tempDir()), makeIO().io);
     expect(spy).toHaveBeenCalledTimes(1);
-    const [, partial] = spy.mock.calls[0];
-    expect(partial.now?.()).toEqual(FIXED);
-    expect(partial.paths?.heddle).toBe(join(home, '.heddle'));
+    const [opts, partial] = spy.mock.calls[0];
+    expect(opts).toEqual({}); // full sweep — no {provider} filter (cursor F7)
+    expect(partial.now?.()).toEqual(FIXED); // the wizard's clock reaches the runner
+    expect(partial.paths).toBeUndefined(); // the step imposes NO path relocation (cursor F1)
   });
 
-  it('threads doctorDeps overrides into the runner, while ctx stays authoritative for the clock', async () => {
-    const home = tempDir();
+  it('threads injected doctorDeps into the runner, while ctx stays authoritative for the clock', async () => {
     const env = { HEDDLE_ROUTING: '/fixture/routing.yaml' } as NodeJS.ProcessEnv;
     const gitBehindOriginMain = async () => 7;
-    // an integration test's own clock must NOT override the wizard's run clock (ctx.now wins)
     const strayNow = () => new Date('2000-01-01T00:00:00.000Z');
+    const paths = { accounts: '/fixture/accounts.json' };
     const spy = vi.fn(async (_opts: { provider?: string }, _partial: Partial<DoctorDeps>) => report({ ok: 1 }));
     const step = createDoctorStep({
       runDoctor: spy,
-      doctorDeps: {
-        env,
-        gitBehindOriginMain,
-        now: strayNow,
-        paths: { heddle: '/explicit/heddle', routing: '/explicit/routing.yaml' },
-      },
+      doctorDeps: { env, gitBehindOriginMain, now: strayNow, paths },
     });
-    await step.run(makeCtx(home), makeIO().io);
+    await step.run(makeCtx(tempDir()), makeIO().io);
     const [, partial] = spy.mock.calls[0];
-    // restDeps thread straight through
+    // a hermetic test's injected deps thread straight through
     expect(partial.env).toBe(env);
     expect(partial.gitBehindOriginMain).toBe(gitBehindOriginMain);
-    // an explicit paths.heddle wins over the ctx-derived default; sibling path fields survive
-    expect(partial.paths?.heddle).toBe('/explicit/heddle');
-    expect(partial.paths?.routing).toBe('/explicit/routing.yaml');
-    // ctx.now is spread AFTER restDeps, so the wizard's clock beats any injected now
+    expect(partial.paths).toBe(paths); // the step adds none of its own; the injected tree passes through
+    // ctx.now is spread AFTER doctorDeps, so the wizard's clock beats any injected now
     expect(partial.now?.()).toEqual(FIXED);
     expect(partial.now?.()).not.toEqual(strayNow());
   });
@@ -123,12 +134,38 @@ describe('createDoctorStep (HED-476 wizard finish = read-only `heddle doctor`)',
   it('the step wrapper itself writes nothing (read-only verification is runDoctor\'s own contract)', async () => {
     // With a faked runner this pins that the WRAPPER adds no filesystem writes of its own — the
     // regression it guards. It does NOT re-prove runDoctor's read-only-ness (that is doctor.ts's
-    // contract, covered by its own suite); a real-runDoctor integration variant is noted in the PR.
+    // contract); the hermetic integration test below exercises the real runDoctor.
     const home = tempDir();
     mkdirSync(join(home, '.heddle'), { recursive: true });
     const before = treeSnapshot(home);
     const step = createDoctorStep({ runDoctor: async () => report({ ok: 2 }) });
     await step.run(makeCtx(home), makeIO().io);
+    expect(treeSnapshot(home)).toEqual(before);
+  });
+
+  it('maps a REAL runDoctor report end-to-end on hermetic deps, imposing no config writes (F5)', async () => {
+    // Exercise the actual runDoctor (not a canned report) through the step, with the whole config
+    // tree + probes relocated via doctor-fixtures.fakeDeps() so nothing touches the real ~/.heddle
+    // and no binary is spawned. Capture the real report and assert the MAPPING against it (robust to
+    // check-count drift), then that the temp home is untouched (no comms.db there → no migration).
+    const home = tempDir();
+    let rep: DoctorReport | undefined;
+    const step = createDoctorStep({
+      runDoctor: async (o, p) => (rep = await realRunDoctor(o, p)),
+      doctorDeps: fakeDeps(),
+    });
+    const before = treeSnapshot(home);
+    const { io, lines } = makeIO();
+    const result = await step.run(makeCtx(home), io);
+
+    expect(rep).toBeDefined();
+    const { ok, warn, fail } = rep!.summary;
+    const ran = ok + warn + fail;
+    expect(ran).toBeGreaterThan(0); // a real sweep always runs config checks → not the ran===0 branch
+    expect(result.id).toBe('doctor');
+    expect(result.status).toBe(fail > 0 || ran === 0 ? 'failed' : 'done');
+    expect(result.detail).toBe(formatDoctorReport(rep!));
+    expect(lines).toEqual(formatDoctorReport(rep!).split('\n'));
     expect(treeSnapshot(home)).toEqual(before);
   });
 });
