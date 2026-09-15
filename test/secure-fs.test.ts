@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
@@ -6,7 +6,6 @@ import {
   releaseCredentialLock,
   secureReadFile,
   secureWriteFile,
-  withCredentialLock,
 } from '../src/secure-fs.js';
 import { useTempResources } from './helpers.js';
 
@@ -110,6 +109,24 @@ describe('secure filesystem primitives', () => {
     expect(readFileSync(path, 'utf8')).toBe('FAKE_SECRET_SENTINEL');
   });
 
+  it('secureWriteFile rejects a caller mode that would leak the secret to group/other', () => {
+    const path = join(tempDir(), 'credential');
+
+    // A secret must never be group/other-readable. {mode:0o644} is rejected at the door — before any file
+    // is created — rather than silently written with the weakened permissions the caller asked us to set.
+    expect(() => secureWriteFile(path, 'FAKE_SECRET_SENTINEL', { mode: 0o644 })).toThrow(/mode|group|other/i);
+    expect(existsSync(path)).toBe(false); // nothing written
+  });
+
+  it('secureWriteFile rejects a caller dirMode that would create a group/other-writable parent', () => {
+    const path = join(tempDir(), 'newparent', 'credential');
+
+    // {dirMode:0o777} under a permissive umask would create a world-writable parent that is never
+    // post-validated. Rejected at the door, so the parent is not created at all.
+    expect(() => secureWriteFile(path, 'FAKE_SECRET_SENTINEL', { dirMode: 0o777 })).toThrow(/dirMode|writable/i);
+    expect(existsSync(dirname(path))).toBe(false); // parent not created with the unsafe mode
+  });
+
   it('secureReadFile returns a 0600 owner-owned file', () => {
     const path = join(tempDir(), 'credential');
     writeFileSync(path, 'FAKE_SECRET_SENTINEL');
@@ -187,6 +204,20 @@ describe('secure filesystem primitives', () => {
     releaseCredentialLock(path, 12345);
   });
 
+  it('acquireCredentialLock publishes the pid atomically (temp+link), leaving no empty window or temp residue', () => {
+    const dir = join(tempDir(), 'locks');
+    const path = join(dir, 'credential.lock');
+
+    expect(acquireCredentialLock(path, 4242)).toEqual({ ok: true });
+    // The lock carries the pid from the instant the name exists — it is link()ed in fully written, never
+    // created empty and filled later (the empty-inode window). nlink===1 and no leftover .tmp prove the
+    // private temp was linked into place and then dropped, not left as a second link or as litter.
+    expect(readFileSync(path, 'utf8')).toBe('4242');
+    expect(statSync(path).nlink).toBe(1);
+    expect(readdirSync(dir).filter((f) => f.endsWith('.tmp'))).toEqual([]);
+    releaseCredentialLock(path, 4242);
+  });
+
   it('acquireCredentialLock rejects an invalid pid rather than writing a self-reclaimable holder', () => {
     // NaN / 0 / fractional would be written then read back as unreadable/dead → instantly reclaimable by
     // a second live caller, so both "hold" it. Reject at the door instead.
@@ -198,11 +229,52 @@ describe('secure filesystem primitives', () => {
     expect(existsSync(path)).toBe(false);
   });
 
-  it('acquireCredentialLock refuses a live holder and names it', () => {
+  it('acquireCredentialLock refuses a live holder and names it, leaving its lock intact', () => {
     const path = join(tempDir(), 'credential.lock');
     writeFileSync(path, '111');
 
+    // claim-fails-when-exists: our link into the taken name fails EEXIST → we inspect and refuse a live
+    // holder WITHOUT truncating or replacing its lock (a path-write claim would have stomped it).
     expect(acquireCredentialLock(path, 222, { isAlive: () => true })).toEqual({ ok: false, heldBy: 111 });
+    expect(readFileSync(path, 'utf8')).toBe('111');
+  });
+
+  it('acquireCredentialLock lets exactly one of two acquirers win a free path (concurrent double-claim)', () => {
+    const path = join(tempDir(), 'credential.lock');
+
+    // First cold-starter wins the free name via the atomic link claim.
+    expect(acquireCredentialLock(path, 111, { isAlive: (pid) => pid === 111 })).toEqual({ ok: true });
+    // A second acquirer arriving while 111 is alive must lose — the name is already taken (link EEXIST)
+    // and 111 is live → refused and named. Two acquirers, never two {ok:true}.
+    expect(acquireCredentialLock(path, 222, { isAlive: (pid) => pid === 111 })).toEqual({ ok: false, heldBy: 111 });
+    expect(readFileSync(path, 'utf8')).toBe('111');
+  });
+
+  it('acquireCredentialLock refuses (no write-through) when a symlink sits at the fresh lock path', () => {
+    const root = tempDir();
+    const path = join(root, 'credential.lock');
+    const secret = join(root, 'secret');
+    writeFileSync(secret, 'FAKE_UNTOUCHED');
+    symlinkSync(secret, path); // a symlink planted where the lock name would go
+
+    // link() does not follow a symlink at the destination → EEXIST → we refuse. A plain path write would
+    // instead follow the link and clobber `secret`. inspectLock then classifies the symlink as refuse.
+    expect(acquireCredentialLock(path, 222)).toEqual({ ok: false });
+    expect(lstatSync(path).isSymbolicLink()).toBe(true); // symlink neither chased nor removed
+    expect(readFileSync(secret, 'utf8')).toBe('FAKE_UNTOUCHED'); // never written through the symlink
+  });
+
+  it('acquireCredentialLock treats a non-decimal lock body ("1e3") as garbage, not pid 1000', () => {
+    const path = join(tempDir(), 'credential.lock');
+    writeFileSync(path, '1e3'); // Number('1e3') === 1000
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(path, old, old); // beyond the creation grace, so a genuine garbage lock is reclaimable
+
+    // If readLockPid used a bare Number(), '1e3' would masquerade as live holder 1000 and be refused
+    // (isAlive claims 1000 IS alive to prove the point). The /^\d+$/ guard makes it null → a garbage lock
+    // older than the grace → reclaimable → we win.
+    expect(acquireCredentialLock(path, 222, { isAlive: (pid) => pid === 1000 })).toEqual({ ok: true });
+    expect(readFileSync(path, 'utf8')).toBe('222');
   });
 
   it('acquireCredentialLock treats an unsignalable (EPERM) holder as alive — real pid 1', () => {
@@ -280,13 +352,13 @@ describe('secure filesystem primitives', () => {
     expect(readFileSync(path, 'utf8')).toBe('222');
   });
 
-  it('acquireCredentialLock refuses (no stomp) when a fresh wx claimant wins the unlink→claim window (finding #1)', () => {
+  it('acquireCredentialLock refuses (no stomp) when a fresh claimant wins the unlink→claim window (finding #1)', () => {
     const path = join(tempDir(), 'credential.lock');
     writeFileSync(path, '111'); // stale — we decide to reclaim
 
-    // Model the exact #1 interleave: after we remove the stale lock but BEFORE our O_EXCL claim, a
-    // non-gated fresh acquirer lands its own claim. Our 'wx' must then fail EEXIST → refuse, so the two
-    // acquirers cannot BOTH get {ok:true}. A 'w' (truncate) here would stomp 999 and dual-acquire.
+    // Model the exact #1 interleave: after we remove the stale lock but BEFORE our atomic claim, a
+    // non-gated fresh acquirer lands its own claim. Our link() into the now-taken name then fails EEXIST
+    // → refuse, so the two acquirers cannot BOTH get {ok:true}. A path write (truncate) would stomp 999.
     const result = acquireCredentialLock(path, 222, {
       isAlive: () => false,
       onReclaimGate: () => unlinkSync(path),                 // stale lock released before our re-inspect
@@ -329,57 +401,5 @@ describe('secure filesystem primitives', () => {
     releaseCredentialLock(path, 111);
 
     expect(readFileSync(path, 'utf8')).toBe('222'); // 222's lock is NOT stranded by our release
-  });
-
-  it('withCredentialLock throws without running fn when the lock is held by a live process', () => {
-    const path = join(tempDir(), 'credential.lock');
-    writeFileSync(path, '111');
-    let called = false;
-
-    expect(() => withCredentialLock(path, () => { called = true; }, { isAlive: () => true })).toThrow(/held by pid 111/);
-    expect(called).toBe(false); // the critical section must NOT run when the lock could not be acquired
-  });
-
-  it('withCredentialLock holds the lock across an async fn until its promise settles', async () => {
-    const path = join(tempDir(), 'credential.lock');
-    let heldDuringAwait = false;
-
-    const result = await withCredentialLock(path, async () => {
-      await Promise.resolve();
-      heldDuringAwait = existsSync(path); // a sync-finally release would have already fired by now
-      return 'x';
-    });
-
-    expect(result).toBe('x');
-    expect(heldDuringAwait).toBe(true); // the lock was still held after the await
-    expect(existsSync(path)).toBe(false); // and released once the promise settled
-  });
-
-  it('withCredentialLock releases the lock when an async fn rejects', async () => {
-    const path = join(tempDir(), 'credential.lock');
-
-    await expect(
-      withCredentialLock(path, async () => { await Promise.resolve(); throw new Error('FAKE_ASYNC_FAILURE'); }),
-    ).rejects.toThrow('FAKE_ASYNC_FAILURE');
-    expect(existsSync(path)).toBe(false);
-  });
-
-  it('withCredentialLock runs its function under the lock and releases afterward', () => {
-    const path = join(tempDir(), 'credential.lock');
-
-    const result = withCredentialLock(path, () => {
-      expect(readFileSync(path, 'utf8')).toBe(String(process.pid));
-      return 'done';
-    });
-
-    expect(result).toBe('done');
-    expect(existsSync(path)).toBe(false);
-  });
-
-  it('withCredentialLock releases afterward when its function throws', () => {
-    const path = join(tempDir(), 'credential.lock');
-
-    expect(() => withCredentialLock(path, () => { throw new Error('FAKE_FAILURE'); })).toThrow('FAKE_FAILURE');
-    expect(existsSync(path)).toBe(false);
   });
 });
