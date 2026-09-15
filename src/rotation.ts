@@ -1,7 +1,8 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { isCursorNativeModel } from './capaware.js';
+import { secureReadFile } from './secure-fs.js';
 import type { WorkerResult } from './types.js';
 
 export const DEFAULT_ROTATION_ACCOUNTS_PATH = join(homedir(), '.heddle', 'accounts.json');
@@ -133,13 +134,15 @@ export function pickCursorAccount(model: string, registry: RotationAccounts, coo
 
 /** Read at dispatch time so a changed/removed key never gets cached in the registry path. */
 export function readCursorKey(path: string): string | null {
+  let key: string;
   try {
-    const mode = statSync(path).mode & 0o777;
-    // Warn-and-use: refusing a readable loose key would silently degrade rotation to machine login.
-    if ((mode & 0o077) !== 0) process.stderr.write(`heddle: Cursor key file ${path} permissions are looser than 0600\n`);
-    const key = readFileSync(path, 'utf8').trim();
-    return key || null;
-  } catch { return null; }
+    key = secureReadFile(path);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    process.stderr.write(`heddle: refusing Cursor key file ${path} — ${err instanceof Error ? err.message : String(err)}; fix perms with: chmod 600 ${path}\n`);
+    return null;
+  }
+  return key.trim() || null;
 }
 
 export function classifyRotationRefusal(_provider: 'codex' | 'cursor', result: Pick<WorkerResult, 'ok' | 'output' | 'error' | 'exitCode'>): 'rate-limit' | null {

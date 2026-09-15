@@ -8,8 +8,8 @@
  * account's headroom <= `residency_cap_below_pct`). `runSpreadPolicy` only CAPTURES the user's policy
  * (participating accounts + an unconditional per-account cap) and PREVIEWS the exact split — it persists
  * nothing. `spreadStep` (HED-579, at the foot of this file) wraps it as a WizardStep and DOES persist,
- * writing `<home>/.heddle/policy/spread.json`. The module is still INERT at merge: `spreadStep` runs only
- * once Y adds its one-line `buildSteps` registration (HED-564 protocol). The policy's consumer-wiring
+ * writing `<home>/.heddle/policy/spread.json`. `spreadStep` is registered in `src/wizard/setup.ts` and
+ * runs as the third step of the eight-step setup wizard flow. The policy's consumer-wiring
  * (HED-446 picker, HED-452 rotation) is deferred.
  */
 import { readFileSync } from 'node:fs';
@@ -120,7 +120,7 @@ export async function runSpreadPolicy(opts: SpreadPolicyOptions, deps: SpreadPol
 // can run it inline (accounts → model-economy → spread → …) and the finish screen reports its outcome.
 // The step owns its own write via the HED-564 seam (policyPath + atomicWriteFile — which mkdir -p's
 // ~/.heddle/policy itself). Kept in this module (not setup.ts) so the step stays on a disjoint file per
-// the HED-564 wire-in protocol; setup.ts adds one buildSteps line to register it. Its fail-vs-skip and
+// the HED-564 wire-in protocol; setup.ts registers it in buildSteps as the third setup step. Its fail-vs-skip and
 // merge-preserving-write discipline deliberately mirror the meters step (src/wizard/meters-step.ts).
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

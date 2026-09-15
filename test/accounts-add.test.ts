@@ -1,8 +1,9 @@
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { loadAccountRegistry } from '../src/accounts.js';
 import { runAccountsAdd } from '../src/wizard/accounts-add.js';
+import { summarizeAccounts } from '../src/wizard/setup.js';
 import { ScriptedPrompter } from '../src/wizard/prompt.js';
 import type { CliRunner } from '../src/wizard/cli-runner.js';
 import { useTempResources } from './helpers.js';
@@ -147,6 +148,76 @@ describe('accounts add wizard', () => {
       prompter: new ScriptedPrompter([true, 'locked', 'paid', 'T2', false, false]), runner: fakeRunner,
     });
     expect(statSync(join(home, '.heddle', 'accounts', 'claude', 'locked')).mode & 0o777).toBe(0o700);
+  });
+
+  it('reuses an existing owner-only claude config dir on re-run after validating it (HED-590)', async () => {
+    const home = tempDir();
+    const path = join(home, 'reuse.json');
+    const dir = join(home, '.heddle', 'accounts', 'claude', 'again');
+    mkdirSync(dir, { recursive: true });
+    chmodSync(dir, 0o700);
+    const summary = await runAccountsAdd({ provider: 'claude', registryPath: path, homeDir: home }, {
+      prompter: new ScriptedPrompter([true, 'again', 'paid', 'T2', false, false]), runner: fakeRunner,
+    });
+    expect(summary.added).toEqual(['again']);
+    expect(statSync(dir).mode & 0o777).toBe(0o700);
+  });
+
+  it('refuses a pre-existing group-writable claude config dir — fails that account, not the wizard (HED-590)', async () => {
+    const home = tempDir();
+    const path = join(home, 'unsafe.json');
+    const dir = join(home, '.heddle', 'accounts', 'claude', 'wide');
+    mkdirSync(dir, { recursive: true });
+    chmodSync(dir, 0o770); // group-writable — an unsafe home for persisted credentials
+    const transcript: string[] = [];
+    // The config-dir refusal returns before the billing/tier prompts, so only have-account + id +
+    // any-other? are consumed.
+    const summary = await runAccountsAdd({ provider: 'claude', registryPath: path, homeDir: home }, {
+      prompter: new ScriptedPrompter([true, 'wide', false]), runner: fakeRunner,
+      report: (line) => transcript.push(line),
+    });
+    expect(summary.failed).toEqual(['wide']);
+    expect(summary.added).toEqual([]);
+    expect(transcript.some((line) => line.startsWith('FAIL claude wide (config dir'))).toBe(true);
+  });
+
+  it('records a per-account registry-write FAIL instead of aborting the wizard on a group-writable ~/.heddle (HED-590)', async () => {
+    const home = tempDir();
+    mkdirSync(join(home, '.heddle'), { recursive: true });
+    chmodSync(join(home, '.heddle'), 0o770); // group-writable creds home — secureWriteFile refuses the registry write
+    const path = join(home, '.heddle', 'accounts.json');
+    const transcript: string[] = [];
+    // cursor has no isolated config dir, so it reaches the registry write (claude/codex fail earlier at the
+    // config-dir step). billing + tier are consumed before the write; then secureWriteFile refuses the parent.
+    // Without the try/catch the throw would abort the wizard after login; with it the account fails cleanly.
+    const summary = await runAccountsAdd({ provider: 'cursor', registryPath: path, homeDir: home }, {
+      prompter: new ScriptedPrompter([true, 'work', 'paid', 'T1', false]), runner: fakeRunner,
+      report: (line) => transcript.push(line),
+    });
+    expect(summary.failed).toEqual(['work']);
+    expect(summary.added).toEqual([]);
+    expect(transcript.some((line) => line.startsWith('FAIL cursor work (registry'))).toBe(true);
+  });
+
+  it('surfaces an all-declined run as failed (not skipped) when the terminal empty-registry write is refused (HED-590 [P2])', async () => {
+    const home = tempDir();
+    mkdirSync(join(home, '.heddle'), { recursive: true });
+    chmodSync(join(home, '.heddle'), 0o770); // group-writable creds home — secureWriteFile refuses the empty-registry write
+    const path = join(home, '.heddle', 'accounts.json');
+    const transcript: string[] = [];
+    // Decline every provider: nothing is added, so runAccountsAdd reaches the terminal empty-registry write.
+    // That write hits the same unsafe-parent refusal as a per-account write. It must be recorded as a failure
+    // (sentinel 'registry'), not left as an empty summary — otherwise summarizeAccounts reads the run as
+    // 'skipped' and `heddle setup` exits 0 though it failed to persist the registry it was meant to create.
+    const summary = await runAccountsAdd({ registryPath: path, homeDir: home }, {
+      prompter: new ScriptedPrompter(Array.from({ length: 16 }, () => false)), runner: fakeRunner,
+      report: (line) => transcript.push(line),
+    });
+    expect(summary.added).toEqual([]);
+    expect(summary.failed).toContain('registry');
+    expect(summary.skipped).toEqual(['claude', 'codex', 'cursor']);
+    expect(transcript.some((line) => line.startsWith('FAIL (registry'))).toBe(true);
+    expect(summarizeAccounts(summary).status).toBe('failed'); // [P2]: no longer masquerades as 'skipped'
   });
 
   it('echoes the signed-in identity on the claude PASS line, never a token field (HED-585)', async () => {

@@ -110,6 +110,21 @@ export interface DispatchRequest {
   authorDispatchId?: number;
   /** HED-3: a git ref; heddle prepends "review `git diff <ref>...HEAD`" to the prompt. */
   diffBase?: string;
+  /** Fresh external quota evidence required by routes with a hard `bounds` envelope. */
+  boundedAdmission?: BoundedAdmission;
+}
+
+export interface BoundedAdmission {
+  /** Idempotency key for one provider attempt; atomically unique in the ledger. */
+  requestId: string;
+  /** External FDL session whose 48-dispatch/2.4M-token caps are being reserved. */
+  sessionId: string;
+  /** Subscription account represented by the headroom snapshot. */
+  account: string;
+  /** Provider/account tokens remaining when observedAt was captured. */
+  remainingTokens: number;
+  /** ISO-8601 capture time. Missing, invalid, or stale evidence refuses closed. */
+  observedAt: string;
 }
 
 /**
@@ -118,7 +133,7 @@ export interface DispatchRequest {
  * `refusal` column.
  */
 export interface DispatchRefusal {
-  code: 'claude-in-session' | 'no-dispatchable-account' | 'not-dispatchable' | 'depth-1' | 'max-children' | 'capability-denied' | 'tier-read-only' | 'metered-pool-exhausted' | 'same-provider-review' | 'override-reason-required' | 'fleet-paused' | 'fallback-blocked-dirty-tree' | 'billing.pay-per-token' | 'billing.open-billing-at-cap' | 'billing.prepaid-exhausted' | 'headless-claude-review-unreliable' | 'env-repoint.missing-token' | 'env-repoint.invalid-config';
+  code: 'claude-in-session' | 'no-dispatchable-account' | 'not-dispatchable' | 'depth-1' | 'max-children' | 'capability-denied' | 'tier-read-only' | 'metered-pool-exhausted' | 'same-provider-review' | 'override-reason-required' | 'fleet-paused' | 'fallback-blocked-dirty-tree' | 'billing.pay-per-token' | 'billing.open-billing-at-cap' | 'billing.prepaid-exhausted' | 'headless-claude-review-unreliable' | 'env-repoint.missing-token' | 'env-repoint.insecure-secrets' | 'env-repoint.invalid-config' | 'bounded-input-oversize' | 'bounded-unsupported-bound' | 'bounded-headroom-unknown' | 'bounded-headroom-stale' | 'bounded-account-mismatch' | 'bounded-aggregate-exhausted' | 'bounded-forbidden-fallback' | 'bounded-forbidden-extra-request' | 'bounded-forbidden-tools' | 'bounded-duplicate-request';
   reason: string;
   /** What to do instead, when there is a clear alternative. */
   instruction?: string;
@@ -192,6 +207,36 @@ export interface DispatchOutcome extends WorkerResult {
    * note also written to the dispatch's ledger row — queryable/scored, never stderr-only.
    */
   billingDegraded?: { reason: string };
+  /** Auditable hard-bound evidence for routes carrying a `bounds` envelope. */
+  boundedReceipt?: BoundedDispatchReceipt;
+}
+
+export interface BoundedDispatchReceipt {
+  version: 1;
+  status: 'refused' | 'completed' | 'incomplete';
+  requestId: string | null;
+  sessionId: string | null;
+  provider: string;
+  model: string;
+  account: string | null;
+  repository: { commit: string | null; dirty: boolean | null };
+  fingerprints: { adapter: string; route: string; lanes: string };
+  enforcementSupport: Record<string, 'native' | 'preflight-conservative' | 'atomic-ledger' | 'local-stream-cap' | 'local-validation' | 'unsupported'>;
+  refusedDimensions: string[];
+  reservation: { inputTokens: number; generatedTokens: number; totalTokens: number } | null;
+  rawUsage: unknown;
+  normalizedUsage: {
+    inputTokens: number | null;
+    cachedInputTokens: number | null;
+    cacheCreationInputTokens: number | null;
+    generatedTokens: number | null;
+    reasoningTokens: number | null;
+    totalTokens: number | null;
+  };
+  times: { headroomObservedAt: string | null; admittedAt: string | null; completedAt: string | null };
+  remoteOutcome: 'provider-confirmed-cancelled' | 'unknown' | null;
+  /** Explicit first-pass gaps; never represented as enforced capabilities. */
+  stubs: string[];
 }
 
 /** Resolves a provider name to its adapter. Injectable into dispatch() so tests can run the full

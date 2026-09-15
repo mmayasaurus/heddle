@@ -133,6 +133,45 @@ describe('routing.v0.yaml — shipped table invariants', () => {
     expect(route.requiresWeb).toBe(true);
     expect(route.fallback?.capabilities).toEqual(['browse']);
   });
+
+  it('keeps FDL public-source research inert and pins its complete GLM resource envelope', () => {
+    const route = resolveRoute(table, 'fdl-public-source-research');
+    expect(route).toMatchObject({
+      provider: 'glm', model: 'glm-5.3', readOnly: true, autoAssess: false,
+      requiresExplicitOptIn: true, fallback: undefined,
+    });
+    expect(route.mcp ?? []).toEqual([]);
+    expect(route.capabilities ?? []).toEqual([]);
+    expect(route.bounds).toEqual({
+      account: 'zai-coding-plan',
+      maxModelRequests: 1,
+      maxInputTokens: 72_000,
+      maxGeneratedTokens: 8_000,
+      maxTotalTokens: 80_000,
+      maxOutputBytes: 16_000,
+      maxConcurrency: 1,
+      timeoutMs: 150_000,
+      maxDispatchesPerHour: 4,
+      maxDispatchesPerSession: 48,
+      maxSessionTokens: 2_400_000,
+      maxHeadroomAgeMs: 300_000,
+      retry: false,
+    });
+  });
+});
+
+describe('bounded routing validation', () => {
+  it('rejects a bounds block without an account', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'heddle-routing-bounds-'));
+    const path = join(dir, 'routing.yaml');
+    writeFileSync(path, `version: 0
+policy: {structural_caps: {max_children_per_orchestrator: 1, in_flight_stale_after_ms: 1}}
+providers: {glm: {models: [glm-5.3]}}
+task_classes: {bounded: {provider: glm, model: glm-5.3, bounds: {retry: false, max_model_requests: 1, max_input_tokens: 1, max_generated_tokens: 1, max_total_tokens: 1, max_output_bytes: 1, max_concurrency: 1, timeout_ms: 1, max_dispatches_per_hour: 1, max_dispatches_per_session: 1, max_session_tokens: 1, max_headroom_age_ms: 1}}}
+`);
+    expect(() => resolveRoute(loadRouting(path), 'bounded')).toThrow('bounds.account must be a non-empty string');
+    rmSync(dir, { recursive: true });
+  });
 });
 
 describe('pickReviewer — per-entry mcp reaches the usability gate (codeant #111)', () => {
