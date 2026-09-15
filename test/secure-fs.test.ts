@@ -692,6 +692,19 @@ describe('secure filesystem primitives', () => {
       // would wrongly reject it; the exact `..` / `../` check accepts it.
       expect(() => ensureSecureDir(leaf, { boundary: root })).not.toThrow();
     });
+
+    it('refuses a ".." traversal segment in the target under a boundary (no symlink-then-.. escape)', () => {
+      const root = tempDir();
+      const outside = tempDir(); // where a symlinked component could redirect creation
+      symlinkSync(outside, join(root, 'link'));
+
+      // `<root>/link/../creds` is LEXICALLY inside root (resolve() collapses `link/..`), but the OS resolves
+      // the `link` symlink FIRST and then applies `..`, landing outside root. The `..` guard refuses it
+      // before any mkdir, so nothing is created at the lexical OR the escaped location.
+      expect(() => ensureSecureDir(`${root}/link/../creds`, { boundary: root })).toThrow(/\.\.|traversal/i);
+      expect(existsSync(join(root, 'creds'))).toBe(false);
+      expect(existsSync(join(outside, 'creds'))).toBe(false);
+    });
   });
 
   it('assertSecureDir accepts a safe existing directory and bubbles ENOENT for an absent one', () => {

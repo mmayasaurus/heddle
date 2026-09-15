@@ -190,6 +190,14 @@ export function ensureSecureDir(dir: string, opts: { mode?: number; euid?: numbe
   if (boundary !== undefined && !isStrictlyWithin(resolve(dir), boundary)) {
     throw new Error(`refusing to create credential directory ${dir}: boundary ${opts.boundary} is not an ancestor of it`);
   }
+  // A `..` segment in the target would let the LEXICAL containment check (resolve()) collapse `link/..`,
+  // while the OS resolves the `link` symlink FIRST and only then applies `..` — so `mkdirSync` could create
+  // OUTSIDE the lexically-checked boundary. Refuse parent-traversal outright when a trust root is asserted;
+  // credential paths never legitimately contain `..` (qodo security finding on #234). A name like `..config`
+  // is a real component, not traversal, so only the exact `..` segment is rejected.
+  if (boundary !== undefined && dir.split(sep).includes('..')) {
+    throw new Error(`refusing to create credential directory ${dir}: a parent-traversal ('..') segment is not allowed under a trust root`);
+  }
 
   // Fast path: the target already exists and is a safe, euid-owned directory → accept as-is (never
   // chmodded, exactly like an existing parent). Its natural ENOENT means "absent → create it" below.
