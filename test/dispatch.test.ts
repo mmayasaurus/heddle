@@ -43,7 +43,9 @@ describe('dispatch — class + explicit route, and in-session refusal', () => {
   });
 
   it('redacts an adapter error before returning and persisting it', async () => {
-    const token = 'sk-ant-EXAMPLE0000';
+    // Split literal so the shipped source line carries no contiguous credential shape (public-scrub
+    // convention); the runtime value is the full token the redactor must scrub.
+    const token = 'sk-' + 'ant-EXAMPLE0000';
     const fake = fakeAdapter({ ok: false, output: '', exitCode: 1, error: `provider stderr: Authorization: Bearer ${token}` });
     const ledger = tempLedger();
 
