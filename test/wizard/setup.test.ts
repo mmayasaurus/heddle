@@ -186,10 +186,10 @@ describe('accountsStep adapter', () => {
   it('buildSteps wires the full walkthrough in order with the doctor finish-gate last', () => {
     const runner = {} as CliRunner;
     const ids = buildSteps({ runner }).map((s) => s.id);
-    // Walkthrough order (HED-564): accounts → model-economy → spread → meters → rules → permissions → pr-automation → doctor.
+    // Walkthrough order (HED-564): canonical → accounts → model-economy → spread → meters → rules → permissions → pr-automation → doctor.
     // buildSteps({ runner }) with no catalogRoot defaults it to resolveCatalogRoot() (the bundled
     // catalog), so this also proves the default path constructs without throwing.
-    expect(ids).toEqual(['accounts', 'model-economy', 'spread', 'meters', 'rules', 'permissions', 'pr-automation', 'doctor']);
+    expect(ids).toEqual(['canonical', 'accounts', 'model-economy', 'spread', 'meters', 'rules', 'permissions', 'pr-automation', 'doctor']);
     // Doctor is the finish gate — it must ALWAYS be last so it verifies AFTER every write-step ran.
     expect(ids[ids.length - 1]).toBe('doctor');
   });
@@ -216,14 +216,19 @@ describe('composed walkthrough (buildSteps -> runSetup)', () => {
     };
     const lines: string[] = [];
     const io: WizardIO = { prompter: new ScriptedPrompter([]), report: (line) => { lines.push(line); } };
-    const results = await runSetup(baseCtx({ dryRun: true }), io, buildSteps({ runner }));
-    // Every wired step is skipped under --dry-run with no prompts or writes: model-economy/spread/meters/
+    // homeDir must be an ISOLATED empty temp dir: canonicalStep reads `${homeDir}/.heddle/canonical.json`
+    // BEFORE its dry-run branch, so a shared /tmp/home carrying a stale canonical.json would flip it to
+    // `done` and break the pin below. ($HEDDLE_CANONICAL, the other prior-state source it reads, is
+    // stripped globally in test/setup.ts's hermetic env list.)
+    const results = await runSetup(baseCtx({ dryRun: true, homeDir: tempDir() }), io, buildSteps({ runner }));
+    // Every wired step is skipped under --dry-run with no prompts or writes: canonical/model-economy/spread/meters/
     // rules/permissions self-handle dry-run in their own module, doctor via dryRunGate, and pr-automation —
     // which now APPLIES even without a --target so it can offer to add a repo (HED-624) — takes its no-target
     // dry-run branch: it DISCLOSES that a real run would offer a repo path then confirm, and returns skipped
     // without prompting or writing (the exhausted prompter above would throw if it prompted). toEqual pins the
     // exact composed order + shape.
     expect(results).toEqual([
+      { id: 'canonical', status: 'skipped', summary: expect.stringContaining('dry-run') },
       { id: 'accounts', status: 'skipped', summary: expect.stringContaining('dry-run') },
       { id: 'model-economy', status: 'skipped', summary: expect.stringContaining('dry-run') },
       { id: 'spread', status: 'skipped', summary: expect.stringContaining('dry-run') },
