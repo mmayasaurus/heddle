@@ -367,7 +367,7 @@ export async function dispatch(
     : providerExecution(table, fallback.provider);
   if (fbExecution === 'in-session-subagent') {
     return refuseInSession(
-      { ...fallback, taskClass: route.taskClass, dispatchable: route.dispatchable, fallback: undefined, reviewerPool: route.reviewerPool },
+      { ...fallback, taskClass: route.taskClass, dispatchable: route.dispatchable, fallback: undefined, reviewerPool: route.reviewerPool, readOnly: route.readOnly },
       req, ctx, fbExecution, 'fallback', `${route.provider}/${route.model}`, plan.accountAdvice,
     );
   }
