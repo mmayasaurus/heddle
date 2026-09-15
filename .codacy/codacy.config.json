@@ -9,6 +9,16 @@
       "JavaScript"
     ]
   },
+  "exclude": [
+    "**/node_modules/**",
+    "**/dist/**",
+    "**/build/**",
+    "**/.git/**",
+    "**/vendor/**",
+    "**/coverage/**",
+    "fleet/**",
+    ".worktrees/**"
+  ],
   "tools": [
     {
       "toolId": "ESLint9",
@@ -69,15 +79,6 @@
         },
         {
           "patternId": "ESLint9_@typescript-eslint_no-unused-vars"
-        },
-        {
-          "patternId": "ESLint9_@typescript-eslint_no-unsafe-assignment"
-        },
-        {
-          "patternId": "ESLint9_@typescript-eslint_no-unsafe-call"
-        },
-        {
-          "patternId": "ESLint9_@typescript-eslint_no-unsafe-return"
         },
         {
           "patternId": "ESLint9_eqeqeq"
