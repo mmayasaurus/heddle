@@ -150,6 +150,7 @@ describe('metersStep', () => {
 
     expect(result).toMatchObject({ id: 'meters', status: 'failed' });
     expect(result.summary).toMatch(/corrupt/i);
+    expect(result.summary).toContain(policyFile); // HED-602: the resolved path, not a hardcoded ~/.heddle literal
     expect(readFileSync(policyFile, 'utf8')).toBe('{ not json');
   });
 
@@ -186,6 +187,10 @@ describe('metersStep', () => {
 
     expect(result).toMatchObject({ id: 'meters', status: 'skipped' });
     expect(captured.join('\n')).toMatch(/dry-run/i);
+    // HED-602: the preview shows the RESOLVED policy path (home-scoped), never a hardcoded ~/.heddle
+    // literal that would be wrong under --home.
+    expect(captured.join('\n')).toContain(join(homeDir, '.heddle', 'policy', 'meters.json'));
+    expect(captured.join('\n')).not.toContain('~/.heddle');
     expect(existsSync(join(homeDir, '.heddle', 'policy', 'meters.json'))).toBe(false);
   });
 });

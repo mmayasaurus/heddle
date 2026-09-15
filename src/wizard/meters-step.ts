@@ -81,7 +81,7 @@ export const metersStep: WizardStep = {
     // dry-run (`heddle setup --dry-run`): report what a real run would do, prompt for nothing, write
     // nothing — mirroring accountsStep. meters is a writing step, so preview returns 'skipped'.
     if (ctx.dryRun) {
-      io.report('dry-run — meters: a real run would prompt per meterable (native Claude) account and write the opt-in policy to ~/.heddle/policy/meters.json; nothing was prompted or written.');
+      io.report(`dry-run — meters: a real run would prompt per meterable (native Claude) account and write the opt-in policy to ${policyPath(ctx.homeDir, 'meters')}; nothing was prompted or written.`);
       return { id: 'meters', status: 'skipped', summary: 'dry-run — meters prompting and policy write skipped' };
     }
 
@@ -125,7 +125,7 @@ export const metersStep: WizardStep = {
     try {
       prior = readPriorPolicy(policyFile);
     } catch {
-      return { id: 'meters', status: 'failed', summary: 'existing meters policy is corrupt — fix or remove ~/.heddle/policy/meters.json' };
+      return { id: 'meters', status: 'failed', summary: `existing meters policy is corrupt — fix or remove ${policyFile}` };
     }
     const priorAccounts = readAccountsMap(prior);
 
