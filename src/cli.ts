@@ -111,6 +111,8 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
   heddle init-project <dir> [--canonical <path>] [--name <n>] [--team <KEY>] [--agents A,B,…] [--room <#room>] [--launcher <script>] [--preset <tier>] [--hook-rules <a,b>] [--enforce <a,b>] [--answers <file>] [--enforce-memtrace] [--dry-run] [--json] [--show-content]
   heddle whoami [--json]         this process's bound identity (HEDDLE_AGENT / FLEET_AGENT / .fleet-agent) + worker context
   heddle doctor [--json] [--provider <p>]   verify harnesses/accounts/config; --provider runs only that provider's checks plus global config checks (exit 1 on any fail)
+  heddle doctor --hooks [--hooks-budget <seconds>] [--json]  probe configured hooks' latency — EXECUTES each configured hook
+                                            with a synthetic payload; probes the current directory's .claude settings — run from the project root; ignores --provider; runs under a default 180s sweep budget (--hooks-budget <seconds> to raise it); a budget-truncated hook is hung (exit 1) or unverified if little budget remained; exits 1 on broken/missing/perma-timeout; flags slow
   heddle release --standalone <outDir> [--source-ref <git ref>] [--init-git] [--verify] [--json]
       requires a clean checkout at main's HEAD — headless-first invariant (HED-507)
   heddle workers [--stale <hours>] [--json]   dispatches still in flight (--stale: only orphans older than N hours)
@@ -545,6 +547,9 @@ try {
 
     case 'doctor': {
       const provider = arg('--provider');
+      const probeHooks = has('--hooks');
+      const budgetArg = arg('--hooks-budget');
+      let hooksBudgetMs: number | undefined;
       const usageError = (message: string): void => {
         if (json) {
           process.stdout.write(
@@ -556,15 +561,36 @@ try {
           process.exit(2);
         }
       };
-      if (process.argv.includes('--provider') && (!provider || provider.startsWith('--'))) {
-        usageError(`doctor: --provider needs a provider name (known: ${DOCTOR_PROVIDERS.join(', ')})`);
-        break;
+      if (!probeHooks) {
+        if (process.argv.includes('--provider') && (!provider || provider.startsWith('--'))) {
+          usageError(`doctor: --provider needs a provider name (known: ${DOCTOR_PROVIDERS.join(', ')})`);
+          break;
+        }
+        if (provider && !DOCTOR_PROVIDERS.includes(provider as typeof DOCTOR_PROVIDERS[number])) {
+          usageError(`doctor: unknown --provider "${provider}" (known: ${DOCTOR_PROVIDERS.join(', ')})`);
+          break;
+        }
       }
-      if (provider && !DOCTOR_PROVIDERS.includes(provider as typeof DOCTOR_PROVIDERS[number])) {
-        usageError(`doctor: unknown --provider "${provider}" (known: ${DOCTOR_PROVIDERS.join(', ')})`);
-        break;
+      if (process.argv.includes('--hooks-budget')) {
+        if (!probeHooks) {
+          usageError('doctor: --hooks-budget requires --hooks');
+          break;
+        }
+        if (!budgetArg || budgetArg.startsWith('--')) {
+          usageError('doctor: --hooks-budget needs a value in seconds');
+          break;
+        }
+        const secs = Number(budgetArg);
+        if (!Number.isFinite(secs) || secs <= 0) {
+          usageError('doctor: --hooks-budget needs a positive number of seconds');
+          break;
+        }
+        hooksBudgetMs = secs * 1_000;
       }
-      const report = await runDoctor({ provider });
+      const report = await runDoctor(
+        { provider: probeHooks ? undefined : provider, probeHooks },
+        hooksBudgetMs !== undefined ? { timeouts: { hooksMs: hooksBudgetMs } } : undefined,
+      );
       const text = json ? JSON.stringify(report, null, 2) : formatDoctorReport(report);
       // Exit only after stdout drains so timed-out probes cannot keep the command alive after its report.
       process.stdout.write(text + '\n', () => process.exit(report.exitCode));

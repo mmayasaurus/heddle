@@ -1,12 +1,12 @@
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
-import { run } from '../adapters/subprocess.js';
+import { run, spawnProbe } from '../adapters/subprocess.js';
 
 export type CheckOutcome = 'ok' | 'warn' | 'fail' | 'skipped';
 
 export interface CheckResult {
   id: string;
-  kind: 'binary' | 'login' | 'catalog' | 'config' | 'freshness' | 'comms' | 'artifact';
+  kind: 'binary' | 'login' | 'catalog' | 'config' | 'freshness' | 'comms' | 'artifact' | 'hooks';
   provider?: string;
   outcome: CheckOutcome;
   detail: string;
@@ -23,7 +23,11 @@ export interface ProbeResult {
 export interface DoctorDeps {
   env: NodeJS.ProcessEnv;
   execFile: (cmd: string, args: string[], opts: { timeoutMs: number }) => Promise<ProbeResult>;
+  execHook?: (command: string, args: string[] | undefined, opts: {
+    cwd: string; env: NodeJS.ProcessEnv; stdin: string; timeoutMs: number;
+  }) => Promise<ProbeResult>;
   readFileBytes: (path: string) => Promise<Uint8Array | undefined>;
+  readSettingsBytes?: (path: string) => Promise<Uint8Array | undefined>;
   sha256: (bytes: Uint8Array) => string;
   gitBehindOriginMain: (repoPath: string) => Promise<number | undefined>;
   now: () => Date;
@@ -37,12 +41,14 @@ export interface DoctorDeps {
     operatorToken?: string;
     repoRoot?: string;
     heddle?: string;
+    project?: string;
   };
   timeouts?: {
     binaryMs?: number;
     loginMs?: number;
     catalogMs?: number;
     graceMs?: number;
+    hooksMs?: number;
   };
 }
 
@@ -53,6 +59,18 @@ export async function defaultReadFileBytes(path: string): Promise<Uint8Array | u
     // This intentionally collapses unreadable paths and ENOENT to absent; the doctor check reports
     // an informational missing-artifact/source note rather than treating a read failure as drift.
     return undefined;
+  }
+}
+
+export async function defaultReadHookSettings(path: string): Promise<Uint8Array | undefined> {
+  try {
+    return await readFile(path);
+  } catch (error) {
+    // Absent (ENOENT) is "no such settings layer" — skip it. Any OTHER read failure (EACCES on a
+    // chmod-000 settings.json, EISDIR, …) means the file EXISTS but we could not read it: surface it so
+    // `hooksChecks` can isolate it as a fail row instead of silently dropping live config.
+    if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return undefined;
+    throw error;
   }
 }
 
@@ -112,6 +130,20 @@ export function defaultExecFile(
   opts: { timeoutMs: number },
 ): Promise<ProbeResult> {
   return run(cmd, args, process.cwd(), opts.timeoutMs).then((probe) => ({
+    ...probe,
+    stdout: capStream(probe.stdout),
+    stderr: capStream(probe.stderr),
+  }));
+}
+
+export function defaultExecHook(
+  command: string,
+  args: string[] | undefined,
+  opts: { cwd: string; env: NodeJS.ProcessEnv; stdin: string; timeoutMs: number },
+): Promise<ProbeResult> {
+  const commandArgs = args && args.length ? args : ['-c', command];
+  const bin = args && args.length ? command : '/bin/sh';
+  return spawnProbe(bin, commandArgs, opts).then((probe) => ({
     ...probe,
     stdout: capStream(probe.stdout),
     stderr: capStream(probe.stderr),
