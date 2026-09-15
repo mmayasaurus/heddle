@@ -17,6 +17,7 @@ import { planDispatch, resolveRotationAccount, hasNoDispatchableClaudeAccount, n
 import { runTarget } from './dispatcher/run.js';
 import { boundedPreflight } from './bounded-dispatch.js';
 import { checkoutFingerprint, fallbackBarrier, autoWipCommit } from './worktree.js';
+import { escapeControlChars } from './control-escape.js';
 import type { AdapterFactory, DispatchContext, DispatchRequest, DispatchOutcome } from './dispatcher/types.js';
 
 // Public surface — exactly what src/dispatch.ts exported before the HED-282 split (nothing widened).
@@ -319,7 +320,29 @@ export async function dispatch(
       },
     });
   };
+  // An unsafe credential file is a local security boundary failure, not a provider availability
+  // failure. The adapter's typed marker prevents this from being mistaken for a benign failed leg
+  // and silently routed around. Match runTarget's existing warning channel: stderr plus the durable
+  // ledger error, while retaining the primary's already-finished failed outcome.
+  const suppressFallbackForInsecureCredential = (outcome: DispatchOutcome): DispatchOutcome | null => {
+    if (!outcome.securityRefusal) return null;
+    // The credential file path is HOME-derived, so neutralize terminal/log-injection control chars before
+    // the warning reaches stderr, the returned outcome.error, or the durable ledger (qodo #239 HIGH).
+    const note = escapeControlChars(`WARNING: insecure credential file ${outcome.securityRefusal.file}; fallback suppressed for safety.`);
+    process.stderr.write(`heddle: ${note}\n`);
+    // Escape the COMBINED error at this emission boundary too: the inherited outcome.error carries the
+    // adapter's refusal (already escaped at its source), and escapeControlChars is idempotent on that.
+    outcome.error = escapeControlChars(outcome.error ? `${outcome.error}; ${note}` : note);
+    try {
+      ledger.annotateError(outcome.ledgerId, note);
+    } catch {
+      // The warning remains on the returned outcome if the best-effort ledger annotation fails.
+    }
+    return outcome;
+  };
   let primary = await runTarget(target, req, ctx, route, plan.decision.routedAwayForCap ? `${route.provider}/${route.model}` : null);
+  const primarySecurityRefusal = suppressFallbackForInsecureCredential(primary);
+  if (primarySecurityRefusal) return primarySecurityRefusal;
   // Capability-fit fallback: when the PRIMARY provider merely lacks the knob (`unenforceable`) and
   // the class declares a fallback whose provider CAN enforce every requested capability, route there
   // — that's fit-routing, same spirit as the model fallback. Caller/operator errors stay terminal;

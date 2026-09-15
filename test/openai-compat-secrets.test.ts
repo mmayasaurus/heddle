@@ -103,6 +103,9 @@ describe('readSecretsEnvValue', () => {
     const result = await adapter.dispatch('x', options);
 
     expect(result.ok).toBe(false);
-    expect(result.error).toContain('refusing to use ~/.heddle/secrets.env');
+    // The typed InsecureCredentialFileError surfaces the provider tag + the secure-fs reason (no redundant
+    // "refusing to use ~/.heddle/secrets.env" preamble — HED-638 review round, codacy #239 LOW).
+    expect(result.error).toContain('groq:');
+    expect(result.error).toContain('group or other permissions are present');
   });
 });

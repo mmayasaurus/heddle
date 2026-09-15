@@ -1,9 +1,30 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { secureReadFile } from '../secure-fs.js';
+import { escapeControlChars } from '../control-escape.js';
 import type { DispatchOptions, TokenUsage, WorkerAdapter, WorkerResult } from '../types.js';
 
 export const DEFAULT_SECRETS_PATH = join(homedir(), '.heddle', 'secrets.env');
+
+/**
+ * A credential-reader refusal is security-significant, unlike an absent key or a provider error.
+ * Keep this discriminator at the adapter boundary: secure-fs owns the filesystem checks, while
+ * dispatch needs a stable, typed signal to avoid treating that refusal as a fallback candidate.
+ */
+export class InsecureCredentialFileError extends Error {
+  readonly file: string;
+
+  constructor(file: string, cause: unknown) {
+    // The cause (secure-fs) message already names the file and the specific reason ("refusing to read
+    // secret file <path>: <reason>"), so this wrapper does NOT re-prefix the path — duplicating it only
+    // bloats the message and can push the reason past a downstream detail-length cap (probe.ts's sanitize
+    // slices doctor/freshness details to 240 chars, and two absolute temp paths overrun it). The path
+    // stays available programmatically via `this.file`.
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
+    this.name = 'InsecureCredentialFileError';
+    this.file = file;
+  }
+}
 
 /** Read one key from heddle’s secrets file; adapter credentials never come from process.env. */
 export function readSecretsEnvValue(keyEnv: string, path = DEFAULT_SECRETS_PATH): string | undefined {
@@ -12,7 +33,10 @@ export function readSecretsEnvValue(keyEnv: string, path = DEFAULT_SECRETS_PATH)
     contents = secureReadFile(path);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return undefined; // absent file → key not configured (benign)
-    throw err; // symlink / foreign-owned / loose-perm violation → fail closed, surface to the caller
+    // secureReadFile's non-ENOENT failures are its refusal-to-read contract (symlink, ownership,
+    // permissions, or another unsafe-open condition). Preserve the cause for diagnostics while
+    // giving dispatch a typed security discriminator without changing secure-fs itself.
+    throw new InsecureCredentialFileError(path, err);
   }
   for (const line of contents.split(/\r?\n/)) {
     const match = line.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/);
@@ -152,9 +176,22 @@ export class OpenAICompatAdapter implements WorkerAdapter {
     try {
       apiKey = this.loadKey();
     } catch (err) {
+      const securityRefusal = err instanceof InsecureCredentialFileError
+        ? { code: 'insecure-credential-file' as const, file: err.file }
+        : undefined;
+      // InsecureCredentialFileError.message is the secure-fs reason itself ("refusing to read secret file
+      // <path>: <reason>"), which already names the file — so for that typed case the provider tag alone is
+      // enough and the "refusing to use ~/.heddle/secrets.env" preamble would just repeat it (codacy #239 LOW).
+      // Other errors keep the explicit preamble. Both branches run through escapeControlChars so a control
+      // char in the (HOME-derived) path or reason cannot inject into the returned outcome, the ledger, or a
+      // terminal (qodo #239 log-injection HIGH); escaping at this source keeps every downstream sink clean.
+      const detail = err instanceof InsecureCredentialFileError
+        ? `${this.provider}: ${err.message}`
+        : `${this.provider}: refusing to use ~/.heddle/secrets.env — ${err instanceof Error ? err.message : String(err)}`;
       return completed({
         ok: false, output: '', exitCode: null,
-        error: `${this.provider}: refusing to use ~/.heddle/secrets.env — ${err instanceof Error ? err.message : String(err)}`,
+        error: escapeControlChars(detail),
+        ...(securityRefusal ? { securityRefusal } : {}),
       });
     }
     if (!apiKey) return completed(this.keyMissingResult());
