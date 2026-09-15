@@ -107,7 +107,7 @@ Account rows may additionally record fences, an overage posture, an environment-
 }
 ```
 
-`pr-automation` applies only when `--target` names a Git repository. It asks you to choose `TS/Node` or `Generic`, detects the default branch, and creates only absent files:
+`pr-automation` sets up CI review workflows in a target repository, and never writes without an opt-in. An explicit `--target <dir>` is itself the opt-in (no further confirmation). Without `--target`, the step detects whether the wizard is running inside a Git repository and asks before writing (default No); when no repository is selected at all, it offers to enter a path to one — validated as a real repository and normalized to its root, with up to three attempts — and pressing Enter instead skips the step. Under `--dry-run` it discloses exactly what a real run would ask and scaffold, including the offer-to-add-a-repository path, and writes nothing. Once a repository is confirmed it asks you to choose `TS/Node` or `Generic`, detects the default branch, and creates only absent files:
 
 ```text
 <target>/.github/workflows/deterministic-review.yml
