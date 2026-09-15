@@ -32,6 +32,8 @@ export interface DispatchOptions {
    * are refused by buildWorkerEnv(). See src/env.ts.
    */
   env?: Record<string, string>;
+  /** Resolved, dispatch-scoped Anthropic-compatible endpoint credentials for Claude only. */
+  envRepoint?: { baseUrl: string; authToken: string; service: string; model?: string };
   /**
    * Capabilities GRANTED to this worker (already decided by src/capabilities.ts — the adapter only
    * maps them to flags it can enforce; it never receives one it cannot). Empty/absent = default-deny.

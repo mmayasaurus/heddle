@@ -120,4 +120,12 @@ describe('model alias pinning (HED-448)', () => {
     const args = new ClaudeAdapter().buildArgs('x', { model: 'claude-haiku-4-5-20251001', cwd: '/tmp' });
     expect(args).toContain('claude-haiku-4-5-20251001');
   });
+
+  it('uses the operator-declared env-repoint model, while absent models retain routed ids', () => {
+    const adapter = new ClaudeAdapter();
+    const kimi = adapter.buildArgs('x', { model: 'sonnet', cwd: '/tmp', envRepoint: { baseUrl: 'https://x.test', authToken: 'synthetic', service: 'kimi', model: 'synthetic-kimi-id' } });
+    const glm = adapter.buildArgs('x', { model: 'sonnet', cwd: '/tmp', envRepoint: { baseUrl: 'https://x.test', authToken: 'synthetic', service: 'glm' } });
+    expect(kimi[kimi.indexOf('--model') + 1]).toBe('synthetic-kimi-id');
+    expect(glm[glm.indexOf('--model') + 1]).toBe(CLAUDE_MODEL_IDS.sonnet);
+  });
 });

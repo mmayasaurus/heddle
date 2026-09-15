@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { appendFileSync, mkdirSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { dispatch } from '../src/dispatch.js';
 import { checkoutFingerprint, escapedPaths, parentCheckoutOf } from '../src/worktree.js';
@@ -207,6 +207,68 @@ describe('worktree escape detection', () => {
     const before = checkoutFingerprint(root)!;
     writeFileSync(join(root, 'dirty.txt'), 'bbb');
     expect(escapedPaths(before, checkoutFingerprint(root))).toEqual(['?? dirty.txt']);
+  });
+
+  it('excludes only untracked daemon churn under the runtime prefixes, still reporting everything else (HED-550 round-3)', () => {
+    const { root } = linkedWorktree(tempDir);
+    const before = checkoutFingerprint(root)!;
+    // Daemon churn under the three top-level runtime dirs is not an escape.
+    for (const rel of ['.memdb/daemon-state.json', '.memtrace/fts/index', '.serena/cache/typescript/sym.pkl']) {
+      mkdirSync(dirname(join(root, rel)), { recursive: true });
+      writeFileSync(join(root, rel), 'machine-local');
+    }
+    expect(escapedPaths(before, checkoutFingerprint(root))).toEqual([]);
+
+    // A nested fake runtime dir (F2), serena AUTHORED content (F1), and ordinary content are ALL
+    // reported — the exclusion is only the narrow daemon zone. Output is sorted.
+    mkdirSync(join(root, 'src', '.serena', 'cache'), { recursive: true });
+    writeFileSync(join(root, 'src', '.serena', 'cache', 'backdoor.ts'), 'x');
+    writeFileSync(join(root, '.serena', 'project.yml'), 'name: proj\n');
+    writeFileSync(join(root, 'escaped.txt'), 'real content');
+    expect(escapedPaths(before, checkoutFingerprint(root))).toEqual([
+      '?? .serena/project.yml',
+      '?? escaped.txt',
+      '?? src/.serena/cache/backdoor.ts',
+    ]);
+  });
+
+  it('reports a tracked rename into a runtime dir and a tracked edit under one, with the SPECIFIC record (HED-550 F5)', () => {
+    const { root } = linkedWorktree(tempDir);
+    const gc = (...a: string[]) => git(root, '-c', 'user.email=t@t', '-c', 'user.name=t', ...a);
+    writeFileSync(join(root, 'tracked.txt'), 'content');
+    git(root, 'add', 'tracked.txt');
+    gc('commit', '-q', '-m', 'add tracked');
+
+    // git mv a tracked file INTO .serena — a rename is ALWAYS a tracked change, recorded before the
+    // untracked-only exclusion, so the move is reported with its rename record, not silently dropped (qodo #2).
+    const before = checkoutFingerprint(root)!;
+    mkdirSync(join(root, '.serena'));
+    git(root, 'mv', 'tracked.txt', '.serena/tracked.txt');
+    expect(escapedPaths(before, checkoutFingerprint(root))).toEqual(['R .serena/tracked.txt']);
+
+    // A tracked file now under .serena, edited unstaged, is reported — only untracked .serena/cache
+    // churn is excluded, never tracked content (qodo #1).
+    gc('commit', '-q', '-m', 'move into serena');
+    const after = checkoutFingerprint(root)!;
+    writeFileSync(join(root, '.serena', 'tracked.txt'), 'edited');
+    expect(escapedPaths(after, checkoutFingerprint(root))).toEqual(['M .serena/tracked.txt']);
+  });
+
+  it('does NOT report a reviewer write to a gitignored .serena/ parent path — the pre-existing ignored-path boundary (HED-569)', () => {
+    // Boundary DOC, not a HED-550 regression: checkoutFingerprint reads `git status --porcelain`,
+    // which omits gitignored paths — so when the parent gitignores .serena/, a write under it
+    // (agent-authored .serena/memories/x included) never reaches isToolRuntimePath and is invisible
+    // to the escape fingerprint, like any ignored artifact. HED-569 tracks whether to enumerate
+    // authored tool-runtime paths even when ignored; this pins the current behavior.
+    const { root } = linkedWorktree(tempDir);
+    writeFileSync(join(root, '.gitignore'), '.serena/\n');
+    git(root, 'add', '.gitignore');
+    git(root, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '-m', 'gitignore serena');
+    const before = checkoutFingerprint(root)!;
+    mkdirSync(join(root, '.serena', 'memories'), { recursive: true });
+    writeFileSync(join(root, '.serena', 'memories', 'note.md'), 'reviewer write_memory');
+    writeFileSync(join(root, '.serena', 'project.yml'), 'name: proj\n');
+    expect(escapedPaths(before, checkoutFingerprint(root))).toEqual([]);
   });
 
   it('reports parent paths that disappear between fingerprints', () => {

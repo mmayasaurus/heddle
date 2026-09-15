@@ -55,6 +55,49 @@ describe('accounts add env-repoint wizard', () => {
     expect(`${report.join('\n')}\n${readFileSync(path, 'utf8')}`).not.toContain(fakeValue);
   });
 
+  it('honors opts.homeDir for BOTH the registry and the isolated credential dir (no split install)', async () => {
+    // Regression for the split-home finding: `heddle setup --home <dir>` must relocate the credential
+    // dir too, not just the registry — otherwise the registry lands under <dir> while credential dirs
+    // default to the process user's real home.
+    const home = tempDir();      // the requested --home
+    const realHome = tempDir();  // the process user's real home — must receive nothing
+    withHome(realHome);
+    vi.stubEnv('HEDDLE_ACCOUNTS', undefined);
+    vi.stubEnv('ZAI_API_KEY', 'FAKE_GLM_SENTINEL');
+    const summary = await runAccountsAdd({ provider: 'glm', homeDir: home }, {
+      prompter: new ScriptedPrompter([true, '', 'global', '', 'ZAI_API_KEY', 'paid', 'T2', false]),
+      runner: fakeRunner,
+    });
+    expect(summary.added).toEqual(['glm-1']);
+    const account = loadAccountRegistry(join(home, '.heddle', 'accounts.json')).accounts[0]!;
+    expect(account.configDir).toBe(join(home, '.heddle', 'accounts', 'claude', 'glm-1'));
+    expect(existsSync(account.configDir!)).toBe(true);
+    expect(existsSync(join(home, '.heddle', 'accounts.json'))).toBe(true);
+    // Nothing leaked to the process user's real home.
+    expect(existsSync(join(realHome, '.heddle'))).toBe(false);
+  });
+
+  it('honors opts.homeDir for the NATIVE (claude/codex) credential dir too', async () => {
+    // Companion to the env-repoint case above, covering the finding as the reviewers worded it ("Claude
+    // and Codex credential directories"): the native login path derives its isolated dir from `home` as
+    // well. addOne creates the dir (mkdirSync) BEFORE calling runner.login, so a login that throws still
+    // proves the dir landed under the requested --home — no status-probe fixture needed, and the account
+    // fails cleanly rather than aborting the wizard.
+    const home = tempDir();      // the requested --home
+    const realHome = tempDir();  // the process user's real home — must receive nothing
+    withHome(realHome);
+    vi.stubEnv('HEDDLE_ACCOUNTS', undefined);
+    const summary = await runAccountsAdd({ provider: 'claude', homeDir: home }, {
+      // confirm "Do you have a Claude account?" → id (empty → default claude-1) → login throws → "any other?" no.
+      prompter: new ScriptedPrompter([true, '', false]), runner: fakeRunner,
+    });
+    expect(summary.failed).toEqual(['claude-1']);
+    // The isolated credential dir was created under the requested home, before the failing login.
+    expect(existsSync(join(home, '.heddle', 'accounts', 'claude', 'claude-1'))).toBe(true);
+    // Nothing leaked to the process user's real home.
+    expect(existsSync(join(realHome, '.heddle'))).toBe(false);
+  });
+
   it('records an openai-compat (codex-harness) account with an operator-supplied base URL', async () => {
     // grok has no matrix baseUrl default — the wizard must prompt for it — and repoints the codex harness.
     const path = join(tempDir(), 'grok.json');

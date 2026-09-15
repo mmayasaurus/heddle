@@ -38,6 +38,13 @@ export interface WizardContext {
   homeDir: string;
   /** The project directory for init-project-scoped steps; undefined for global-only steps. */
   targetDir?: string;
+  /**
+   * Preview mode (`heddle setup --dry-run`): when true a step performs NO side effects — no vendor
+   * logins, no config writes — it reports what a real run would do and returns 'skipped' (or 'done'
+   * for a read-only step). Optional and additive: --dry-run semantics vary per step, and a step with
+   * nothing to preview may ignore it, so this stays a plain flag rather than a central persist hook.
+   */
+  dryRun?: boolean;
   /** Injectable clock so steps are deterministic under test. */
   now(): Date;
   /**

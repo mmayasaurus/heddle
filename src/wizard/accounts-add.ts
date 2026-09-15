@@ -16,8 +16,8 @@ export interface AccountsAddSummary { added: string[]; failed: string[]; skipped
 // validated at runtime in runAccountsAdd. (Kept as `string` because the literal union is subsumed by it.)
 type AccountsAddProvider = string;
 
-function pathFor(provider: NativeProvider, id: string): string {
-  return join(homedir(), '.heddle', 'accounts', provider, id);
+function pathFor(provider: NativeProvider, id: string, home: string = homedir()): string {
+  return join(home, '.heddle', 'accounts', provider, id);
 }
 
 function envRepointHarness(entry: ProviderMatrixEntry): 'claude' | 'codex' {
@@ -55,8 +55,8 @@ function validateBaseUrl(value: string): void {
   }
 }
 
-function createIsolatedConfigDir(provider: 'claude' | 'codex', id: string): string {
-  const configPath = pathFor(provider, id);
+function createIsolatedConfigDir(provider: 'claude' | 'codex', id: string, home: string = homedir()): string {
+  const configPath = pathFor(provider, id, home);
   if (existsSync(configPath)) throw new Error(`isolated config directory already exists for ${provider} ${id}`);
   mkdirSync(configPath, { recursive: true });
   chmodSync(configPath, 0o700);
@@ -80,13 +80,13 @@ function makeAccount(provider: NativeProvider, id: string, configPath: string | 
   return { ...base, keyFile: null };
 }
 
-async function addOne(provider: NativeProvider, deps: AccountsAddDeps, ordinal: number, registryPath: string, summary: AccountsAddSummary): Promise<void> {
+async function addOne(provider: NativeProvider, deps: AccountsAddDeps, ordinal: number, registryPath: string, summary: AccountsAddSummary, home: string = homedir()): Promise<void> {
   const id = await deps.prompter.text(`Account id for ${services[provider]}`, `${provider}-${ordinal}`);
   // Confine the id — it becomes a path segment under ~/.heddle/accounts, so reject path separators
   // and traversal (must start alphanumeric; letters/digits/'.'/'_'/'-' only).
   validateId(id);
   // cursor uses the machine login (no per-account dir); claude/codex isolate under a per-account dir.
-  const configPath = provider === 'cursor' ? null : pathFor(provider, id);
+  const configPath = provider === 'cursor' ? null : pathFor(provider, id, home);
   const env = accountEnv(provider, configPath);
   if (configPath) mkdirSync(configPath, { recursive: true });
   try {
@@ -133,7 +133,7 @@ async function envRepointBaseUrl(entry: ProviderMatrixEntry, deps: AccountsAddDe
 
 /** Add an env-repoint account without invoking a native harness login or status probe. */
 export async function addEnvRepointOne(
-  entry: ProviderMatrixEntry, deps: AccountsAddDeps, ordinal: number, registryPath: string, summary: AccountsAddSummary,
+  entry: ProviderMatrixEntry, deps: AccountsAddDeps, ordinal: number, registryPath: string, summary: AccountsAddSummary, home: string = homedir(),
 ): Promise<void> {
   if (!entry.envRepoint) throw new Error(`${entry.key} is not an env-repoint provider`);
   const id = await deps.prompter.text(`Account id for ${entry.displayName}`, `${entry.key}-${ordinal}`);
@@ -171,7 +171,7 @@ export async function addEnvRepointOne(
   // reason to abort the whole wizard (an interrupted prior run can leave the dir behind).
   let configPath: string;
   try {
-    configPath = createIsolatedConfigDir(provider, id);
+    configPath = createIsolatedConfigDir(provider, id, home);
   } catch (error) {
     summary.failed.push(id);
     deps.report?.(`FAIL ${entry.key} ${id} (${error instanceof Error ? error.message : String(error)})`);
@@ -200,7 +200,7 @@ function customService(name: string): string {
   return service;
 }
 
-async function addCustomProvider(deps: AccountsAddDeps, registryPath: string, summary: AccountsAddSummary): Promise<void> {
+async function addCustomProvider(deps: AccountsAddDeps, registryPath: string, summary: AccountsAddSummary, home: string = homedir()): Promise<void> {
   const displayName = await deps.prompter.text('Custom provider display name');
   const service = customService(displayName);
   const style = await deps.prompter.select('Custom provider API style', ['openai-compatible', 'anthropic-compatible', 'custom']);
@@ -236,7 +236,7 @@ async function addCustomProvider(deps: AccountsAddDeps, registryPath: string, su
   // Per-account freshness failure must not abort the wizard (see addEnvRepointOne).
   let configPath: string;
   try {
-    configPath = createIsolatedConfigDir(provider, id);
+    configPath = createIsolatedConfigDir(provider, id, home);
   } catch (error) {
     summary.failed.push(id);
     deps.report?.(`FAIL ${service} ${id} (${error instanceof Error ? error.message : String(error)})`);
@@ -256,9 +256,13 @@ async function addCustomProvider(deps: AccountsAddDeps, registryPath: string, su
 
 /** Data-driven provider loop; each account persists before the next question. */
 export async function runAccountsAdd(
-  opts: { provider?: AccountsAddProvider; registryPath?: string }, deps: AccountsAddDeps,
+  opts: { provider?: AccountsAddProvider; registryPath?: string; homeDir?: string }, deps: AccountsAddDeps,
 ): Promise<AccountsAddSummary> {
-  const registryPath = opts.registryPath ?? process.env.HEDDLE_ACCOUNTS ?? join(homedir(), '.heddle', 'accounts.json');
+  // Single install root: the registry AND the per-account credential dirs both derive from `home`, so
+  // `heddle setup --home <dir>` yields a self-contained install instead of splitting the registry from
+  // the credential dirs (which otherwise default to the process user's real home). Defaults to homedir().
+  const home = opts.homeDir ?? homedir();
+  const registryPath = opts.registryPath ?? process.env.HEDDLE_ACCOUNTS ?? join(home, '.heddle', 'accounts.json');
   const summary: AccountsAddSummary = { added: [], failed: [], skipped: [] };
   const matrixProvider = opts.provider === undefined ? undefined : getProvider(opts.provider);
   if (opts.provider && opts.provider !== 'custom') {
@@ -275,14 +279,14 @@ export async function runAccountsAdd(
   for (const provider of opts.provider && !selectedEnv && opts.provider !== 'custom' ? [opts.provider as NativeProvider] : opts.provider ? [] : providers) {
     if (!await deps.prompter.confirm(`Do you have a ${services[provider]} account?`, false)) { summary.skipped.push(provider); continue; }
     let ordinal = loadAccountRegistry(registryPath).accounts.filter((account) => account.provider === provider).length + 1;
-    do { await addOne(provider, deps, ordinal++, registryPath, summary); }
+    do { await addOne(provider, deps, ordinal++, registryPath, summary, home); }
     while (await deps.prompter.confirm(`Any other ${services[provider]} accounts to cycle through?`, false));
   }
   const envProviders = selectedEnv && !selectedEnv.blocked ? [selectedEnv] : opts.provider ? [] : listEnvRepointProviders().filter((entry) => entry.wizardDefault && !entry.blocked && envRepointWizardSupported(entry));
   for (const entry of envProviders) {
     if (!await deps.prompter.confirm(`Do you have a ${entry.displayName} account?`, false)) continue;
     let ordinal = loadAccountRegistry(registryPath).accounts.filter((account) => account.envRepoint?.service === entry.key).length + 1;
-    do { await addEnvRepointOne(entry, deps, ordinal++, registryPath, summary); }
+    do { await addEnvRepointOne(entry, deps, ordinal++, registryPath, summary, home); }
     while (await deps.prompter.confirm(`Any other ${entry.displayName} accounts to cycle through?`, false));
   }
   const blocked = selectedEnv?.blocked ? [selectedEnv] : opts.provider ? [] : listEnvRepointProviders().filter((entry) => entry.blocked && envRepointWizardSupported(entry));
@@ -290,10 +294,10 @@ export async function runAccountsAdd(
     deps.report?.(`COMING ${entry.displayName}: ${entry.blocked!.reason}`);
     if (!await deps.prompter.confirm(`I already have a working ${entry.displayName} key — add it anyway?`, false)) continue;
     let ordinal = loadAccountRegistry(registryPath).accounts.filter((account) => account.envRepoint?.service === entry.key).length + 1;
-    do { await addEnvRepointOne(entry, deps, ordinal++, registryPath, summary); }
+    do { await addEnvRepointOne(entry, deps, ordinal++, registryPath, summary, home); }
     while (await deps.prompter.confirm(`Any other ${entry.displayName} accounts to cycle through?`, false));
   }
-  if (opts.provider === 'custom' || !opts.provider && await deps.prompter.confirm('Any provider/key/model not listed?', false)) await addCustomProvider(deps, registryPath, summary);
+  if (opts.provider === 'custom' || !opts.provider && await deps.prompter.confirm('Any provider/key/model not listed?', false)) await addCustomProvider(deps, registryPath, summary, home);
   if (!loadAccountRegistry(registryPath).accounts.length) writeAccountRegistry({ schemaVersion: 2, accounts: [] }, registryPath);
   return summary;
 }
