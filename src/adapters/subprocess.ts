@@ -76,11 +76,12 @@ function capAppend(acc: string, accBytes: number, chunk: string, cap: number):
 
 export function run(bin: string, args: string[], cwd: string, timeoutMs: number,
                     envOverrides?: Record<string, string>, envUnset?: string[],
-                    maxStreamBytes = DEFAULT_MAX_STREAM_BYTES, idleTimeoutMs?: number):
+                    maxStreamBytes = DEFAULT_MAX_STREAM_BYTES, idleTimeoutMs?: number,
+                    envRepoint?: { baseUrl: string; authToken: string; service: string }):
   Promise<{ stdout: string; stderr: string; exitCode: number | null; timedOut: boolean; idleTimedOut: boolean; stdoutTruncated: boolean; stderrTruncated: boolean }> {
   return new Promise((resolve) => {
     // stdin 'ignore' is load-bearing — every subprocess adapter must close stdin.
-    const { env } = buildWorkerEnv({ overrides: envOverrides, unset: envUnset });
+    const { env } = buildWorkerEnv({ overrides: envOverrides, unset: envUnset, envRepoint });
     const child = spawn(bin, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
     installExitHandlers();
     if (child.pid !== undefined) liveChildren.add(child);

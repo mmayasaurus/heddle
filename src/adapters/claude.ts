@@ -137,9 +137,11 @@ export class ClaudeAdapter implements WorkerAdapter {
     const caps = new Set(opts.capabilities ?? []);
     // Own-property lookup only: a bracket read on a plain object would resolve prototype keys
     // (model: 'toString' -> Object.prototype.toString, a FUNCTION in argv) — codeant, PR #107.
-    const modelId = Object.hasOwn(CLAUDE_MODEL_IDS, opts.model)
+    const routed = Object.hasOwn(CLAUDE_MODEL_IDS, opts.model)
       ? CLAUDE_MODEL_IDS[opts.model as ClaudeWorkerModel]
       : opts.model;
+    // TODO(HED-432): a verified per-service default model can slot in here; today model is operator-supplied via envRepoint.model.
+    const modelId = opts.envRepoint?.model ?? routed;
     // stream-json (+ --verbose, required by the CLI for -p stream-json; --include-partial-messages) emits
     // NDJSON events mid-turn so a long headless run is observable and B2's run() idle watchdog has liveness
     // to reset on. parseClaudeResult still extracts the terminal {type:"result"} line via lastResultJson —
@@ -196,7 +198,7 @@ export class ClaudeAdapter implements WorkerAdapter {
     const started = Date.now();
     const timeoutMs = opts.timeoutMs ?? 600_000;
     const idleMs = opts.idleTimeoutMs ?? DEFAULT_CLAUDE_IDLE_TIMEOUT_MS;
-    const { stdout, stderr, exitCode, timedOut, idleTimedOut, stdoutTruncated } = await run(this.bin, args, opts.cwd, timeoutMs, opts.env, opts.envUnset, undefined, idleMs);
+    const { stdout, stderr, exitCode, timedOut, idleTimedOut, stdoutTruncated } = await run(this.bin, args, opts.cwd, timeoutMs, opts.env, opts.envUnset, undefined, idleMs, opts.envRepoint);
     const parsed = parseClaudeResult(stdout, exitCode);
     // A timeout must be tellable apart from a crash: SIGKILL alone reports only a null exit.
     if (timedOut) parsed.error = `claude timed out after ${timeoutMs}ms (SIGKILL)` + (parsed.error ? `; ${parsed.error}` : '');

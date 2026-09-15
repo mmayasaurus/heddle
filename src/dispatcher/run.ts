@@ -5,7 +5,7 @@
  */
 import { materializeAgentsMd, readPack, composePacks } from '../skillpacks.js';
 import { materializeWorkerMcp, validateWorkerMcp, codexMcpFlags, claudeMcpConfigFile, webCapable } from '../mcp.js';
-import { isInProcessHttpProvider } from '../adapters/openai-compat.js';
+import { isInProcessHttpProvider, readSecretsEnvValue } from '../adapters/openai-compat.js';
 import { assessResult, type ResultAssessment } from '../classify.js';
 import { snapshotWorktree, sameSnapshot, diffInstruction, embeddedDiff, READ_ONLY_MANDATE } from '../review.js';
 import { parentCheckoutOf, checkoutFingerprint, escapedPaths, destroyedWork } from '../worktree.js';
@@ -21,6 +21,64 @@ import { baseRecord, refusalOutcome, refuseBilling, webRefusalReason } from './r
 import { billingVerdict } from './billing.js';
 import { tierReadOnlyVerdict } from './tier-gate.js';
 import type { DispatchContext, DispatchRequest, DispatchOutcome, DispatchRefusal } from './types.js';
+import { validateEnvRepoint, type AccountEnvRepoint } from '../accounts.js';
+
+export type EnvRepointResolution =
+  | { kind: 'none' }
+  | { kind: 'refuse'; refusal: DispatchRefusal }
+  | { kind: 'ok'; envRepoint: { baseUrl: string; authToken: string; service: string; model?: string } };
+
+export function resolveEnvRepoint(
+  account: { id?: string; envRepoint?: AccountEnvRepoint } | undefined,
+  targetProvider: string,
+  readSecret: (ref: string) => string = (ref) => readSecretsEnvValue(ref) ?? '',
+): EnvRepointResolution {
+  if (targetProvider !== 'claude' || account?.envRepoint === undefined) return { kind: 'none' };
+
+  let envRepoint: AccountEnvRepoint;
+  try {
+    envRepoint = validateEnvRepoint(account.envRepoint, `account "${account.id ?? '?'}"`, '<request>');
+  } catch {
+    return {
+      kind: 'refuse',
+      refusal: {
+        code: 'env-repoint.invalid-config',
+        reason: 'env-repoint account is misconfigured — refusing (will not fall back to native Claude billing)',
+        instruction: 'Fix the account envRepoint (baseUrl must be an http(s) URL; service and authTokenRef required).',
+      },
+    };
+  }
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(envRepoint.authTokenRef)) {
+    return {
+      kind: 'refuse',
+      refusal: {
+        code: 'env-repoint.invalid-config',
+        reason: `env-repoint ${envRepoint.service}: authTokenRef is not a valid environment-variable name (expected ^[A-Za-z_][A-Za-z0-9_]*$) — refusing to avoid leaking a possible secret`,
+        instruction: 'Set authTokenRef to the NAME of the variable in ~/.heddle/secrets.env, not the token value.',
+      },
+    };
+  }
+  const authToken = readSecret(envRepoint.authTokenRef);
+  if (!authToken) {
+    return {
+      kind: 'refuse',
+      refusal: {
+        code: 'env-repoint.missing-token',
+        reason: `env-repoint ${envRepoint.service}: ${envRepoint.authTokenRef} not found in ~/.heddle/secrets.env`,
+        instruction: 'Add the referenced free-tier credential to ~/.heddle/secrets.env and retry.',
+      },
+    };
+  }
+  return {
+    kind: 'ok',
+    envRepoint: {
+      baseUrl: envRepoint.baseUrl,
+      authToken,
+      service: envRepoint.service,
+      ...(envRepoint.model === undefined ? {} : { model: envRepoint.model }),
+    },
+  };
+}
 
 export async function runTarget(
   target: RouteTarget, req: DispatchRequest, ctx: DispatchContext, route: Route,
@@ -91,6 +149,13 @@ export async function runTarget(
     const veto = check();
     if (veto) return refuseBilling(ctx, req, route.taskClass, target, skills, veto, fellBackFrom);
   }
+  // Env-repoint is resolved at the shared plan/run chokepoint. The pure worker-env builder receives
+  // only resolved values, never a secret reference and never process.env credentials.
+  const envRepointResolution = resolveEnvRepoint(ctx.claudeAccount?.account, target.provider);
+  if (envRepointResolution.kind === 'refuse') {
+    return refuseBilling(ctx, req, route.taskClass, target, skills, envRepointResolution.refusal, fellBackFrom);
+  }
+  const envRepoint = envRepointResolution.kind === 'ok' ? envRepointResolution.envRepoint : undefined;
   // Loud-degrade-to-ALLOW (F2/F4/F6): the gate could not classify the account for spend but must NOT
   // silently skip — warn now, and carry the machine-greppable note onto the ledger row (finish, below)
   // AND the outcome, so it is queryable/scored, never stderr-only.
@@ -242,6 +307,7 @@ export async function runTarget(
       timeoutMs: req.timeoutMs,
       resume: req.resume,
       env: { ...req.env, ...acct?.env, ...rotation?.env, ...stamps },
+      envRepoint: envRepoint && { ...envRepoint, authToken: envRepoint.authToken! },
       envUnset: [...(acct?.envUnset ?? []), ...(rotation?.unset ?? [])],
       capabilities: caps.granted,
       systemPromptAppend,

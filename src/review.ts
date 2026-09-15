@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Route } from './routing.js';
+import { isToolRuntimePath } from './tool-runtime.js';
 
 /**
  * heddle-transient paths and spans are EXCLUDED from the mandate digest (HED-56 × HED-3): a peer
@@ -153,11 +154,14 @@ export function snapshotWorktree(cwd: string): WorktreeSnapshot {
     h.update('INDEX=').update(index).update('\n');
     const list = gitOut(cwd, ['ls-files', '-z', '--cached', '--others', '--exclude-standard']);
     const paths = list.split('\0').filter(Boolean).sort();
+    // Tool-runtime dirs are excluded ONLY for UNTRACKED (daemon-generated) files; a TRACKED file under
+    // one (e.g. a committed .serena/project.yml) is real content the mandate must still hash (qodo #1).
+    const untracked = new Set(gitOut(cwd, ['ls-files', '-z', '--others', '--exclude-standard']).split('\0').filter(Boolean));
     const files: Array<{ rel: string; size: number; mode: number }> = [];
     const transformed: Array<{ rel: string; mode: number }> = [];
     for (const rel of paths) {
       const base = rel.split('/').pop() ?? rel;
-      if (isTransientBasename(base)) continue; // heddle bookkeeping churn — outside the mandate
+      if (isTransientBasename(base) || (isToolRuntimePath(rel) && untracked.has(rel))) continue; // heddle / untracked-tool-runtime churn — outside the mandate
       let st;
       try { st = statSync(join(cwd, rel)); } catch { h.update(rel).update('=<missing>\n'); continue; } // deleted tracked file
       if (st.isDirectory()) continue; // submodule dir etc.

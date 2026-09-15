@@ -115,6 +115,32 @@ describe('buildWorkerEnv — subscription-billing worker isolation (HED-30 allow
   });
 
   describe('invariants', () => {
+    it('injects resolved env-repoint credentials only for this GLM worker env', () => {
+      process.env.ANTHROPIC_BASE_URL = 'https://inherited.invalid';
+      process.env.ANTHROPIC_AUTH_TOKEN = 'inherited-token';
+      const { env } = buildWorkerEnv({ envRepoint: {
+        baseUrl: 'https://glm.example.test/anthropic', authToken: 'synthetic-glm-token', service: 'glm',
+      } });
+      expect(env.ANTHROPIC_BASE_URL).toBe('https://glm.example.test/anthropic');
+      expect(env.ANTHROPIC_AUTH_TOKEN).toBe('synthetic-glm-token');
+    });
+
+    it('injects only endpoint credentials for Kimi and does not leak its per-call allowlist to a later worker', () => {
+      const repointed = buildWorkerEnv({ envRepoint: {
+        baseUrl: 'https://kimi.example.test/anthropic', authToken: 'synthetic-kimi-token', service: 'kimi',
+      } });
+      expect(repointed.env).toMatchObject({
+        ANTHROPIC_BASE_URL: 'https://kimi.example.test/anthropic',
+        ANTHROPIC_AUTH_TOKEN: 'synthetic-kimi-token',
+      });
+      expect(repointed.env.ANTHROPIC_MODEL).toBeUndefined();
+
+      const plain = buildWorkerEnv();
+      expect(plain.env.ANTHROPIC_BASE_URL).toBeUndefined();
+      expect(plain.env.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
+      expect(() => buildWorkerEnv({ overrides: { ANTHROPIC_AUTH_TOKEN: 'must-stay-refused' } })).toThrow(/allow-listed/);
+    });
+
     it('refuses an override that would pass the Z.ai API key to a worker', () => {
       expect(() => buildWorkerEnv({ overrides: { ZAI_API_KEY: 'must-not-leak' } })).toThrow(/refusing to set "ZAI_API_KEY".*vendor billing\/endpoint switch/i);
     });

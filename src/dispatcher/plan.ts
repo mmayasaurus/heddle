@@ -24,6 +24,7 @@ import { overrideReasonGate } from './override-gate.js';
 import { webRefusalReason } from './refusals.js';
 import { billingVerdict } from './billing.js';
 import { tierReadOnlyVerdict } from './tier-gate.js';
+import { resolveEnvRepoint } from './run.js';
 import type { DispatchContext, DispatchRequest, DispatchPlan, InSessionOrigin } from './types.js';
 
 // The billing/overage decision (HED-395) lives in ./billing.ts (billingVerdict) — the SAME pure
@@ -377,6 +378,13 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
   const tierRefusal = reachesRunTarget
     ? tierReadOnlyVerdict({ accountId: account, provider: target.provider, readOnly: route.readOnly }).refusal
     : undefined;
+  const envRepointResolution = resolveEnvRepoint(
+    target.provider === 'claude' ? accountPick?.account : undefined,
+    target.provider,
+  );
+  const envRepointRefusal = reachesRunTarget && envRepointResolution.kind === 'refuse'
+    ? envRepointResolution.refusal
+    : undefined;
   const billingAdvice = billing.advice;
   if (billingAdvice) {
     decision.checks.push(billingAdvice);
@@ -423,7 +431,7 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
       + `claude -p --output-format json is silent until completion, so a substantial review that overruns `
       + `SIGKILLs at its timeout with zero output (HED-511: 6/6 such dispatches died this way).`
     : undefined;
-  return { route, target, fallback, origin, execution, decision, symbol, resolutionWalk, skillsForRefusal, account, accountAdvice, accountPick, rotationAccount, claudeAccountCount, notDispatchable, reviewerPick, sameProviderReview, pinnedExcludedAccount, overrideReasonRequired, billingRefusal, tierRefusal, billingAdvice, capabilityRefusal, requiresWebRefusal, capabilityFitRebinds, headlessClaudeReviewRefusal };
+  return { route, target, fallback, origin, execution, decision, symbol, resolutionWalk, skillsForRefusal, account, accountAdvice, accountPick, rotationAccount, claudeAccountCount, notDispatchable, reviewerPick, sameProviderReview, pinnedExcludedAccount, overrideReasonRequired, billingRefusal, tierRefusal, envRepointRefusal, billingAdvice, capabilityRefusal, requiresWebRefusal, capabilityFitRebinds, headlessClaudeReviewRefusal };
 }
 
 /** One shared dry-run summary for `heddle route` and the `plan_dispatch` MCP tool (identical fields). */
@@ -445,7 +453,7 @@ export function summarizePlan(plan: DispatchPlan): Record<string, unknown> {
     task_class: plan.route.taskClass,
     symbol: plan.symbol ?? null,
     resolution_walk: plan.resolutionWalk ?? [],
-    would_run: notDispatchable || plan.decision.refusal || previewBilling || previewTier || plan.sameProviderReview || plan.pinnedExcludedAccount || noDispatchableAccount || plan.headlessClaudeReviewRefusal || plan.overrideReasonRequired || plan.capabilityRefusal || plan.requiresWebRefusal ? null : `${plan.target.provider}/${plan.target.model}`,
+    would_run: notDispatchable || plan.decision.refusal || previewBilling || previewTier || plan.envRepointRefusal || plan.sameProviderReview || plan.pinnedExcludedAccount || noDispatchableAccount || plan.headlessClaudeReviewRefusal || plan.overrideReasonRequired || plan.capabilityRefusal || plan.requiresWebRefusal ? null : `${plan.target.provider}/${plan.target.model}`,
     execution: plan.execution ?? null,
     in_session: plan.execution === 'in-session-subagent',
     routed_away_for_cap: plan.decision.routedAwayForCap,
@@ -463,6 +471,8 @@ export function summarizePlan(plan: DispatchPlan): Record<string, unknown> {
       ? previewBilling
       : previewTier
       ? previewTier
+      : plan.envRepointRefusal
+      ? plan.envRepointRefusal
       : plan.pinnedExcludedAccount
       ? { code: 'no-dispatchable-account', reason: plan.pinnedExcludedAccount.reason }
       : noDispatchableAccount
