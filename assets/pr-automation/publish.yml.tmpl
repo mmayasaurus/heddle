@@ -1,0 +1,37 @@
+# Package publish workflow scaffold — safe by default.
+# This workflow never runs automatically: the operator owns enabling and targeting it, and the
+# operator decides whether the project is ready to publish a package. Its only trigger is manual
+# workflow_dispatch, and its build step fails closed until the operator configures it.
+name: Publish
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing git tag to publish the package from, e.g. v1.2.3"
+        required: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    environment: publish
+    # Least privilege: the default GITHUB_TOKEN is read-only here. Publishing to a registry needs a
+    # credential this scaffold deliberately does NOT grant — add a registry token as a secret, or add
+    # "id-token: write" for OIDC / trusted publishing, when you configure the publish step below.
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout release tag
+        # ref is pinned to refs/tags/… so checkout resolves the TAG specifically (see
+        # release-on-tag.yml.tmpl for the full rationale). A branch name, a commit SHA, or a
+        # nonexistent tag has no refs/tags/<input> and fails closed HERE.
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+          persist-credentials: false
+
+      - name: Configure this package publish
+        run: |
+          echo "::error::Edit this file to build your package and publish it to your registry (npm, PyPI, crates.io, a container registry, …)."
+          echo "::error::Grant this job a registry credential first (a secret token, or id-token: write for OIDC) — this scaffold grants none by default."
+          exit 1

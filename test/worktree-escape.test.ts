@@ -71,8 +71,16 @@ describe('worktree escape detection', () => {
     expect(escapedPaths(untracked, null)).toBeNull();
   });
 
-  it('records a parent-checkout escape warning without changing a successful worker outcome to failure', async () => {
+  it('scrubs credential-shaped filenames (decorated included) from parent-checkout escape and destroyed-work reports', async () => {
     const { root, worktree } = linkedWorktree(tempDir);
+    // DECORATED into a filename (backup_<cred>) — the HED-651 qodo-HIGH case: shapes-only disables the
+    // opaque backstop, so a \b-anchored prefix match misses this; the supplementary embedded pass catches
+    // it. This fixture LEAKS on the pre-fix HEAD, making the credential side of this E2E load-bearing.
+    const secret = 'sk-' + 'DEADBEEF1234567890';
+    const credential = 'backup_' + secret;
+    const ordinary = 'release-20260915-build-artifact.txt';
+    writeFileSync(join(worktree, credential), 'pre-existing\n');
+    writeFileSync(join(worktree, ordinary), 'pre-existing\n');
     const routing = join(tempDir(), 'routing.yaml');
     writeFileSync(routing, routingYaml());
     const previousRouting = process.env.HEDDLE_ROUTING;
@@ -80,7 +88,10 @@ describe('worktree escape detection', () => {
     const adapter = {
       ...fake.adapter,
       dispatch: async (prompt: string, opts: Parameters<typeof fake.adapter.dispatch>[1]) => {
-        writeFileSync(join(root, 'escaped.txt'), 'x');
+        writeFileSync(join(root, credential), 'x');
+        writeFileSync(join(root, ordinary), 'x');
+        unlinkSync(join(opts.cwd, credential));
+        unlinkSync(join(opts.cwd, ordinary));
         return fake.adapter.dispatch(prompt, opts);
       },
     };
@@ -94,9 +105,18 @@ describe('worktree escape detection', () => {
       );
       expect(outcome.ok).toBe(true);
       expect(outcome.escape?.note).toContain('escape-warning:');
-      expect(outcome.escape?.note).toContain('escaped.txt');
-      expect(ledger.recent(1)[0].error).toContain('escape-warning:');
-      expect(ledger.recent(1)[0].error).toContain('escaped.txt');
+      // The decorated credential's SECRET body is scrubbed (backup_[redacted]); the surviving "backup_"
+      // decoration is irrelevant — asserting on `secret` proves no credential material leaks.
+      expect(outcome.escape?.paths).toContain('?? backup_[redacted]');
+      expect(outcome.escape?.paths).toContain(`?? ${ordinary}`);
+      expect(outcome.escape?.note).toContain('[redacted]');
+      expect(outcome.escape?.note).not.toContain(secret);
+      expect(outcome.destroyed?.paths).toContain('reverted-or-deleted backup_[redacted]');
+      expect(outcome.destroyed?.paths).toContain(`reverted-or-deleted ${ordinary}`);
+      expect(outcome.destroyed?.note).toContain('[redacted]');
+      expect(outcome.destroyed?.note).not.toContain(secret);
+      expect(ledger.recent(1)[0].error).toContain('[redacted]');
+      expect(ledger.recent(1)[0].error).not.toContain(secret);
     } finally {
       if (previousRouting === undefined) delete process.env.HEDDLE_ROUTING;
       else process.env.HEDDLE_ROUTING = previousRouting;

@@ -1,0 +1,38 @@
+# Deploy workflow scaffold — safe by default.
+# This workflow never runs automatically: the operator owns enabling and targeting it, and the
+# operator decides whether the project is ready to deploy. Its only trigger is manual
+# workflow_dispatch, and its deploy step fails closed until the operator configures it.
+name: Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing git tag to deploy, e.g. v1.2.3"
+        required: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    environment: production
+    # Least privilege: the default GITHUB_TOKEN is read-only here. Deploying needs credentials this
+    # scaffold deliberately does NOT grant — add your deploy target's secrets, or add
+    # "id-token: write" for cloud OIDC, when you configure the deploy step below.
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout release tag
+        # ref is pinned to refs/tags/… so checkout resolves the TAG specifically (see
+        # release-on-tag.yml.tmpl for the full rationale). A branch name, a commit SHA, or a
+        # nonexistent tag has no refs/tags/<input> and fails closed HERE. Deploy the tagged release;
+        # edit this ref only if you deliberately need to deploy a branch tip or a raw commit.
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+          persist-credentials: false
+
+      - name: Configure this deploy
+        run: |
+          echo "::error::Edit this file to deploy your project (push to your host, run your release commands, …)."
+          echo "::error::Grant this job your deploy-target credentials first (secrets, or id-token: write for cloud OIDC) — this scaffold grants none by default."
+          exit 1

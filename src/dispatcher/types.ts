@@ -64,6 +64,12 @@ export interface DispatchRequest {
   /** Skip the routing table's fallback on failure. */
   noFallback?: boolean;
   /**
+   * Opt-in (default off): when a failed leg leaves isolable newly-created paths, auto-commit ONLY
+   * those paths so fallback can proceed. A tree with pre-existing local changes is never
+   * auto-committed; isolation failure refuses the fallback.
+   */
+  fallbackWipCommit?: boolean;
+  /**
    * Per-dispatch request to keep the worker CLI's own interactive permission prompts. Undefined =
    * the adapter's constructed default (heddle's headless workers keep skipping, so the fleet is
    * unchanged); `false` keeps agy's prompts (omits --dangerously-skip-permissions); `true` forces

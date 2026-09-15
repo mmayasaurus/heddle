@@ -441,7 +441,10 @@ export async function runTarget(
   // would be its own harm — but the side effects are dangerous and must never be silent. Nothing is
   // reverted (the operator decides, same discipline as the read-only mandate). heddle cannot ATTRIBUTE
   // the change — another agent legitimately editing the canonical checkout looks identical — so the
-  // wording says what was observed, not who did it.
+  // wording says what was observed, not who did it. One shared options object for both scrubs, hoisted
+  // out of the per-path .map callbacks below (the escape/destroyed filename arrays are scrubbed
+  // shapes-only so a credential-shaped name does not leak, HED-651).
+  const shapesOnlyOpt = { shapesOnly: true } as const;
   if (wt) {
     const escaped = escapedPaths(parentBefore, checkoutFingerprint(wt.parentRoot));
     if (escaped === null) {
@@ -450,11 +453,12 @@ export async function runTarget(
       escapeReport = { available: false, parentRoot: wt.parentRoot, paths: [], note };
       process.stderr.write(`heddle: ${note}\n`);
     } else if (escaped.length) {
+      const safeEscaped = escaped.map((p) => redactSecrets(p, shapesOnlyOpt));
       const note = `escape-warning: the parent checkout ${wt.parentRoot} changed while this worker ran in ` +
-        `${wt.worktreeRoot} — ${escaped.length} change(s): ${escaped.slice(0, 10).join(', ')}` +
-        (escaped.length > 10 ? `, +${escaped.length - 10} more` : '') +
+        `${wt.worktreeRoot} — ${safeEscaped.length} change(s): ${safeEscaped.slice(0, 10).join(', ')}` +
+        (safeEscaped.length > 10 ? `, +${safeEscaped.length - 10} more` : '') +
         ` (heddle cannot attribute the change; if it was this worker it escaped its sandbox — HED-98)`;
-      escapeReport = { available: true, parentRoot: wt.parentRoot, paths: escaped, note };
+      escapeReport = { available: true, parentRoot: wt.parentRoot, paths: safeEscaped, note };
       process.stderr.write(`heddle: ${note}\n`);
     }
   }
@@ -472,11 +476,12 @@ export async function runTarget(
     destroyedReport = { paths: [], note };
     process.stderr.write(`heddle: ${note}\n`);
   } else if (lost && lost.length) {
+    const safeLost = lost.map((p) => redactSecrets(p, shapesOnlyOpt));
     const note = `destroyed-work-warning: uncommitted work present in ${req.cwd} before this dispatch is ` +
-      `gone — ${lost.length} item(s): ${lost.slice(0, 10).join(', ')}` +
-      (lost.length > 10 ? `, +${lost.length - 10} more` : '') +
+      `gone — ${safeLost.length} item(s): ${safeLost.slice(0, 10).join(', ')}` +
+      (safeLost.length > 10 ? `, +${safeLost.length - 10} more` : '') +
       ` (a worker must never reset the tree it was given — HED-127)`;
-    destroyedReport = { paths: lost, note };
+    destroyedReport = { paths: safeLost, note };
     process.stderr.write(`heddle: ${note}\n`);
   }
 
@@ -535,14 +540,10 @@ export async function runTarget(
     // The escape note is appended to the LEDGER's error column so the row is durably self-describing
     // (the outcome keeps it in its own `escape` field, so callers never mistake it for a failure). The
     // HED-395 billing-degraded note rides the same column for the same reason (queryable, never silent).
-    // result.error is already redacted at the line-337 boundary (the vendor-stderr credential vector).
-    // The escape/destroyed-work notes and the billing reason are heddle-GENERATED safety/status strings
-    // (they carry checkout FILENAMES, not vendor credentials) — they must NOT be re-redacted here, or an
-    // ordinary long filename (24+ chars w/ digits, not '/'-anchored) would be scrubbed from the ledger's
-    // own escape record. So the join is persisted verbatim; only result.error passed through redaction.
-    // (A worker COULD name a parent-checkout file after its own credential, persisting that credential-
-    // shaped FILENAME here; scrubbing heddle-generated safety notes without destroying ordinary filenames
-    // is a separate concern from F6's vendor-error-output scope — tracked in HED-651.)
+    // The escape/destroyed-work notes and paths are already scrubbed SHAPES-ONLY at construction (HED-651),
+    // so a credential-shaped checkout filename cannot leak into the ledger, outcome, CLI, or stderr while
+    // ordinary long filenames survive (the opaque backstop is deliberately NOT applied to these
+    // heddle-generated notes). result.error remains full-mode redacted at its vendor-stderr boundary.
     error: [result.error, escapeReport?.note, destroyedReport?.note, billingDegraded?.reason].filter(Boolean).join('; ') || undefined,
     sessionId: result.sessionId,
     durationMs: result.durationMs,
