@@ -111,7 +111,13 @@ async function addOne(provider: NativeProvider, deps: AccountsAddDeps, ordinal: 
   // cursor uses the machine login (no per-account dir); claude/codex isolate under a per-account dir.
   const configPath = provider === 'cursor' ? null : pathFor(provider, id, home);
   const env = accountEnv(provider, configPath);
-  if (configPath) mkdirSync(configPath, { recursive: true });
+  if (configPath) {
+    // 0700: `claude auth login` now persists .credentials.json here, so lock the dir to the owner on
+    // shared machines — mirrors createIsolatedConfigDir (the env-repoint path). recursive mkdir is
+    // idempotent so a native re-run is fine; the chmod re-asserts perms on an existing dir too.
+    mkdirSync(configPath, { recursive: true });
+    chmodSync(configPath, 0o700);
+  }
   try {
     deps.runner.login(provider, env);
   } catch (error) {

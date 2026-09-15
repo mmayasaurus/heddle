@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { loadAccountRegistry } from '../src/accounts.js';
@@ -138,6 +138,15 @@ describe('accounts add wizard', () => {
       }
     }
     for (const key of Object.keys(mixed)) expect(captured.login).not.toHaveProperty(key);
+  });
+
+  it('creates the isolated claude config dir with owner-only 0700 perms (it persists credentials) — HED-584', async () => {
+    const home = tempDir();
+    const path = join(home, 'perms.json');
+    await runAccountsAdd({ provider: 'claude', registryPath: path, homeDir: home }, {
+      prompter: new ScriptedPrompter([true, 'locked', 'paid', 'T2', false, false]), runner: fakeRunner,
+    });
+    expect(statSync(join(home, '.heddle', 'accounts', 'claude', 'locked')).mode & 0o777).toBe(0o700);
   });
 
   it('echoes the signed-in identity on the claude PASS line, never a token field (HED-585)', async () => {
