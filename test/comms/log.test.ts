@@ -436,24 +436,28 @@ describe('CommsLog read-only probe mode (HED-635)', () => {
   });
   afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
-  it('reads an older (migratable) db without migrating it', () => {
+  it('reads a genuine older (v1) db without migrating it', () => {
     const rw = new CommsLog(path);
     rw.ensureDefaultRooms();
     rw.close();
-    // Downgrade the version marker to simulate a v1 db the broker would migrate on a real open.
+    // A GENUINE v1 shape: drop the v2-only table and mark the file v1. A read-write open would
+    // re-provision message_mentions (db.exec(SCHEMA)) AND bump user_version to current; the read-only
+    // probe must do neither. A version-only downgrade on a v2-shaped db cannot catch a stray SCHEMA run.
     const down = new DatabaseSync(path);
+    down.exec('DROP TABLE message_mentions;');
     down.exec('PRAGMA user_version = 1;');
     down.close();
 
     const ro = new CommsLog(path, { readOnly: true });
     try {
-      expect(ro.room(DEFAULT_ROOM)).not.toBeNull(); // reads fine read-only
+      expect(ro.room(DEFAULT_ROOM)).not.toBeNull(); // room/version are schema-independent — read fine on v1
     } finally { ro.close(); }
 
     const after = new DatabaseSync(path, { readOnly: true });
     try {
-      // Still v1 — the probe never migrated it (a read-write open would have bumped it to current).
+      // No migration: still v1, and the v2-only table was NOT re-created (a read-write open would do both).
       expect((after.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(1);
+      expect(after.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='message_mentions'").get()).toBeUndefined();
     } finally { after.close(); }
   });
 

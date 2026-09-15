@@ -278,9 +278,13 @@ export interface CommsLogOptions {
   /**
    * Open the db in read-only PROBE mode (HED-635): skip the mkdir, the WAL journal-mode write, and
    * the schema migration, and open the sqlite file with SQLITE_OPEN_READONLY. For diagnostics
-   * (`heddle doctor` commsCheck) that must observe the shared db without mutating it — a newer-schema
-   * db is still refused (upgrade heddle), an older one is read as-is and left for the broker to
-   * migrate on its next real open. Only read methods are usable; a write throws.
+   * (`heddle doctor` commsCheck) that must observe the shared db without mutating it. A newer-schema
+   * db is still refused (upgrade heddle). Scope of the promise: because migration is skipped, this
+   * mode is for OPENING plus the schema-independent reads a probe needs — room/rooms, participants,
+   * `user_version`, message counts. It does NOT provision the v2-only tables, so on a genuine pre-v2
+   * db the message-body readers that join `message_mentions` (get/transcript/inbox/pause-markers, via
+   * SELECT_WITH_MENTIONS) throw `no such table`; the broker migrates the file on its next real open.
+   * Only read methods are usable; a write throws.
    */
   readOnly?: boolean;
 }

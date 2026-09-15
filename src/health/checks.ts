@@ -340,9 +340,10 @@ export function configChecks(
  * "not initialized" detection — so it gates on existsSync(commsDbPath) BEFORE opening, and opens in
  * read-only PROBE mode (HED-635): CommsLog { readOnly: true } skips the mkdir, the WAL journal-mode
  * write, and the schema migration, so the diagnostic observes the shared db without mutating it — a
- * newer-schema db is still reported (upgrade heddle), an older one is read as-is and left for the
- * broker to migrate on its next real open. The operator token is checked as a non-empty regular
- * file (statSync metadata only, never its bytes).
+ * newer-schema db is still reported (upgrade heddle), and an older db is read without migration (this
+ * check reads only the room, which is schema-independent) and left for the broker to migrate on its
+ * next real open. The operator token is checked as a non-empty regular file (statSync metadata only,
+ * never its bytes).
  */
 export function commsCheck(commsDbPath: string, operatorTokenPath: string): Definition {
   return {
