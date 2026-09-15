@@ -332,11 +332,16 @@ function resolveCanonical(input: InstallOptions, homeDir: string): string {
   const configCanonical = existsSync(canonicalConfig) ? readJson(canonicalConfig, 'canonical.json')?.canonical : undefined;
   const canonicalSource = valueFor('--canonical', input.canonical) ?? process.env.HEDDLE_CANONICAL ?? configCanonical;
   if (!canonicalSource) throw new Error('canonical is required: pass --canonical <path>, set HEDDLE_CANONICAL, or create ~/.heddle/canonical.json');
+  const { canonical, missing } = validateCanonical(canonicalSource);
+  if (missing.length) throw new Error(`canonical ${canonical} is missing required discipline hooks: ${missing.join(', ')}`);
+  return canonical;
+}
+
+export function validateCanonical(canonicalSource: string): { canonical: string; missing: string[] } {
   const canonical = canonicalizePath(canonicalSource);
   assertShellSafeCanonical(canonical);
   const missing = WIRED_HOOKS.filter((hook) => !existsSync(join(canonical, 'hooks', hook)));
-  if (missing.length) throw new Error(`canonical ${canonical} is missing required discipline hooks: ${missing.join(', ')}`);
-  return canonical;
+  return { canonical, missing };
 }
 function registryState(homeDir: string): { path: string; content: string | undefined; raw: any; registry: any } {
   const path = join(homeDir, '.heddle', 'projects.json');
