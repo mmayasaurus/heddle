@@ -140,6 +140,33 @@ describe('loadAccountRegistry', () => {
     });
   });
 
+  it('accepts HTTPS and literal loopback HTTP envRepoint base URLs', () => {
+    const path = writeAccounts('secure-and-loopback-env-repoint.json', { claude: [
+      { id: 'https', envRepoint: { baseUrl: 'https://api.example.test/v1', authTokenRef: 'NAME', service: 'test' } },
+      { id: 'localhost', envRepoint: { baseUrl: 'http://localhost:11434/v1', authTokenRef: 'NAME', service: 'test' } },
+      { id: 'ipv4', envRepoint: { baseUrl: 'http://127.0.0.1:11434/v1', authTokenRef: 'NAME', service: 'test' } },
+      { id: 'ipv6', envRepoint: { baseUrl: 'http://[::1]:11434/v1', authTokenRef: 'NAME', service: 'test' } },
+    ] });
+
+    expect(loadAccountRegistry(path).accounts).toHaveLength(4);
+  });
+
+  it('refuses a remote plaintext envRepoint URL with remediation guidance', () => {
+    const path = writeAccounts('remote-plaintext-env-repoint.json', {
+      claude: [{ id: 'plaintext', envRepoint: { baseUrl: 'http://api.example.test/v1', authTokenRef: 'NAME', service: 'test' } }],
+    });
+
+    expect(() => loadAccountRegistry(path)).toThrow(/must use https:\/\/ for a remote endpoint.*loopback.*refusing to send credentials over plaintext http/i);
+  });
+
+  it('refuses URL userinfo in an envRepoint URL', () => {
+    const path = writeAccounts('userinfo-env-repoint.json', {
+      claude: [{ id: 'userinfo', envRepoint: { baseUrl: 'https://user:pass@api.example.test/v1', authTokenRef: 'NAME', service: 'test' } }],
+    });
+
+    expect(() => loadAccountRegistry(path)).toThrow(/credentials in the URL/i);
+  });
+
   it('preserves an operator-supplied envRepoint model and omits it when absent', () => {
     const path = writeAccounts('env-repoint-model.json', { claude: [
       { id: 'with-model', envRepoint: { baseUrl: 'https://x.test', authTokenRef: 'NAME', service: 'kimi', model: 'synthetic-kimi-id' } },
@@ -164,6 +191,7 @@ describe('loadAccountRegistry', () => {
     ['missing baseUrl', { authTokenRef: 'NAME' }],
     ['empty baseUrl', { baseUrl: '', authTokenRef: 'NAME' }],
     ['non-URL baseUrl', { baseUrl: 'not a url', authTokenRef: 'NAME' }],
+    ['relative baseUrl', { baseUrl: '/anthropic', authTokenRef: 'NAME' }],
     ['non-http baseUrl', { baseUrl: 'ftp://x', authTokenRef: 'NAME' }],
     ['missing authTokenRef', { baseUrl: 'https://x.test' }],
     ['empty authTokenRef', { baseUrl: 'https://x.test', authTokenRef: '' }],

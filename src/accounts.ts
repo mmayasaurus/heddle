@@ -173,22 +173,38 @@ function validateOverage(value: unknown, where: string, path: string): AccountOv
   return { posture };
 }
 
+const envRepointLoopbackHosts = new Set(['localhost', '127.0.0.1', '::1']);
+
+/** Validates the credential-bearing endpoint shared by registry loading and wizard input. */
+export function validateEnvRepointBaseUrl(value: unknown, where: string): string {
+  if (typeof value !== 'string' || !value) {
+    throw new Error(`${where} must be an http(s) URL`);
+  }
+  let url: URL;
+  try {
+    url = new URL(value);
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new Error('unsupported protocol');
+  } catch {
+    throw new Error(`${where} must be an http(s) URL`);
+  }
+  if (url.username || url.password) {
+    throw new Error(`${where} must not contain credentials in the URL`);
+  }
+  // Local runtimes use this same envRepoint shape, so loopback belongs in this shared validator,
+  // not in a local-runtime adapter. Node retains brackets around an IPv6 URL hostname.
+  const hostname = url.hostname === '[::1]' ? '::1' : url.hostname;
+  if (url.protocol === 'http:' && !envRepointLoopbackHosts.has(hostname)) {
+    throw new Error(`${where} must use https:// for a remote endpoint (or bind a local runtime to loopback: localhost / 127.0.0.1 / ::1) — refusing to send credentials over plaintext http`);
+  }
+  return value;
+}
+
 export function validateEnvRepoint(value: unknown, where: string, path: string): AccountEnvRepoint {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error(`accounts.json at ${path}: ${where}.envRepoint must be an object`);
   }
   const envRepoint = value as Record<string, unknown>;
-  if (typeof envRepoint.baseUrl !== 'string' || !envRepoint.baseUrl) {
-    throw new Error(`accounts.json at ${path}: ${where}.envRepoint.baseUrl must be an http(s) URL`);
-  }
-  try {
-    const url = new URL(envRepoint.baseUrl);
-    if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-      throw new Error('unsupported protocol');
-    }
-  } catch {
-    throw new Error(`accounts.json at ${path}: ${where}.envRepoint.baseUrl must be an http(s) URL`);
-  }
+  const baseUrl = validateEnvRepointBaseUrl(envRepoint.baseUrl, `accounts.json at ${path}: ${where}.envRepoint.baseUrl`);
   if (typeof envRepoint.authTokenRef !== 'string' || !envRepoint.authTokenRef) {
     throw new Error(`accounts.json at ${path}: ${where}.envRepoint.authTokenRef must be a non-empty string (an env-var name or keychain ref, never the token)`);
   }
@@ -199,7 +215,7 @@ export function validateEnvRepoint(value: unknown, where: string, path: string):
     throw new Error(`accounts.json at ${path}: ${where}.envRepoint.model must be a non-empty string`);
   }
   return {
-    baseUrl: envRepoint.baseUrl,
+    baseUrl,
     authTokenRef: envRepoint.authTokenRef,
     service: envRepoint.service,
     ...(typeof envRepoint.model === 'string' ? { model: envRepoint.model } : {}),

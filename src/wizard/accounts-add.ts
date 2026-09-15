@@ -1,7 +1,7 @@
 import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
-import { loadAccountRegistry, upsertAccount, writeAccountRegistry, type Account, type AccountTier, type BillingClass } from '../accounts.js';
+import { loadAccountRegistry, upsertAccount, validateEnvRepointBaseUrl, writeAccountRegistry, type Account, type AccountTier, type BillingClass } from '../accounts.js';
 import { ensureSecureDir } from '../secure-fs.js';
 import { loginStatus, loginIdentity } from '../health/parse.js';
 import type { CliRunner, NativeProvider } from './cli-runner.js';
@@ -44,15 +44,6 @@ function validateId(id: string): void {
 function validateEnvVarName(value: string): void {
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(value)) {
     throw new Error('that looks like a value, not a name — pass the NAME of the env var you exported');
-  }
-}
-
-function validateBaseUrl(value: string): void {
-  try {
-    const url = new URL(value);
-    if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new Error('unsupported protocol');
-  } catch {
-    throw new Error('base URL must be an http(s) URL');
   }
 }
 
@@ -185,7 +176,7 @@ async function envRepointBaseUrl(entry: ProviderMatrixEntry, deps: AccountsAddDe
   // endpoint can disagree (codeant #128). For a non-global region the operator must supply the URL.
   const urlDefault = region && region !== 'global' ? undefined : entry.baseUrl;
   const baseUrl = await deps.prompter.text(`${entry.displayName} base URL`, urlDefault);
-  validateBaseUrl(baseUrl);
+  validateEnvRepointBaseUrl(baseUrl, `${entry.displayName} base URL`);
   return { baseUrl, ...(region === undefined ? {} : { region }) };
 }
 
@@ -205,7 +196,15 @@ export async function addEnvRepointOne(
     deps.report?.(`FAIL ${entry.key} ${id} (id already used by an existing ${provider} account — choose another)`);
     return;
   }
-  const { baseUrl, region } = await envRepointBaseUrl(entry, deps);
+  let baseUrl: string;
+  let region: string | undefined;
+  try {
+    ({ baseUrl, region } = await envRepointBaseUrl(entry, deps));
+  } catch (error) {
+    summary.failed.push(id);
+    deps.report?.(`FAIL ${entry.key} ${id} (${error instanceof Error ? error.message : String(error)})`);
+    return;
+  }
   const authTokenRef = await deps.prompter.text(
     `Which environment variable holds your ${entry.displayName} key? (a NAME you have exported, e.g. ZAI_API_KEY — not the key itself)`,
   );
@@ -266,7 +265,13 @@ export async function addLocalRuntimeOne(
     return;
   }
   const baseUrl = await deps.prompter.text(`${entry.displayName} base URL`, entry.baseUrl);
-  validateBaseUrl(baseUrl);
+  try {
+    validateEnvRepointBaseUrl(baseUrl, `${entry.displayName} base URL`);
+  } catch (error) {
+    summary.failed.push(id);
+    deps.report?.(`FAIL ${entry.key} ${id} (${error instanceof Error ? error.message : String(error)})`);
+    return;
+  }
   let configPath: string;
   try {
     configPath = createIsolatedConfigDir(provider, id, home);
@@ -301,7 +306,17 @@ async function addCustomProvider(deps: AccountsAddDeps, registryPath: string, su
   const service = customService(displayName);
   const style = await deps.prompter.select('Custom provider API style', ['openai-compatible', 'anthropic-compatible', 'custom']);
   const baseUrl = await deps.prompter.text('Custom provider base URL');
-  validateBaseUrl(baseUrl);
+  // A custom provider is a credential-bearing env-repoint account too (envRepoint below), so its base URL
+  // must clear the same TLS-or-loopback + no-userinfo bar as the matrix env-repoint and local-runtime paths
+  // — otherwise a remote plaintext endpoint would slip through here and then poison the registry, since the
+  // now-strict loader (validateEnvRepoint) refuses to load it on the next read. Fail only this account.
+  try {
+    validateEnvRepointBaseUrl(baseUrl, `${displayName} base URL`);
+  } catch (error) {
+    summary.failed.push(service);
+    deps.report?.(`FAIL ${service} (${error instanceof Error ? error.message : String(error)})`);
+    return;
+  }
   const authTokenRef = await deps.prompter.text('Which environment variable holds your custom provider key? (a NAME you have exported, not the key itself)');
   validateEnvVarName(authTokenRef);
   const modelIds = await deps.prompter.text('Custom provider model IDs');
