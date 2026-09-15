@@ -3,12 +3,18 @@ import { tierReadOnlyVerdict } from '../src/dispatcher/tier-gate.js';
 import { effectiveFences, harnessFences, NO_FENCE } from '../src/fences.js';
 import type { Account, AccountRegistry, AccountTier } from '../src/accounts.js';
 
-function reg(accounts: Array<{ id: string; provider: 'claude' | 'codex' | 'cursor'; tier?: AccountTier }>): AccountRegistry {
+function reg(accounts: Array<{
+  id: string;
+  provider: 'claude' | 'codex' | 'cursor';
+  tier?: AccountTier;
+  envRepoint?: Account['envRepoint'];
+}>): AccountRegistry {
   return {
     schemaVersion: 2,
     accounts: accounts.map((a): Account => ({
       id: a.id, provider: a.provider, harness: a.provider, credentialRef: 'ref',
       ...(a.tier ? { tier: a.tier } : {}),
+      ...(a.envRepoint ? { envRepoint: a.envRepoint } : {}),
     })),
   };
 }
@@ -55,6 +61,38 @@ describe('tierReadOnlyVerdict (HED-404 structural read-only tier gate)', () => {
     // The T0 belongs to codex; a claude-target dispatch does not resolve it (mirrors billingVerdict's match).
     const v = tierReadOnlyVerdict({ accountId: 't0', provider: 'claude', readOnly: false, loadRegistry: load([{ id: 't0', provider: 'codex', tier: 'T0' }]) });
     expect(v.refusal).toBeUndefined();
+  });
+
+  describe('env-repoint accounts', () => {
+    const envRepoint = {
+      service: 'glm',
+      baseUrl: 'https://example.test/v1',
+      authTokenRef: 'GLM_KEY',
+    };
+
+    it('REFUSES a T0 env-repoint account on a non-read-only service route', () => {
+      const v = tierReadOnlyVerdict({
+        accountId: 'glm-1', provider: 'glm', readOnly: false,
+        loadRegistry: load([{ id: 'glm-1', provider: 'codex', tier: 'T0', envRepoint }]),
+      });
+      expect(v.refusal?.code).toBe('tier-read-only');
+    });
+
+    it('ALLOWS the same T0 env-repoint account on a read-only service route', () => {
+      const v = tierReadOnlyVerdict({
+        accountId: 'glm-1', provider: 'glm', readOnly: true,
+        loadRegistry: load([{ id: 'glm-1', provider: 'codex', tier: 'T0', envRepoint }]),
+      });
+      expect(v.refusal).toBeUndefined();
+    });
+
+    it('ALLOWS a non-T0 env-repoint account on a non-read-only service route', () => {
+      const v = tierReadOnlyVerdict({
+        accountId: 'glm-1', provider: 'glm', readOnly: false,
+        loadRegistry: load([{ id: 'glm-1', provider: 'codex', tier: 'T1', envRepoint }]),
+      });
+      expect(v.refusal).toBeUndefined();
+    });
   });
 });
 

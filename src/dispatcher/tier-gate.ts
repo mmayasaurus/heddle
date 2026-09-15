@@ -51,8 +51,11 @@ export function tierReadOnlyVerdict(input: TierGateInput): TierVerdict {
     return {};
   }
 
+  // An env-repoint account runs through its native harness but is selected by its service route.
   // Not found, or no declared tier, or a higher tier (T1-T3): not a T0 -> allow.
-  const account = registry.accounts.find((a) => a.provider === provider && a.id === accountId);
+  const account = registry.accounts.find((a) =>
+    (a.provider === provider || a.envRepoint?.service === provider) && a.id === accountId,
+  );
   if (!account || account.tier !== 'T0') return {};
 
   // POSITIVE evidence: a T0 account selected for a class that is not marked read-only. Structural refusal.
