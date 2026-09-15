@@ -41,7 +41,7 @@ export function rulesStep(catalogRoot: string): WizardStep {
         return { id: 'rules', status: 'skipped', summary: 'rules: not saved' };
       }
 
-      atomicWriteFile(policyPath(ctx.homeDir, 'rules'), JSON.stringify(selection, null, 2) + '\n');
+      atomicWriteFile(policyPath(ctx.homeDir, 'rules'), JSON.stringify({ schemaVersion: 1, rules: selection }, null, 2) + '\n');
       const enforced = selection.filter((rule) => rule.enforce).length;
       return {
         id: 'rules',
