@@ -37,6 +37,7 @@ import { DEFAULT_ACCOUNTS_PATH } from './capaware.js';
 import { migrateConfigFile } from './config-migrations.js';
 import { diffFleetBin, diffFleetHooks, diffFleetLaunchers, installFleetBin, installFleetHooks, installFleetLaunchers } from './fleet.js';
 import { uninstall } from './uninstall.js';
+import { gitRepositoryFor } from './worktree.js';
 import { NativeCliRunner, type NativeProvider } from './wizard/cli-runner.js';
 import { ReadlinePrompter, ScriptedPrompter, type Prompter } from './wizard/prompt.js';
 import { runAccountsAdd } from './wizard/accounts-add.js';
@@ -93,7 +94,7 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
   heddle projects [--json]       registered projects and their fleets (~/.heddle/projects.json; HED-160)
   heddle accounts list [--json]  registered Claude, Codex, and Cursor accounts
   heddle accounts verify         verify local credential paths and recorded Claude login state
-  heddle setup [--only <ids>] [--skip <ids>] [--dry-run] [--answers <file>] [--home <dir>] [--target <dir>] [--json]  guided fresh-machine onboarding walkthrough (composes the wizard steps in order; exit 1 if any step failed)
+  heddle setup [--only <ids>] [--skip <ids>] [--dry-run] [--answers <file>] [--home <dir>] [--target <dir>] [--json]  guided fresh-machine onboarding walkthrough (composes the wizard steps in order; without --target, PR automation uses the current repo or offers to add one, confirming before it writes; exit 1 if any step failed)
   heddle accounts add [--provider <p>] [--answers <file>]  add native-login or env-repoint accounts interactively
   heddle comms init [--json]     initialize the comms database, operator token, and registered project rooms
   heddle fleet install-hooks [--dry-run] [--json]  install vendored fleet hooks under ~/.heddle/fleet/hooks
@@ -997,6 +998,13 @@ try {
       if (has('--home') && (homeArg === undefined || homeArg.startsWith('--'))) throw new Error('--home needs a directory path');
       const targetArg = arg('--target');
       if (has('--target') && (targetArg === undefined || targetArg.startsWith('--'))) throw new Error('--target needs a directory path');
+      // HED-624: with no explicit --target, auto-derive the project dir from the invocation cwd when it
+      // sits inside a git repository — resolved up front (before the terminal opens), alongside the other
+      // arg parsing. gitRepositoryFor is fail-safe (→ null off a repo, no git, or an unreadable one), so a
+      // non-repo cwd leaves targetDir unset and the pr-automation step stays inert. The derived flag makes
+      // that step CONFIRM before scaffolding — an explicit --target is the opt-in; a detected repo the
+      // operator never named is not.
+      const derivedTarget = targetArg === undefined ? gitRepositoryFor(process.cwd())?.topLevel : undefined;
       const parseStepIds = (flag: string): string[] | undefined => {
         if (!has(flag)) return undefined;
         const value = arg(flag);
@@ -1021,7 +1029,11 @@ try {
       try {
         const base: SetupContext = {
           homeDir: homeArg ?? homedir(),
-          ...(targetArg === undefined ? {} : { targetDir: targetArg }),
+          ...(targetArg !== undefined
+            ? { targetDir: targetArg }
+            : derivedTarget !== undefined
+              ? { targetDir: derivedTarget, targetDirDerived: true }
+              : {}),
           dryRun: has('--dry-run'),
           now: () => new Date(),
         };
