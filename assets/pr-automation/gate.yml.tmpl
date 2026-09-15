@@ -78,14 +78,18 @@ __HEDDLE_GATE_BUILD_STEPS__
               fi
               # D1: a marker is fresh only if it follows the newest executed
               # build. Skipped edit leaves must not stale a real marker.
+              # Select the build check-runs by this workflow's EXACT build job name, not a `^build`
+              # prefix: a prefix would also match unrelated `build*` jobs from other workflows on the
+              # same commit and corrupt the leaf/in-flight logic. Keep this string, the INFLIGHT select
+              # below, and the `build` job's `name:` identical (a wizard drift-guard test binds them).
               CONC=$(printf '%s\n' "$CR" | jq -r '
                 [.[].check_runs[]] as $all
-                | ([$all[] | select((.name | test("^build")) and .conclusion != "skipped") | .started_at] | max) as $leaf
+                | ([$all[] | select(.name == "build (typecheck + test + build)" and .conclusion != "skipped") | .started_at] | max) as $leaf
                 | ([$all[] | select(.name == "gate-verdict")] | sort_by(.started_at) | last) as $m
                 | if $m == null or $leaf == null then "none"
                   elif $m.started_at >= $leaf then ($m.conclusion // "none")
                   else "none" end')
-              INFLIGHT=$(printf '%s\n' "$CR" | jq -r '[.[].check_runs[]] | [ .[] | select((.name|test("^build")) and .status!="completed") ] | length')
+              INFLIGHT=$(printf '%s\n' "$CR" | jq -r '[.[].check_runs[]] | [ .[] | select(.name == "build (typecheck + test + build)" and .status!="completed") ] | length')
               # F2/D2: accept only a fresh marker with no leaf in flight. A
               # retained stale value can never turn loop exhaustion green.
               if [ "$CONC" != "none" ] && [ "$INFLIGHT" = "0" ]; then

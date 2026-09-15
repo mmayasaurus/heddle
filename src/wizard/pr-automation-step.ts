@@ -62,6 +62,13 @@ const nextSteps = [
 //       when a repo has no source in the configured languages);
 //   (3) per-upload `id:` + `continue-on-error: true` + the outcome-conditioned "Explain SARIF upload
 //       availability" steps, so a private repo without code scanning degrades to the log + summary cleanly.
+// `gate.yml.tmpl` is `.github/workflows/gate.yml` vendored the same way, with these deliberate divergences a
+// re-syncer must NOT strip: the identity scrub; `__HEDDLE_DEFAULT_BRANCH__` (canonical hardcodes the push
+// branch) and `__HEDDLE_GATE_BUILD_STEPS__` (canonical inlines heddle's own build; the template is
+// preset-driven); and the verdict-echo's build selector NARROWED from canonical's `^(build|web|rust)` prefix
+// (heddle has three build jobs) to an EXACT match on this template's single `build (…)` job name — a prefix
+// would also capture unrelated `build*` jobs from other workflows on the same commit and corrupt the echo
+// (qodo/codeant HED-616). A drift-guard test binds the selector to the job name.
 function bundledAssetsRoot(): string {
   return fileURLToPath(new URL('../../assets/pr-automation', import.meta.url));
 }
@@ -105,6 +112,10 @@ function gateBuildSteps(options: RenderOptions): string {
       '          exit 1',
     ].join('\n');
   }
+  // TS/Node preset assumes an npm project: `npm ci` requires a package-lock.json, and the typecheck/
+  // test/build scripts must exist. A pnpm/yarn or differently-scripted repo edits these build steps (or
+  // picks Generic) before requiring `gate` — the operator adapts the scaffold, as with the Generic
+  // placeholder (see nextSteps; codeant HED-616).
   return [
     '      - name: Checkout',
     '        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1',
@@ -131,7 +142,18 @@ function gateBuildSteps(options: RenderOptions): string {
   ].join('\n');
 }
 
+// A git branch ref may legally contain characters that are hostile in the YAML and shell contexts the
+// templates interpolate the branch into: `git check-ref-format` permits `"`, `$`, backtick, `,` and more —
+// only a bare space (and a few structural sequences) are rejected. Constrain any branch that reaches a
+// template to a conservative charset. detectDefaultBranch treats a name that fails this as undetectable
+// (it falls through to the conventional-name lookup); renderWorkflow throws, so no caller — including the
+// exported render helpers — can smuggle an unvetted value into a workflow (qodo/codeant, HED-616).
+const SAFE_BRANCH = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
+
 function renderWorkflow(template: string, options: RenderOptions): string {
+  if (!SAFE_BRANCH.test(options.defaultBranch)) {
+    throw new Error(`workflow template default branch is not a safe ref name: ${JSON.stringify(options.defaultBranch)}`);
+  }
   const replacements: Record<string, string> = {
     '__HEDDLE_RULESETS__': options.rulesets.map((ruleset) => `--config ${ruleset}`).join(' '),
     '__HEDDLE_RULESETS_DESCRIPTION__': options.rulesets.join(' + '),
@@ -174,7 +196,10 @@ export function renderGate(options: RenderPresetOptions = TS_NODE): string {
 export function detectDefaultBranch(targetDir: string): string {
   try {
     const remoteHead = execFileSync('git', ['-C', targetDir, 'symbolic-ref', '--short', 'refs/remotes/origin/HEAD'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
-    if (remoteHead.startsWith('origin/')) return remoteHead.slice('origin/'.length);
+    const branch = remoteHead.startsWith('origin/') ? remoteHead.slice('origin/'.length) : '';
+    // Accept origin/HEAD only when it names a charset-safe branch; a hostile name (or an unset/malformed
+    // origin/HEAD) falls through to the conventional-name lookup rather than being interpolated verbatim.
+    if (SAFE_BRANCH.test(branch)) return branch;
   } catch {
     // Try local conventional names below; a feature branch is deliberately not a fallback.
   }

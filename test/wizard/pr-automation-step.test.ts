@@ -83,16 +83,18 @@ describe('prAutomationStep', () => {
       const gate = renderGate({ ...preset, defaultBranch });
       const document = parse(gate) as { jobs: { build: { name: string }; gate: { steps: Array<{ run?: string }> } } };
       const echo = document.jobs.gate.steps.find((step) => step.run)?.run ?? '';
-      const leafRegexes = [...echo.matchAll(/test\("(\^[^"]+)"\)/g)].map((match) => match[1]);
+      const nameSelects = [...echo.matchAll(/\.name == "([^"]+)"/g)].map((match) => match[1]);
+      const buildName = document.jobs.build.name;
 
-      expect(document.jobs.build.name).toMatch(/^build/);
-      // BOTH coupled jq selects (the $leaf select AND the INFLIGHT select) must key on the build
-      // job name — an asymmetric drift of either silently breaks the echo's four-state logic
-      // (INFLIGHT drift would read 0-in-flight and fail the gate closed while the build still runs).
-      expect(leafRegexes).toEqual(['^build', '^build']);
-      for (const leafRegex of leafRegexes) {
-        expect(document.jobs.build.name).toMatch(new RegExp(leafRegex));
-      }
+      // The echo selects the build check-runs by this workflow's EXACT build job name — not a `^build`
+      // prefix, which would also match unrelated `build*` jobs from other workflows on the same commit
+      // and corrupt the four-state logic (qodo/codeant HED-616). BOTH coupled selects (the $leaf
+      // max-started_at select AND the INFLIGHT count select) must key on it: an asymmetric drift reads
+      // 0-in-flight and fails the gate closed while the build still runs. The one other .name select is
+      // the gate-verdict marker lookup.
+      expect(nameSelects.filter((name) => name === buildName)).toHaveLength(2);
+      expect(nameSelects.filter((name) => name === 'gate-verdict')).toHaveLength(1);
+      expect(new Set(nameSelects)).toEqual(new Set([buildName, 'gate-verdict']));
       execFileSync('sh', ['-n'], { input: echo });
     }
   });
@@ -138,12 +140,21 @@ describe('prAutomationStep', () => {
     execFileSync('git', ['-C', fallback, 'checkout', '-q', '-b', 'feature-only']);
     commit(fallback);
     execFileSync('git', ['-C', fallback, 'checkout', '-q', '--detach']);
+    // A charset-hostile origin/HEAD (git allows `$`, `"`, backtick, … in a ref; only a bare space is
+    // rejected) must never be interpolated into a workflow — detection falls through to the
+    // conventional-name lookup, then the 'main' default (qodo/codeant HED-616 sanitization). Set the
+    // ref directly rather than via push/clone: it drives the exact symbolic-ref read detection uses and
+    // keeps this git-heavy integration test fast.
+    const hostileHead = initRepo();
+    execFileSync('git', ['-C', hostileHead, 'symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/foo$bar']);
 
     expect(detectDefaultBranch(originHead)).toBe('trunk');
     expect(detectDefaultBranch(main)).toBe('main');
     expect(detectDefaultBranch(master)).toBe('master');
     expect(detectDefaultBranch(fallback)).toBe('main');
-  });
+    // origin/HEAD resolves to the hostile name, but it is rejected and never returned.
+    expect(detectDefaultBranch(hostileHead)).toBe('main');
+  }, 60000);
 
   it('conditions the SARIF explain note on an actual upload failure, not always()', () => {
     const workflow = renderDeterministicReview(TS_NODE);
