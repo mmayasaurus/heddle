@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, symlinkSync, truncateSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { lstatSync, mkdirSync, symlinkSync, truncateSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { checkoutFingerprint } from '../src/worktree.js';
@@ -77,20 +77,23 @@ describe('checkoutFingerprint — non-regular and oversized paths (HED-625)', ()
     expect(fp.entries.get('tracked.txt')).toMatch(/:<special>$/);
   }, 5000);
 
-  it('fingerprints an oversized file by size and mtime, and detects an in-place rewrite', () => {
+  itUnix('fingerprints an oversized file by size/mtime/ctime and detects a rewrite even when mtime is restored', () => {
     const root = gitRepo(join(tempDir(), 'repo'));
     const big = join(root, 'big.bin');
     writeFileSync(big, '');
     truncateSync(big, 11534336); // 11 MiB (11 * 1024 * 1024) sparse — over the 10 MiB hash cap; content never read
     // Literal regex, not new RegExp(): the byte count is a fixed constant, so no dynamic construction.
-    const marker = /^\?\?:<large:11534336:\d+>$/;
+    const marker = /^\?\?:<large:11534336:\d+:\d+>$/;
     const first = checkoutFingerprint(root)!.entries.get('big.bin')!;
     expect(first).toMatch(marker);
-    // A same-length in-place rewrite changes mtime but not size — a size-only marker (qodo HIGH #3)
-    // would collide and hide the change; size+mtime makes it visible. Bump mtime deterministically
-    // (no sleep, no content read) to stand in for that rewrite.
-    const later = new Date(Date.now() + 5000);
-    utimesSync(big, later, later);
+    const origMtime = lstatSync(big).mtime;
+    // A same-length in-place rewrite (qodo HIGH #3) that then RESTORES mtime is the classic evasion:
+    // size and mtime end up identical to `first`, so a size:mtime-only marker would collide and hide
+    // it. But the rewrite moves ctime, which userspace cannot set, so the size:mtime:ctime marker
+    // still changes. Content is never read on either fingerprint call.
+    writeFileSync(big, Buffer.alloc(1));   // rewrite content at offset 0 ...
+    truncateSync(big, 11534336);           // ... back to the same 11 MiB length
+    utimesSync(big, origMtime, origMtime); // attacker restores mtime to hide the rewrite
     const second = checkoutFingerprint(root)!.entries.get('big.bin')!;
     expect(second).toMatch(marker);
     expect(second).not.toBe(first);

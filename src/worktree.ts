@@ -139,15 +139,16 @@ export function parentCheckoutOf(cwd: string): WorktreeContext | null {
 /** HEAD + every dirty path's status AND content digest. */
 export interface CheckoutFingerprint {
   head: string;
-  /** path → "<XY>:<content digest>" — a sha256 prefix, or '<missing>' (gone), 'symlink:<hash>' (link target text, not followed), '<special>' (FIFO/socket/device/dir), or '<large:bytes:mtimeMs>' (over the hash cap). */
+  /** path → "<XY>:<content digest>" — a sha256 prefix, or '<missing>' (gone), 'symlink:<hash>' (link target text, not followed), '<special>' (FIFO/socket/device/dir), or '<large:bytes:mtimeMs:ctimeMs>' (over the hash cap). */
   entries: Map<string, string>;
 }
 
 /**
  * Cap the per-path content read (HED-625). checkoutFingerprint hashes every dirty/untracked path; a
  * worker-created FIFO would block readFileSync on the event loop forever (a pipe with no writer never
- * returns), and a multi-GB file would spike memory. A path above this size is fingerprinted by size
- * alone — its presence in the git-status string already marks it dirt; the digest is only a refinement.
+ * returns), and a multi-GB file would spike memory. A path above this size is fingerprinted by its
+ * size, mtime and ctime instead of its content — enough for escapedPaths to still catch an in-place
+ * rewrite of an already-dirty path (ctime moves and userspace cannot restore it), without reading it.
  */
 const MAX_FINGERPRINT_HASH_BYTES = 10 * 1024 * 1024; // 10 MiB
 
@@ -193,14 +194,17 @@ export function checkoutFingerprint(root: string): CheckoutFingerprint | null {
         const fullPath = join(root, path);
         const st = lstatSync(fullPath);
         if (st.isSymbolicLink()) {
-          // Hash the link TARGET TEXT — readlink never opens the target, so no fifo/device hang; a
-          // dangling or racing readlink throws → fall through to <special>.
+          // Hash the link TARGET TEXT — readlink reads the link itself (never opens/follows the
+          // target), so no fifo/device hang and a dangling target is fine; only a racing unlink/retype
+          // between lstat and readlink throws → fall through to <special>.
           try { digest = `symlink:${createHash('sha256').update(readlinkSync(fullPath)).digest('hex').slice(0, 16)}`; }
           catch { digest = '<special>'; }
         } else if (!st.isFile()) {
           digest = '<special>';                                     // FIFO / socket / device / directory
         } else if (st.size > MAX_FINGERPRINT_HASH_BYTES) {
-          digest = `<large:${st.size}:${Math.trunc(st.mtimeMs)}>`;  // size+mtime: an in-place same-length rewrite still changes the marker
+          // size+mtime+ctime: a same-length rewrite changes mtime, and even a rewrite that RESTORES
+          // mtime still moves ctime — which userspace cannot set — so escapedPaths still sees it.
+          digest = `<large:${st.size}:${Math.trunc(st.mtimeMs)}:${Math.trunc(st.ctimeMs)}>`;
         } else {
           digest = createHash('sha256').update(readFileSync(fullPath)).digest('hex').slice(0, 16);
         }
