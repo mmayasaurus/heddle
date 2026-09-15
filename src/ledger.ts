@@ -351,13 +351,13 @@ export class Ledger {
     const info = this.db.prepare(`
       INSERT INTO dispatches
         (orchestrator, task_class, provider, model, skills, issue, pr, cwd, prompt_preview,
-         session_id, fell_back_from, refusal, capabilities, route_reason, symbol, account, identity_source,
+         session_id, fell_back_from, refusal, capabilities, route_reason, symbol, account, fence, identity_source,
          override_reason, execution_mode, ok, error, started_at, finished_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
     `).run(
       r.orchestrator, r.taskClass, r.provider, r.model, r.skills, r.issue, r.pr, r.cwd,
       r.promptPreview.slice(0, 500), r.sessionId, r.fellBackFrom, refusal, r.capabilities ?? null,
-      r.routeReason ?? null, r.symbol ?? null, r.account ?? null, r.identitySource ?? null, r.overrideReason ?? null,
+      r.routeReason ?? null, r.symbol ?? null, r.account ?? null, r.fence ?? null, r.identitySource ?? null, r.overrideReason ?? null,
       executionMode ?? null, reason, now, now,
     );
     return Number(info.lastInsertRowid);

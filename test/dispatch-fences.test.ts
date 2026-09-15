@@ -84,4 +84,27 @@ describe('dispatch read-only fences (HED-404)', () => {
     expect(outcome.ok).toBe(true);
     expect(ledger.recent().find((row) => row.id === outcome.ledgerId)?.fence).toBeNull();
   });
+
+  it('records mandate-only + injects the read-only mandate for an in-session read-only handoff', async () => {
+    // In-session (in_session:true) claude review: heddle CANNOT fence the orchestrator's OWN subagent (no
+    // subprocess, no --tools/sandbox), so the honest posture is mandate-only + an explicit no-write boundary
+    // in the handoff instruction — the in-session analogue of the spawn path's mandate. And the row must
+    // KEEP that posture after report_in_session confirms the work (HED-404: insertRefusal persists fence,
+    // reportInSession leaves it untouched).
+    const ledger = tempLedger();
+    const fake = fakeAdapter();
+    const outcome = await dispatch({
+      taskClass: 'adversarial-review', authorProvider: 'cursor', provider: 'claude', model: 'sonnet',
+      inSession: true, prompt: 'review', cwd: tempDir(), identity: unbound,
+      accounts: [], caps: {} as CapsByProvider,
+    }, ledger, () => fake.adapter);
+
+    expect(outcome.refusal?.code).toBe('claude-in-session'); // a handoff, not a spawn
+    expect(fake.calls).toHaveLength(0);
+    expect(outcome.error).toContain('Never fix, never write.'); // READ_ONLY_MANDATE in the handoff instruction
+    expect(ledger.recent().find((row) => row.id === outcome.ledgerId)?.fence).toBe('mandate-only');
+    // Confirming the handoff clears the refusal but must NOT drop the recorded read-only posture.
+    ledger.reportInSession(outcome.ledgerId!, { ok: true });
+    expect(ledger.recent().find((row) => row.id === outcome.ledgerId)?.fence).toBe('mandate-only');
+  });
 });

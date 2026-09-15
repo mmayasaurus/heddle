@@ -236,6 +236,9 @@ export interface DispatchPlan {
   accountAdvice?: AccountAdvice;
   /** Money-safety refusal for the selected rich-registry account. */
   billingRefusal?: DispatchRefusal;
+  /** HED-404: structural tier read-only refusal for the selected account — the plan-level mirror of
+   *  billingRefusal (undefined for in-session previews; the in-session tier gate is HED-573). */
+  tierRefusal?: DispatchRefusal;
   /** Non-blocking bounded-prepaid warning when dispatch will consume the prepaid buffer. */
   billingAdvice?: string;
   /** HED-78: the Claude account a headless worker will run on. `undefined` = in-session/non-Claude;

@@ -4,6 +4,7 @@
  */
 import type { DispatchStartRecord } from '../ledger.js';
 import { resolveRoute, providerExecution, type Route, type RouteTarget, type RoutingTable } from '../routing.js';
+import { READ_ONLY_MANDATE } from '../review.js';
 import type { AccountAdvice } from '../capaware.js';
 import { packsFor, requestedPacks } from './packs.js';
 import type { DispatchContext, DispatchRequest, DispatchOutcome, DispatchRefusal, RefusalOpts, InSessionOrigin } from './types.js';
@@ -116,7 +117,7 @@ export function refuseNotDispatchable(route: Route, req: DispatchRequest, ctx: D
 }
 
 export function refuseInSession(
-  route: RouteTarget & { taskClass: string; dispatchable: boolean; fallback?: RouteTarget; reviewerPool?: Route['reviewerPool'] },
+  route: RouteTarget & { taskClass: string; dispatchable: boolean; fallback?: RouteTarget; reviewerPool?: Route['reviewerPool']; readOnly?: boolean },
   req: DispatchRequest, ctx: DispatchContext, execution: string, origin: InSessionOrigin,
   fellBackFrom: string | null = null, accountAdvice?: AccountAdvice,
 ): DispatchOutcome {
@@ -137,7 +138,11 @@ export function refuseInSession(
   const reason = `${head} runs as an in-session subagent of the orchestrator, not a subprocess heddle can spawn.`;
   // This row describes what will actually run in the orchestrator's session, not the account that
   // would have been best for a separate headless worker.
-  const record = { ...baseRecord(ctx, req, route.taskClass, route, skills, fellBackFrom), account: accountAdvice?.current?.id ?? null };
+  // HED-404: an in-session read-only class is UNENFORCEABLE by heddle (the orchestrator runs it as its own
+  // subagent, not a spawned subprocess with --tools/sandbox), so the honest posture is `mandate-only` — the
+  // same fallback the spawn path records when a harness can't fence. Recorded on the refusal row so a
+  // confirmed in-session read-only review is distinguishable from non-read-only work.
+  const record = { ...baseRecord(ctx, req, route.taskClass, route, skills, fellBackFrom, [], route.readOnly ? 'mandate-only' : undefined), account: accountAdvice?.current?.id ?? null };
   const id = ctx.ledger.refuse(
     record, 'claude-in-session', reason, 'in-session',
   );
@@ -159,7 +164,10 @@ export function refuseInSession(
         `(${err instanceof Error ? err.message : String(err)}) — the handoff stands; only its review-pair audit is skipped\n`);
     }
   }
-  const instruction =
+  // HED-404: for a read-only class, the handoff must state the explicit no-write boundary — the honest
+  // analogue of the spawn path's prompt mandate, since heddle can't fence the orchestrator's own subagent.
+  const mandate = route.readOnly ? `${READ_ONLY_MANDATE}\n\n` : '';
+  const instruction = mandate +
     `Use your own Agent tool with model "${route.model}" and skills [${skills.join(', ')}]` +
     (mcp.length ? ` and MCP [${mcp.join(', ')}]` : '') + `.` + alt +
     (accountAdvice ? ` ${accountAdvice.line}` : '') +
