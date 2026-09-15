@@ -70,9 +70,11 @@ function atomicWriteFile(path: string, content: string, mode?: number): void {
   const temporary = join(dirname(path), `.${basename(path)}.${process.pid}.${atomicWriteSequence++}.tmp`);
   try {
     writeFileSync(temporary, content);
-    // An explicit mode (e.g. an executable launcher) wins; else preserve an existing file's mode.
-    // A brand-new file with no explicit mode keeps the umask default (unchanged pre-HED-671 behaviour).
-    const targetMode = mode ?? (existsSync(path) ? statSync(path).mode : undefined);
+    // An explicit mode (e.g. an executable launcher) wins; else preserve an existing file's mode
+    // (masked to 0o7777 so only permission + setuid/setgid/sticky bits reach chmod, never S_IFMT
+    // file-type bits). A brand-new file with no explicit mode keeps the umask default (unchanged
+    // pre-HED-671 behaviour).
+    const targetMode = mode ?? (existsSync(path) ? statSync(path).mode & 0o7777 : undefined);
     if (targetMode !== undefined) chmodSync(temporary, targetMode);
     renameSync(temporary, path);
   } finally {
