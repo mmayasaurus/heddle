@@ -214,7 +214,9 @@ describe('accounts add env-repoint wizard', () => {
     const path = join(tempDir(), 'ollama.json');
     const home = tempDir();
     withHome(home);
-    vi.stubEnv('OPENAI_API_KEY', undefined);
+    // A real cloud OPENAI_API_KEY may sit in the environment — the local-runtime account must NOT bind it
+    // as its token ref (that would route the cloud key to a localhost endpoint once HED-619 wires consume).
+    vi.stubEnv('OPENAI_API_KEY', 'cloud-key-present');
 
     const summary = await runAccountsAdd({ provider: 'ollama', registryPath: path, homeDir: home }, {
       prompter: new ScriptedPrompter([true, '', '', false]), runner: fakeRunner,
@@ -225,7 +227,7 @@ describe('accounts add env-repoint wizard', () => {
     expect(account).toMatchObject({
       id: 'ollama-1', provider: 'codex', harness: 'codex-cli', billingClass: 'free-tier', tier: 'T0',
       credentialRef: `codex:ollama:${account.codexHome}`,
-      envRepoint: { baseUrl: 'http://localhost:11434/v1', authTokenRef: 'OPENAI_API_KEY', service: 'ollama' },
+      envRepoint: { baseUrl: 'http://localhost:11434/v1', authTokenRef: 'HEDDLE_LOCAL_RUNTIME_TOKEN', service: 'ollama' },
     });
     expect(account.trainsOnInputs).toBeUndefined();
   });
@@ -241,7 +243,7 @@ describe('accounts add env-repoint wizard', () => {
 
     expect(summary.added).toEqual(['lmstudio-1']);
     expect(loadAccountRegistry(path).accounts[0]).toMatchObject({
-      envRepoint: { baseUrl, authTokenRef: 'OPENAI_API_KEY', service: 'lmstudio' },
+      envRepoint: { baseUrl, authTokenRef: 'HEDDLE_LOCAL_RUNTIME_TOKEN', service: 'lmstudio' },
       billingClass: 'free-tier', tier: 'T0',
     });
   });

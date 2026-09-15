@@ -243,16 +243,20 @@ export async function addLocalRuntimeOne(
   validateBaseUrl(baseUrl);
   let configPath: string;
   try {
-    configPath = createIsolatedConfigDir('codex', id, home);
+    configPath = createIsolatedConfigDir(provider, id, home);
   } catch (error) {
     summary.failed.push(id);
     deps.report?.(`FAIL ${entry.key} ${id} (${error instanceof Error ? error.message : String(error)})`);
     return;
   }
+  // Keyless by design: local runtimes need no cloud key. Record a heddle-namespaced token ref rather
+  // than OPENAI_API_KEY so a real cloud key in ~/.heddle/secrets.env can never be materialized toward a
+  // localhost endpoint when env-repoint consume reaches codex (HED-619); an operator who secures their
+  // local server opts in by exporting exactly this var. Absent from secrets.env, consume fail-closes.
   const account: Account = {
-    id, provider: 'codex', harness: 'codex-cli', credentialRef: `codex:${entry.key}:${configPath}`,
+    id, provider, harness: 'codex-cli', credentialRef: `${provider}:${entry.key}:${configPath}`,
     billingClass: 'free-tier', tier: 'T0',
-    envRepoint: { baseUrl, authTokenRef: 'OPENAI_API_KEY', service: entry.key }, codexHome: configPath,
+    envRepoint: { baseUrl, authTokenRef: 'HEDDLE_LOCAL_RUNTIME_TOKEN', service: entry.key }, codexHome: configPath,
   };
   writeAccountRegistry(upsertAccount(loadAccountRegistry(registryPath), account), registryPath);
   summary.added.push(id);
