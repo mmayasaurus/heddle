@@ -189,6 +189,13 @@ export function ensureSecureDir(dir: string, opts: { mode?: number; euid?: numbe
   // chmodded, exactly like an existing parent). Its natural ENOENT means "absent → create it" below.
   try {
     assertSafeExistingDir(dir, euid);
+    // HED-634: an existing leaf is not enough — also reject an unsafe IMMEDIATE PARENT (symlink /
+    // non-dir / group-or-other-writable), matching the create-path climb below. Otherwise a safe,
+    // euid-owned leaf that already exists under a group/other-writable ancestor is accepted on a re-run,
+    // while a first run (which takes the create path) would refuse it. Structural only (no euid): a
+    // legitimately root-owned parent such as ~ or /Users is fine, and the parent is guaranteed to exist
+    // here because the leaf does.
+    assertSafeExistingDir(dirname(dir));
     return;
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;

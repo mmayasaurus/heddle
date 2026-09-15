@@ -1,0 +1,144 @@
+# Required, edit-safe CI gate. Every workflow run publishes the static `gate`
+# context: skipping an edit can mask a red, while a dynamic name leaves the
+# latest check suite without the required context. Commit-path runs do real work;
+# title/body edits echo the SHA-bound marker from that work.
+name: Gate
+
+on:
+  push:
+    branches: ["__HEDDLE_DEFAULT_BRANCH__"]
+  pull_request:
+    # No base filter supports stacked PRs. Retargeting fires only `edited`, so
+    # it must take the real-work path; ordinary edits take the echo path.
+    types: [opened, synchronize, reopened, edited]
+  workflow_dispatch: {}
+
+permissions: {}
+
+# Commit-path events and base retargets share `run` and cancel stale work. Plain
+# edits use `edit` without cancellation so an echo cannot cancel a required run.
+concurrency:
+  group: gate-${{ github.event.pull_request.number || github.ref }}-${{ (github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base.ref.from != '') && 'run' || 'edit' }}
+  cancel-in-progress: ${{ github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base.ref.from != '' }}
+
+jobs:
+  build:
+    # Real CI work only. A title/body edit skips it; gate echoes the last verdict.
+    name: build (typecheck + test + build)
+    if: ${{ github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base.ref.from != '' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+__HEDDLE_GATE_BUILD_STEPS__
+
+  gate:
+    # This static required context records real build results and echoes them on
+    # body/title edits. `always()` prevents a failed/skipped build becoming a
+    # passing skipped required check.
+    name: gate
+    needs: [build]
+    if: always()
+    runs-on: ubuntu-24.04
+    # LOUD TIMING INVARIANT: seq 1 57's backoff is about 24m50s, longer than the
+    # 15-minute build timeout plus publish grace; this 30-minute job timeout is
+    # longer than the belt plus API/startup allowance. If build timeout changes,
+    # resize BOTH values. Do not make this dynamic: an early echo red would land
+    # in a newer suite and block a later successful build.
+    timeout-minutes: 30
+    permissions:
+      checks: write
+    steps:
+      - name: Verdict (commit) or echo (edit)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          # True only for a title/body edit; a base retarget is real-work.
+          IS_EDIT: ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.base.ref.from == '' }}
+          BUILD_RESULT: ${{ needs.build.result }}
+        run: |
+          set -eu
+          if [ "$IS_EDIT" = "true" ]; then
+            echo "edit event — echoing the last real verdict (gate-verdict marker) for $SHA"
+            CONC=none; DRY=0; VERDICT=""
+            # Wait for the commit-path marker instead of using a wall-clock
+            # failure. The belt and timeout invariant above prevents a slow build
+            # race from creating a newer, premature red required check.
+            for i in $(seq 1 57); do
+              # F4: an unreadable API response leaves liveness unknown; never
+              # coerce it to empty data or it could falsely prove the build gone.
+              # `filter=all --paginate --slurp` retains runs from every suite.
+              if ! CR=$(gh api "repos/$REPO/commits/$SHA/check-runs?filter=all" --paginate --slurp 2>/dev/null); then
+                echo "  could not read check runs for ${SHA}; build liveness is unknown — retrying"
+                DRY=0
+                if [ "$i" -lt 12 ]; then sleep 10; else sleep 30; fi
+                continue
+              fi
+              # D1: a marker is fresh only if it follows the newest executed
+              # build. Skipped edit leaves must not stale a real marker.
+              # Select the build check-runs by this workflow's EXACT build job name, not a `^build`
+              # prefix: a prefix would also match unrelated `build*` jobs from other workflows on the
+              # same commit and corrupt the leaf/in-flight logic. Keep this string, the INFLIGHT select
+              # below, and the `build` job's `name:` identical (a wizard drift-guard test binds them).
+              CONC=$(printf '%s\n' "$CR" | jq -r '
+                [.[].check_runs[]] as $all
+                | ([$all[] | select(.name == "build (typecheck + test + build)" and .conclusion != "skipped") | .started_at] | max) as $leaf
+                | ([$all[] | select(.name == "gate-verdict")] | sort_by(.started_at) | last) as $m
+                | if $m == null or $leaf == null then "none"
+                  elif $m.started_at >= $leaf then ($m.conclusion // "none")
+                  else "none" end')
+              INFLIGHT=$(printf '%s\n' "$CR" | jq -r '[.[].check_runs[]] | [ .[] | select(.name == "build (typecheck + test + build)" and .status!="completed") ] | length')
+              # F2/D2: accept only a fresh marker with no leaf in flight. A
+              # retained stale value can never turn loop exhaustion green.
+              if [ "$CONC" != "none" ] && [ "$INFLIGHT" = "0" ]; then
+                VERDICT="$CONC"; break
+              fi
+              if [ "$CONC" = "none" ] && [ "$INFLIGHT" = "0" ]; then
+                DRY=$((DRY + 1))
+              else
+                DRY=0
+              fi
+              # Fail closed only after the build is verifiably gone and the fresh
+              # marker remains absent across a sustained dry window.
+              if [ "$i" -gt 9 ] && [ "$DRY" -ge 6 ]; then
+                echo "  build is no longer in flight and no fresh gate-verdict marker appeared — the commit gate did not publish (cancelled / never ran)."
+                break
+              fi
+              if [ -z "${WAITED:-}" ]; then
+                WAITED=1
+                {
+                  echo "### gate — waiting for the commit-path verdict on \`${SHA}\`"
+                  echo "This edit run is holding the required \`gate\` **pending** until the commit-path build for this commit publishes its \`gate-verdict\`, which the echo then reflects. Pending here means *blocked-while-building*, not failed."
+                } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+              fi
+              echo "  waiting for the commit run's verdict on ${SHA} (poll ${i}; fresh marker=${CONC}, commit-path jobs in flight=${INFLIGHT}, dry=${DRY})"
+              if [ "$i" -lt 12 ]; then sleep 10; else sleep 30; fi
+            done
+            case "$VERDICT" in
+              success)
+                echo "real verdict for ${SHA} = success — gate green"
+                exit 0 ;;
+              "")
+                echo "::error::no confirmed gate verdict for ${SHA} — never saw a fresh gate-verdict marker with no commit-path leaf in flight (the commit 'gate' run was cancelled / never ran / still queued, or the check-runs API was unreachable). Re-run the 'gate' workflow on this PR, or push a commit. Failing closed."
+                exit 1 ;;
+              *)
+                echo "::error::real verdict for ${SHA} was '${VERDICT}' — echoing it. An edit never masks a real failure; fix the code and push a commit."
+                exit 1 ;;
+            esac
+          fi
+          # Commit / retarget / push: the real verdict is the build result.
+          case "$BUILD_RESULT" in
+            success) MARK=success ;;
+            *)       MARK=failure ;;
+          esac
+          # Best effort: fork PR tokens can be read-only, so marker creation can
+          # fail there. The current gate still reflects the build; later edits
+          # fail closed rather than masking a failure until a marker can be made.
+          if ! gh api "repos/$REPO/check-runs" -X POST -f name=gate-verdict \
+                -f head_sha="$SHA" -f status=completed -f conclusion="$MARK" >/dev/null 2>&1; then
+            echo "::warning::could not publish the gate-verdict marker for ${SHA} (read-only token / fork PR?) — edit runs on this commit will fail closed until a commit run can publish one."
+          fi
+          echo "real verdict = ${MARK} (build=${BUILD_RESULT}); recorded as gate-verdict marker for ${SHA}"
+          [ "$MARK" = success ]

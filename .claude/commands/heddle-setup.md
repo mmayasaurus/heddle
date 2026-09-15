@@ -49,9 +49,10 @@ own run:
    (`heddle setup --only <id>`).
 5. **Verify.** In a normal run the wizard's closing step runs `heddle doctor` and reports the verdict.
    If it was skipped by a `--dry-run` preview or `--skip doctor`, run `heddle doctor` now so "setup
-   complete" is a checked claim. (After an alternate `--home` install the wizard skips its doctor gate
-   on purpose: plain `heddle doctor` probes only the default `~/.heddle`, so it would verify a
-   different install than the run wrote — home-aware verification is tracked in HED-596.)
+   complete" is a checked claim. (An alternate `--home` install runs its doctor gate too: the wizard's
+   closing step is home-aware and verifies the account registry it wrote under that root — HED-596. A
+   bare standalone `heddle doctor` is NOT home-aware — it still probes the default `~/.heddle` — so
+   verify a `--home` install through the wizard's own closing step, not a separate `heddle doctor`.)
 6. **Repair a single step.** To redo just one part rather than the whole walkthrough, use
    `heddle setup --only <id>` (run only these steps) or `--skip <id>` (run all but these) — comma-
    separate ids, and take the ids from the `--json --dry-run` plan. `--only` and `--skip` are

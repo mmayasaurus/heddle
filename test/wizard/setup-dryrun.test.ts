@@ -154,8 +154,8 @@ function filesUnderHome(dir: string = tempHome): string[] {
 // The accounts-focused HED-571 scenarios run the composed walkthrough MINUS the real doctor finish-gate.
 // Since #191 wired the read-only doctor into buildSteps it runs real CLI execFile probes (claude/codex/
 // cursor auth, git) that are non-hermetic — they HANG on a dev box with real CLIs (30s timeout; a latent
-// CI flake), and these scenarios never assert the doctor's result anyway. Doctor's wiring, its dry-run /
-// alt-home guards, AND the green/warn/fail finish mapping are all covered HERMETICALLY by the HED-599
+// CI flake), and these scenarios never assert the doctor's result anyway. Doctor's wiring, its dry-run
+// guard, AND the green/warn/fail finish mapping are all covered HERMETICALLY by the HED-599
 // block below (which injects the report instead of probing). — HED-604
 const stepsWithoutRealDoctor = (runner: CliRunner) => buildSteps({ runner }).filter((step) => step.id !== 'doctor');
 
@@ -316,8 +316,10 @@ describe('heddle setup — doctor-green finish composition (HED-599)', () => {
     // qodo/codeant: the canned-report scenarios above compose a custom array, so a regression that drops
     // the doctor step from buildSteps or loses its guards would not surface there. Pin the PRODUCTION
     // composition instead: extract the REAL guarded doctor step FROM buildSteps (proving it stays wired)
-    // and drive THAT step through its two skip paths — no real probe needed, and running it in isolation
+    // and drive THAT step through its dry-run skip path — no real probe needed, and running it in isolation
     // keeps this decoupled from the spread/meters/rules step grouping (no cross-PR collision).
+    // (HED-596 removed the alt-home skip guard; the doctor now RUNS under --home — positive coverage of
+    // that lives as an injected-doctor test in setup.test.ts, not here where the production step probes.)
     const doctor = buildSteps({ runner: untouchableRunner() }).find((step) => step.id === 'doctor');
     expect(doctor, 'buildSteps must keep the doctor finish-gate wired').toBeDefined();
 
@@ -326,17 +328,5 @@ describe('heddle setup — doctor-green finish composition (HED-599)', () => {
       .find((result) => result.id === 'doctor');
     expect(dryDoctor?.status).toBe('skipped');
     expect(dryDoctor?.summary.toLowerCase()).toContain('dry-run');
-
-    // skipDoctorUnderAltHome intact: a --home install diverging from $HOME skips the gate (HED-596),
-    // so setup never verifies (green OR red) a different install than it wrote.
-    const altHome = mkdtempSync(join(tmpdir(), 'heddle-hed599-alt-'));
-    try {
-      const altDoctor = (await runSetup(ctx({ homeDir: altHome }), makeIO(new PlanPrompter({})), [doctor!]))
-        .find((result) => result.id === 'doctor');
-      expect(altDoctor?.status).toBe('skipped');
-      expect(altDoctor?.summary).toMatch(/HED-596/);
-    } finally {
-      rmSync(altHome, { recursive: true, force: true });
-    }
   });
 });
