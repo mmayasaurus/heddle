@@ -302,6 +302,18 @@ async function resolveTargetByOffer(ctx: WizardContext, io: WizardIO): Promise<{
   return { skip: 'PR automation: no git repository entered' };
 }
 
+/**
+ * Report a scaffold-write failure and, when the error names a blocked path (the symlinked, non-directory, or
+ * world/other-writable `.github` component that createFileWithinRoot refused), add an actionable remediation
+ * hint. Factored out of run()'s catch so the step's control flow stays within the complexity budget (HED-650).
+ */
+function reportScaffoldFailure(io: WizardIO, targetDir: string, detail: string): void {
+  io.report(`PR automation failed: ${detail}`);
+  if (/symlink|writable|not a directory/i.test(detail)) {
+    io.report(`If ${targetDir}/.github is a symlink or world-writable, heddle will not write through it — replace it with a plain directory you own and re-run.`);
+  }
+}
+
 export function prAutomationStep(): WizardStep {
   return {
     id: 'pr-automation',
@@ -372,10 +384,7 @@ export function prAutomationStep(): WizardStep {
         });
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
-        io.report(`PR automation failed: ${detail}`);
-        if (/symlink|writable|not a directory/i.test(detail)) {
-          io.report(`If ${targetDir}/.github is a symlink or world-writable, heddle will not write through it — replace it with a plain directory you own and re-run.`);
-        }
+        reportScaffoldFailure(io, targetDir, detail);
         return publish({ id: 'pr-automation', status: 'failed', summary: `PR automation: ${preset.label}; failed to write workflows` });
       }
     },
