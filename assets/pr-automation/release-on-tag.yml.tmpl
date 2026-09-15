@@ -1,0 +1,37 @@
+# Release workflow scaffold — safe by default.
+# This workflow never ships automatically: the operator owns enabling and targeting it,
+# and the operator decides whether the project is ready to release.
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing git tag to build the release from, e.g. v1.2.3"
+        required: true
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag }}
+          persist-credentials: false
+
+      - name: Configure this release build
+        run: |
+          echo "::error::Edit this file to build and package your project's release artifacts before creating a release."
+          exit 1
+
+      - name: Create GitHub Release
+        # inputs.tag is routed through an env var (not interpolated into the shell) to avoid script
+        # injection — the same pattern gate.yml.tmpl uses for every ${{ }} value.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+        run: gh release create "$TAG" --generate-notes
