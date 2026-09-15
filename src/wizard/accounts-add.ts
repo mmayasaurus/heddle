@@ -176,7 +176,9 @@ async function envRepointBaseUrl(entry: ProviderMatrixEntry, deps: AccountsAddDe
   // endpoint can disagree (codeant #128). For a non-global region the operator must supply the URL.
   const urlDefault = region && region !== 'global' ? undefined : entry.baseUrl;
   const baseUrl = await deps.prompter.text(`${entry.displayName} base URL`, urlDefault);
-  validateEnvRepointBaseUrl(baseUrl, `${entry.displayName} base URL`);
+  // Validation is the CALLER's job (addEnvRepointOne), in a narrow try/catch — so a bad URL fails just
+  // that account while a prompter cancellation still propagates and aborts the wizard, matching
+  // addLocalRuntimeOne / addCustomProvider (qodo #241: don't record a prompter exception as a failed account).
   return { baseUrl, ...(region === undefined ? {} : { region }) };
 }
 
@@ -196,10 +198,9 @@ export async function addEnvRepointOne(
     deps.report?.(`FAIL ${entry.key} ${id} (id already used by an existing ${provider} account — choose another)`);
     return;
   }
-  let baseUrl: string;
-  let region: string | undefined;
+  const { baseUrl, region } = await envRepointBaseUrl(entry, deps);
   try {
-    ({ baseUrl, region } = await envRepointBaseUrl(entry, deps));
+    validateEnvRepointBaseUrl(baseUrl, `${entry.displayName} base URL`);
   } catch (error) {
     summary.failed.push(id);
     deps.report?.(`FAIL ${entry.key} ${id} (${error instanceof Error ? error.message : String(error)})`);

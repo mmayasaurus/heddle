@@ -167,6 +167,18 @@ describe('loadAccountRegistry', () => {
     expect(() => loadAccountRegistry(path)).toThrow(/credentials in the URL/i);
   });
 
+  it('refuses a loopback-PREFIXED remote host over http (no bypass via localhost.evil.com)', () => {
+    // The loopback set is literal exact-match, not a prefix/suffix test: a remote host that merely
+    // starts with "localhost" or "127.0.0.1" must still require https. (Genuine obscure spellings of
+    // 127.0.0.1 — 0177.0.0.1, 0x7f.0.0.1, 2130706433, 127.1 — are canonicalized to 127.0.0.1 by the URL
+    // parser and correctly accepted as loopback; only truly-remote hosts are refused.)
+    const path = writeAccounts('loopback-prefix-bypass-env-repoint.json', {
+      claude: [{ id: 'bypass', envRepoint: { baseUrl: 'http://localhost.evil.com/v1', authTokenRef: 'NAME', service: 'test' } }],
+    });
+
+    expect(() => loadAccountRegistry(path)).toThrow(/must use https:\/\/ for a remote endpoint/i);
+  });
+
   it('preserves an operator-supplied envRepoint model and omits it when absent', () => {
     const path = writeAccounts('env-repoint-model.json', { claude: [
       { id: 'with-model', envRepoint: { baseUrl: 'https://x.test', authTokenRef: 'NAME', service: 'kimi', model: 'synthetic-kimi-id' } },
