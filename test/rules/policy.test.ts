@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
+import { chmodSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { applyPolicy, loadRulesPolicy, type RulesPolicy } from '../../src/rules/policy.js';
 import { parseRule, type Rule } from '../../src/rules/schema.js';
+import { useTempResources } from '../helpers.js';
 
 function rule(id: string, enforce: boolean): Rule {
   const parsed = parseRule({
@@ -51,9 +54,68 @@ describe('applyPolicy', () => {
 });
 
 describe('loadRulesPolicy', () => {
+  const { tempDir } = useTempResources('heddle-policy-');
+
+  // tempDir() is a mkdtemp 0700 dir; a 0600 file inside it satisfies secureReadFile (owner-only file,
+  // non-group/other-writable parent), so this writes a policy the secure read path will actually accept.
+  function writePolicyFile(body: string, mode = 0o600): string {
+    const path = join(tempDir(), 'rules.json');
+    writeFileSync(path, body, { mode });
+    return path;
+  }
+
+  it('reports a securely-readable v1 policy', () => {
+    const path = writePolicyFile(JSON.stringify({ schemaVersion: 1, rules: [{ id: 'sample-block', enforce: false }] }));
+    const result = loadRulesPolicy(path);
+    expect(result.policy?.rules).toEqual([{ id: 'sample-block', enforce: false }]);
+    expect(result.warning).toBeUndefined();
+    expect(result.absent).toBeUndefined();
+  });
+
+  it('fails open SILENTLY (absent, no warning) when no policy file exists', () => {
+    // R convergence item 1: an ABSENT policy is the normal "operator never configured one" case — fall back
+    // to catalog enforcement WITHOUT a warning (a warning would cry wolf on every per-tool-call hook run).
+    // secureReadFile bubbles ENOENT unchanged; we map exactly that code to { absent: true }.
+    const result = loadRulesPolicy(join(tempDir(), 'rules.json')); // never created
+    expect(result.absent).toBe(true);
+    expect(result.warning).toBeUndefined();
+    expect(result.policy).toBeUndefined();
+  });
+
+  it('fails open LOUDLY (warning names the path) for invalid JSON', () => {
+    const path = writePolicyFile('{ not json');
+    const result = loadRulesPolicy(path);
+    expect(result.warning).toContain(path);
+    expect(result.warning).toContain('not valid JSON');
+    expect(result.policy).toBeUndefined();
+    expect(result.absent).toBeUndefined();
+  });
+
+  it('fails open LOUDLY for a non-v1 policy object', () => {
+    const path = writePolicyFile(JSON.stringify({ schemaVersion: 2, rules: [] }));
+    const result = loadRulesPolicy(path);
+    expect(result.warning).toContain(path);
+    expect(result.warning).toContain('not a valid v1 policy');
+    expect(result.policy).toBeUndefined();
+  });
+
+  it('fails open LOUDLY when the policy file is group/other-readable (secure-fs refuses it)', () => {
+    // R convergence item 2: the policy is read via secure-fs secureReadFile, so a rules.json that is NOT
+    // owner-only (chmod'd to 0644 here, umask-independent) is REFUSED — the hook warns + falls back to
+    // catalog. This is the ONLY test that fails if the read path is reverted to a bare readFileSync, so it
+    // is what pins the operator-domain (owner-only, no-symlink, TOCTOU-safe) read contract.
+    const path = writePolicyFile(JSON.stringify({ schemaVersion: 1, rules: [] }));
+    chmodSync(path, 0o644);
+    const result = loadRulesPolicy(path);
+    expect(result.warning).toContain(path);
+    expect(result.warning).toContain('could not be securely read');
+    expect(result.policy).toBeUndefined();
+  });
+
   it('fails open (never hangs) on a non-regular policy file', () => {
-    // /dev/zero is an endless char device — readFileSync would read forever. The regular-file guard must
-    // return a warning + catalog fallback FAST, never hang the per-tool-call hook (vitest would time out).
+    // /dev/zero is an endless char device — a bare readFileSync would read forever. secureReadFile opens it
+    // O_NOFOLLOW and rejects it at the fstat-on-the-fd isFile() check (secure-fs.ts) BEFORE any read, so we
+    // get a fast warning + catalog fallback, never a hang (vitest would otherwise time out).
     const result = loadRulesPolicy('/dev/zero');
     expect(result.warning).toBeDefined();
     expect(result.policy).toBeUndefined();

@@ -1,15 +1,18 @@
 import { beforeAll, describe, expect, it } from 'vitest';
 import { spawn } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ensureBuilt, PROJECT_ROOT } from '../helpers/cli.js';
 import { useTempResources } from '../helpers.js';
 
 const rule = (id: string, event: string, action: string, enforce: boolean, message: string) => `id: ${id}\nevent: ${event}\nmatch: {}\naction: ${action}\nenforce: ${enforce}\nsubagent_aware: false\nmessage: ${message}\nfail_open: true\n`;
-function writePolicy(home: string, policy: unknown): void {
+function writePolicy(home: string, policy: unknown, mode = 0o600): void {
   const dir = join(home, '.heddle', 'policy');
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, 'rules.json'), typeof policy === 'string' ? policy : JSON.stringify(policy));
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const path = join(dir, 'rules.json');
+  writeFileSync(path, typeof policy === 'string' ? policy : JSON.stringify(policy));
+  // Exact mode, umask-independent: 0600 satisfies secureReadFile (owner-only); 0644 exercises its refusal.
+  chmodSync(path, mode);
 }
 async function runHook(rules: string, stdin: string, env: Record<string, string> = {}): Promise<{ stdout: string; stderr: string; code: number }> {
   return new Promise((resolve, reject) => {
@@ -57,14 +60,34 @@ describe('heddle-hook bin', () => {
     expect(output.hookSpecificOutput.permissionDecision).toBeUndefined();
     expect(output.hookSpecificOutput.additionalContext).toContain('(would block) denied');
   });
-  it.each([
-    ['missing', undefined],
-    ['invalid JSON', '{'],
-    ['non-v1', { schemaVersion: 2, rules: [{ id: 'sample-block', enforce: false }] }],
-  ])('warns for %s policy and preserves catalog enforcement', async (_name, policy) => {
+  it('fails open SILENTLY (no warning) when no policy file exists', async () => {
+    // R convergence item 1 through the real binary: an ABSENT policy warns NOTHING and preserves catalog
+    // enforcement (the wizard-never-ran case must not print a warning on every per-tool-call hook run).
     const rules = tempDir(); const home = tempDir();
     writeFileSync(join(rules, 'sample-block.yaml'), rule('sample-block', 'PreToolUse', 'block', true, 'denied'));
-    if (policy !== undefined) writePolicy(home, policy);
+    const r = await runHook(rules, JSON.stringify({ hook_event_name: 'PreToolUse' }), { HOME: home });
+    expect(JSON.parse(r.stdout).hookSpecificOutput.permissionDecision).toBe('deny');
+    expect(r.stderr).not.toContain('rules policy');
+    expect(r.stderr).not.toContain('FAILED OPEN');
+  });
+  it.each([
+    ['invalid JSON', '{'],
+    ['non-v1', { schemaVersion: 2, rules: [{ id: 'sample-block', enforce: false }] }],
+  ])('warns LOUDLY for a present-but-unusable (%s) policy and preserves catalog enforcement', async (_name, policy) => {
+    const rules = tempDir(); const home = tempDir();
+    writeFileSync(join(rules, 'sample-block.yaml'), rule('sample-block', 'PreToolUse', 'block', true, 'denied'));
+    writePolicy(home, policy);
+    const r = await runHook(rules, JSON.stringify({ hook_event_name: 'PreToolUse' }), { HOME: home });
+    expect(JSON.parse(r.stdout).hookSpecificOutput.permissionDecision).toBe('deny');
+    expect(r.stderr).toContain('rules policy');
+    expect(r.stderr).not.toContain('FAILED OPEN');
+  });
+  it('warns LOUDLY for a group/other-readable policy (secure-fs refuses it) and preserves catalog enforcement', async () => {
+    // R convergence item 2 through the real binary: a rules.json that is not owner-only (0644) is refused by
+    // secureReadFile → the hook warns + falls back to catalog. Fails if the read path reverts to bare fs.
+    const rules = tempDir(); const home = tempDir();
+    writeFileSync(join(rules, 'sample-block.yaml'), rule('sample-block', 'PreToolUse', 'block', true, 'denied'));
+    writePolicy(home, { schemaVersion: 1, rules: [{ id: 'sample-block', enforce: false }] }, 0o644);
     const r = await runHook(rules, JSON.stringify({ hook_event_name: 'PreToolUse' }), { HOME: home });
     expect(JSON.parse(r.stdout).hookSpecificOutput.permissionDecision).toBe('deny');
     expect(r.stderr).toContain('rules policy');
