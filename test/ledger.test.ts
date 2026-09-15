@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
+import { chmodSync, existsSync, mkdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { Ledger } from '../src/ledger.js';
 import { useTempResources } from './helpers.js';
@@ -49,6 +50,23 @@ describe('Ledger (temp db)', () => {
     const [row] = ledger.recent(1);
     expect(row.ok).toBe(0);
     expect(row.error).toBe('codex produced no stdout');
+  });
+
+  it('creates ledger storage with owner-only permissions', () => {
+    const path = join(dir, 'ledger.db');
+    expect(statSync(dir).mode & 0o777).toBe(0o700);
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+    for (const sibling of [`${path}-wal`, `${path}-shm`]) {
+      if (existsSync(sibling)) expect(statSync(sibling).mode & 0o777).toBe(0o600);
+    }
+  });
+
+  it('tightens a pre-existing world-traversable ledger directory to 0700', () => {
+    const loose = join(dir, 'loose');
+    mkdirSync(loose, { recursive: true });
+    chmodSync(loose, 0o755); // simulate an existing 0755 ~/.heddle from before this hardening
+    trackLedger(new Ledger(join(loose, 'ledger.db')));
+    expect(statSync(loose).mode & 0o777).toBe(0o700);
   });
 
   it('annotateError() appends to blank and existing errors, and returns false for a missing row', () => {

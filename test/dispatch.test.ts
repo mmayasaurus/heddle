@@ -44,6 +44,24 @@ describe('dispatch — class + explicit route, and in-session refusal', () => {
     expect(ledger.recent(1)[0].ok).toBe(0);
   });
 
+  it('redacts an adapter error before returning and persisting it', async () => {
+    // Split literal so the shipped source line carries no contiguous credential shape (public-scrub
+    // convention); the runtime value is the full token the redactor must scrub.
+    const token = 'sk-' + 'ant-EXAMPLE0000';
+    const fake = fakeAdapter({ ok: false, output: '', exitCode: 1, error: `provider stderr: Authorization: Bearer ${token}` });
+    const ledger = tempLedger();
+
+    const outcome = await dispatch(
+      { taskClass: 'bulk-mechanical', provider: 'codex', model: 'gpt-5.6-sol', prompt: 'x', cwd: tempDir() },
+      ledger, () => fake.adapter,
+    );
+
+    expect(outcome.error).toContain('[redacted]');
+    expect(outcome.error).not.toContain(token);
+    expect(ledger.recent(1)[0].error).toContain('[redacted]');
+    expect(ledger.recent(1)[0].error).not.toContain(token);
+  });
+
   it('does not fail over after a truncated provider result with retained output', async () => {
     const dir = tempDir();
     const routingPath = join(dir, 'routing.yaml');

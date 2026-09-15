@@ -22,6 +22,7 @@ import { billingVerdict } from './billing.js';
 import { tierReadOnlyVerdict } from './tier-gate.js';
 import type { DispatchContext, DispatchRequest, DispatchOutcome, DispatchRefusal } from './types.js';
 import { validateEnvRepoint, type AccountEnvRepoint } from '../accounts.js';
+import { redactSecrets } from '../redact.js';
 import { createBoundedReceipt, finalizeBoundedResult, normalizedBoundedUsage } from '../bounded-dispatch.js';
 
 export type EnvRepointResolution =
@@ -433,6 +434,8 @@ export async function runTarget(
     }
   }
 
+  if (result.error) result.error = redactSecrets(result.error);
+
   // HED-98 worktree confinement: did anything change in the PARENT checkout while this worker ran?
   // Reported as a WARNING, not a failure: the work product may be perfectly good and destroying it
   // would be its own harm — but the side effects are dangerous and must never be silent. Nothing is
@@ -532,6 +535,14 @@ export async function runTarget(
     // The escape note is appended to the LEDGER's error column so the row is durably self-describing
     // (the outcome keeps it in its own `escape` field, so callers never mistake it for a failure). The
     // HED-395 billing-degraded note rides the same column for the same reason (queryable, never silent).
+    // result.error is already redacted at the line-337 boundary (the vendor-stderr credential vector).
+    // The escape/destroyed-work notes and the billing reason are heddle-GENERATED safety/status strings
+    // (they carry checkout FILENAMES, not vendor credentials) — they must NOT be re-redacted here, or an
+    // ordinary long filename (24+ chars w/ digits, not '/'-anchored) would be scrubbed from the ledger's
+    // own escape record. So the join is persisted verbatim; only result.error passed through redaction.
+    // (A worker COULD name a parent-checkout file after its own credential, persisting that credential-
+    // shaped FILENAME here; scrubbing heddle-generated safety notes without destroying ordinary filenames
+    // is a separate concern from F6's vendor-error-output scope — tracked in HED-651.)
     error: [result.error, escapeReport?.note, destroyedReport?.note, billingDegraded?.reason].filter(Boolean).join('; ') || undefined,
     sessionId: result.sessionId,
     durationMs: result.durationMs,
