@@ -32,7 +32,7 @@ import { runPrOwn } from './pr-own.js';
 import { runPrSweep } from './pr-sweep.js';
 import { runPrWatch } from './pr-watch.js';
 import { bootstrapComms } from './comms/bootstrap.js';
-import { loadAccountRegistry } from './accounts.js';
+import { loadAccountRegistry, reconcileRegistryIdentity, writeAccountRegistry } from './accounts.js';
 import { DEFAULT_ACCOUNTS_PATH } from './capaware.js';
 import { migrateConfigFile } from './config-migrations.js';
 import { diffFleetBin, diffFleetHooks, diffFleetLaunchers, installFleetBin, installFleetHooks, installFleetLaunchers } from './fleet.js';
@@ -178,9 +178,10 @@ const json = has('--json');
  * Skipped too for `setup` (HED-564): `heddle setup` is the fresh-machine onboarding walkthrough
  * (accounts, model-economy, meters, rules, doctor) — like `comms init` it runs before any dispatch
  * exists and must not incur ledger startup, migration, or SQLite locking; each step owns its writes.
- * Skipped too for `usage poll-claude` (HED-329): a scheduled vendor-poll that only writes usage
- * sidecars runs headless on a launchd timer (~5 min), has no ledger reads to make honest, and must
- * not mutate the ledger — closing orphans as a side effect of a background poll — on that cadence.
+ * Skipped too for `usage poll-claude` (HED-329): a scheduled vendor-poll that writes usage sidecars
+ * and populates registry identity via a local atomic accounts.json upsert runs headless on a launchd
+ * timer (~5 min), has no ledger reads to make honest, and must not mutate the ledger — closing
+ * orphans as a side effect of a background poll — on that cadence.
  * Skipped too for `usage install-poll-launchd` (HED-517): a local launchd installer that only writes
  * a plist and calls launchctl has no ledger reads to make honest and must not sweep orphans — a
  * `--dry-run` preview especially must observe, not mutate.
@@ -794,10 +795,30 @@ try {
           renameSync(tempPath, path);
           written.push(path);
         }
-        out(json, { written, skipped, warnings: result.warnings }, () => result.rows.map((row) => {
-          const path = written.find((candidate) => candidate.endsWith(`claude-${row.id.replace(/[^A-Za-z0-9_.-]/g, '_')}.oauth-usage.json`));
-          return path ? `${row.id} → written (${row.source})` : `${row.id} → skipped (${row.source})`;
-        }).join('\n'));
+        // HED-492: populate persistent registry identity (accountUuid/orgId) from the live poll, on this same
+        // cadence. Load the FULL registry now (readClaudeAccounts above is the poll projection, not the registry)
+        // to minimise the read-modify-write window (a true CAS is HED-503). Populate-only: a live identity that
+        // CONFLICTS with a persisted one is refused + warned, never overwritten.
+        const registry = loadAccountRegistry();
+        const identity = reconcileRegistryIdentity(registry, { rows: result.rows.map((r) => ({ id: r.id, liveIdentity: r.liveIdentity })) });
+        if (identity.changes.length) writeAccountRegistry(identity.registry);
+        out(json, {
+          written,
+          skipped,
+          warnings: result.warnings,
+          identity: {
+            written: identity.changes,
+            refused: identity.warnings.filter((warning) => warning.code === 'identity-conflict'),
+            unmatched: identity.warnings.filter((warning) => warning.code === 'no-registry-match'),
+          },
+        }, () => [
+          ...result.rows.map((row) => {
+            const path = written.find((candidate) => candidate.endsWith(`claude-${row.id.replace(/[^A-Za-z0-9_.-]/g, '_')}.oauth-usage.json`));
+            return path ? `${row.id} → written (${row.source})` : `${row.id} → skipped (${row.source})`;
+          }),
+          ...identity.changes.map((change) => `${change.id} → identity populated (accountUuid ${change.accountUuid}${change.orgId ? `, org ${change.orgId}` : ''})`),
+          ...identity.warnings.map((warning) => `${warning.id} → ${warning.message}`),
+        ].join('\n'));
         break;
       }
       if (process.argv[3] === 'install-poll-launchd') {
