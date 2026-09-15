@@ -92,9 +92,13 @@ function paths(assetSet: FleetAssetSet, options: FleetHookOptions): { canonicalD
 }
 
 function canonicalFiles(assetSet: FleetAssetSet, canonicalDir: string): string[] {
-  if (!existsSync(canonicalDir)) throw new Error(`fleet ${assetSet.kind} canon not found: ${canonicalDir}`);
+  // An ABSENT canon dir means this pack ships no fleet assets of this kind — the standalone ship-set
+  // excludes fleet/ entirely, so a shipped headless pack legitimately has no FLEET_ROOT/<kind> (HED-561).
+  // Return no files and let callers no-op (empty install/diff report, nothing to uninstall). This is
+  // DISTINCT from the present-but-EMPTY canon below, which is a broken checkout and still errors.
+  if (!existsSync(canonicalDir)) return [];
   const names = assetSet.files(canonicalDir);
-  // An empty canon is a broken checkout, never a vacuously clean install/diff.
+  // A present-but-empty canon is a broken checkout, never a vacuously clean install/diff.
   if (names.length === 0) throw new Error(`fleet ${assetSet.kind} canon is empty: ${canonicalDir}`);
   return names;
 }
@@ -112,6 +116,10 @@ function manifestHashes(): Map<string, string> {
 
 function verifyDefaultCanon(assetSet: FleetAssetSet, canonicalDir: string, names: string[]): void {
   if (canonicalDir !== assetSet.canonicalDir) return;
+  // Absent canon: canonicalFiles returned no names, so there is nothing to manifest-verify. A fleetless
+  // pack has no MANIFEST.sha256 either, so calling manifestHashes() below would throw — no-op instead
+  // (HED-561). A present-but-empty canon can never reach here: canonicalFiles throws on it first.
+  if (names.length === 0) return;
   const hashes = manifestHashes();
   for (const name of names) {
     const directory = assetSet.kind === 'bin' ? 'bin' : `${assetSet.kind}s`;
@@ -299,10 +307,10 @@ export function diffFleetBin(options: FleetBinOptions = {}): FleetBinDiffReport 
 }
 
 /**
- * Verify a fleet asset set's canon is present, non-empty, and (for the default canon) manifest-
- * identical — WITHOUT touching any installed target. `uninstall` runs this for every asset set before
- * removing anything, so a manifest/canon failure aborts the whole command rather than leaving one set
- * removed and another intact.
+ * Verify a fleet asset set's canon before uninstall touches any installed target: a PRESENT canon must
+ * be non-empty and (for the default canon) manifest-identical, or this aborts the whole command rather
+ * than leaving one set removed and another intact. An ABSENT canon is a no-op (a fleetless pack ships no
+ * fleet/ — HED-561), kept distinct from a present-but-empty canon, which still aborts.
  */
 export function verifyFleetCanon(kind: FleetAssetSet['kind'], options: FleetHookOptions = {}): void {
   const assetSet = ASSET_SETS[kind];
