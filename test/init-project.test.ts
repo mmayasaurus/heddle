@@ -13,6 +13,7 @@ const WIRED_HOOKS = [
   'agent-identity.py', 'agent-preflight.py', 'remind-owned-prs.py',
   'require-memtrace-first.py', 'delegation-nudge.py', 'require-pr-sweep.py',
 ];
+const DISCIPLINE_RULES = ['pr-review-sweep.md', 'pr-ownership.md', 'worktree-discipline.md'];
 
 function fixture(base: string) {
   const canonical = join(base, 'canonical');
@@ -78,6 +79,41 @@ describe('init-project', () => {
     expect(commands.every((command: string) => command.includes(opts.canonical))).toBe(true);
     const registry = JSON.parse(readFileSync(join(opts.homeDir, '.heddle', 'projects.json'), 'utf8'));
     expect(registry.projects[0]).toMatchObject({ name: 'toy', workspaceRoots: [realpathSync.native(opts.dir)] });
+  });
+
+  it('populates the canonical rules referenced by the consumer stubs', () => {
+    const opts = options(tempDir());
+    applyInstall(planInstall(opts));
+
+    for (const file of DISCIPLINE_RULES) {
+      const canonicalRule = join(opts.canonical, 'rules', file);
+      expect(readFileSync(canonicalRule, 'utf8')).toBe(readFileSync(join(dirname(dirname(fileURLToPath(import.meta.url))), 'fleet', 'rules', file), 'utf8'));
+      const stub = readFileSync(join(opts.dir, '.claude', 'rules', file), 'utf8');
+      const stubCanonical = stub.match(/^Canonical: (.+)$/m)?.[1];
+      expect(stubCanonical).toBeDefined();
+      expect(existsSync(stubCanonical!)).toBe(true);
+    }
+  });
+
+  it('does not clobber an existing canonical rule on re-run', () => {
+    const opts = options(tempDir());
+    applyInstall(planInstall(opts));
+    const canonicalRule = join(opts.canonical, 'rules', DISCIPLINE_RULES[0]!);
+    writeFileSync(canonicalRule, 'operator customization\n');
+
+    expect(planInstall(opts).steps.find((step) => step.step === `canonical-rule:${DISCIPLINE_RULES[0]}`)).toMatchObject({ action: 'skip', reason: 'exists' });
+    applyInstall(planInstall(opts));
+    expect(readFileSync(canonicalRule, 'utf8')).toBe('operator customization\n');
+  });
+
+  it('seeds runtime-state entries into a fresh project .gitignore', () => {
+    const opts = options(tempDir());
+    applyInstall(planInstall(opts));
+    const ignore = readFileSync(join(opts.dir, '.gitignore'), 'utf8');
+    expect(ignore).toContain('.memdb/');
+    expect(ignore).toContain('.memtrace/');
+    expect(ignore).toContain('.serena/');
+    expect(ignore).toContain('.worktrees/');
   });
 
   it('regression PR#112 — re-registration preserves prior gates in the written registry', () => {
