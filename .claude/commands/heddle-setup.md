@@ -17,7 +17,9 @@ own idempotent write, so re-running the walkthrough is always safe.
   you connect by naming an environment variable that holds your key (e.g. GLM), flags providers that
   aren't wired up yet as "coming", and closes with a **custom provider** option for anything not
   listed. The exact set offered is whatever the wizard prompts for — that is the source of truth.
-- **Model economy**, **spread / rotation**, **meters (opt-in)**, and **init-project rules**.
+- **Model economy**, **spread / rotation**, **meters (opt-in)**, and **init-project rules** — each
+  joins the walkthrough as the build gains it, so the step-2 dry-run plan is the true list of what a
+  run configures today, not this aspirational set.
 - A closing **`heddle doctor`** gate that verifies the configured environment end-to-end.
 
 ## How to run it — guide the interactive CLI, don't drive it
@@ -37,15 +39,19 @@ own run:
    prompts and the vendor logins need a terminal you don't own. The best path is to have them type
    `! heddle setup` at the prompt, which runs it in this session so the output lands back in the
    conversation for you to read and relay. If the prompts don't render interactively that way, have
-   them run `heddle setup` directly in their own terminal and paste the finish screen back. (Testing
-   against a throwaway install? add `--home <dir>` and/or `--target <dir>`.)
-4. **Relay the finish screen.** `heddle setup` prints a per-step summary — `✓` done / `–` skipped /
-   `✗` failed — to stderr, and exits `0` only when every step is done or skipped; a non-zero exit
-   means at least one step **failed**. Name which failed, and surface the exact re-run it prints
+   them run `heddle setup` directly in their own terminal and paste the outcome back. (Testing against
+   a throwaway install? `--home <a scratch directory>` puts the account registry and credential dirs
+   under that root instead of the real home.)
+4. **Relay the outcome.** `heddle setup` writes its step progress and finish screen to **stderr** and
+   a final per-step summary — `✓` done / `–` skipped / `✗` failed — to **stdout**, so capture both
+   (the `!` handoff already does). It exits `0` only when every step is done or skipped; a non-zero
+   exit means at least one step **failed** — name which, and surface the re-run it suggests
    (`heddle setup --only <id>`).
-5. **Verify.** The wizard's closing step runs `heddle doctor`. If it was skipped (a `--dry-run`
-   preview, an alternate `--home`, or `--skip doctor`), run `heddle doctor` now and relay its verdict
-   so "setup complete" is a checked claim, not an assumption.
+5. **Verify.** In a normal run the wizard's closing step runs `heddle doctor` and reports the verdict.
+   If it was skipped by a `--dry-run` preview or `--skip doctor`, run `heddle doctor` now so "setup
+   complete" is a checked claim. (After an alternate `--home` install the wizard skips its doctor gate
+   on purpose: plain `heddle doctor` probes only the default `~/.heddle`, so it would verify a
+   different install than the run wrote — home-aware verification is tracked in HED-596.)
 6. **Repair a single step.** To redo just one part rather than the whole walkthrough, use
    `heddle setup --only <id>` (run only these steps) or `--skip <id>` (run all but these) — comma-
    separate ids, and take the ids from the `--json --dry-run` plan. `--only` and `--skip` are
@@ -53,5 +59,7 @@ own run:
 
 ## Report
 A short summary, not a transcript: which accounts were connected (**by service — never echo a secret
-or key value**), the model-economy / rotation / meters choices made, and the `heddle doctor` verdict.
-Name anything that failed or was skipped, and the single next action to finish it.
+or key value**), the choices made in whichever steps ran (economy / rotation / meters / rules, as this
+build offers them), and the `heddle doctor` verdict. Summarize what the run actually reported — never
+assert a step that did not run. Name anything that failed or was skipped, and the single next action
+to finish it.
