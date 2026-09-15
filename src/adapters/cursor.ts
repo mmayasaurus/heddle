@@ -69,6 +69,7 @@ export class CursorAdapter implements WorkerAdapter {
       ? {
           inputTokens: u.inputTokens,
           cachedInputTokens: u.cacheReadTokens,
+          cacheCreationInputTokens: u.cacheWriteTokens,
           outputTokens: u.outputTokens,
         }
       : undefined;

@@ -165,6 +165,7 @@ export function fakeDeps(
       }
       throw new Error(`unexpected probe: ${key}`);
     },
+    execHook: async () => ({ stdout: '', stderr: '', exitCode: 0, timedOut: false }),
     ...restOverrides,
   };
 }

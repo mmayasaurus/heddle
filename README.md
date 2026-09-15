@@ -1,209 +1,328 @@
 # Heddle
 
-> The heddle is the part of a loom that lifts and separates the warp threads so the shuttle can
-> pass — the small piece that coordinates every thread. This is that, for a fleet of AI coding
-> agents.
+Heddle is a multi-agent harness for subscription coding CLIs. It gives you a guided machine setup, a reproducible project initializer, policy-driven worker dispatch, safety rules and hooks, skill packs, a durable ledger, and verification tools. You keep control of your project, provider accounts, and issue/PR systems; heddle supplies the coordination and guardrails around delegated work.
 
-Heddle is a **cross-provider agent orchestration layer** for subscription coding CLIs. Orchestrator
-sessions (Claude Code, interactive, in your own terminal tabs) claim issues, split them into
-sub-tasks, and dispatch each sub-task to the best-fit model — running on **your existing provider
-subscriptions, never per-token API billing** — with task-specific skill packs, real inter-agent
-messaging, and a companion dashboard for full visibility.
+## Install and build
 
-**Status.** Phase 1 (orchestration) is built and in daily use: the `WorkerAdapter` contract +
-verified per-CLI invocation (`src/adapters/`), the routing table + cap-aware routing + Claude
-account switching, the dispatcher, the SQLite ledger, the `heddle` CLI, the `heddle-mcp` MCP
-server, skill-pack materialization, and adversarial review. Phase 2 (comms broker) is built in its
-core — durable append-only log, trust tiers, delivery, the `heddle-comms` channel server, and fleet
-pause/quiesce (`docs/COMMS.md`); its needs-human queue, room governance, non-Claude transport
-bridges, and dashboard WebSocket push remain (`docs/COMMS.md` → Roadmap). Phase 3 is the
-**dashboard**, which lives in its own repo
-(`heddle-dashboard`, a Tauri fork of VelaTerm) and consumes heddle's ledger + comms. The test
-suite is behavioral vitest (`npm test`). See `docs/ARCHITECTURE.md` and, first, `docs/SPEC.md`.
-
-**Read first: `docs/SPEC.md`** (the single source of truth). Detail: `docs/ORCHESTRATION.md`
-(Phase-1 mechanics) · `docs/MODELS.md` (routing/task-class narrative + cap-aware/Fable budget) ·
-`docs/ARCHITECTURE.md` (layers) · `docs/COMMS.md` (broker) · `docs/fleet/DASHBOARD.md` (the
-`heddle-dashboard` product) · `docs/LANDMINES.md` (live-verified per-CLI contracts — read before
-touching an adapter) · `docs/CI.md` (CI, scanners, review-sweep).
-
-First consumer: a private multi-agent app-rebuild fleet. Heddle itself is project-agnostic — the consumer
-supplies its own routing table, Linear team, and ownership systems.
-
-## Install as a Claude Code plugin
-
-Heddle ships as a Claude Code plugin (`.claude-plugin/`), bundling the `heddle` (dispatch surface)
-and `heddle-comms` (inter-agent messaging) MCP servers so any Claude Code session can drive the fleet.
-
-**From a built checkout** (works today):
+Heddle requires Node.js `>=22.12.0`.
 
 ```shell
-git clone https://github.com/OWNER/heddle.git && cd heddle   # OWNER = the repo owner
-npm install && npm run build           # produce dist/ (the two MCP servers)
-PLUGIN_DIR="$(pwd)"                     # remember the plugin's location, then…
-cd /path/to/your/project               # …launch from YOUR project — NOT the heddle checkout
-claude --plugin-dir "$PLUGIN_DIR"      # so dispatched workers target your project, not heddle's source
-```
-
-Once loaded, the `plugin:heddle:heddle` and `plugin:heddle:heddle-comms` MCP tools are available. The
-plugin resolves every path from `${CLAUDE_PLUGIN_ROOT}`, so it works from wherever the checkout lives
-— no machine-specific paths. Verify a checkout with `claude plugin validate .`.
-
-The `heddle-comms` tools need a per-session agent identity (`HEDDLE_AGENT`); without one, comms
-operations fail with `no bound comms identity`. Establishing accounts and identity is the onboarding
-wizard's job (a follow-up slice) — until then, set `HEDDLE_AGENT=<name>` in the session yourself.
-
-**One-command marketplace install** — `/plugin marketplace add <owner>/heddle` then
-`/plugin install heddle@heddle` — resolves against the same-repo marketplace
-(`.claude-plugin/marketplace.json`, `source: "./"`), but is **not usable from this source tree**:
-build output is kept out of source (`dist/` is gitignored), so a bare clone has no runnable servers.
-The install-ready build is a follow-up slice — a standalone CLI-only distribution **regenerated from
-this source** and scrubbed for public readiness, shipping a self-contained plugin (built `dist/` plus
-the lockfile, so `npm ci` supplies the servers' dependencies with **no user build step**). Until that
-lands, use the built-checkout flow above.
-
-> This slice delivers the MCP servers + the plugin/marketplace structure. Still to come as follow-up
-> slices of the packaging epic (HED-394): the release-generated distribution build, the orchestrator
-> slash commands, the rules-as-data hook engine, and the packaged skill packs.
-
-## The rules that shape everything
-
-1. **Never metered overage.** Every execution path bills against a subscription OR a no-overage key pool (free-tier / prepaid-credit / subscription-quota) — never per-token API billing. A pay-per-token account is refused at dispatch by default; the one exception is an explicit operator opt-in (`permit_pay_per_token`, default off). The billing-class decision lives in `billingVerdict` (the pure classifier the dry-run preview and the spawn-time gate share); `src/env.ts` strips every inherited billing-switch var so a stray key can't silently switch a worker off the subscription. Execution paths use subscription CLIs — Claude models via interactive Claude Code sessions and their in-session subagents, GPT models via `codex exec` (ChatGPT plan), Gemini models via `agy` (Antigravity CLI, Google plan), and supplemental models (Kimi K3, Composer, Grok, GLM, …) via `cursor-agent` (Cursor plan's included pool) or free/prepaid key pools (e.g. Groq, OpenRouter credits) when the account's billing class carries no overage.
-   **Corollary — we drive each vendor's own official binary, never a third-party client wearing
-   its credentials.** Google's Antigravity FAQ, for instance, prohibits using third-party software
-   with an Antigravity login (suspension/termination grounds) while its own docs demonstrate
-   scripting `agy -p --output-format json` in CI. Heddle is squarely the latter: official binaries,
-   official auth, no token extraction or credential proxying — for any provider.
-2. **Never route a model through a middleman when a direct subscription exists.** Cursor carries
-   Claude/GPT/Gemini models in its catalog — Heddle must never select them there; it uses Cursor
-   only for models with no direct subscription.
-3. **Orchestrators are humans' terminal tabs.** An orchestrator is an interactive Claude Code
-   session in a human's own terminal tab; Heddle never owns that terminal. The GUI is a **separate
-   app** — `heddle-dashboard`, built as a Tauri fork of VelaTerm — that visualizes the fleet and
-   hosts in-app terminals; it consumes heddle's ledger and comms, it is not heddle itself.
-   (`docs/fleet/DASHBOARD.md` holds the product vision — panes, roster, embedded terminals — and supersedes
-   the earlier "browser only, no embedded terminals" scope; its 2026-08-03 *Electron* shell decision
-   predates the VelaTerm/Tauri choice and is being reconciled — HED-177.)
-4. **Ownership is external and canonical.** Issue tracking (Linear) and PR ownership live in the
-   consumer project's existing systems; Heddle links its sub-task ledger to them, never replaces
-   them.
-5. **Route away, never overage.** Metered/open-billing pools get a guard threshold; when a pool nears exhaustion, work routes elsewhere before on-demand or overage charges are incurred.
-
-## Layout
-
-```
-routing/routing.v0.yaml  routing table: task-class → provider/model/effort/skills (+why, edits_code)
-src/dispatch.ts          the dispatcher: task class → routed worker → recorded outcome (+refusals)
-src/dispatcher/          the dispatcher's modules: types · packs · adapters · refusals · override-gate · monoculture · plan · run (src/dispatch.ts keeps dispatch() + re-exports)
-src/routing.ts           routing-table loader + resolveRoute
-src/capaware.ts          cap-aware routing (HED-67) + Claude account switching (HED-68) + Fable budget (HED-76)
-src/ledger.ts            SQLite dispatch/review ledger (node:sqlite; ~/.heddle/ledger.db)
-src/cli.ts               the `heddle` CLI (dispatch · route · classes · usage · reviews · ledger · …)
-src/mcp-server.ts        the `heddle-mcp` MCP server (dispatch_worker, list_task_classes, plan_dispatch, assess_result, …)
-src/types.ts             WorkerAdapter contract (ports-and-adapters)
-src/adapters/            codex · cursor · agy (subprocess, verified) · claude (in-session protocol) · parse
-src/comms/               comms broker: log · server · channel-server (`heddle-comms`) · seal (trust) · quiesce/nudge · bridge
-src/skillpacks.ts        skill-pack materialization (AGENTS.md / --append-system-prompt)
-src/review.ts            adversarial-review reviewer selection (HED-3)
-src/classify.ts          effort classification + assess
-src/identity.ts          orchestrator/worker fleet identity
-src/worktree.ts          worktree confinement + destroyed-work detection
-src/rotate/              fleet rotator (account rotation)
-src/guidance.ts + src/hook-dispatch-guidance.ts   dispatch-time guidance rules + the PreToolUse hook
-src/smoke.ts             `node dist/smoke.js <adapter> "<prompt>"` — one-shot adapter round-trip
-docs/                    SPEC · ORCHESTRATION · ARCHITECTURE · MODELS · COMMS · DASHBOARD · LANDMINES · CI · …
-test/                    vitest behavioral suites (`npm test`)
-```
-
-Dispatch-time guidance (HED-1): `list_task_classes` / `heddle classes` return each class's `why`,
-default `skills`, `edits_code`, `execution`; the PreToolUse hook `dist/hook-dispatch-guidance.js`
-nudges on no-task-fit-packs / missing opt-in (never blocks). Semantics + registration snippet:
-`docs/MODELS.md` → "Dispatch-time surfacing".
-
-## Install & register
-
-Prerequisites: **Node ≥ 22.12** (`node:sqlite` needs 22.5+; vitest 4's vite/rolldown declare
-`>=22.12.0`, and `package.json` `engines` pins it so older 22.x fail fast at install). Plus a
-logged-in CLI for each provider you dispatch to — `codex` (ChatGPT plan), `cursor-agent` (Cursor
-plan), `agy` (Antigravity/Google). Claude models default to **headless** dispatch — `ClaudeAdapter`
-spawns the `claude` CLI as `claude -p …` — so that binary must be installed and logged in too; only
-the opt-in `--in-session` / `in_session:true` path spawns nothing (it returns an instruction for
-your interactive session's Agent tool instead).
-
-```bash
+git clone https://github.com/OWNER/heddle.git   # replace OWNER with the repository owner
+cd heddle
 npm install
-npm run build          # tsc → dist/
-npm run typecheck      # tsc --noEmit over src/ AND test/ (tsconfig.test.json)
-npm test               # vitest run — behavioral suites under test/**/*.test.ts (no build needed)
-node dist/smoke.js cursor "Reply with exactly: OK"   # requires cursor-agent login
-node dist/smoke.js codex  "Reply with exactly: OK"   # requires codex login
+npm run build
+npm link   # optional: exposes the `heddle` command the examples below use
+node dist/cli.js classes --json
 ```
 
-Register the MCP server with your MCP client (Claude Code, etc.) — point it at the built entry:
+The built CLI is `node dist/cli.js` (or `heddle` when installed as a bin). Provider-backed operations also require the relevant provider CLI to be installed and logged in.
 
-```jsonc
-// .mcp.json (in your consumer project, or your Claude config). This repo ships its own
-// .mcp.json for heddle-comms sessions opened here; this is the separate generic MCP entry.
+## Machine setup
+
+Run the wizard on a new machine or re-run individual steps as your configuration changes:
+
+```shell
+heddle setup
+heddle setup --only accounts,meters
+heddle setup --skip pr-automation
+```
+
+The wizard runs these eight steps in order: `accounts`, `model-economy`, `spread`, `meters`, `rules`, `permissions`, `pr-automation`, and `doctor`. A failed step does not prevent later steps from reporting their outcome; `heddle setup` exits 1 when any selected step fails.
+
+| Option | Meaning |
+| --- | --- |
+| `--only <ids>` | Run only comma-separated step IDs. Cannot be used with `--skip`. |
+| `--skip <ids>` | Skip comma-separated step IDs. |
+| `--dry-run` | Preview every write step without prompting, logging in, writing, or running the final doctor check. |
+| `--answers <file>` | Read a JSON-array answer script for non-interactive runs. |
+| `--home <dir>` | Use `<dir>/.heddle` instead of your normal home for wizard-owned configuration. |
+| `--target <dir>` | Target repository for the PR-automation step. |
+| `--json` | Return the step results as JSON. |
+
+For a safe preview in a disposable home:
+
+```shell
+heddle setup --home /tmp/heddle-home --dry-run --json
+```
+
+### What each setup step writes
+
+`accounts` guides native logins for Claude, Codex, and Cursor, or environment-repointed/local runtimes. It writes `<home>/.heddle/accounts.json`, an account registry with this top-level shape:
+
+```json
 {
-  "mcpServers": {
-    "heddle": { "command": "node", "args": ["/abs/path/to/heddle/dist/mcp-server.js"] }
+  "schemaVersion": 2,
+  "accounts": [
+    {
+      "id": "codex-work",
+      "provider": "codex",
+      "harness": "codex-cli",
+      "credentialRef": "codex:<config-path>",
+      "billingClass": "subscription-quota",
+      "tier": "T1",
+      "codexHome": "<config-path>",
+      "loggedIn": true,
+      "lastVerified": "<ISO-8601 timestamp>"
+    }
+  ]
+}
+```
+
+Account rows may additionally record fences, an overage posture, an environment-repoint endpoint and environment-variable reference, region, or provider-specific credential location. The registry stores references and metadata, not a secret value.
+
+`model-economy` asks for a default model and reasoning effort, an optional premium model/agent set, and whether to pin models per agent. It writes `<home>/.heddle/policy/model-economy.json`:
+
+```json
+{
+  "version": 1,
+  "default": { "model": "<model>", "effort": "<effort>" },
+  "premium": { "agents": ["A"], "model": "<model>", "effort": "<effort>" },
+  "modelPins": true
+}
+```
+
+`spread` asks which registered Claude accounts participate, expected concurrent sessions, a per-account cap, and whether to save. It writes `<home>/.heddle/policy/spread.json` only when you choose to save:
+
+```json
+{ "strategy": "even-spread", "provider": "claude", "accounts": ["account-id"], "capPerAccount": 1 }
+```
+
+`meters` asks whether to show the currently supported native-Claude usage meter for each eligible account. It writes `<home>/.heddle/policy/meters.json`:
+
+```json
+{ "version": 1, "accounts": { "account-id": { "meters": true } } }
+```
+
+`rules` shows each shipped hook rule, previews catalog fixtures when present, asks whether to include it, and asks whether block rules should enforce. It writes `<home>/.heddle/policy/rules.json` with `schemaVersion: 1` and a `rules` array of `{ "id": "…", "enforce": false }` entries.
+
+`permissions` asks for one of `block`, `ask`, `nudge`, or `off` for every guard category—`file-deletion`, `git-history-rewrite`, `db-destructive`, `disk-level`, `credential-writes`, and `package-removal`—in both `interactive` and `unattended` profiles. An unattended `ask` choice is saved as `block`. It writes `<home>/.heddle/policy/permissions.json`:
+
+```json
+{
+  "version": 1,
+  "activeProfile": "interactive",
+  "profiles": {
+    "interactive": { "<category>": "ask" },
+    "unattended": { "<category>": "block" }
   }
 }
 ```
 
-After `npm run build` the package declares bins: `heddle` (CLI), `heddle-mcp` (MCP server),
-`heddle-comms` (comms channel server), `heddle-rotator`, `heddle-hook-dispatch-guidance`. It is a
-private, unpublished package, so these are **not** on your `PATH` after `npm install` — run
-`npm link` (or a global install) to expose them, or invoke the built files directly (`node
-dist/cli.js …`, as the MCP snippet above does).
+`pr-automation` sets up CI review workflows in a target repository, and never writes without an opt-in. An explicit `--target <dir>` is itself the opt-in (no further confirmation). Without `--target`, the step detects whether the wizard is running inside a Git repository and asks before writing (default No); when no repository is selected at all, it offers to enter a path to one — validated as a real repository and normalized to its root, with up to three attempts — and pressing Enter instead skips the step. Under `--dry-run` it discloses exactly what a real run would ask and scaffold, including the offer-to-add-a-repository path, and writes nothing. Once a repository is confirmed it asks you to choose `TS/Node` or `Generic`, detects the default branch, and creates only absent files:
 
-### Verify harness health
+```text
+<target>/.github/workflows/deterministic-review.yml
+<target>/.github/workflows/gate.yml
+<target>/.github/scripts/gitleaks-range-scan.sh
+```
 
-### Standalone snapshot
+The TS/Node gate runs `npm ci`, `npm run typecheck`, `npm test`, and `npm run build`. The Generic gate intentionally contains a failing build-configuration placeholder for you to replace before making that check required. Existing workflow files are left unchanged. The step explains that making checks merge-blocking is a repository ruleset setting, not a file the wizard changes.
 
-Create a CLI-only snapshot with `heddle release --standalone <outDir>`. The generated directory
-contains the command-line source, tests, routing, skills, and public documentation; dashboard code
-and fleet operations documentation are not included. Add `--init-git` for a single local commit, or
-`--verify` to run install, build, and tests before the snapshot is placed at its destination.
+`doctor` is the read-only finish gate. It verifies the configured environment after the earlier steps.
 
-Run `heddle doctor` before onboarding an account or starting a session. It checks the configured
-harness binaries, login state, live model catalogs where supported, routing/config parsing, and
-provider verification freshness; `--provider` runs only that provider's checks plus global config
-checks (including valid API providers such as `groq`), and `--json` returns
-the same typed report. Cursor catalog omissions fail; an `agy` catalog omission warns because a new
-Gemini model can work before its catalog lists it (see `docs/MODELS.md`). It exits 1 only when a check
-fails; exit 0 means no failures (including timed-out, unverified probes, which warn), and exit 2 is a
-usage error.
+## Settings: machine-wide and project-level
 
-Framework-layer config lives under `~/.heddle/` (it spans projects, never a single repo):
-`accounts.json` (Claude accounts), `ledger.db` (dispatch/review ledger), `comms.db` (broker), and
-`packs/` (operator skill packs, searched after `HEDDLE_PACKS` and before built-ins).
+Heddle’s home-level state is under `~/.heddle/` (or the alternate `--home` directory used by setup). It is shared by every project on that machine. Important entries include `accounts.json`, `policy/*.json`, `secrets.env`, `projects.json`, `ledger.db`, `comms.db`, and optional `packs/`.
 
-`projects.json` may also define optional repository-aware `gates`: an exact app layout
-`{ "app": { "parent": "acme-org", "dir": "acme-app", "pack": "acme-app-gate" } }`, plus
-`byFolderName` and `byOriginName` maps from exact repository names to installed packs. A requested
-`quality-gate` resolves in order from a repository main root: app layout, exact folder corroborated
-by origin, then origin alone for renamed clones; otherwise it is dropped. Built-in keys cannot be
-overridden, and cross-project keys with different packs are dropped. Each defect warns on stderr and
-bad registry gate data fails soft rather than guessing a gate. An explicit `HEDDLE_PACKS` shadow of
-`quality-gate` remains consumer-owned; `~/.heddle/packs/quality-gate.md` does not disable resolution.
-See [project registry details](docs/PROJECTS.md).
-Environment overrides:
+`projects.json` is the registry of project names, workspace roots, agent IDs, team key, room, launcher, and optional repository-aware quality gates. An agent ID may belong to only one registered project; the registry validator rejects duplicates.
 
-| var | what |
-|-----|------|
-| `HEDDLE_AGENT` | this session's orchestrator identity (e.g. `U`); also honors `FLEET_AGENT` or a `.fleet-agent` file |
-| `HEDDLE_ROUTING` | routing-table path (default `routing/routing.v0.yaml`) |
-| `HEDDLE_LANES` | lanes configuration path (default `routing/lanes.yaml`) |
-| `HEDDLE_ACCOUNTS` | Claude accounts registry path (default `~/.heddle/accounts.json`) — cap-aware routing reads it |
-| `HEDDLE_PROJECTS` | project registry path (default `~/.heddle/projects.json`; blank is unset) |
-| `HEDDLE_PACKS` | extra skill-pack dirs (`path.delimiter` separated); then `~/.heddle/packs`, then built-ins |
-| `HEDDLE_COMMS_DB` | comms broker db (default `~/.heddle/comms.db`) |
-| `HEDDLE_LEDGER_DB` | dispatch/review ledger db (default `~/.heddle/ledger.db`), used for lineage |
+Project-level files are generated by `init-project`; they are not imported from a different project. Use an answer script or a preset to reproduce a setup. Cross-machine settings export/import is not implemented. Moving the non-secret parts of `~/.heddle` yourself is the current manual path; do not copy secrets.
 
-(`HEDDLE_DISPATCH_ID` / `HEDDLE_PARENT` / `HEDDLE_WORKER` are set by heddle on spawned workers — not
-operator config.)
+## Start a project
 
-Tests are behavioral (assert what a change DOES, not that a toggle toggles) and never touch the
-operator's real ledger — construct `new Ledger(<temp path>)`, see `test/ledger.test.ts`. CI,
-scanners, and the review-sweep rules: [`docs/CI.md`](docs/CI.md).
+Initialize an existing or new directory with a canonical hook set and project registration:
+
+```text
+heddle init-project <your-repo> \
+  --canonical <canonical-root> \
+  --name <project-name> \
+  --team <team-key> \
+  --agents A,B \
+  --room '#project-room' \
+  --launcher <launcher-script>
+```
+
+On a first registration, `--team`, `--agents`, `--room`, and `--launcher` are required. `--name` defaults to the target directory basename. `--canonical` can instead come from `HEDDLE_CANONICAL` or `~/.heddle/canonical.json`; one of those sources is required. The canonical root must contain a `hooks/` directory with all six wired discipline hooks (further workspace-only hooks are optional): `agent-identity.py`, `agent-preflight.py`, `remind-owned-prs.py`, `require-memtrace-first.py`, `delegation-nudge.py`, and `require-pr-sweep.py`.
+
+| Option | Meaning |
+| --- | --- |
+| `--canonical <path>` | Canonical hook root; required unless the environment variable or canonical config supplies it. |
+| `--name <name>` | Registry project name. |
+| `--team <key>` | Project team key for the first registration. |
+| `--agents A,B,…` | Comma-separated agent IDs for the first registration. |
+| `--room <room>` | Default room for the first registration. |
+| `--launcher <script>` | Launcher recorded for the first registration. |
+| `--preset minimal\|standard\|strict` | Select a shipped hook-rule set. |
+| `--hook-rules a,b` | Select named rules rather than a preset. |
+| `--enforce a,b` | Mark selected block rules as enforced. |
+| `--answers <file>` | JSON-array answer script for rule selection. |
+| `--enforce-memtrace` | Set this repository’s memtrace marker to enforced. |
+| `--dry-run` | Produce an installation plan without writes. |
+| `--json` | Return the installation report as JSON. |
+| `--show-content` | Include home-level planned content in the report instead of redacting it. |
+
+The preset rule sets are exact:
+
+| Preset | Installed rules |
+| --- | --- |
+| `minimal` | `no-rm-recursive-force` |
+| `standard` | `no-rm-recursive-force`, `no-git-history-rewrite`, `no-git-worktree-discard`, `pr-flow-reminder` |
+| `strict` | Standard plus `no-destructive-sql` |
+
+The installer plans and applies these artifacts:
+
+- `<your-repo>/.claude/settings.json`: merged discipline-hook wiring.
+- `<your-repo>/.claude/rules/pr-review-sweep.md`, `pr-ownership.md`, and `worktree-discipline.md`: canonical rule bridges, seeded only if absent.
+- `<your-repo>/rules/<rule-id>.yaml` and available `rules/tests/<rule-id>.jsonl`: selected hook rules and their fixtures, seeded only if absent.
+- `<your-repo>/.mcp.json`: merged MCP-server entries when the bundled template is available.
+- `<your-repo>/.memtraceignore`: appended `.worktrees/` and `.memdb*/` entries.
+- `<your-repo>/.claude/commands/`: `heddle-gate.md`, `startup.md`, `closeout.md`, `handoff.md`, and `heddle-usage.md`, seeded only if absent.
+- `~/.heddle/projects.json`: merged project registration.
+- `~/.heddle/memtrace-enforce.json`: per-repository memtrace marker; `--enforce-memtrace` sets it to `true`, otherwise a new marker starts at `false`.
+
+It is deliberately re-runnable. Merged files preserve unrelated configuration; seeded files are not overwritten; an unchanged rerun plans no change. If an input changes between planning and writing, the installer aborts rather than overwrite the newer content—rerun it to make a fresh plan.
+
+To inspect a new-project plan without modifying your normal home:
+
+```shell
+heddle init-project /tmp/example-repo \
+  --canonical /tmp/canonical \
+  --name example-repo --team EXAMPLE --agents A --room '#example' \
+  --launcher launch.sh --preset standard --dry-run --json
+```
+
+## Safety rules and discipline hooks
+
+The rule catalog contains these rules. All catalog defaults have `enforce: false`; a matching rule reports its action unless you enable enforcement for a block rule.
+
+| Rule | Default mode | Guard |
+| --- | --- | --- |
+| `no-rm-recursive-force` | block, not enforced | Recursive forced file removal. |
+| `no-git-history-rewrite` | block, not enforced | Hard resets, force-pushes, and forced branch deletion. |
+| `no-git-worktree-discard` | block, not enforced | Commands that discard uncommitted worktree state. |
+| `no-destructive-sql` | block, not enforced | Destructive database DDL and truncation. |
+| `pr-flow-reminder` | nudge | Opening a pull request. |
+
+The wired hooks establish identity and preflight checks at session start; remind about owned pull requests on prompt submission; require and record code-discovery activity before relevant reads, searches, commands, or stopping; nudge before edits; and record/enforce the pull-request sweep at the appropriate tool and stop events. Hook-rule evaluation uses the selected project `rules/` catalog through the generated settings wiring.
+
+After initialization, add or change project rules with `heddle rule list`, `heddle rule propose`, `heddle rule ratify`, and `heddle rule test`, or re-run `init-project` with `--hook-rules` and `--enforce`. The installer does not overwrite an existing seeded project rule.
+
+## Skill packs
+
+A skill pack is a Markdown instruction bundle attached to a dispatched worker. Heddle searches `HEDDLE_PACKS`, then `~/.heddle/packs`, then the built-in `skills/` directory; an earlier pack with the same name shadows a later one.
+
+`worker-role` and `worker-hygiene` are mandatory for every delegated worker. The dispatcher also attaches the provider-family pack automatically when available: `family-claude`, `family-codex`, `family-cursor`, or `family-gemini`. A task class supplies task-fit packs; an explicit `--skills` list replaces those defaults on ordinary routes, while review routes (those with a reviewer pool) union the class packs with the explicit list so the find-only review mandate is never dropped. Mandatory packs are always included either way.
+
+The shipped generic packs include `worker-role` (delegated-worker scope), `worker-hygiene` (safe working-tree and verification habits), the four family packs (provider-specific execution guidance), `code-discovery` (repository navigation), and `quality-gate` (repository quality checks). `heddle packs` lists the packs reachable in your current environment.
+
+For Codex, Gemini, and Cursor workers, materialized packs are temporarily added to the target worktree’s `AGENTS.md` and restored after the dispatch. Claude workers receive the composed packs through an appended system prompt.
+
+## Dispatch, routes, reviews, and the ledger
+
+Dispatch chooses a route from `routing/routing.v0.yaml`, materializes the applicable packs, invokes the provider adapter, and writes the outcome to the SQLite ledger. Preview a choice without a worker or ledger row:
+
+```shell
+heddle route --class implementation --json
+heddle dispatch --class implementation --task "Implement the bounded change"
+```
+
+You can route by class or name a provider/model directly. A direct route without a class requires `--override-reason`. Dispatch supports the flags shown by `heddle dispatch --help`, including skill/MCP overrides, effort, resume, timeout, fallback control, capability grants, account selection, and review lineage.
+
+Task classes encode the purpose and default provider/model policy. Their current roles are:
+
+| Class | When to use it |
+| --- | --- |
+| `orchestration` | Your own in-session decomposition and integration; it is not dispatchable. |
+| `deep-implementation` | Cross-cutting or subtle implementation work. |
+| `implementation` | Well-scoped feature work with a clear specification. |
+| `second-opinion` | Independent diagnosis or review of a plan or diff. |
+| `second-opinion-hard` | An opt-in, harder independent review. |
+| `escalate-judgment` | A genuinely hard, bounded judgment task. |
+| `bulk-mechanical` | Renames, codemods, boilerplate, and similar volume work. |
+| `scaffold` | Fast structural drafts such as files, stubs, and wiring. |
+| `research-summarize` | Reading, log triage, and summarization. |
+| `documentation` | Documentation and prose based on known facts. |
+| `quick-alt-take` | A lower-cost alternate draft or small-diff review. |
+| `adversarial-review` | Read-only, pre-PR review with a test-quality lens. |
+| `gemini-analysis` | Long-context analysis, cross-checking, and grounded research. |
+| `web-research` | Live research that must begin with a grounded search. |
+
+Use `heddle classes --json` for the exact current provider/model, fallback, skill, and editability data. Explicit provider/model routing is supported, but policy can refuse a request—for example, a missing opt-in, an unavailable capability fence, a non-dispatchable class, an invalid direct override, or a worker attempting to dispatch another worker. Refusals are returned with a code and recorded as finished ledger rows rather than silently disappearing.
+
+`adversarial-review` is read-only. Supply `--author-provider` (and optionally `--author-dispatch` and `--diff-base`); the review route selects a different provider family from the author. The author applies any accepted fixes. The ledger retains dispatches, refusals, output, review lineage, and review-pair outcomes. Inspect it with `heddle ledger`, `heddle ledger show <id>`, `heddle workers`, `heddle reviews`, and `heddle review-outcome`.
+
+The MCP server exposes the same core actions to an MCP client, including worker dispatch, dispatch planning, class listing, pack listing, effort classification, result assessment, ledger access, and review recording. Account and usage checks are CLI-only today.
+
+## Verification and health
+
+Run:
+
+```shell
+heddle doctor
+heddle doctor --provider codex --json
+```
+
+Doctor checks configured harness binaries, login state, live catalogs where supported, routing and lane configuration, project and Claude-account registries, comms readiness, installed-artifact drift, and provider-verification freshness. `--provider <name>` runs that provider’s checks plus the global configuration checks. Exit 0 means no failures (warnings and skipped checks may still be present); exit 1 means at least one failure; CLI usage errors exit 2.
+
+`heddle doctor --hooks` is a separate, opt-in diagnostic that is never part of the default read-only sweep: it executes every configured Claude Code hook from the current directory’s `.claude` settings with a synthetic stdin payload to report latency and health, which can trigger a hook’s normal external effects. It ignores `--provider`, runs under a default 180-second sweep budget (`--hooks-budget <seconds>` to raise it), and exits 1 for broken, missing, or permanently-timed-out hooks; a hook truncated by the budget is flagged hung if it ran past the interactive floor, or unverified (warning) when little budget remained.
+
+The project’s CI gate is behavioral: tests assert observable results rather than merely a toggle changing. The standard commands are:
+
+```shell
+npm run typecheck
+npm test
+npm run build
+```
+
+The PR-automation wizard scaffolds deterministic `gate`, Semgrep, and Gitleaks workflows. Their check contexts can be required in a repository ruleset after you have configured the repository’s build job appropriately.
+
+## Remaining CLI commands
+
+Run `heddle --help` for the authoritative syntax. The remaining commands are:
+
+| Command | Purpose |
+| --- | --- |
+| `classify-effort` | Classify task difficulty for a routing class. |
+| `assess` | Assess a worker result as done, needing rework, or needing a human. |
+| `projects` | List registered projects and fleets. |
+| `accounts list` | List registered Claude, Codex, and Cursor accounts. |
+| `accounts verify` | Verify local credential paths and recorded Claude login state. |
+| `accounts add` | Add native-login or environment-repoint accounts interactively. |
+| `comms init` | Initialize comms storage, operator token, and registered project rooms. |
+| `fleet install-hooks`, `fleet hooks-diff` | Install or compare vendored fleet hooks. |
+| `fleet install-launchers`, `fleet launchers-diff` | Install or compare vendored fleet launcher wrappers. |
+| `fleet install-bin`, `fleet bin-diff` | Install or compare vendored fleet bin tools. |
+| `upgrade` | Migrate configuration schemas and restore missing fleet assets without overwriting modified files. |
+| `uninstall` | Remove only installed fleet assets still byte-identical to the shipped version; it preserves modified assets. |
+| `mode [desktop\|mobile\|away]` | Read or set the local operator mode. |
+| `whoami` | Show the bound identity and worker context. |
+| `workers` | List in-flight dispatches, optionally limited to old orphans. |
+| `ledger`, `ledger show`, `ledger finish`, `ledger sweep`, `ledger report-in-session` | Inspect, close, sweep, or administratively report ledger records. |
+| `usage`, `usage --remaining`, `usage poll-claude`, `usage install-poll-launchd` | View totals/headroom, collect Claude usage, or install its local polling job. |
+| `top` | Print one disk-only dashboard snapshot. |
+| `account pick`, `account seat-weights sync` | Select a healthy Claude account or refresh seat-weight data. |
+| `pr own`, `pr sweep`, `pr watch` | Coordinate PR ownership, sweep review channels, or poll PR review/CI state. |
+| `rule list\|propose\|ratify\|test` | Manage hook rules. |
+| `reviews`, `review-outcome` | Inspect the adversarial-review scoreboard or record accepted findings. |
+| `release --standalone <outDir>` | Build a standalone CLI snapshot; it requires a clean checkout at the main-head commit. |
+
+## Documentation index
+
+- [Specification](docs/SPEC.md) — product and behavioral specification.
+- [Architecture](docs/ARCHITECTURE.md) — system layers and boundaries.
+- [Orchestration](docs/ORCHESTRATION.md) — dispatch mechanics.
+- [Models](docs/MODELS.md) — routing, capability, and provider behavior.
+- [Provider matrix](docs/PROVIDER-MATRIX.md) — supported provider configuration.
+- [Accounts](docs/ACCOUNTS.md) — account registry and account operations.
+- [Projects](docs/PROJECTS.md) — project registry and repository-aware gates.
+- [Project initialization](docs/INIT-PROJECT.md) — installer contract and generated files.
+- [Rules](docs/RULES.md) — hook-rule lifecycle and schema.
+- [Comms](docs/COMMS.md) — messaging broker behavior.
+- [CI](docs/CI.md) — CI, scanners, and review-sweep behavior.
+- [Review sweep](docs/REVIEW-SWEEP.md) — PR review sweep operation.
+- [Testing bar](docs/TESTING-BAR.md) — behavioral testing expectations.
+- [Usage polling](docs/USAGE-POLL.md) — usage-poll setup and operation.
+- [Memtrace freshness](docs/MEMTRACE-FRESHNESS.md) — code-index freshness checks.
+- [Fleet hooks](docs/FLEET-HOOKS.md), [fleet launchers](docs/FLEET-LAUNCHERS.md), and [fleet bin tools](docs/FLEET-BIN.md) — installed fleet assets.
+- [Landmines](docs/LANDMINES.md) — verified adapter and CLI constraints.
+- [Fleet overview](docs/fleet/README.md) and [dashboard](docs/fleet/DASHBOARD.md) — fleet-facing documentation.

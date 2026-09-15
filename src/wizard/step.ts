@@ -39,6 +39,14 @@ export interface WizardContext {
   /** The project directory for init-project-scoped steps; undefined for global-only steps. */
   targetDir?: string;
   /**
+   * True when `targetDir` was AUTO-DERIVED from the invocation cwd (a detected git repository),
+   * not passed explicitly via `--target`. A step that scaffolds into the project MUST confirm
+   * before writing when this is set: the operator never named this directory, so writing silently
+   * would assume intent (HED-624). An explicit `--target` leaves this unset — that IS the opt-in.
+   * Optional and additive, exactly like `dryRun` below.
+   */
+  targetDirDerived?: boolean;
+  /**
    * Preview mode (`heddle setup --dry-run`): when true a step performs NO side effects — no vendor
    * logins, no config writes — it reports what a real run would do and returns 'skipped' (or 'done'
    * for a read-only step). Optional and additive: --dry-run semantics vary per step, and a step with

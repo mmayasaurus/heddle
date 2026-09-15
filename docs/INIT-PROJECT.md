@@ -15,7 +15,8 @@ their `.claude/settings.json` (HED-107) — drift-prone and unrepeatable for a n
 ## Contract
 
 `heddle init-project <dir> [--canonical <path>] [--name <n>] [--team <KEY>] [--agents A,B,…]
-[--room <#room>] [--launcher <script>] [--enforce-memtrace] [--dry-run] [--json]`
+[--room <#room>] [--launcher <script>] [--preset <minimal|standard|strict>] [--hook-rules <a,b>] [--enforce <a,b>]
+[--answers <file>] [--enforce-memtrace] [--dry-run] [--json] [--show-content]`
 
 Installs/links the canonical discipline set into `<dir>` and registers the project. **Idempotent and
 re-runnable**: every step is a no-op when already correct; re-running after a canonical change
@@ -25,6 +26,33 @@ file whose bytes change is reported as `update` (a one-time re-serialization of 
 is expected and reported). Files the installer only seeds (rules stubs, /heddle-gate) are never
 rewritten once present.
 
+### Rule-selection flags and preset tiers
+
+In addition to discipline hooks, `init-project` can seed project-level safety rules into `<dir>/rules/` and wire the hook-rules bridge (`dist/hook.js`) into `.claude/settings.json`. Rules can be selected via preset tier (`--preset`) or explicit rule list (`--hook-rules`); block-rule enforcement can be selected via `--enforce` or the answers supplied through `--answers`:
+
+- `--preset minimal|standard|strict`: Select a shipped hook-rule set.
+- `--hook-rules a,b`: Select named hook rules rather than a preset.
+- `--enforce a,b`: Mark selected block rules as enforced (`enforce: true`).
+- `--answers <file>`: JSON-array answer script for non-interactive rule and enforcement selection.
+
+Preset rule sets are exact:
+
+| Preset | Installed rules |
+| --- | --- |
+| `minimal` | `no-rm-recursive-force` |
+| `standard` | `no-rm-recursive-force`, `no-git-history-rewrite`, `no-git-worktree-discard`, `pr-flow-reminder` |
+| `strict` | `no-rm-recursive-force`, `no-git-history-rewrite`, `no-git-worktree-discard`, `no-destructive-sql`, `pr-flow-reminder` |
+
+When hook rules are selected, `init-project` plans and executes additional steps in the contract:
+- Seeds `<dir>/rules/<rule-id>.yaml` (and fixture `<dir>/rules/tests/<rule-id>.jsonl` if present in the catalog) for each selected rule (skipped if present).
+- Appends event-specific hook-rules bridge registrations to `<dir>/.claude/settings.json` targeting the compiled `hook.js` script with `--rules <dir>/rules`.
+
+### Output and inspection flags
+
+- `--show-content`: Include home-level planned content in the installation plan/report instead of redacting home-directory step content.
+- `--dry-run`: Produce an installation plan and simulate step evaluation without performing writes or creating directories (`would-create`, `would-update`).
+- `--json`: Format the output plan/report as JSON.
+
 ### Steps (each reported as `ok | created | updated | skipped(reason) | would-<verb>` under --dry-run)
 
 1. **Canonical root** — resolve `--canonical`, else `HEDDLE_CANONICAL`, else the path
@@ -32,6 +60,7 @@ rewritten once present.
    vendored discipline-hook set (that relocation is HED-96), so a machine-specific fallback would
    be non-portable. The selected root must contain `hooks/` with the 6 WIRED discipline hooks (the 3 workspace-only hooks are
    optional and reported); a missing wired hook fails loudly with the list (no partial install).
+
 2. **`<dir>/.claude/settings.json` hook wiring** — render the 14-command / 6-event wiring heddle's own
    `.claude/settings.json` uses today (SessionStart identity+preflight; UserPromptSubmit
    remind-owned-prs; PreToolUse Bash→memtrace deny-recursive-search + enforce-query, Grep|Glob|Read→

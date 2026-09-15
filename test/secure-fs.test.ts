@@ -541,6 +541,31 @@ describe('secure filesystem primitives', () => {
     expect(() => ensureSecureDir(dir, { euid: foreignEuid })).toThrow(/owner|owned/i);
   });
 
+  it('ensureSecureDir rejects a safe existing target under a group/other-writable parent (fast path validates the parent)', () => {
+    const parent = join(tempDir(), 'loose-parent');
+    mkdirSync(parent, { mode: 0o700 });
+    const leaf = join(parent, 'creds');
+    mkdirSync(leaf, { mode: 0o700 });
+    chmodSync(leaf, 0o700); // the leaf itself is safe and euid-owned …
+    chmodSync(parent, 0o777); // … but its immediate parent is group/other-writable
+
+    // Without the fast-path parent check this pre-existing safe leaf would be accepted on a re-run, even
+    // though the create path (first run) would have refused it under the loose ancestor — so refuse here too.
+    expect(() => ensureSecureDir(leaf)).toThrow(/writable/i);
+  });
+
+  it('ensureSecureDir rejects a safe existing target reached through a symlinked parent (fast path)', () => {
+    const realParent = join(tempDir(), 'real-parent');
+    mkdirSync(realParent, { mode: 0o700 });
+    mkdirSync(join(realParent, 'creds'), { mode: 0o700 });
+    const linkParent = join(tempDir(), 'link-parent');
+    symlinkSync(realParent, linkParent);
+
+    // The leaf reached via the symlinked parent lstats as a real dir (the symlink is an ANCESTOR, not the
+    // leaf), so only the fast-path parent check catches it — the immediate-parent analog of the create climb.
+    expect(() => ensureSecureDir(join(linkParent, 'creds'))).toThrow(/symlink/i);
+  });
+
   it('assertSecureDir accepts a safe existing directory and bubbles ENOENT for an absent one', () => {
     const dir = join(tempDir(), 'present');
     mkdirSync(dir, { mode: 0o700 });
@@ -561,5 +586,66 @@ describe('secure filesystem primitives', () => {
     expect(() => assertSecureDir(linkDir)).toThrow(/symlink/i);
 
     expect(() => assertSecureDir(realDir, { euid: foreignEuid })).toThrow(/owner|owned/i);
+  });
+
+  // HED-626: ensureSafeParent (the writer's and lock's parent-create path) adopts ensureSecureDir's
+  // per-level walk (createSecureDirTree), replacing a single umask-subject `mkdir -p`. Exercised through
+  // the two PUBLIC callers, secureWriteFile and acquireCredentialLock.
+  it('secureWriteFile builds a multi-level missing parent under an owner-execute-stripping umask (HED-626)', () => {
+    // A single `mkdir -p` under umask 0o100 would create the FIRST ancestor un-enterable (0o600, no
+    // owner-execute), so creating the rest of the path fails EACCES and strands a partial tree. The adopted
+    // walk force-modes each level past umask on its own fd BEFORE descending, so the whole chain is created
+    // and every created ancestor lands at exactly 0o700. Resolve tempDir BEFORE changing the umask.
+    const root = tempDir();
+    const a = join(root, 'p');
+    const b = join(a, 'q');
+    const path = join(b, 'credential');
+    const prevUmask = process.umask(0o100);
+    try {
+      secureWriteFile(path, 'FAKE_SECRET_SENTINEL');
+      for (const level of [a, b]) {
+        expect(statSync(level).isDirectory()).toBe(true);
+        expect(statSync(level).mode & 0o777).toBe(0o700); // every created ancestor enterable, not just the last
+      }
+      expect(statSync(path).mode & 0o777).toBe(0o600);
+      expect(readFileSync(path, 'utf8')).toBe('FAKE_SECRET_SENTINEL');
+    } finally {
+      process.umask(prevUmask);
+    }
+  });
+
+  it('secureWriteFile rejects a created parent whose owner is not euid and rolls it back (HED-626)', () => {
+    // The adopted walk enforces the SAME euid-ownership invariant on a parent it CREATES that the existing-
+    // parent path enforces, and rolls a half-initialized level back. With an injected foreign euid the just-
+    // created parent (owned by the real euid) fails finalizeCreatedDir's ownership check; the level is
+    // rmdir'd, so nothing partial is left and the secret is never written. (In production the created dir is
+    // always process-owned, so this check is a no-op there — the seam only makes the invariant observable.)
+    const path = join(tempDir(), 'made', 'credential');
+
+    expect(() => secureWriteFile(path, 'FAKE_SECRET_SENTINEL', { euid: foreignEuid })).toThrow(/owner|owned/i);
+    expect(existsSync(dirname(path))).toBe(false); // rolled back — no partial-init parent left behind
+    expect(existsSync(path)).toBe(false);
+  });
+
+  it('acquireCredentialLock builds a multi-level missing lock parent under a restrictive umask, with no caller euid (HED-626)', () => {
+    // The lock deliberately calls ensureSafeParent with NO euid (module invariant: its claim is a single
+    // atomic link, so it needs no parent-ownership guard). The create branch still resolves the process euid
+    // for the levels it makes — a dir it just created is process-owned, so finalizeCreatedDir passes — and
+    // force-modes each past the owner-execute-stripping umask so the lock-parent chain is enterable.
+    const root = tempDir();
+    const a = join(root, 'locks');
+    const b = join(a, 'nested');
+    const lockPath = join(b, 'credential.lock'); // resolve tempDir BEFORE changing the umask
+    const prevUmask = process.umask(0o100);
+    try {
+      const result = acquireCredentialLock(lockPath);
+      expect(result.ok).toBe(true);
+      for (const level of [a, b]) {
+        expect(statSync(level).mode & 0o777).toBe(0o700); // every created lock-parent level enterable
+      }
+      releaseCredentialLock(lockPath);
+    } finally {
+      process.umask(prevUmask);
+    }
   });
 });

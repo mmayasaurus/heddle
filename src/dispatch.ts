@@ -15,6 +15,7 @@ import { overrideReasonGate } from './dispatcher/override-gate.js';
 import { monocultureNote, formatMonocultureWarning } from './dispatcher/monoculture.js';
 import { planDispatch, resolveRotationAccount, hasNoDispatchableClaudeAccount, noDispatchableClaudeAccountReason, capabilityFitFallbackEligible } from './dispatcher/plan.js';
 import { runTarget } from './dispatcher/run.js';
+import { boundedPreflight } from './bounded-dispatch.js';
 import { checkoutFingerprint, fallbackBarrier } from './worktree.js';
 import type { AdapterFactory, DispatchContext, DispatchRequest, DispatchOutcome } from './dispatcher/types.js';
 
@@ -24,7 +25,7 @@ export { defaultAdapterFor } from './dispatcher/adapters.js';
 export { isNonReason, overrideReasonGate } from './dispatcher/override-gate.js';
 export { monocultureNote, formatMonocultureWarning } from './dispatcher/monoculture.js';
 export { planDispatch, summarizePlan } from './dispatcher/plan.js';
-export type { DispatchRequest, DispatchRefusal, DispatchOutcome, AdapterFactory, DispatchPlan } from './dispatcher/types.js';
+export type { DispatchRequest, DispatchRefusal, DispatchOutcome, AdapterFactory, DispatchPlan, BoundedAdmission, BoundedDispatchReceipt } from './dispatcher/types.js';
 export type { MonocultureNote } from './dispatcher/monoculture.js';
 
 /**
@@ -123,6 +124,16 @@ export async function dispatch(
       authorProvider: normalizeProvider(req.authorProvider) ?? null, authorModel: req.authorModel ?? null,
       authorDispatchId: req.authorDispatchId ?? null, reviewerPick: plan.reviewerPick?.reason,
     };
+  }
+
+  // Hard-bounded routes fail closed before adapter creation, ledger writes, or any provider request.
+  // planDispatch has already resolved provider capabilities; the later transactional gate rechecks
+  // time-sensitive headroom under the lock.
+  const boundedVeto = boundedPreflight(route, target, req, table);
+  if (boundedVeto) {
+    return refusalOutcome(ctx, req, route.taskClass, target, skillsForRefusal, boundedVeto.refusal, {
+      extra: { boundedReceipt: boundedVeto.receipt },
+    });
   }
 
   // ---- Non-dispatchable class (`orchestration`) — refused on EVERY path ------------------------
@@ -342,7 +353,10 @@ export async function dispatch(
   // "retry" it on the fallback (that would re-run in an already-mutated tree and mask the violation).
   // HED-601: keyed on `quarantine` (set for ANY read_only violation, review pair or not), so a non-review
   // read-only violation is not retried on the fallback either.
-  if (primary.ok || primary.refusal || primary.quarantine) return primary;
+  // A truncated response completed a provider interaction; retrying the same prompt would truncate
+  // again, so preserve its retained output instead of spending a fallback request. An empty truncated
+  // output retains nothing, so a differently budgeted fallback may still be useful.
+  if (primary.ok || (primary.truncated && primary.output !== '') || primary.refusal || primary.quarantine) return primary;
   if (req.noFallback) {
     if ((target.provider === 'codex' || target.provider === 'cursor') && ctx.rotationAccount
         && classifyRotationRefusal(target.provider, primary) === 'rate-limit') {

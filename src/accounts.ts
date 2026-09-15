@@ -1,6 +1,7 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { DEFAULT_ACCOUNTS_PATH } from './capaware.js';
+import { secureWriteFile } from './secure-fs.js';
 
 export const ACCOUNTS_SCHEMA_VERSION = 2;
 
@@ -110,13 +111,20 @@ const overagePostures = new Set<OveragePosture>(['hard-stop', 'bounded-prepaid',
 
 let atomicWriteSequence = 0;
 
-// Mirrors init-project's temp-in-the-same-directory write so a registry is never half-written.
+// Atomic config writer (policy files): temp-in-the-same-directory write + rename so a file is never
+// half-written, at a fixed 0600 — it no longer copies a pre-existing permissive mode onto the write
+// (F8/HED-590: an already-0666 file would otherwise stay 0666). The credential REGISTRY uses
+// secureWriteFile (fd-level ownership/symlink guards + validated parent); this stays for the
+// non-credential policy files under ~/.heddle/policy.
 export function atomicWriteFile(path: string, content: string): void {
-  mkdirSync(dirname(path), { recursive: true });
+  // Owner-only parent (0700) for consistency with the hardened creds tree. mkdir's mode is umask-subject
+  // (unlike the fd-fchmod path in secure-fs), acceptable here because policy files are non-credential —
+  // so the umask-proof per-level walk isn't warranted, but 0700-under-a-normal-umask still beats the 0755
+  // default (F8/HED-590).
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const temporary = join(dirname(path), `.${basename(path)}.${process.pid}.${atomicWriteSequence++}.tmp`);
   try {
     writeFileSync(temporary, content, { mode: 0o600 });
-    if (existsSync(path)) chmodSync(temporary, statSync(path).mode);
     renameSync(temporary, path);
   } finally {
     try { if (existsSync(temporary)) unlinkSync(temporary); } catch { /* preserve original failure */ }
@@ -424,5 +432,9 @@ export function writeAccountRegistry(
       ...priorRows.filter((row) => !mineIds.has(row.id as string)),
     ];
   }
-  atomicWriteFile(path, JSON.stringify(output, null, 2) + '\n');
+  // The account registry holds credential references → hardened writer: fixed 0600, fd-level
+  // ownership/symlink guards, a validated euid-owned parent (created 0700 if absent). It refuses to
+  // write into a group/other-WRITABLE ~/.heddle rather than silently harden a file whose parent an
+  // attacker could still redirect — the misconfig, not the file mode, is the real defect (F8/HED-590).
+  secureWriteFile(path, JSON.stringify(output, null, 2) + '\n');
 }

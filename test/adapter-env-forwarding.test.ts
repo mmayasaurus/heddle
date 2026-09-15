@@ -36,4 +36,19 @@ describe('subprocess adapters forward envUnset to run (HED-268 account-selector 
     const result = await new CursorAdapter().dispatch('x', { model: 'kimi-k3', cwd: '/tmp' });
     expect(result.error).toContain('stderr tail: rate limit diagnostic');
   });
+
+  it('preserves Cursor cache-write usage without assuming its relationship to input', async () => {
+    mockedRun.mockClear();
+    mockedRun.mockResolvedValueOnce({
+      stdout: JSON.stringify({ type: 'result', result: 'ok', usage: {
+        inputTokens: 10, cacheReadTokens: 4, cacheWriteTokens: 3, outputTokens: 2,
+      } }),
+      stderr: '', exitCode: 0, timedOut: false, idleTimedOut: false,
+      stdoutTruncated: false, stderrTruncated: false,
+    });
+    const result = await new CursorAdapter().dispatch('x', { model: 'kimi-k3', cwd: '/tmp' });
+    expect(result.usage).toEqual({
+      inputTokens: 10, cachedInputTokens: 4, cacheCreationInputTokens: 3, outputTokens: 2,
+    });
+  });
 });

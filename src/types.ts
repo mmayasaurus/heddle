@@ -64,6 +64,14 @@ export interface DispatchOptions {
   mcpServers?: string[];
   /** Optional OpenAI-compatible structured-output contract for adapters that support JSON Schema. */
   responseSchema?: ResponseSchema;
+  /** Native provider completion-token ceiling for this dispatch. Undefined uses the adapter default. */
+  maxOutputTokens?: number;
+  /** Conservative transport ceiling for the complete HTTP response body, including JSON framing. */
+  maxOutputBytes?: number;
+  /** Maximum provider requests this dispatch may issue. OpenAI-compatible bounded routes require 1. */
+  maxModelRequests?: number;
+  /** Disable the OpenAI-compatible empty-reasoning retry for single-request routes. */
+  allowReasoningRetry?: boolean;
 }
 
 export interface ResponseSchema {
@@ -76,9 +84,14 @@ export interface ResponseSchema {
 }
 
 export interface TokenUsage {
+  /** Provider request id used to deduplicate normalized accounting. */
+  requestId?: string;
   inputTokens?: number;
   cachedInputTokens?: number;
+  /** Cache-write/creation tokens; a subset of inputTokens, never added to totalTokens again. */
+  cacheCreationInputTokens?: number;
   outputTokens?: number;
+  /** Reasoning is a subset of outputTokens, never an additional generated-token charge. */
   reasoningOutputTokens?: number;
 }
 
@@ -95,6 +108,12 @@ export interface WorkerResult {
   error?: string;
   /** Raw structured output for the ledger/dashboard; never parse downstream — use fields above. */
   raw?: unknown;
+  /** The attempt ended without a complete usable result (timeout, truncation, or bounded validation). */
+  incomplete?: boolean;
+  /** True when the provider explicitly reported a length-limited response. */
+  truncated?: boolean;
+  /** Cancellation certainty. An HTTP AbortController timeout is always `unknown`. */
+  remoteOutcome?: 'provider-confirmed-cancelled' | 'unknown';
 }
 
 export interface WorkerAdapter {

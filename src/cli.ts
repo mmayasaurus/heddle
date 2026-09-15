@@ -37,6 +37,7 @@ import { DEFAULT_ACCOUNTS_PATH } from './capaware.js';
 import { migrateConfigFile } from './config-migrations.js';
 import { diffFleetBin, diffFleetHooks, diffFleetLaunchers, installFleetBin, installFleetHooks, installFleetLaunchers } from './fleet.js';
 import { uninstall } from './uninstall.js';
+import { gitRepositoryFor } from './worktree.js';
 import { NativeCliRunner, type NativeProvider } from './wizard/cli-runner.js';
 import { ReadlinePrompter, ScriptedPrompter, type Prompter } from './wizard/prompt.js';
 import { runAccountsAdd } from './wizard/accounts-add.js';
@@ -46,6 +47,8 @@ import { runSetup, buildSteps, selectSteps, type SetupContext } from './wizard/s
 import { getProvider } from './provider-matrix.js';
 import { releaseStandalone } from './release/standalone.js';
 import { assembleTop, renderTopText } from './top.js';
+import type { BoundedAdmission } from './dispatcher/types.js';
+import { readBoundedAdmissionFile } from './bounded-admission.js';
 
 /**
  * heddle CLI — the surface orchestrators (and later the dashboard) drive.
@@ -68,6 +71,7 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
       --auto-effort        classify the task's difficulty (cheap model) and pin effort automatically
       --resume <id>        continue a prior worker session
       --timeout <ms>       wall-clock budget (default 600000)
+      --bounded-admission <path> JSON object: requestId, sessionId, account, remainingTokens, observedAt
       --codex-home <path>  account selection for codex workers
       --opt-in             required for task classes that gate on it (and for exec-privileged)
       --override-reason <r> REQUIRED with --provider/--model when no --class: why this bypasses the
@@ -93,7 +97,7 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
   heddle projects [--json]       registered projects and their fleets (~/.heddle/projects.json; HED-160)
   heddle accounts list [--json]  registered Claude, Codex, and Cursor accounts
   heddle accounts verify         verify local credential paths and recorded Claude login state
-  heddle setup [--only <ids>] [--skip <ids>] [--dry-run] [--answers <file>] [--home <dir>] [--target <dir>] [--json]  guided fresh-machine onboarding walkthrough (composes the wizard steps in order; exit 1 if any step failed)
+  heddle setup [--only <ids>] [--skip <ids>] [--dry-run] [--answers <file>] [--home <dir>] [--target <dir>] [--json]  guided fresh-machine onboarding walkthrough (composes the wizard steps in order; without --target, PR automation uses the current repo or offers to add one, confirming before it writes; exit 1 if any step failed)
   heddle accounts add [--provider <p>] [--answers <file>]  add native-login or env-repoint accounts interactively
   heddle comms init [--json]     initialize the comms database, operator token, and registered project rooms
   heddle fleet install-hooks [--dry-run] [--json]  install vendored fleet hooks under ~/.heddle/fleet/hooks
@@ -110,6 +114,8 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
   heddle init-project <dir> [--canonical <path>] [--name <n>] [--team <KEY>] [--agents A,B,…] [--room <#room>] [--launcher <script>] [--preset <tier>] [--hook-rules <a,b>] [--enforce <a,b>] [--answers <file>] [--enforce-memtrace] [--dry-run] [--json] [--show-content]
   heddle whoami [--json]         this process's bound identity (HEDDLE_AGENT / FLEET_AGENT / .fleet-agent) + worker context
   heddle doctor [--json] [--provider <p>]   verify harnesses/accounts/config; --provider runs only that provider's checks plus global config checks (exit 1 on any fail)
+  heddle doctor --hooks [--hooks-budget <seconds>] [--json]  probe configured hooks' latency — EXECUTES each configured hook
+                                            with a synthetic payload; probes the current directory's .claude settings — run from the project root; ignores --provider; runs under a default 180s sweep budget (--hooks-budget <seconds> to raise it); a budget-truncated hook is hung (exit 1) or unverified if little budget remained; exits 1 on broken/missing/perma-timeout; flags slow
   heddle release --standalone <outDir> [--source-ref <git ref>] [--init-git] [--verify] [--json]
       requires a clean checkout at main's HEAD — headless-first invariant (HED-507)
   heddle workers [--stale <hours>] [--json]   dispatches still in flight (--stale: only orphans older than N hours)
@@ -208,6 +214,14 @@ try {
         process.exit(2);
       }
       const env: Record<string, string> = {};
+      let boundedAdmission: BoundedAdmission | undefined;
+      const boundedAdmissionPath = arg('--bounded-admission');
+      if (boundedAdmissionPath) {
+        try { boundedAdmission = readBoundedAdmissionFile(boundedAdmissionPath); } catch (err) {
+          console.error(`dispatch: ${err instanceof Error ? err.message : String(err)}`);
+          process.exit(2);
+        }
+      }
       const codexHome = arg('--codex-home');
       if (codexHome) env.CODEX_HOME = codexHome;
 
@@ -236,6 +250,7 @@ try {
         authorProvider: arg('--author-provider'),
         authorDispatchId: arg('--author-dispatch') ? Number(arg('--author-dispatch')) : undefined,
         diffBase: arg('--diff-base'),
+        boundedAdmission,
       });
 
       const { raw, ...summary } = res;
@@ -544,6 +559,9 @@ try {
 
     case 'doctor': {
       const provider = arg('--provider');
+      const probeHooks = has('--hooks');
+      const budgetArg = arg('--hooks-budget');
+      let hooksBudgetMs: number | undefined;
       const usageError = (message: string): void => {
         if (json) {
           process.stdout.write(
@@ -555,15 +573,36 @@ try {
           process.exit(2);
         }
       };
-      if (process.argv.includes('--provider') && (!provider || provider.startsWith('--'))) {
-        usageError(`doctor: --provider needs a provider name (known: ${DOCTOR_PROVIDERS.join(', ')})`);
-        break;
+      if (!probeHooks) {
+        if (process.argv.includes('--provider') && (!provider || provider.startsWith('--'))) {
+          usageError(`doctor: --provider needs a provider name (known: ${DOCTOR_PROVIDERS.join(', ')})`);
+          break;
+        }
+        if (provider && !DOCTOR_PROVIDERS.includes(provider as typeof DOCTOR_PROVIDERS[number])) {
+          usageError(`doctor: unknown --provider "${provider}" (known: ${DOCTOR_PROVIDERS.join(', ')})`);
+          break;
+        }
       }
-      if (provider && !DOCTOR_PROVIDERS.includes(provider as typeof DOCTOR_PROVIDERS[number])) {
-        usageError(`doctor: unknown --provider "${provider}" (known: ${DOCTOR_PROVIDERS.join(', ')})`);
-        break;
+      if (process.argv.includes('--hooks-budget')) {
+        if (!probeHooks) {
+          usageError('doctor: --hooks-budget requires --hooks');
+          break;
+        }
+        if (!budgetArg || budgetArg.startsWith('--')) {
+          usageError('doctor: --hooks-budget needs a value in seconds');
+          break;
+        }
+        const secs = Number(budgetArg);
+        if (!Number.isFinite(secs) || secs <= 0) {
+          usageError('doctor: --hooks-budget needs a positive number of seconds');
+          break;
+        }
+        hooksBudgetMs = secs * 1_000;
       }
-      const report = await runDoctor({ provider });
+      const report = await runDoctor(
+        { provider: probeHooks ? undefined : provider, probeHooks },
+        hooksBudgetMs !== undefined ? { timeouts: { hooksMs: hooksBudgetMs } } : undefined,
+      );
       const text = json ? JSON.stringify(report, null, 2) : formatDoctorReport(report);
       // Exit only after stdout drains so timed-out probes cannot keep the command alive after its report.
       process.stdout.write(text + '\n', () => process.exit(report.exitCode));
@@ -997,6 +1036,13 @@ try {
       if (has('--home') && (homeArg === undefined || homeArg.startsWith('--'))) throw new Error('--home needs a directory path');
       const targetArg = arg('--target');
       if (has('--target') && (targetArg === undefined || targetArg.startsWith('--'))) throw new Error('--target needs a directory path');
+      // HED-624: with no explicit --target, auto-derive the project dir from the invocation cwd when it
+      // sits inside a git repository — resolved up front (before the terminal opens), alongside the other
+      // arg parsing. gitRepositoryFor is fail-safe (→ null off a repo, no git, or an unreadable one), so a
+      // non-repo cwd leaves targetDir unset and the pr-automation step stays inert. The derived flag makes
+      // that step CONFIRM before scaffolding — an explicit --target is the opt-in; a detected repo the
+      // operator never named is not.
+      const derivedTarget = targetArg === undefined ? gitRepositoryFor(process.cwd())?.topLevel : undefined;
       const parseStepIds = (flag: string): string[] | undefined => {
         if (!has(flag)) return undefined;
         const value = arg(flag);
@@ -1021,7 +1067,11 @@ try {
       try {
         const base: SetupContext = {
           homeDir: homeArg ?? homedir(),
-          ...(targetArg === undefined ? {} : { targetDir: targetArg }),
+          ...(targetArg !== undefined
+            ? { targetDir: targetArg }
+            : derivedTarget !== undefined
+              ? { targetDir: derivedTarget, targetDirDerived: true }
+              : {}),
           dryRun: has('--dry-run'),
           now: () => new Date(),
         };
