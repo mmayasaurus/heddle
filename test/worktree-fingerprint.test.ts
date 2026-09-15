@@ -81,8 +81,9 @@ describe('checkoutFingerprint — non-regular and oversized paths (HED-625)', ()
     const root = gitRepo(join(tempDir(), 'repo'));
     const big = join(root, 'big.bin');
     writeFileSync(big, '');
-    truncateSync(big, 11 * 1024 * 1024); // 11 MiB sparse — over the 10 MiB hash cap; content never read
-    const marker = new RegExp(`^\\?\\?:<large:${11 * 1024 * 1024}:\\d+>$`);
+    truncateSync(big, 11534336); // 11 MiB (11 * 1024 * 1024) sparse — over the 10 MiB hash cap; content never read
+    // Literal regex, not new RegExp(): the byte count is a fixed constant, so no dynamic construction.
+    const marker = /^\?\?:<large:11534336:\d+>$/;
     const first = checkoutFingerprint(root)!.entries.get('big.bin')!;
     expect(first).toMatch(marker);
     // A same-length in-place rewrite changes mtime but not size — a size-only marker (qodo HIGH #3)
