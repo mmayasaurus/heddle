@@ -62,6 +62,18 @@ function writeRegistry(homeDir: string, targetDir: string, agents = ['A', 'B'], 
   }));
 }
 
+function writeRegistryWithExternalGithubAgent(homeDir: string, workspaceRoot: string): void {
+  const registryDir = join(homeDir, '.heddle');
+  mkdirSync(registryDir, { recursive: true });
+  writeFileSync(join(registryDir, 'projects.json'), JSON.stringify({
+    schemaVersion: PROJECTS_SCHEMA_VERSION,
+    projects: [{
+      name: 'external-github-project', workspaceRoots: [workspaceRoot], agentIds: ['G'], linearTeam: 'HED',
+      defaultRoom: 'synthetic-room', launcher: 'synthetic-launcher', tracker: 'github',
+    }],
+  }));
+}
+
 describe('linearStep', () => {
   const { tempDir } = useTempResources('hed645-linear-step-');
 
@@ -163,7 +175,7 @@ describe('linearStep', () => {
 
     const result = await linearStep(runner).run(context(homeDir, targetDir, true), io([true]));
 
-    expect(result).toMatchObject({ status: 'skipped', summary: expect.stringContaining('dry-run — would verify credential/team/roster for team HED, agents A') });
+    expect(result).toMatchObject({ status: 'skipped', summary: expect.stringContaining('dry-run — would verify team HED for Linear agents A') });
     expect(runner.calls).toEqual([]);
     expect(readdirSync(targetDir)).toEqual(before);
   });
@@ -191,6 +203,46 @@ describe('linearStep', () => {
     expect(result.summary).not.toContain('dry-run — would verify');
     expect(result.detail).toContain('github');
     expect(runner.calls).toEqual([]);
+  });
+
+  it('does not probe a prompted agent registered to a github project elsewhere', async () => {
+    const homeDir = tempDir();
+    const targetDir = tempDir();
+    writeRegistryWithExternalGithubAgent(homeDir, tempDir());
+    const runner = new StubLinearRunner();
+
+    const result = await linearStep(runner).run(context(homeDir, targetDir), io([true, 'HED', 'G']));
+
+    expect(result.status).toBe('failed');
+    expect(result.detail).toContain('G');
+    expect(result.detail).toContain('github');
+    expect(runner.calls).not.toContain('whoami:G');
+  });
+
+  it('names prompted agents routed to github in dry-run without probing them', async () => {
+    const homeDir = tempDir();
+    const targetDir = tempDir();
+    writeRegistryWithExternalGithubAgent(homeDir, tempDir());
+    const runner = new StubLinearRunner();
+
+    const result = await linearStep(runner).run(context(homeDir, targetDir, true), io([true, 'HED', 'G']));
+
+    expect(result.status).toBe('skipped');
+    expect(result.summary).toContain('G');
+    expect(result.summary).toContain('NOT Linear');
+    expect(result.summary).not.toContain('would verify team HED for Linear agents G');
+    expect(runner.calls).toEqual([]);
+  });
+
+  it('probes a prompted agent that is absent from the registry', async () => {
+    const homeDir = tempDir();
+    const targetDir = tempDir();
+    writeRegistryWithExternalGithubAgent(homeDir, tempDir());
+    const runner = new StubLinearRunner();
+
+    await linearStep(runner).run(context(homeDir, targetDir), io([true, 'HED', 'Z']));
+
+    expect(runner.calls).toContain('whoami:Z');
   });
 
   it('re-prompts an unregistered target once for a blank team then fails with a guide', async () => {
@@ -307,6 +359,7 @@ describe('LinShLinearRunner', () => {
 
     expect(mockExecFileSync).toHaveBeenNthCalledWith(1, join('/synthetic-home', '.heddle', 'fleet', 'bin', 'lin.sh'), ['--agent', 'A', 'whoami'], expect.objectContaining({ timeout: 15_000, encoding: 'utf8' }));
     expect(mockExecFileSync).toHaveBeenNthCalledWith(2, join('/synthetic-home', '.heddle', 'fleet', 'bin', 'lin.sh'), ['--agent', 'A', 'list', '--limit', '1'], expect.objectContaining({ env: expect.objectContaining({ LIN_TEAM: 'SYN' }), timeout: 15_000, encoding: 'utf8' }));
+    expect((mockExecFileSync.mock.calls[0][2] as { env: NodeJS.ProcessEnv }).env.HOME).toBe('/synthetic-home');
     expect((mockExecFileSync.mock.calls[0][2] as { env: NodeJS.ProcessEnv }).env.LIN_TEAM).not.toBe('SYN');
   });
 

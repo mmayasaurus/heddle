@@ -1,7 +1,15 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { DEFAULT_TRACKER, loadProjectRegistry, projectForCwd, type Project } from '../projects.js';
+import {
+  DEFAULT_TRACKER,
+  loadProjectRegistry,
+  projectForAgent,
+  projectForCwd,
+  type Project,
+  type ProjectRegistry,
+  type TrackerKind,
+} from '../projects.js';
 import type { WizardIO, WizardStep, WizardStepResult } from './step.js';
 
 /** A narrow seam around the installed Linear command. */
@@ -22,9 +30,11 @@ type CommandResult = { ok: boolean; output: string; error?: string };
 
 /** Production adapter for the fleet-owned Linear command. */
 export class LinShLinearRunner implements LinearRunner {
+  private readonly homeDir: string;
   private readonly script: string;
 
   constructor(homeDir: string) {
+    this.homeDir = homeDir;
     this.script = join(homeDir, '.heddle', 'fleet', 'bin', 'lin.sh');
   }
 
@@ -53,7 +63,7 @@ export class LinShLinearRunner implements LinearRunner {
     try {
       const output = execFileSync(this.script, args, {
         encoding: 'utf8',
-        env: { ...process.env, ...env },
+        env: { ...process.env, HOME: this.homeDir, USERPROFILE: this.homeDir, ...env },
         timeout: 15_000,
       });
       return { ok: true, output };
@@ -116,6 +126,17 @@ async function enteredProject(io: WizardIO): Promise<LinearProject | null> {
   const enteredRoster = await io.prompter.text('Comma-separated Linear agent roster for this project');
   const agentIds = enteredRoster.trim() ? enteredRoster.split(',').map((agent) => agent.trim()) : [];
   return { linearTeam: teamKey, agentIds, tracker: DEFAULT_TRACKER };
+}
+
+// projectForAgent is case-insensitive while lin.sh's agent_key in agentIds is exact — the divergence can only make the step MORE conservative (skip a probe lin.sh would run as linear), never a false positive; so we do not uppercase-normalize (resolve_agent's lowercase handling unverified).
+function nonLinearAgents(reg: ProjectRegistry, agentIds: string[]): { agent: string; tracker: TrackerKind; projectName: string }[] {
+  const out: { agent: string; tracker: TrackerKind; projectName: string }[] = [];
+  for (const agent of agentIds) {
+    const project = projectForAgent(reg, agent);
+    const tracker = project?.tracker ?? DEFAULT_TRACKER;
+    if (tracker !== 'linear') out.push({ agent, tracker, projectName: project?.name ?? '?' });
+  }
+  return out;
 }
 
 async function verifyRoster(
@@ -211,9 +232,11 @@ export function linearStep(injectedRunner?: LinearRunner): WizardStep {
         return report(skip('Linear tooling is unavailable; setup remains optional', detail));
       }
 
+      let reg!: ProjectRegistry;
       let project: LinearProject | null;
       try {
-        const registered = ctx.targetDir ? projectForCwd(loadProjectRegistry(registryPath(ctx.homeDir)), ctx.targetDir) : null;
+        reg = loadProjectRegistry(registryPath(ctx.homeDir));
+        const registered = ctx.targetDir ? projectForCwd(reg, ctx.targetDir) : null;
         project = registered ?? await enteredProject(io);
       } catch (error) {
         return report(fail('Linear project configuration could not be resolved', `GUIDE: Could not resolve this project's Linear registry entry: ${errorText(error)}`));
@@ -235,8 +258,11 @@ export function linearStep(injectedRunner?: LinearRunner): WizardStep {
         return report(fail('Linear project configuration needs attention', `GUIDE: ${errorText(error)}`));
       }
 
+      const nonLinear = nonLinearAgents(reg, project.agentIds);
+      const linearEligible = project.agentIds.filter((agent) => !nonLinear.some((entry) => entry.agent === agent));
+
       if (ctx.dryRun) {
-        return skip(`dry-run — would verify credential/team/roster for team ${project.linearTeam}, agents ${project.agentIds.join(', ') || 'none'}`);
+        return skip(`dry-run — would verify team ${project.linearTeam} for Linear agents ${linearEligible.join(', ') || 'none'}${nonLinear.length ? `; NOT Linear (routed elsewhere): ${nonLinear.map((entry) => entry.agent).join(', ')}` : ''}`);
       }
 
       if (project.agentIds.length === 0) {
@@ -244,7 +270,10 @@ export function linearStep(injectedRunner?: LinearRunner): WizardStep {
       }
 
       const detail: string[] = [];
-      const { verifiedAgents, missingStore, agentFailure: rosterFailure } = await verifyRoster(runner, project.agentIds, detail);
+      for (const { agent, tracker, projectName } of nonLinear) {
+        detail.push(`GUIDE: agent ${agent} is registered to project ${projectName} (tracker=${tracker}); lin.sh routes it to ${tracker}, so Linear onboarding cannot verify it.`);
+      }
+      const { verifiedAgents, missingStore, agentFailure: rosterFailure } = await verifyRoster(runner, linearEligible, detail);
 
       if (missingStore) {
         detail.push(manualSteps(project.linearTeam));
@@ -252,7 +281,7 @@ export function linearStep(injectedRunner?: LinearRunner): WizardStep {
       }
 
       if (verifiedAgents.length > 0) detail.unshift(`VERIFIED: agents ${verifiedAgents.join(', ')}`);
-      let agentFailure = rosterFailure;
+      let agentFailure = rosterFailure || nonLinear.length > 0;
       let teamOk = false;
       if (verifiedAgents.length > 0) {
         teamOk = await verifyTeam(runner, project.linearTeam, verifiedAgents[0], detail);
