@@ -417,7 +417,11 @@ export async function runTarget(
     // The escape note is appended to the LEDGER's error column so the row is durably self-describing
     // (the outcome keeps it in its own `escape` field, so callers never mistake it for a failure). The
     // HED-395 billing-degraded note rides the same column for the same reason (queryable, never silent).
-    error: [result.error, escapeReport?.note, destroyedReport?.note, billingDegraded?.reason].filter(Boolean).join('; ') || undefined,
+    // Redact at the TRUE persistence boundary: the escape/destroyed notes carry dynamic filenames and
+    // the billing reason is assembled AFTER the line-337 redaction, so re-redact the joined string here
+    // (idempotent on the already-redacted result.error; normal filenames survive via redactSecrets' path
+    // guard, only credential-shaped content is scrubbed).
+    error: redactSecrets([result.error, escapeReport?.note, destroyedReport?.note, billingDegraded?.reason].filter(Boolean).join('; ')) || undefined,
     sessionId: result.sessionId,
     durationMs: result.durationMs,
     inputTokens: result.usage?.inputTokens,

@@ -293,7 +293,13 @@ export class Ledger {
 
   constructor(path: string = DEFAULT_LEDGER_PATH) {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    // mkdirSync's mode applies only to a dir it CREATES; force 0700 on a pre-existing dir too
+    // (best-effort — skip if we do not own it).
+    try { chmodSync(dirname(path), 0o700); } catch { /* not owned by us — leave it */ }
     this.outputDir = join(dirname(path), 'outputs');
+    // Create the db file at 0600 BEFORE opening it, so a fresh ledger is never world-readable in the
+    // window between DatabaseSync creating it (default 0644) and the chmod below.
+    if (!existsSync(path)) writeFileSync(path, '', { mode: 0o600 });
     this.db = new DatabaseSync(path);
     chmodSync(path, 0o600);
     // Several heddle processes (one MCP server per orchestrator session, CLIs, the dashboard) share
