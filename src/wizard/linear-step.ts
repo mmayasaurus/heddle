@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { loadProjectRegistry, projectForCwd, type Project } from '../projects.js';
+import { DEFAULT_TRACKER, loadProjectRegistry, projectForCwd, type Project } from '../projects.js';
 import type { WizardIO, WizardStep, WizardStepResult } from './step.js';
 
 /** A narrow seam around the installed Linear command. */
@@ -106,7 +106,7 @@ function isUnknownAgent(error: string): boolean {
   return /unknown agent key/i.test(error);
 }
 
-type LinearProject = Pick<Project, 'linearTeam' | 'agentIds'>;
+type LinearProject = Pick<Project, 'linearTeam' | 'agentIds' | 'tracker'>;
 
 async function enteredProject(io: WizardIO): Promise<LinearProject | null> {
   let teamKey = (await io.prompter.text('Linear team key for this project')).trim();
@@ -115,7 +115,55 @@ async function enteredProject(io: WizardIO): Promise<LinearProject | null> {
 
   const enteredRoster = await io.prompter.text('Comma-separated Linear agent roster for this project');
   const agentIds = enteredRoster.trim() ? enteredRoster.split(',').map((agent) => agent.trim()) : [];
-  return { linearTeam: teamKey, agentIds };
+  return { linearTeam: teamKey, agentIds, tracker: DEFAULT_TRACKER };
+}
+
+async function verifyRoster(
+  runner: LinearRunner,
+  agentIds: string[],
+  detail: string[],
+): Promise<{ verifiedAgents: string[]; missingStore: boolean; agentFailure: boolean }> {
+  const verifiedAgents: string[] = [];
+  let missingStore = false;
+  let agentFailure = false;
+
+  for (const agent of agentIds) {
+    let check: { ok: boolean; identity?: string; error?: string };
+    try {
+      check = await runner.whoami(agent);
+    } catch (error) {
+      check = { ok: false, error: errorText(error) };
+    }
+    if (check.ok) {
+      verifiedAgents.push(agent);
+      continue;
+    }
+    const message = check.error ?? 'lin.sh whoami failed';
+    if (isMissingCredentialStore(message)) {
+      missingStore = true;
+      detail.push(provisionGuide());
+      break;
+    }
+    agentFailure = true;
+    detail.push(isUnknownAgent(message) ? oauthGuide(agent) : `GUIDE: Linear check for agent ${agent} failed: ${message}`);
+  }
+
+  return { verifiedAgents, missingStore, agentFailure };
+}
+
+async function verifyTeam(runner: LinearRunner, teamKey: string, agent: string, detail: string[]): Promise<boolean> {
+  let team: { ok: boolean; name?: string; error?: string };
+  try {
+    team = await runner.team(teamKey, agent);
+  } catch (error) {
+    team = { ok: false, error: errorText(error) };
+  }
+  if (team.ok) {
+    detail.push(`Linear team ${team.name ?? teamKey}: reachable — access confirmed. (An empty or misspelled team key can't be told apart from a valid one via the CLI, so double-check the key.)`);
+    return true;
+  }
+  detail.push(`GUIDE: Linear team ${teamKey} could not be reached: ${team.error ?? 'lin.sh list failed'}`);
+  return false;
 }
 
 /**
@@ -173,6 +221,12 @@ export function linearStep(injectedRunner?: LinearRunner): WizardStep {
       if (!project) {
         return report(fail('Linear project configuration needs attention', 'GUIDE: Linear team key must not be blank; re-run `heddle setup` and provide a team key.'));
       }
+      if (project.tracker !== 'linear') {
+        return report(skip(
+          `Linear onboarding does not apply — this project uses the ${project.tracker} issue tracker`,
+          `GUIDE: This project's registry sets tracker="${project.tracker}", so lin.sh routes it to the ${project.tracker} backend, not Linear. No Linear onboarding is needed. (Set tracker="linear" in ~/.heddle/projects.json if that is wrong.)`,
+        ));
+      }
 
       try {
         validateTeam(project.linearTeam);
@@ -190,30 +244,7 @@ export function linearStep(injectedRunner?: LinearRunner): WizardStep {
       }
 
       const detail: string[] = [];
-      const verifiedAgents: string[] = [];
-      let missingStore = false;
-      let agentFailure = false;
-
-      for (const agent of project.agentIds) {
-        let check: { ok: boolean; identity?: string; error?: string };
-        try {
-          check = await runner.whoami(agent);
-        } catch (error) {
-          check = { ok: false, error: errorText(error) };
-        }
-        if (check.ok) {
-          verifiedAgents.push(agent);
-          continue;
-        }
-        const message = check.error ?? 'lin.sh whoami failed';
-        if (isMissingCredentialStore(message)) {
-          missingStore = true;
-          detail.push(provisionGuide());
-          break;
-        }
-        agentFailure = true;
-        detail.push(isUnknownAgent(message) ? oauthGuide(agent) : `GUIDE: Linear check for agent ${agent} failed: ${message}`);
-      }
+      const { verifiedAgents, missingStore, agentFailure: rosterFailure } = await verifyRoster(runner, project.agentIds, detail);
 
       if (missingStore) {
         detail.push(manualSteps(project.linearTeam));
@@ -221,21 +252,11 @@ export function linearStep(injectedRunner?: LinearRunner): WizardStep {
       }
 
       if (verifiedAgents.length > 0) detail.unshift(`VERIFIED: agents ${verifiedAgents.join(', ')}`);
+      let agentFailure = rosterFailure;
       let teamOk = false;
       if (verifiedAgents.length > 0) {
-        let team: { ok: boolean; name?: string; error?: string };
-        try {
-          team = await runner.team(project.linearTeam, verifiedAgents[0]);
-        } catch (error) {
-          team = { ok: false, error: errorText(error) };
-        }
-        if (team.ok) {
-          teamOk = true;
-          detail.push(`VERIFIED: team ${team.name ?? project.linearTeam}`);
-        } else {
-          agentFailure = true;
-          detail.push(`GUIDE: Linear team ${project.linearTeam} could not be verified: ${team.error ?? 'lin.sh list failed'}`);
-        }
+        teamOk = await verifyTeam(runner, project.linearTeam, verifiedAgents[0], detail);
+        if (!teamOk) agentFailure = true;
       } else {
         agentFailure = true;
         detail.push('GUIDE: No roster agent verified, so the Linear team could not be checked.');
@@ -244,8 +265,8 @@ export function linearStep(injectedRunner?: LinearRunner): WizardStep {
       detail.push(manualSteps(project.linearTeam));
       const allVerified = !agentFailure && teamOk && verifiedAgents.length === project.agentIds.length;
       const summary = allVerified
-        ? `Linear verified: team ${project.linearTeam}, agents ${verifiedAgents.join(', ')}`
-        : `Linear verification incomplete: ${verifiedAgents.length}/${project.agentIds.length} agents verified; team ${teamOk ? 'verified' : 'needs attention'}`;
+        ? `Linear ready: agents ${verifiedAgents.join(', ')} verified; team ${project.linearTeam} reachable`
+        : `Linear verification incomplete: ${verifiedAgents.length}/${project.agentIds.length} agents verified; team ${teamOk ? 'reachable' : 'not reachable'}`;
       return report(allVerified ? { id: 'linear', status: 'done', summary, detail: detail.join('\n') } : fail(summary, detail.join('\n')));
     },
   };

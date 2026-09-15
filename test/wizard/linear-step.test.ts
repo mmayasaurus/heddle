@@ -49,7 +49,7 @@ function io(answers: unknown[], reports: string[] = []): WizardIO {
   return { prompter: new ScriptedPrompter(answers), report: (line) => reports.push(line) };
 }
 
-function writeRegistry(homeDir: string, targetDir: string, agents = ['A', 'B'], team = 'HED'): void {
+function writeRegistry(homeDir: string, targetDir: string, agents = ['A', 'B'], team = 'HED', tracker?: 'linear' | 'github'): void {
   const registryDir = join(homeDir, '.heddle');
   mkdirSync(registryDir, { recursive: true });
   writeFileSync(join(registryDir, 'projects.json'), JSON.stringify({
@@ -57,6 +57,7 @@ function writeRegistry(homeDir: string, targetDir: string, agents = ['A', 'B'], 
     projects: [{
       name: 'synthetic-project', workspaceRoots: [targetDir], agentIds: agents, linearTeam: team,
       defaultRoom: 'synthetic-room', launcher: 'synthetic-launcher',
+      ...(tracker ? { tracker } : {}),
     }],
   }));
 }
@@ -64,10 +65,10 @@ function writeRegistry(homeDir: string, targetDir: string, agents = ['A', 'B'], 
 describe('linearStep', () => {
   const { tempDir } = useTempResources('hed645-linear-step-');
 
-  function registered(agents = ['A', 'B'], team = 'HED'): { homeDir: string; targetDir: string } {
+  function registered(agents = ['A', 'B'], team = 'HED', tracker?: 'linear' | 'github'): { homeDir: string; targetDir: string } {
     const homeDir = tempDir();
     const targetDir = tempDir();
-    writeRegistry(homeDir, targetDir, agents, team);
+    writeRegistry(homeDir, targetDir, agents, team, tracker);
     return { homeDir, targetDir };
   }
 
@@ -103,7 +104,7 @@ describe('linearStep', () => {
     expect(result.status).toBe('done');
     expect(runner.calls).toEqual(['whoami:A', 'whoami:B', 'team:HED:A']);
     expect(result.detail).toContain('VERIFIED: agents A, B');
-    expect(result.detail).toContain('VERIFIED: team HED');
+    expect(result.detail).toContain("Linear team HED: reachable — access confirmed. (An empty or misspelled team key can't be told apart from a valid one via the CLI, so double-check the key.)");
     expect(result.detail).toContain('STILL MANUAL: export LIN_TEAM=HED');
   });
 
@@ -165,6 +166,31 @@ describe('linearStep', () => {
     expect(result).toMatchObject({ status: 'skipped', summary: expect.stringContaining('dry-run — would verify credential/team/roster for team HED, agents A') });
     expect(runner.calls).toEqual([]);
     expect(readdirSync(targetDir)).toEqual(before);
+  });
+
+  it('skips Linear onboarding for a non-Linear (github) project without spawning', async () => {
+    const { homeDir, targetDir } = registered(['A'], 'HED', 'github');
+    const runner = new StubLinearRunner();
+
+    const result = await linearStep(runner).run(context(homeDir, targetDir), io([true]));
+
+    expect(result.status).toBe('skipped');
+    expect(result.summary).toContain('github');
+    expect(result.detail).toContain('github');
+    expect(runner.calls).toEqual([]);
+  });
+
+  it('skips github projects before the dry-run gate', async () => {
+    const { homeDir, targetDir } = registered(['A'], 'HED', 'github');
+    const runner = new StubLinearRunner();
+
+    const result = await linearStep(runner).run(context(homeDir, targetDir, true), io([true]));
+
+    expect(result.status).toBe('skipped');
+    expect(result.summary).toContain('github');
+    expect(result.summary).not.toContain('dry-run — would verify');
+    expect(result.detail).toContain('github');
+    expect(runner.calls).toEqual([]);
   });
 
   it('re-prompts an unregistered target once for a blank team then fails with a guide', async () => {
