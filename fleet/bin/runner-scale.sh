@@ -89,6 +89,17 @@ case "${1:-status}" in
       echo "jobs (observed live 2026-07-22 ×2). Wait for them to finish, or pass --force."
       exit 2
     fi
+    # Residual TOCTOU (inherent — documented, not closed here; see HED-563):
+    # the busy-runner guard above reads GitHub's runner API, but the teardown
+    # below happens on Fly and `fly scale count` is NOT atomic with job
+    # assignment — a fly-runner that reads idle at the guard can still pick up a
+    # job in the window before it is torn down. The guard sits immediately before
+    # the teardown to keep that window minimal, and --force / the freshness checks
+    # + /deepreview N recover a job that loses this race; it cannot be fully closed
+    # with a whole-pool `fly scale count`. The complete fix (idle-only targeted
+    # teardown by machine id, gated on a verified runner-name->machine-id mapping)
+    # needs live Spinventory-CI verification, so it is handed off in HED-563
+    # (Spinventory-Port, apply-at-resume) rather than shipped unverified here.
     echo "Scaling $APP to $N machines (queued: $Q)..."
     fly scale count "$N" -a "$APP" --yes 2>&1 | grep -Ev "Metrics token" | tail -6
     echo "Done. Destroyed machines' registrations go offline-stale; the watchdog reports them."

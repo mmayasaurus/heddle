@@ -116,7 +116,13 @@ def row_key(r):
     # 30 rows keep de-duping. Do not change the fields or order.
     basis = "|".join([r.get("Timestamp", ""), r.get("Your name or Tester ID", ""),
                       r.get("What was the error/bug?", "")]).strip()
-    return hashlib.sha1(basis.encode()).hexdigest()[:16]
+    # SHA-1 here is a content-addressed dedup key, NOT a security digest, so
+    # usedforsecurity=False is correct: it silences weak-hash linters (bandit
+    # B324 / CodeFactor) and, per hashlib's contract, does NOT change the bytes
+    # produced — every existing state-file key still matches (verified: identical
+    # digest under 3.12). Switching to SHA-256 would rehash all 30 rows and
+    # re-import them, which is exactly what the stability comment above forbids.
+    return hashlib.sha1(basis.encode(), usedforsecurity=False).hexdigest()[:16]
 
 def is_blank_row(r):
     """A genuinely-empty sheet row (e.g. a spacer). Skip it so it never becomes an
