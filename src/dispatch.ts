@@ -15,6 +15,7 @@ import { overrideReasonGate } from './dispatcher/override-gate.js';
 import { monocultureNote, formatMonocultureWarning } from './dispatcher/monoculture.js';
 import { planDispatch, resolveRotationAccount, hasNoDispatchableClaudeAccount, noDispatchableClaudeAccountReason, capabilityFitFallbackEligible } from './dispatcher/plan.js';
 import { runTarget } from './dispatcher/run.js';
+import { boundedPreflight } from './bounded-dispatch.js';
 import type { AdapterFactory, DispatchContext, DispatchRequest, DispatchOutcome } from './dispatcher/types.js';
 
 // Public surface — exactly what src/dispatch.ts exported before the HED-282 split (nothing widened).
@@ -23,7 +24,7 @@ export { defaultAdapterFor } from './dispatcher/adapters.js';
 export { isNonReason, overrideReasonGate } from './dispatcher/override-gate.js';
 export { monocultureNote, formatMonocultureWarning } from './dispatcher/monoculture.js';
 export { planDispatch, summarizePlan } from './dispatcher/plan.js';
-export type { DispatchRequest, DispatchRefusal, DispatchOutcome, AdapterFactory, DispatchPlan } from './dispatcher/types.js';
+export type { DispatchRequest, DispatchRefusal, DispatchOutcome, AdapterFactory, DispatchPlan, BoundedAdmission, BoundedDispatchReceipt } from './dispatcher/types.js';
 export type { MonocultureNote } from './dispatcher/monoculture.js';
 
 /**
@@ -122,6 +123,15 @@ export async function dispatch(
       authorProvider: normalizeProvider(req.authorProvider) ?? null, authorModel: req.authorModel ?? null,
       authorDispatchId: req.authorDispatchId ?? null, reviewerPick: plan.reviewerPick?.reason,
     };
+  }
+
+  // Hard-bounded routes fail closed before classifiers, provider-cap reads, adapter creation, or any
+  // provider request. The later transactional gate rechecks time-sensitive headroom under the lock.
+  const boundedVeto = boundedPreflight(route, target, req, table);
+  if (boundedVeto) {
+    return refusalOutcome(ctx, req, route.taskClass, target, skillsForRefusal, boundedVeto.refusal, {
+      extra: { boundedReceipt: boundedVeto.receipt },
+    });
   }
 
   // ---- Non-dispatchable class (`orchestration`) — refused on EVERY path ------------------------

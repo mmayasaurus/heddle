@@ -261,6 +261,31 @@ task_classes:
     why: doc reading, log triage, summarization — Haiku is the cheap Claude. The fallback stays codex/gpt-5.6-luna (NOT glm — HED-465 weighed it and kept codex) because it is load-bearing on two axes — (1) HED-264 dead-claude walk, a logged-out/billing-dead claude PRIMARY must walk to an ALWAYS-ADDRESSABLE non-claude lane, and codex is a reliable CLI whereas glm is key-gated (ZAI_API_KEY unset → unaddressable → refusal); (2) capability-fit — claude cannot enforce net/exec (no sandbox) but codex can, so a request carrying a capability routes to codex instead of a terminal refusal (test/dispatch-claude.test.ts). A capability-AWARE split (glm normally, codex only when a capability is requested) is HED-501. HED-79 rejected the same class of swap for scaffold. glm ships on the two CURSOR-primary advisory classes instead (second-opinion, quick-alt-take), which have neither a dead-claude walk nor a capability hatch to lose.
     skills: [worker-role]
     edits_code: false
+  fdl-public-source-research:  # FDL packet analysis; explicit/direct class only, never auto-routed
+    provider: glm
+    model: glm-5.3
+    requires_explicit_opt_in: true
+    note: bounded FDL packet analysis on the existing Z.ai Coding Plan route; requires fresh caller-supplied headroom
+    why: read-only public-source packet analysis with a pre-reserved single-request GLM envelope; never tools, fallback, assessment, or retry
+    skills: []
+    mcp: []
+    capabilities: []
+    edits_code: false
+    read_only: true
+    auto_assess: false
+    bounds:
+      max_model_requests: 1
+      max_input_tokens: 72000
+      max_generated_tokens: 8000
+      max_total_tokens: 80000
+      max_output_bytes: 16000
+      max_concurrency: 1
+      timeout_ms: 150000
+      max_dispatches_per_hour: 4
+      max_dispatches_per_session: 48
+      max_session_tokens: 2400000
+      max_headroom_age_ms: 300000
+      retry: false
   documentation:            # READMEs, comments, changelogs, docstrings — minimal reasoning need
     provider: gemini         # gemini-flash: cheap, fast, fine for prose-over-known-facts
     model: gemini-3.6-flash-low

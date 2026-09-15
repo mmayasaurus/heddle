@@ -5,7 +5,7 @@
  */
 import { materializeAgentsMd, readPack, composePacks } from '../skillpacks.js';
 import { materializeWorkerMcp, validateWorkerMcp, codexMcpFlags, claudeMcpConfigFile, webCapable } from '../mcp.js';
-import { isInProcessHttpProvider, readSecretsEnvValue } from '../adapters/openai-compat.js';
+import { isInProcessHttpProvider, isOpenAICompatProvider, openAICompatInputTokenUpperBound, readSecretsEnvValue } from '../adapters/openai-compat.js';
 import { assessResult, type ResultAssessment } from '../classify.js';
 import { snapshotWorktree, sameSnapshot, diffInstruction, embeddedDiff } from '../review.js';
 import { parentCheckoutOf, checkoutFingerprint, escapedPaths, destroyedWork } from '../worktree.js';
@@ -19,6 +19,7 @@ import { baseRecord, refusalOutcome, refuseBilling, webRefusalReason } from './r
 import { billingVerdict } from './billing.js';
 import type { DispatchContext, DispatchRequest, DispatchOutcome, DispatchRefusal } from './types.js';
 import { validateEnvRepoint, type AccountEnvRepoint } from '../accounts.js';
+import { createBoundedReceipt, finalizeBoundedResult, normalizedBoundedUsage } from '../bounded-dispatch.js';
 
 export type EnvRepointResolution =
   | { kind: 'none' }
@@ -162,19 +163,65 @@ export async function runTarget(
   // written and nothing is left in flight.
   for (const p of skills) readPack(p);
   validateWorkerMcp(target.provider, mcp);
-  const adapter = ctx.adapterFor(target.provider);
-
-  // max-children: count + insert in one transaction (see Ledger.startUnderCap).
-  const started = ctx.ledger.startUnderCap(
-    baseRecord(ctx, req, route.taskClass, target, skills, fellBackFrom, caps.granted), ctx.caps,
-  );
+  const isHttp = isInProcessHttpProvider(target.provider);
+  const boundedReceipt = route.bounds
+    ? createBoundedReceipt(route, target, req, ctx.table, 'incomplete')
+    : undefined;
+  const boundedSystemPromptAppend = route.bounds && isHttp && skills.length ? composePacks(skills) : undefined;
+  const boundedPrompt = route.bounds
+    ? (req.diffBase ? embeddedDiff(req.cwd, req.diffBase, undefined, false) + req.prompt : req.prompt)
+    : undefined;
+  let started;
+  if (route.bounds && boundedReceipt && req.boundedAdmission && boundedPrompt !== undefined) {
+    if (!isOpenAICompatProvider(target.provider)) {
+      throw new Error(`bounded dispatch invariant: ${target.provider} passed preflight without OpenAI-compatible enforcement`);
+    }
+    const inputTokens = openAICompatInputTokenUpperBound(target.provider, boundedPrompt, {
+      model: target.model,
+      cwd: req.cwd,
+      systemPromptAppend: boundedSystemPromptAppend,
+      maxOutputTokens: route.bounds.maxGeneratedTokens,
+      maxModelRequests: route.bounds.maxModelRequests,
+      allowReasoningRetry: route.bounds.retry,
+      timeoutMs: Math.min(req.timeoutMs ?? route.bounds.timeoutMs, route.bounds.timeoutMs),
+    });
+    boundedReceipt.reservation = {
+      inputTokens,
+      generatedTokens: route.bounds.maxGeneratedTokens,
+      totalTokens: inputTokens + route.bounds.maxGeneratedTokens,
+    };
+    started = ctx.ledger.startBoundedUnderCap(
+      baseRecord(ctx, req, route.taskClass, target, skills, fellBackFrom, caps.granted),
+      ctx.caps,
+      { ...req.boundedAdmission, inputTokens },
+      route.bounds,
+    );
+    if (!started.refused) boundedReceipt.times.admittedAt = started.admittedAt;
+  } else {
+    // Legacy max-children behavior is untouched when the route declares no resource envelope.
+    started = ctx.ledger.startUnderCap(
+      baseRecord(ctx, req, route.taskClass, target, skills, fellBackFrom, caps.granted), ctx.caps,
+    );
+  }
   if (started.refused) {
+    const refusalCode = ('code' in started ? started.code : 'max-children') as DispatchRefusal['code'];
+    if (boundedReceipt) {
+      boundedReceipt.status = 'refused';
+      boundedReceipt.refusedDimensions = [
+        refusalCode === 'bounded-input-oversize' ? 'inputTokens' :
+          refusalCode === 'max-children' ? 'concurrency' : 'aggregateBudget',
+      ];
+      boundedReceipt.times.completedAt = new Date().toISOString();
+    }
     return refusalOutcome(ctx, req, route.taskClass, target, skills, {
-      code: 'max-children', reason: started.reason,
-      instruction: 'Wait for a worker to finish (check_workers), or close orphaned rows.',
-    }, { extra: { usedFallback: fellBackFrom !== null }, ledgerId: started.id });
+      code: refusalCode, reason: started.reason,
+      instruction: refusalCode === 'max-children'
+        ? 'Wait for a worker to finish (check_workers), or close orphaned rows.'
+        : 'Refresh quota headroom or start a new external session only when its declared cap permits the complete reservation.',
+    }, { extra: { usedFallback: fellBackFrom !== null, ...(boundedReceipt ? { boundedReceipt } : {}) }, ledgerId: started.id });
   }
   const ledgerId = started.id;
+  const adapter = ctx.adapterFor(target.provider);
   // HED-3: review rows carry the author→reviewer pair from the moment the row exists.
   if (ctx.review) {
     ctx.ledger.recordReview({
@@ -209,7 +256,6 @@ export async function runTarget(
   // --mcp-config file — nothing is written into the worktree — and run under the chosen account's
   // CLAUDE_CONFIG_DIR (unset for the default login).
   const isClaude = target.provider === 'claude';
-  const isHttp = isInProcessHttpProvider(target.provider);
   const acct = isClaude ? ctx.claudeAccount ?? null : null;
   const rotation = (target.provider === 'codex' || target.provider === 'cursor') ? ctx.rotationAccount ?? null : null;
   let restoreSkills: () => void = () => {};
@@ -243,7 +289,7 @@ export async function runTarget(
     } else if (isHttp) {
       // HTTP/in-process providers have no filesystem: embed packs as their system prompt. MCP is
       // empty here because validateWorkerMcp rejects every non-empty HTTP-provider attachment.
-      systemPromptAppend = skills.length ? composePacks(skills) : undefined;
+      systemPromptAppend = boundedSystemPromptAppend ?? (skills.length ? composePacks(skills) : undefined);
     } else {
       // Per-dispatch blocks + liveness GC (HED-56): concurrent dispatches into one cwd each own
       // their block/ref; blocks left by crashed dispatches are collected on the next dispatch.
@@ -262,9 +308,9 @@ export async function runTarget(
     // HTTP providers cannot run git; Claude read-only reviewers also receive an embedded diff because
     // their tool set has no Bash. Tool-less HTTP prompts must not mention Read/Grep/Glob.
     const embedDiff = (isClaude && route.readOnly) || isHttp;
-    const basePrompt = req.diffBase
+    const basePrompt = boundedPrompt ?? (req.diffBase
       ? (embedDiff ? embeddedDiff(req.cwd, req.diffBase, undefined, !isHttp) : diffInstruction(req.diffBase)) + req.prompt
-      : req.prompt;
+      : req.prompt);
     // Best-effort PREVENTION to pair with the detection above: state the boundary explicitly, since
     // a worker that walks up to find "the project root" lands in the parent checkout and has no
     // other way to know it is inside a linked worktree.
@@ -279,7 +325,9 @@ export async function runTarget(
       cwd: req.cwd,
       effort: req.effort ?? target.effort,
       extraFlags,
-      timeoutMs: req.timeoutMs,
+      timeoutMs: route.bounds
+        ? Math.min(req.timeoutMs ?? route.bounds.timeoutMs, route.bounds.timeoutMs)
+        : req.timeoutMs,
       resume: req.resume,
       env: { ...req.env, ...acct?.env, ...rotation?.env, ...stamps },
       envRepoint: envRepoint && { ...envRepoint, authToken: envRepoint.authToken! },
@@ -290,6 +338,9 @@ export async function runTarget(
       readOnly: route.readOnly,
       skipPermissions: req.skipPermissions,
       mcpServers: isClaude ? mcp : undefined,
+      maxOutputTokens: route.bounds?.maxGeneratedTokens,
+      maxModelRequests: route.bounds?.maxModelRequests,
+      allowReasoningRetry: route.bounds ? route.bounds.retry : undefined,
     });
   } catch (err) {
     result = { ok: false, output: '', exitCode: null, error: err instanceof Error ? err.message : String(err) };
@@ -375,6 +426,15 @@ export async function runTarget(
     }
   }
 
+  if (route.bounds && boundedReceipt) {
+    result = finalizeBoundedResult(result, boundedReceipt, route.bounds);
+    const normalized = normalizedBoundedUsage(result.usage);
+    ctx.ledger.settleBoundedReservation(ledgerId, {
+      inputTokens: normalized.inputTokens,
+      generatedTokens: normalized.generatedTokens,
+    });
+  }
+
   ctx.ledger.finish(ledgerId, {
     ok: result.ok,
     // The escape note is appended to the LEDGER's error column so the row is durably self-describing
@@ -408,6 +468,7 @@ export async function runTarget(
     ...(escapeReport ? { escape: escapeReport } : {}),
     ...(destroyedReport ? { destroyed: destroyedReport } : {}),
     ...(billingDegraded ? { billingDegraded } : {}),
+    ...(boundedReceipt ? { boundedReceipt } : {}),
     ...(ctx.review ? { review: { authorProvider: ctx.review.authorProvider, reviewerProvider: target.provider, reviewerModel: target.model, mandateOk, reviewerPick: ctx.review.reviewerPick } } : {}),
     ...(assessment ? { assessment } : {}),
   };

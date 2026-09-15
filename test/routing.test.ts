@@ -133,6 +133,30 @@ describe('routing.v0.yaml — shipped table invariants', () => {
     expect(route.requiresWeb).toBe(true);
     expect(route.fallback?.capabilities).toEqual(['browse']);
   });
+
+  it('keeps FDL public-source research inert and pins its complete GLM resource envelope', () => {
+    const route = resolveRoute(table, 'fdl-public-source-research') as Route & { bounds?: Record<string, number | boolean> };
+    expect(route).toMatchObject({
+      provider: 'glm', model: 'glm-5.3', readOnly: true, autoAssess: false,
+      requiresExplicitOptIn: true, fallback: undefined,
+    });
+    expect(route.mcp ?? []).toEqual([]);
+    expect(route.capabilities ?? []).toEqual([]);
+    expect(route.bounds).toEqual({
+      maxModelRequests: 1,
+      maxInputTokens: 72_000,
+      maxGeneratedTokens: 8_000,
+      maxTotalTokens: 80_000,
+      maxOutputBytes: 16_000,
+      maxConcurrency: 1,
+      timeoutMs: 150_000,
+      maxDispatchesPerHour: 4,
+      maxDispatchesPerSession: 48,
+      maxSessionTokens: 2_400_000,
+      maxHeadroomAgeMs: 300_000,
+      retry: false,
+    });
+  });
 });
 
 describe('pickReviewer — per-entry mcp reaches the usability gate (codeant #111)', () => {

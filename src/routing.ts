@@ -55,6 +55,23 @@ export interface Route extends RouteTarget {
    *  permission implied"). Undefined = the default applies; the ladder never auto-joins T1Q/T3. */
   minTier?: Tier;
   maxTier?: Tier;
+  /** Optional hard resource envelope. Absent means the legacy dispatch path is unchanged. */
+  bounds?: DispatchBounds;
+}
+
+export interface DispatchBounds {
+  maxModelRequests: number;
+  maxInputTokens: number;
+  maxGeneratedTokens: number;
+  maxTotalTokens: number;
+  maxOutputBytes: number;
+  maxConcurrency: number;
+  timeoutMs: number;
+  maxDispatchesPerHour: number;
+  maxDispatchesPerSession: number;
+  maxSessionTokens: number;
+  maxHeadroomAgeMs: number;
+  retry: boolean;
 }
 
 /**
@@ -162,6 +179,39 @@ function listField(node: any, key: string, where: string): string[] | undefined 
   if (v === undefined || v === null) return undefined;
   if (Array.isArray(v) && v.every((x) => typeof x === 'string')) return v;
   throw new Error(`routing table: ${where}.${key} must be a list of strings (got ${JSON.stringify(v)})`);
+}
+
+function positiveInteger(node: Record<string, unknown>, key: string, where: string): number {
+  const value = node[key];
+  if (!Number.isInteger(value) || Number(value) <= 0) {
+    throw new Error(`routing table: ${where}.${key} must be a positive integer (got ${JSON.stringify(value)})`);
+  }
+  return Number(value);
+}
+
+function parseDispatchBounds(node: unknown, where: string): DispatchBounds | undefined {
+  if (node === undefined || node === null) return undefined;
+  if (typeof node !== 'object' || Array.isArray(node)) {
+    throw new Error(`routing table: ${where}.bounds must be an object`);
+  }
+  const bounds = node as Record<string, unknown>;
+  if (typeof bounds.retry !== 'boolean') {
+    throw new Error(`routing table: ${where}.bounds.retry must be a boolean (got ${JSON.stringify(bounds.retry)})`);
+  }
+  return {
+    maxModelRequests: positiveInteger(bounds, 'max_model_requests', `${where}.bounds`),
+    maxInputTokens: positiveInteger(bounds, 'max_input_tokens', `${where}.bounds`),
+    maxGeneratedTokens: positiveInteger(bounds, 'max_generated_tokens', `${where}.bounds`),
+    maxTotalTokens: positiveInteger(bounds, 'max_total_tokens', `${where}.bounds`),
+    maxOutputBytes: positiveInteger(bounds, 'max_output_bytes', `${where}.bounds`),
+    maxConcurrency: positiveInteger(bounds, 'max_concurrency', `${where}.bounds`),
+    timeoutMs: positiveInteger(bounds, 'timeout_ms', `${where}.bounds`),
+    maxDispatchesPerHour: positiveInteger(bounds, 'max_dispatches_per_hour', `${where}.bounds`),
+    maxDispatchesPerSession: positiveInteger(bounds, 'max_dispatches_per_session', `${where}.bounds`),
+    maxSessionTokens: positiveInteger(bounds, 'max_session_tokens', `${where}.bounds`),
+    maxHeadroomAgeMs: positiveInteger(bounds, 'max_headroom_age_ms', `${where}.bounds`),
+    retry: bounds.retry,
+  };
 }
 
 function toTarget(node: any, where = 'task class'): RouteTarget | undefined {
@@ -291,6 +341,7 @@ export function resolveRoute(table: RoutingTable, taskClass: string): Route {
       : undefined,
     minTier,
     maxTier,
+    bounds: parseDispatchBounds(node.bounds, where),
   };
 }
 

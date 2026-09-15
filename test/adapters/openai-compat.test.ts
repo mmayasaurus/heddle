@@ -55,6 +55,33 @@ describe('OpenAICompatAdapter', () => {
     expect(JSON.parse(fetch.mock.calls[1][1].body).max_completion_tokens).toBe(65536);
   });
 
+  it('uses the dispatch output cap and disables the reasoning retry for a bounded request', async () => {
+    vi.mocked(readFileSync).mockReturnValue('ZAI_API_KEY=secret\n');
+    const fetch = vi.fn().mockResolvedValue(response({
+      id: 'glm-request-1',
+      choices: [{ finish_reason: 'length', message: { content: '{"partial":true}' } }],
+      usage: {
+        prompt_tokens: 12,
+        completion_tokens: 8_000,
+        prompt_tokens_details: { cached_tokens: 4, cache_creation_tokens: 3 },
+        completion_tokens_details: { reasoning_tokens: 7_000 },
+      },
+    }));
+    vi.stubGlobal('fetch', fetch);
+    const result = await new OpenAICompatAdapter('glm').dispatch('hello', {
+      ...opts, model: 'glm-5.3', maxOutputTokens: 8_000, maxModelRequests: 1, allowReasoningRetry: false,
+    } as any);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(fetch.mock.calls[0][1].body).max_completion_tokens).toBe(8_000);
+    expect(result).toMatchObject({
+      ok: false, output: '{"partial":true}', incomplete: true, truncated: true,
+      usage: {
+        requestId: 'glm-request-1', inputTokens: 12, cachedInputTokens: 4,
+        cacheCreationInputTokens: 3, outputTokens: 8_000, reasoningOutputTokens: 7_000,
+      },
+    });
+  });
+
   it('fails loudly when its key is missing', async () => {
     vi.mocked(readFileSync).mockImplementation(() => { throw new Error('ENOENT'); });
     await expect(new OpenAICompatAdapter('cerebras').dispatch('hello', opts)).resolves.toMatchObject({
@@ -79,6 +106,7 @@ describe('OpenAICompatAdapter', () => {
     })));
     await expect(new OpenAICompatAdapter('openrouter').dispatch('hello', { ...opts, model: 'dynamic/model', timeoutMs: 1 })).resolves.toMatchObject({
       ok: false, output: '', exitCode: null, error: expect.stringContaining('timed out'),
+      incomplete: true, remoteOutcome: 'unknown',
     });
   });
 

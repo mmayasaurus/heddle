@@ -73,8 +73,27 @@ export function isInProcessHttpProvider(provider: string): boolean {
 }
 
 export interface ChatResponse {
+  id?: string;
   choices?: Array<{ finish_reason?: string | null; message?: { content?: unknown } }>;
-  usage?: { prompt_tokens?: number; completion_tokens?: number; completion_tokens_details?: { reasoning_tokens?: number } };
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    prompt_tokens_details?: { cached_tokens?: number; cache_creation_tokens?: number };
+    completion_tokens_details?: { reasoning_tokens?: number };
+  };
+}
+
+/**
+ * Conservative preflight bound for the exact in-process request body. Every tokenizer token consumes
+ * at least one UTF-8 byte from this fully assembled body, so byte length may over-reserve but can
+ * never treat unknown message/system/pack overhead as zero.
+ */
+export function openAICompatInputTokenUpperBound(
+  provider: 'groq' | 'cerebras' | 'openrouter' | 'glm',
+  prompt: string,
+  opts: DispatchOptions,
+): number {
+  return Buffer.byteLength(new OpenAICompatAdapter(provider).buildRequest(prompt, opts, '').body, 'utf8');
 }
 
 /** Generic HTTP worker for OpenAI Chat Completions-compatible providers. */
@@ -112,14 +131,16 @@ export class OpenAICompatAdapter implements WorkerAdapter {
     const apiKey = this.loadKey();
     if (!apiKey) return completed(this.keyMissingResult());
 
-    const first = await this.request(prompt, opts, apiKey, this.config.maxTokensDefault, deadline);
+    const firstBudget = opts.maxOutputTokens ?? this.config.maxTokensDefault;
+    const first = await this.request(prompt, opts, apiKey, firstBudget, deadline);
     if ('result' in first) return completed(first.result);
     const firstResult = toResult(first.response, first.httpOk);
-    if (!this.needsReasoningRetry(first.response) || Date.now() >= deadline) return completed(firstResult);
+    if (opts.allowReasoningRetry === false || opts.maxModelRequests === 1
+        || !this.needsReasoningRetry(first.response) || Date.now() >= deadline) return completed(firstResult);
 
-    const firstBudget = this.budgetFor(this.config.maxTokensDefault);
-    const retryBudget = Math.min(this.config.maxTokensDefault * 2, this.config.contextCap ?? Infinity);
-    if (retryBudget === firstBudget) return completed(firstResult);
+    const enforcedFirstBudget = this.budgetFor(firstBudget);
+    const retryBudget = Math.min(firstBudget * 2, this.config.contextCap ?? Infinity);
+    if (retryBudget === enforcedFirstBudget) return completed(firstResult);
     const retry = await this.request(prompt, opts, apiKey, retryBudget, deadline);
     if ('result' in retry) return completed({ ...retry.result, usage: sumUsage(firstResult.usage, retry.result.usage) });
     const result = toResult(retry.response, retry.httpOk);
@@ -155,7 +176,11 @@ export class OpenAICompatAdapter implements WorkerAdapter {
       return { response: body, httpOk: response.ok };
     } catch (err) {
       const timedOut = controller.signal.aborted;
-      return { result: { ok: false, output: '', exitCode: null, error: timedOut ? `${this.provider}: request timed out` : `${this.provider}: request failed: ${err instanceof Error ? err.message : String(err)}` } };
+      return { result: {
+        ok: false, output: '', exitCode: null,
+        error: timedOut ? `${this.provider}: request timed out` : `${this.provider}: request failed: ${err instanceof Error ? err.message : String(err)}`,
+        ...(timedOut ? { incomplete: true as const, remoteOutcome: 'unknown' as const } : {}),
+      } };
     } finally {
       clearTimeout(timeout);
     }
@@ -175,20 +200,36 @@ export class OpenAICompatAdapter implements WorkerAdapter {
 export function toResult(response: ChatResponse, httpOk: boolean): WorkerResult {
   const choice = response.choices?.[0];
   const output = typeof choice?.message?.content === 'string' ? choice.message.content : '';
+  const truncated = choice?.finish_reason === 'length';
   const usage: TokenUsage | undefined = response.usage ? {
+    requestId: response.id,
     inputTokens: response.usage.prompt_tokens,
+    cachedInputTokens: response.usage.prompt_tokens_details?.cached_tokens,
+    cacheCreationInputTokens: response.usage.prompt_tokens_details?.cache_creation_tokens,
     outputTokens: response.usage.completion_tokens,
     reasoningOutputTokens: response.usage.completion_tokens_details?.reasoning_tokens,
   } : undefined;
-  return { ok: httpOk && output.length > 0, output, usage, exitCode: null, error: output.length ? undefined : 'empty content', raw: response };
+  return {
+    ok: httpOk && output.length > 0 && !truncated,
+    output,
+    usage,
+    exitCode: null,
+    error: truncated ? 'length-limited response' : output.length ? undefined : 'empty content',
+    raw: response,
+    ...(truncated ? { incomplete: true as const, truncated: true as const } : {}),
+  };
 }
 
 export function sumUsage(first?: TokenUsage, second?: TokenUsage): TokenUsage | undefined {
   const sum = (a?: number, b?: number): number | undefined => a === undefined && b === undefined ? undefined : (a ?? 0) + (b ?? 0);
   const usage = {
     inputTokens: sum(first?.inputTokens, second?.inputTokens),
+    cachedInputTokens: sum(first?.cachedInputTokens, second?.cachedInputTokens),
+    cacheCreationInputTokens: sum(first?.cacheCreationInputTokens, second?.cacheCreationInputTokens),
     outputTokens: sum(first?.outputTokens, second?.outputTokens),
     reasoningOutputTokens: sum(first?.reasoningOutputTokens, second?.reasoningOutputTokens),
   };
-  return usage.inputTokens === undefined && usage.outputTokens === undefined && usage.reasoningOutputTokens === undefined ? undefined : usage;
+  return usage.inputTokens === undefined && usage.cachedInputTokens === undefined
+    && usage.cacheCreationInputTokens === undefined && usage.outputTokens === undefined
+    && usage.reasoningOutputTokens === undefined ? undefined : usage;
 }
