@@ -2,8 +2,9 @@
 // into ONE ordered walkthrough and is the SINGLE writer of step composition — step modules stay on
 // disjoint files, never import each other, and never edit this file. Owners land their step module
 // (model-economy HED-473, spread HED-474, meters HED-475, rules HED-544, permissions HED-600,
-// doctor HED-476) and it is wired here as a one-line addition to `buildSteps`; accounts,
-// model-economy, spread, meters, rules, permissions, and the doctor finish-gate are all wired.
+// pr-automation HED-597, doctor HED-476) and it is wired here as a one-line addition to `buildSteps`;
+// accounts, model-economy, spread, meters, rules, permissions, pr-automation, and the doctor
+// finish-gate are all wired.
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 import type { WizardContext, WizardIO, WizardStep, WizardStepResult, WizardStepStatus } from './step.js';
@@ -15,6 +16,7 @@ import { spreadStep } from './spread-policy.js';
 import { metersStep } from './meters-step.js';
 import { rulesStep } from './rules-step.js';
 import { permissionsStep } from './permissions-step.js';
+import { prAutomationStep } from './pr-automation-step.js';
 import { resolveCatalogRoot } from '../rules/lifecycle.js';
 
 /**
@@ -146,10 +148,12 @@ function skipDoctorUnderAltHome(step: WizardStep): WizardStep {
 
 /**
  * Build the ordered built-in step set, in walkthrough order:
- * accounts → model-economy → spread → meters → rules → permissions → doctor (last). Each self-contained
- * step module is registered here as one line by its owner as it lands (HED-564 protocol). model-economy,
- * spread, meters, rules, and permissions each write UNDER `ctx.homeDir` and self-handle --dry-run inside their own module,
- * so they need no wrapper here. `rulesStep` is the one step taking a construction dep — the rule catalog
+ * accounts → model-economy → spread → meters → rules → permissions → pr-automation → doctor (last). Each
+ * self-contained step module is registered here as one line by its owner as it lands (HED-564 protocol).
+ * model-economy, spread, meters, rules, and permissions each write UNDER `ctx.homeDir` and self-handle
+ * --dry-run inside their own module; pr-automation writes under `ctx.targetDir` (the target repo's
+ * `.github/`) and self-gates via `applies` on a git target (skipped when no `--target` is set) — all
+ * self-dry-run, so they need no wrapper here. `rulesStep` is the one step taking a construction dep — the rule catalog
  * — defaulted to the bundled catalog (`resolveCatalogRoot()`) so
  * `buildSteps({ runner })` stays the caller contract. Doctor is the read-only finish gate, composed
  * with two guards: `skipDoctorUnderAltHome` (skip when --home diverges — it would otherwise verify a
@@ -164,6 +168,7 @@ export function buildSteps(deps: SetupDeps): WizardStep[] {
     metersStep,
     rulesStep(deps.catalogRoot ?? resolveCatalogRoot()),
     permissionsStep(),
+    prAutomationStep(),
     // doctor (HED-476) is ALWAYS last — the read-only finish gate that verifies setup end-to-end.
     dryRunGate(
       skipDoctorUnderAltHome(doctorStep),
