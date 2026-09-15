@@ -159,15 +159,41 @@ describe('rulesStep', () => {
     expect(written.meta).toEqual({ source: 'migration-7' });
   });
 
-  it('refuses to clobber a malformed existing policy file', async () => {
+  it('fails fast on a malformed existing policy file, before any prompt', async () => {
     const catalogRoot = tempDir();
     const homeDir = tempDir();
     seedCatalog(catalogRoot);
     const path = seedPolicy(homeDir, '{ this is not valid json');
 
-    await expect(rulesStep(catalogRoot).run(context(homeDir), io(['minimal', true, true]))).rejects.toThrow(/not valid JSON/);
+    // No prompt answers: if the existing policy were not validated first, run() would reach the preset
+    // select() and the ScriptedPrompter would throw "answer script exhausted" instead — so asserting the
+    // specific "not valid JSON" error proves validation happens before the operator is prompted.
+    await expect(rulesStep(catalogRoot).run(context(homeDir), io([]))).rejects.toThrow(/not valid JSON/);
     // The unparseable file is left exactly as-is, never overwritten.
     expect(readFileSync(path, 'utf8')).toBe('{ this is not valid json');
+  });
+
+  it('names the resolved policy path (not a hardcoded ~) in the save prompt under a custom home', async () => {
+    const catalogRoot = tempDir();
+    const homeDir = tempDir();
+    seedCatalog(catalogRoot);
+    const recording = new RecordingPrompter(['minimal', true, false]); // minimal, accept as-is, decline save
+
+    await rulesStep(catalogRoot).run(context(homeDir), { prompter: recording, report: () => {} });
+
+    const savePrompt = recording.calls.find((call) => call.question.startsWith('Save these rules'));
+    expect(savePrompt?.question).toContain(policyPath(homeDir, 'rules'));
+    expect(savePrompt?.question).not.toContain('~/.heddle');
+  });
+
+  it('names the resolved policy path in dry-run output', async () => {
+    const catalogRoot = tempDir();
+    const homeDir = tempDir();
+    const lines: string[] = [];
+
+    await rulesStep(catalogRoot).run(context(homeDir, true), io([], lines));
+
+    expect(lines.some((line) => line.includes(policyPath(homeDir, 'rules')))).toBe(true);
   });
 });
 

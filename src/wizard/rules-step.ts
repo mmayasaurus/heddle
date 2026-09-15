@@ -44,14 +44,21 @@ export function rulesStep(catalogRoot: string): WizardStep {
     id: 'rules',
     title: 'Safety rules',
     async run(ctx: WizardContext, io: WizardIO): Promise<WizardStepResult> {
+      const policyFile = policyPath(ctx.homeDir, 'rules');
       if (ctx.dryRun) {
-        io.report('dry-run — rules: a real run would prompt for a preset, fine-tune the hooks chooser, and write ~/.heddle/policy/rules.json; nothing was prompted or written.');
+        io.report(`dry-run — rules: a real run would prompt for a preset, fine-tune the hooks chooser, and write ${policyFile}; nothing was prompted or written.`);
         return {
           id: 'rules',
           status: 'skipped',
           summary: 'dry-run — rules prompting and write skipped',
         };
       }
+
+      // Fail fast: read + validate any existing policy BEFORE prompting, so a malformed or
+      // unknown-version file aborts the step immediately rather than after the operator has picked a
+      // preset and fine-tuned it (codacy review). The same object is reused for the merge-preserving
+      // write below.
+      const existing = loadExistingRulesPolicy(policyFile);
 
       const choice = await io.prompter.select('Safety preset', ['minimal', 'standard', 'strict', 'custom (choose each rule)']);
       let selection: HookRuleSelection[];
@@ -66,16 +73,14 @@ export function rulesStep(catalogRoot: string): WizardStep {
         selection = (await runHooksChoose({ catalogRoot }, { prompter: io.prompter, report: io.report })).selected;
       }
 
-      if (!await io.prompter.confirm('Save these rules to ~/.heddle/policy/rules.json?', true)) {
+      if (!await io.prompter.confirm(`Save these rules to ${policyFile}?`, true)) {
         io.report('Rules policy not saved.');
         return { id: 'rules', status: 'skipped', summary: 'rules: not saved' };
       }
 
       // Merge-preserving write (WizardStep contract): keep any unknown top-level fields a newer
-      // consumer/migration wrote, replace only this step's owned fields. loadExistingRulesPolicy throws
-      // on malformed / unknown-version existing JSON rather than clobbering it.
-      const policyFile = policyPath(ctx.homeDir, 'rules');
-      const existing = loadExistingRulesPolicy(policyFile);
+      // consumer/migration wrote, replace only this step's owned fields (schemaVersion, rules). The
+      // existing policy was already read + validated at the top of run().
       atomicWriteFile(policyFile, JSON.stringify({ ...existing, schemaVersion: 1, rules: selection }, null, 2) + '\n');
       const enforced = selection.filter((rule) => rule.enforce).length;
       return {
