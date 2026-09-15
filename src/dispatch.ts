@@ -263,6 +263,22 @@ export async function dispatch(
   // both that fallback's own account selection and the HED-261 floor. Run the primary as usual — a real
   // rate-limit then cools + fails over (below), and a genuinely dead pool reaches the normal fallback path.
   const preFp = checkoutFingerprint(req.cwd);
+  // One barrier for both fallback re-dispatch points (account-failover + class fallback): if the
+  // failed leg left the parent checkout dirty since `preFp`, refuse rather than let the next leg
+  // inherit it (HED-487). `failedLeg` is whichever leg just failed — the primary, or the reassigned
+  // account-failover outcome. Returns the refusal outcome to return, or null to proceed. Auto-WIP
+  // recovery was cut before merge; its design constraints live in HED-622.
+  const dirtBarrier = (routeTarget: RouteTarget, failedLeg: DispatchOutcome): DispatchOutcome | null => {
+    const barrier = fallbackBarrier(req.cwd, preFp);
+    if (!barrier.blocked) return null;
+    const refusal = {
+      code: 'fallback-blocked-dirty-tree' as const,
+      reason: `failed primary leg ${failedLeg.provider}/${failedLeg.model} (dispatch #${failedLeg.ledgerId}) left checkout dirt: ${(barrier.dirt ?? []).join(', ')}`,
+      instruction: `Commit or discard the changes in ${req.cwd}, then re-dispatch.`,
+    };
+    return refusalOutcome(ctx, req, route.taskClass, routeTarget, skillsForRefusal, refusal,
+      { fellBackFrom: failedLeg.provider, extra: { usedFallback: true } });
+  };
   let primary = await runTarget(target, req, ctx, route, plan.decision.routedAwayForCap ? `${route.provider}/${route.model}` : null);
   // Capability-fit fallback: when the PRIMARY provider merely lacks the knob (`unenforceable`) and
   // the class declares a fallback whose provider CAN enforce every requested capability, route there
@@ -340,20 +356,8 @@ export async function dispatch(
     if (retry && retry.id !== from) {
       ctx.rotationAccount = retry; ctx.account = retry.id;
       ctx.routeReason = `${plan.decision.routeReason}; account-failover:${from}→${retry.id} (rate-limit); ${retry.reason}`;
-      const barrier = fallbackBarrier(req.cwd, preFp, {
-        wip: req.fallbackWipCommit === true, failedLegId: primary.ledgerId,
-        label: `${primary.provider}/${primary.model}`,
-      });
-      if (barrier.blocked) {
-        const refusal = {
-          code: 'fallback-blocked-dirty-tree' as const,
-          reason: `failed primary leg ${primary.provider}/${primary.model} (dispatch #${primary.ledgerId}) left checkout dirt: ${(barrier.dirt ?? []).join(', ')}`,
-          instruction: `Commit or discard the changes in ${req.cwd} and re-dispatch, or set fallbackWipCommit to auto-commit them before fallback.`,
-        };
-        return refusalOutcome(ctx, req, route.taskClass, target, skillsForRefusal, refusal,
-          { fellBackFrom: primary.provider });
-      }
-      if (barrier.wipCommit) ctx.routeReason += `; wip-commit ${barrier.wipCommit} before fallback`;
+      const failoverBarrier = dirtBarrier(target, primary);
+      if (failoverBarrier) return failoverBarrier;
       let retryOutcome = await runTarget(target, req, ctx, route, `${target.provider}/${target.model} (account-failover)`);
       if (primary.destroyed && !retryOutcome.destroyed) retryOutcome = { ...retryOutcome, destroyed: primary.destroyed };
       else if (primary.destroyed && retryOutcome.destroyed) {
@@ -450,20 +454,8 @@ export async function dispatch(
   // / 5h-headroom evidence the scoreboard is built on (PR #24, found by the dispatched test worker).
   ctx.routeReason = `${ctx.routeReason ?? plan.decision.routeReason}; ${target.provider}/${target.model} failed → class fallback`
     + (ctx.claudeAccount ? `; ${ctx.claudeAccount.reason}` : ctx.rotationAccount ? `; ${ctx.rotationAccount.reason}` : '');
-  const barrier = fallbackBarrier(req.cwd, preFp, {
-    wip: req.fallbackWipCommit === true, failedLegId: primary.ledgerId,
-    label: `${primary.provider}/${primary.model}`,
-  });
-  if (barrier.blocked) {
-    const refusal = {
-      code: 'fallback-blocked-dirty-tree' as const,
-      reason: `failed primary leg ${primary.provider}/${primary.model} (dispatch #${primary.ledgerId}) left checkout dirt: ${(barrier.dirt ?? []).join(', ')}`,
-      instruction: `Commit or discard the changes in ${req.cwd} and re-dispatch, or set fallbackWipCommit to auto-commit them before fallback.`,
-    };
-    return refusalOutcome(ctx, req, route.taskClass, fallback, skillsForRefusal, refusal,
-      { fellBackFrom: primary.provider });
-  }
-  if (barrier.wipCommit) ctx.routeReason += `; wip-commit ${barrier.wipCommit} before fallback`;
+  const classBarrier = dirtBarrier(fallback, primary);
+  if (classBarrier) return classBarrier;
   let fbOutcome = await runTarget(fallback, req, ctx, route, `${route.provider}/${route.model}`);
   // A PRIMARY that escaped its worktree and then FAILED must not have that warning discarded when
   // the fallback succeeds — the parent checkout is still dirty and someone has to know (PR #28).

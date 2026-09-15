@@ -206,35 +206,23 @@ export function escapedPaths(
   return out.sort();
 }
 
-/** Block a fallback from inheriting checkout dirt created by a failed dispatch leg. */
+/**
+ * Block a fallback from inheriting checkout dirt created by a failed dispatch leg: any dirt that
+ * appeared since `preFp` — a new/changed/cleared path, or a moved HEAD — blocks the re-dispatch. A
+ * null fingerprint (non-git or unreadable cwd) or a clean tree passes: no claim is made in either
+ * direction, matching escapedPaths.
+ *
+ * Refuse-with-report ONLY. The opt-in that auto-committed the leg's dirt so the fallback could
+ * proceed was cut before merge: git add/commit cannot isolate one leg's contribution at path
+ * granularity, so it risks sweeping in the orchestrator's own uncommitted work (four independent
+ * reviewers converged on six defects, PR #206). That designed feature is HED-622.
+ */
 export function fallbackBarrier(
   cwd: string, preFp: CheckoutFingerprint | null,
-  opts: { wip: boolean; failedLegId: number | null; label: string },
-): { blocked: boolean; dirt: string[] | null; wipCommit?: string } {
-  const postFp = checkoutFingerprint(cwd);
-  const humanDirt = escapedPaths(preFp, postFp);
-  if (humanDirt === null || humanDirt.length === 0) return { blocked: false, dirt: humanDirt };
-  if (preFp === null || postFp === null) return { blocked: false, dirt: humanDirt };
-
-  const legPaths: string[] = [];
-  for (const [path, state] of postFp.entries) {
-    if (preFp.entries.get(path) !== state) legPaths.push(path);
-  }
-  for (const path of preFp.entries.keys()) {
-    if (!postFp.entries.has(path)) legPaths.push(path);
-  }
-  legPaths.sort();
-
-  if (preFp.head !== postFp.head || !opts.wip) return { blocked: true, dirt: humanDirt };
-  const msg = 'heddle: WIP — auto-committed before fallback re-dispatch (failed leg dispatch #'
-    + opts.failedLegId + ': ' + opts.label + '); paths: ' + legPaths.join(', ');
-  try {
-    git(cwd, ['add', '--', ...legPaths]);
-    git(cwd, ['commit', '--no-verify', '-m', msg]);
-    return { blocked: false, dirt: humanDirt, wipCommit: git(cwd, ['rev-parse', 'HEAD']).trim() };
-  } catch {
-    return { blocked: true, dirt: humanDirt };
-  }
+): { blocked: boolean; dirt: string[] | null } {
+  const dirt = escapedPaths(preFp, checkoutFingerprint(cwd));
+  if (dirt === null || dirt.length === 0) return { blocked: false, dirt };
+  return { blocked: true, dirt };
 }
 
 /**

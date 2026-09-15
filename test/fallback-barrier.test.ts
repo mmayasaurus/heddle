@@ -151,31 +151,13 @@ describe('fallback commit barrier', () => {
       expect(outcome.refusal?.reason).toContain(`dispatch #${primary.id}`);
       expect(outcome.refusal?.reason).toContain('primary-dirt.txt');
       expect(outcome.refusal?.instruction).toBe(
-        `Commit or discard the changes in ${root} and re-dispatch, or set fallbackWipCommit to auto-commit them before fallback.`,
+        `Commit or discard the changes in ${root}, then re-dispatch.`,
       );
+      // The refusal fires on a fallback path, so the row is attributed as a fallback (HED-622: the
+      // direct refusalOutcome path must set usedFallback, not inherit the hard-coded false).
+      expect(outcome.usedFallback).toBe(true);
       expect(rows.some((row) => row.refusal === 'fallback-blocked-dirty-tree')).toBe(true);
       expect(harness.calls.map((call) => call.provider)).toEqual(['codex']);
-    } finally { restore(); }
-  });
-
-  it('auto-commits primary dirt before running the fallback when opted in', async () => {
-    const root = gitRepo(tempDir); const restore = installRouting(tempDir); const ledger = tempLedger();
-    const before = git(root, 'rev-parse', 'HEAD').trim();
-    const harness = adapterHarness({
-      codex: () => { writeFileSync(join(root, 'primary-dirt.txt'), 'dirty\n'); return failure(); },
-      cursor: success,
-    });
-    try {
-      const outcome = await dispatch(request(root, { fallbackWipCommit: true }), ledger, harness.factory);
-      const primary = ledger.recent().find((row) => row.provider === 'codex')!;
-      const head = git(root, 'rev-parse', 'HEAD').trim();
-      expect(head).not.toBe(before);
-      expect(git(root, 'log', '-1', '--format=%B')).toContain(
-        `failed leg dispatch #${primary.id}: codex/primary`,
-      );
-      expect(outcome).toMatchObject({ ok: true, provider: 'cursor', model: 'fallback', usedFallback: true });
-      expect(outcome.routeReason).toContain(`wip-commit ${head} before fallback`);
-      expect(harness.calls.map((call) => call.provider)).toEqual(['codex', 'cursor']);
     } finally { restore(); }
   });
 
@@ -236,22 +218,7 @@ describe('fallback commit barrier', () => {
     } finally { restore(); }
   });
 
-  it('auto-commits only leg-created paths and leaves pre-existing work uncommitted', async () => {
-    const root = gitRepo(tempDir); const restore = installRouting(tempDir);
-    writeFileSync(join(root, 'tracked.txt'), 'orchestrator edit\n');
-    const harness = adapterHarness({
-      codex: () => { writeFileSync(join(root, 'leg-created.txt'), 'worker edit\n'); return failure(); },
-      cursor: success,
-    });
-    try {
-      const outcome = await dispatch(request(root, { fallbackWipCommit: true }), tempLedger(), harness.factory);
-      expect(outcome.ok).toBe(true);
-      expect(git(root, 'show', '--format=', '--name-only', 'HEAD').trim()).toBe('leg-created.txt');
-      expect(git(root, 'status', '--short', '--', 'tracked.txt')).toContain(' M tracked.txt');
-    } finally { restore(); }
-  });
-
-  it('blocks after a primary moves HEAD even when auto-WIP is enabled', async () => {
+  it('blocks the fallback when the failed primary moved HEAD', async () => {
     const root = gitRepo(tempDir); const restore = installRouting(tempDir);
     const harness = adapterHarness({
       codex: () => {
@@ -263,10 +230,11 @@ describe('fallback commit barrier', () => {
       cursor: success,
     });
     try {
-      const outcome = await dispatch(request(root, { fallbackWipCommit: true }), tempLedger(), harness.factory);
+      const outcome = await dispatch(request(root), tempLedger(), harness.factory);
       expect(outcome.refusal?.code).toBe('fallback-blocked-dirty-tree');
       expect(outcome.refusal?.reason).toContain('HEAD moved');
       expect(git(root, 'log', '-1', '--format=%s').trim()).toBe('worker moved head');
+      // No auto-WIP commit is ever made now (refuse-only): just init + the worker's own commit.
       expect(git(root, 'rev-list', '--count', 'HEAD').trim()).toBe('2');
       expect(harness.calls.map((call) => call.provider)).toEqual(['codex']);
     } finally { restore(); }

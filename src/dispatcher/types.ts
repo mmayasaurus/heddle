@@ -63,8 +63,6 @@ export interface DispatchRequest {
   optIn?: boolean;
   /** Skip the routing table's fallback on failure. */
   noFallback?: boolean;
-  /** Opt in to committing failed-leg checkout dirt before a fallback is dispatched. */
-  fallbackWipCommit?: boolean;
   /**
    * Per-dispatch request to keep the worker CLI's own interactive permission prompts. Undefined =
    * the adapter's constructed default (heddle's headless workers keep skipping, so the fleet is
