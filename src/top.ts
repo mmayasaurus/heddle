@@ -4,6 +4,7 @@ import { loadAccountRegistry, type Account } from './accounts.js';
 import { DEFAULT_COMMS_PATH, DEFAULT_SESSION_STALE_MS, type SessionRecord } from './comms/log.js';
 import { DEFAULT_LEDGER_PATH } from './ledger.js';
 import { readProviderCaps, type CapWindow, type CapsByProvider } from './usage.js';
+import { filterByMetersPolicy, readOptedOutAccounts } from './meters-policy.js';
 import type { UsageRemainingRow } from './usage-remaining.js';
 
 export interface TopAccount {
@@ -42,6 +43,7 @@ export interface AssembleTopOptions {
   commsPath?: string;
   ledgerPath?: string;
   nowS?: number;
+  metersPolicyPath?: string;
 }
 
 function safeAccounts(path: string | undefined): Account[] {
@@ -164,7 +166,9 @@ export function assembleTop(opts: AssembleTopOptions = {}): TopView {
   const nowS = opts.nowS ?? Math.floor(Date.now() / 1_000);
   const accounts = safeAccounts(opts.accountsPath);
   const caps = safeCaps({ ...opts, nowS });
-  const usage = usageRows(caps, nowS);
+  // HED-582: gate opted-out accounts' meters BEFORE accountKeys, so the account line still appears (from the
+  // registry / caps) but its meters render `—`. `top` has no per-account request, so no bypass here.
+  const usage = filterByMetersPolicy(usageRows(caps, nowS), readOptedOutAccounts(opts.metersPolicyPath));
   const byRegistryKey = new Map(accounts.map((account) => [`${account.provider}\0${account.id}`, account]));
   const keys = accountKeys(accounts, usage, caps);
   const topAccounts = keys.map(({ provider, id }) => {

@@ -1,4 +1,4 @@
-import { writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
@@ -66,6 +66,12 @@ function usageDir(fixtureNowS = nowS): string {
   return dir;
 }
 
+function metersPolicy(contents: string): string {
+  const path = join(tempDir(), 'meters.json');
+  writeFileSync(path, contents);
+  return path;
+}
+
 describe('heddle usage --remaining', () => {
   it('renders a fresh vendor meter with usage, reset time, source, and age', () => {
     const rows = readUsageRemaining({ usageDir: usageDir(), nowS });
@@ -127,5 +133,56 @@ describe('heddle usage --remaining', () => {
 
     expect(rows).toHaveLength(2);
     expect(rows.every((row) => row.account === 'alpha')).toBe(true);
+  });
+
+  it('hides opted-out account meters while retaining other account and provider meters', () => {
+    const rows = readUsageRemaining({
+      usageDir: usageDir(), nowS,
+      metersPolicyPath: metersPolicy(JSON.stringify({ accounts: { alpha: { meters: false } } })),
+    });
+
+    expect(rows.some((row) => row.account === 'alpha')).toBe(false);
+    expect(rows.some((row) => row.account === 'beta')).toBe(true);
+    expect(rows.some((row) => row.account === null)).toBe(true);
+  });
+
+  it('keeps provider-level rows when every account opts out', () => {
+    const rows = readUsageRemaining({
+      usageDir: usageDir(), nowS,
+      metersPolicyPath: metersPolicy(JSON.stringify({ accounts: {
+        alpha: { meters: false }, beta: { meters: false }, 'cursor-ide': { meters: false },
+      } })),
+    });
+
+    expect(rows).not.toHaveLength(0);
+    expect(rows.every((row) => row.account === null)).toBe(true);
+  });
+
+  it('fails open for absent, corrupt, and directory policy paths', () => {
+    const absent = join(tempDir(), 'absent-meters.json');
+    const corrupt = metersPolicy('{ not json');
+    const directory = join(tempDir(), 'meters-directory');
+    mkdirSync(directory);
+
+    for (const metersPolicyPath of [absent, corrupt, directory]) {
+      expect(() => readUsageRemaining({ usageDir: usageDir(), nowS, metersPolicyPath })).not.toThrow();
+      expect(readUsageRemaining({ usageDir: usageDir(), nowS, metersPolicyPath }).some((row) => row.account === 'alpha')).toBe(true);
+    }
+  });
+
+  it('shows opted-in and unlisted accounts and bypasses the gate for an explicit account request', () => {
+    const optedIn = readUsageRemaining({
+      usageDir: usageDir(), nowS,
+      metersPolicyPath: metersPolicy(JSON.stringify({ accounts: { alpha: { meters: true } } })),
+    });
+    const bypassed = readUsageRemaining({
+      usageDir: usageDir(), nowS, account: 'alpha',
+      metersPolicyPath: metersPolicy(JSON.stringify({ accounts: { alpha: { meters: false } } })),
+    });
+
+    expect(optedIn.some((row) => row.account === 'alpha')).toBe(true);
+    expect(optedIn.some((row) => row.account === 'beta')).toBe(true);
+    expect(bypassed).toHaveLength(2);
+    expect(bypassed.every((row) => row.account === 'alpha')).toBe(true);
   });
 });
