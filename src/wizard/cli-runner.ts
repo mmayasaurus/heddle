@@ -8,15 +8,20 @@ export interface CliRunner {
   status(provider: NativeProvider, env: NodeJS.ProcessEnv): ProbeResult;
 }
 
-const commands: Record<NativeProvider, { command: string; login: string[]; status: string[] }> = {
-  claude: { command: 'claude', login: ['setup-token'], status: ['auth', 'status', '--json'] },
+// Exported so the argv contract is testable. Claude login uses `auth login` (NOT `setup-token`):
+// `auth login` PERSISTS `.credentials.json` under CLAUDE_CONFIG_DIR, so a per-account config dir yields
+// an isolated login; `setup-token` only PRINTS a token and stores nothing (it would leak the token to
+// the operator's terminal and leave the account unauthenticated — HED-584). `--claudeai` pins the
+// subscription flow (heddle rotation is subscription-quota) against a managed forceLoginMethod=console.
+export const cliCommands: Record<NativeProvider, { command: string; login: string[]; status: string[] }> = {
+  claude: { command: 'claude', login: ['auth', 'login', '--claudeai'], status: ['auth', 'status', '--json'] },
   codex: { command: 'codex', login: ['login'], status: ['login', 'status'] },
   cursor: { command: 'cursor-agent', login: ['login'], status: ['status', '--format', 'json'] },
 };
 
 export class NativeCliRunner implements CliRunner {
   login(provider: NativeProvider, env: NodeJS.ProcessEnv): void {
-    const command = commands[provider];
+    const command = cliCommands[provider];
     // Interactive (browser/device) login — a generous cap so a truly hung login still aborts.
     // Route the child's STDOUT to our stderr (fd 2) so a machine-readable stdout — e.g. `heddle setup
     // --json` — stays clean of vendor login banners; stdin + stderr stay inherited so the interactive
@@ -26,7 +31,7 @@ export class NativeCliRunner implements CliRunner {
   }
 
   status(provider: NativeProvider, env: NodeJS.ProcessEnv): ProbeResult {
-    const command = commands[provider];
+    const command = cliCommands[provider];
     // Bounded: a status probe waiting on credentials/network must not block the wizard indefinitely.
     const result = spawnSync(command.command, command.status, { env, encoding: 'utf8', timeout: 20_000 });
     return {

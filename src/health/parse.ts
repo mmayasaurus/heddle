@@ -44,6 +44,32 @@ export function loginStatus(stdout: string, stderr: string): boolean | undefined
   return undefined;
 }
 
+/**
+ * Human-readable identity from `claude auth status --json`, for the operator to confirm the RIGHT
+ * account was signed in — the browser step of `claude auth login` can land on the wrong account, and a
+ * bare PASS would hide that (HED-585). Returns `email · orgName · subscriptionType`, from the verified
+ * logged-in `auth status --json` schema; each field is included only when the CLI reports it as a
+ * string. Returns undefined when the output is unparseable or carries no email (e.g. not logged in).
+ * It reads ONLY these three identity fields by name, so no credential/token field can be surfaced.
+ */
+export function loginIdentity(stdout: string): string | undefined {
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(stdout) as Record<string, unknown>;
+  } catch {
+    return undefined;
+  }
+
+  const str = (key: string): string | undefined => (typeof parsed[key] === 'string' ? (parsed[key] as string) : undefined);
+  const email = str('email');
+
+  if (!email) {
+    return undefined;
+  }
+
+  return [email, str('orgName'), str('subscriptionType')].filter((part): part is string => typeof part === 'string').join(' · ');
+}
+
 export function catalogModels(stdout: string): Set<string> {
   const values = new Set<string>();
   const walk = (value: unknown): void => {

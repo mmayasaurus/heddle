@@ -2,7 +2,7 @@ import { chmodSync, existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { loadAccountRegistry, upsertAccount, writeAccountRegistry, type Account, type AccountTier, type BillingClass } from '../accounts.js';
-import { loginStatus } from '../health/parse.js';
+import { loginStatus, loginIdentity } from '../health/parse.js';
 import type { CliRunner, NativeProvider } from './cli-runner.js';
 import type { Prompter } from './prompt.js';
 import { getProvider, listEnvRepointProviders, type ProviderMatrixEntry } from '../provider-matrix.js';
@@ -63,12 +63,30 @@ function createIsolatedConfigDir(provider: 'claude' | 'codex', id: string, home:
   return configPath;
 }
 
+// Ambient Anthropic credentials that outrank or short-circuit the per-account /login credential in the
+// documented auth-precedence chain: if any is inherited from the operator's shell (an env-repoint
+// ANTHROPIC_BASE_URL would even aim the native OAuth flow at a gateway), `claude auth login` and
+// `auth status` would resolve THAT identity instead of the isolated CLAUDE_CONFIG_DIR — so onboarding
+// could silently accept, and record loggedIn against, an inherited account (HED-585). Stripped on the
+// claude onboarding path only; codex's OPENAI_* surface is a separate audit. Denylist of the documented
+// precedence vars; an allowlist rebuild of the env is the harder-edged follow-up.
+const CLAUDE_AMBIENT_CRED_VARS = [
+  'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_PROFILE',
+  'ANTHROPIC_BASE_URL', 'ANTHROPIC_FEDERATION_RULE_ID', 'ANTHROPIC_ORGANIZATION_ID',
+  'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY',
+] as const;
+
 // claude/codex isolate an account with a per-account dir + config-dir env var. cursor uses the
 // MACHINE login (its per-account isolation is undocumented — HED-503): no dir, and it records
 // keyFile:null, which is exactly the machine-login row rotation.pickCursorAccount selects (a non-null
 // keyFile would be misread as an API-key file by readCursorKey and the account would be unusable).
 function accountEnv(provider: NativeProvider, configPath: string | null): NodeJS.ProcessEnv {
-  if (provider === 'claude' && configPath) return { ...process.env, CLAUDE_CONFIG_DIR: configPath };
+  if (provider === 'claude' && configPath) {
+    // Copy process.env first, then strip the ambient creds from the COPY — never mutate process.env.
+    const env: NodeJS.ProcessEnv = { ...process.env, CLAUDE_CONFIG_DIR: configPath };
+    for (const key of CLAUDE_AMBIENT_CRED_VARS) delete env[key];
+    return env;
+  }
   if (provider === 'codex' && configPath) return { ...process.env, CODEX_HOME: configPath };
   return { ...process.env };
 }
@@ -111,8 +129,11 @@ async function addOne(provider: NativeProvider, deps: AccountsAddDeps, ordinal: 
   const loggedIn = probe.exitCode === 0 && loginStatus(probe.stdout, probe.stderr) === true;
   registry = upsertAccount(registry, { ...account, loggedIn, lastVerified: (deps.now ?? (() => new Date()))().toISOString() });
   writeAccountRegistry(registry, registryPath);
+  // Surface the signed-in identity so the operator can confirm the browser step landed on the intended
+  // account (claude only — from the verified `auth status --json` identity schema; HED-585).
+  const identity = loggedIn && provider === 'claude' ? loginIdentity(probe.stdout) : undefined;
   (loggedIn ? summary.added : summary.failed).push(id);
-  deps.report?.(`${loggedIn ? 'PASS' : 'FAIL'} ${provider} ${id}`);
+  deps.report?.(`${loggedIn ? 'PASS' : 'FAIL'} ${provider} ${id}${identity ? ` — ${identity}` : ''}`);
 }
 
 async function envRepointBaseUrl(entry: ProviderMatrixEntry, deps: AccountsAddDeps): Promise<{ baseUrl: string; region?: string }> {

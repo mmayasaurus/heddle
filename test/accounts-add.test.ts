@@ -67,4 +67,80 @@ describe('accounts add wizard', () => {
       prompter: new ScriptedPrompter([true, '../../escape']), runner: fakeRunner,
     })).rejects.toThrow(/invalid account id/);
   });
+
+  it('strips inherited Anthropic creds from the claude onboarding env, keeping only CLAUDE_CONFIG_DIR (HED-585)', async () => {
+    const home = tempDir();
+    const path = join(home, 'sanitize.json');
+    const captured: { login?: NodeJS.ProcessEnv; status?: NodeJS.ProcessEnv } = {};
+    const capturingRunner: CliRunner = {
+      login: (_provider, env) => { captured.login = { ...env }; },
+      status: (_provider, env) => {
+        captured.status = { ...env };
+        return { stdout: JSON.stringify({ loggedIn: true }), stderr: '', exitCode: 0, timedOut: false };
+      },
+    };
+    // Ambient credentials that would let `auth status` report logged-in from an INHERITED identity.
+    // Synthetic, deliberately NOT credential-shaped (no sk-ant- prefix) — shipped test files are scanned.
+    const ambient: Record<string, string> = {
+      ANTHROPIC_API_KEY: 'inherited-key-must-not-leak', ANTHROPIC_AUTH_TOKEN: 'inherited-auth-must-not-leak',
+      CLAUDE_CODE_OAUTH_TOKEN: 'inherited-oauth-must-not-leak', ANTHROPIC_PROFILE: 'inherited-work',
+      ANTHROPIC_BASE_URL: 'https://gateway.example.com', ANTHROPIC_FEDERATION_RULE_ID: 'fed-1',
+      ANTHROPIC_ORGANIZATION_ID: 'org-1', CLAUDE_CODE_USE_BEDROCK: '1', CLAUDE_CODE_USE_VERTEX: '1',
+      CLAUDE_CODE_USE_FOUNDRY: '1',
+    };
+    const saved: Record<string, string | undefined> = {};
+    for (const [key, value] of Object.entries(ambient)) { saved[key] = process.env[key]; process.env[key] = value; }
+    try {
+      await runAccountsAdd({ provider: 'claude', registryPath: path, homeDir: home }, {
+        prompter: new ScriptedPrompter([true, 'iso', 'paid', 'T2', false, false]), runner: capturingRunner,
+      });
+    } finally {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key]; else process.env[key] = value;
+      }
+    }
+    const expectedConfigDir = join(home, '.heddle', 'accounts', 'claude', 'iso');
+    for (const env of [captured.login, captured.status]) {
+      expect(env).toBeDefined();
+      expect(env?.CLAUDE_CONFIG_DIR).toBe(expectedConfigDir);
+      for (const key of Object.keys(ambient)) expect(env).not.toHaveProperty(key);
+    }
+    // The strip acts on a COPY — the live process.env is untouched.
+    expect(process.env.ANTHROPIC_API_KEY).toBeUndefined();
+  });
+
+  it('echoes the signed-in identity on the claude PASS line, never a token field (HED-585)', async () => {
+    const home = tempDir();
+    const path = join(home, 'identity.json');
+    const transcript: string[] = [];
+    const runner: CliRunner = {
+      login: () => undefined,
+      status: () => ({
+        stdout: JSON.stringify({
+          loggedIn: true, email: 'dev@example.com', orgName: 'Example Org', subscriptionType: 'max',
+          accessToken: 'token-value-MUST-NOT-APPEAR',
+        }),
+        stderr: '', exitCode: 0, timedOut: false,
+      }),
+    };
+    await runAccountsAdd({ provider: 'claude', registryPath: path, homeDir: home }, {
+      prompter: new ScriptedPrompter([true, 'acct', 'paid', 'T2', false, false]), runner,
+      report: (line) => transcript.push(line),
+    });
+    const pass = transcript.find((line) => line.startsWith('PASS claude acct'));
+    expect(pass).toBe('PASS claude acct — dev@example.com · Example Org · max');
+    expect(transcript.join('\n')).not.toContain('MUST-NOT-APPEAR');
+  });
+
+  it('leaves the claude PASS line bare when the status output carries no identity', async () => {
+    const home = tempDir();
+    const path = join(home, 'noid.json');
+    const transcript: string[] = [];
+    // fakeRunner reports { loggedIn: true } with no email → loginIdentity returns undefined.
+    await runAccountsAdd({ provider: 'claude', registryPath: path, homeDir: home }, {
+      prompter: new ScriptedPrompter([true, 'acct', 'paid', 'T2', false, false]), runner: fakeRunner,
+      report: (line) => transcript.push(line),
+    });
+    expect(transcript).toContain('PASS claude acct');
+  });
 });
