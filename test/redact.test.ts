@@ -159,6 +159,27 @@ describe('redactSecrets — review-hardened cases', () => {
     expect(redactSecrets('deadbeef0123456789abcdef01')).toBe('[redacted]');
   });
 
+  // Round-5 finding (codex/gpt-5.6-sol): the AWS access-key-id shape (A[KS]IA + 16) is exactly 20 chars, so
+  // it DODGES the 24+ opaque backstop and needs its own prefix arm. Split literals keep gitleaks' AWS
+  // access-key rule off the shipped test file (AWS's own docs-example id).
+  it('redacts a bare AWS access key id and one in an AWS_ACCESS_KEY_ID= assignment', () => {
+    const akia = 'AKIA' + 'IOSFODNN7EXAMPLE'; // 20-char AWS access key id (AWS docs example), split literal
+    expect(redactSecrets(akia)).toBe('[redacted]');
+    expect(redactSecrets(`AWS_ACCESS_KEY_ID=${akia}`)).toBe('AWS_ACCESS_KEY_ID=[redacted]');
+    const asia = 'ASIA' + 'IOSFODNN7EXAMPLE'; // STS temporary access key id
+    expect(redactSecrets(`stderr: ${asia} denied`)).toBe('stderr: [redacted] denied');
+  });
+
+  // Accepted residual (round 5): an AWS SECRET key is 40-char base64. A slashless one is caught by the opaque
+  // 24+ rule; a '/'-containing one is NOT — and cannot be safely, since a '/'-inclusive rule would redact
+  // long real filesystem paths (which MUST survive). Documented — same class as the prefix-less-opaque residual.
+  it('catches a slashless AWS secret via opaque yet leaves a long alnum+slash path intact', () => {
+    const noSlash = 'wJalrXUtnFEMIK7MDENGbPxRfiCYE' + 'XAMPLEKEY12'; // 40 chars, no slash -> opaque catches
+    expect(redactSecrets(noSlash)).toBe('[redacted]');
+    const longPath = '/usr/local/share/applications/mycompanyapp/bin'; // 40+ alnum+slash path MUST survive
+    expect(redactSecrets(longPath)).toBe(longPath);
+  });
+
   it('is ReDoS-safe: ~0.5MB pathological runs redact well under a second', () => {
     const start = Date.now();
     for (const s of [
@@ -167,6 +188,7 @@ describe('redactSecrets — review-hardened cases', () => {
       'secret'.repeat(80_000),                               // repeated embedded keyword
       'x'.repeat(200_000) + '.' + 'y'.repeat(200_000),       // dotted pair
       'g' + 'sk_' + 'a'.repeat(300_000),                     // credential-prefix arm, unbounded suffix
+      'AKIA' + 'A'.repeat(300_000),                          // AWS access-key arm, unbounded {16,} suffix
     ]) redactSecrets(s);
     expect(Date.now() - start).toBeLessThan(2000);
   });

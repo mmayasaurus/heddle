@@ -20,12 +20,16 @@ export function redactSecrets(text: string, opts: { credential?: string } = {}):
       // at the first comma; their sensitive params (nonce/response) are caught by the opaque rule below.
       .replace(/\bAuthorization\s*:\s*(?:[A-Za-z][A-Za-z0-9-]*\s+)?[^\s,;]+/gi, 'Authorization: [redacted]')
       .replace(/\bBearer\s+[^\s,;]+/gi, 'Bearer [redacted]')
-      // Unmistakable credential-PREFIX shapes — the same set src/release/scrub.ts credentialPatterns
-      // enforces on shipped files: sk-* (Anthropic/OpenAI), gh[po]_ + github_pat_ (GitHub), gsk_ (Groq),
-      // csk- (Cerebras), lin_api_/lin_oauth_ (Linear), xox[baprs]- (Slack). Redacted by shape, so a BARE
-      // token (no key=value context, too short or dot-split for the opaque rule) is still caught. Each arm
-      // is prefix + one unbounded [A-Za-z0-9_-]+ with no trailing literal, so matching stays linear.
-      .replace(/\b(?:sk-[A-Za-z0-9_-]+|gh[po]_[A-Za-z0-9_-]+|github_pat_[A-Za-z0-9_-]+|gsk_[A-Za-z0-9_-]+|csk-[A-Za-z0-9_-]+|lin_(?:api|oauth)_[A-Za-z0-9_-]+|xox[baprs]-[A-Za-z0-9_-]+)/g, '[redacted]')
+      // Unmistakable credential-PREFIX shapes — the src/release/scrub.ts credentialPatterns set: sk-*
+      // (Anthropic/OpenAI), gh[po]_ + github_pat_ (GitHub), gsk_ (Groq), csk- (Cerebras),
+      // lin_api_/lin_oauth_ (Linear), xox[baprs]- (Slack) — PLUS the AWS access-key-id shape A[KS]IA + 16
+      // (AKIA long-term / ASIA STS): it is exactly 20 chars, so it DODGES the 24+ opaque backstop and needs
+      // its own arm. Redacted by shape, so a BARE token (no key=value context, too short or dot-split for the
+      // opaque rule) is still caught. Each arm is prefix + one bounded/unbounded class with no trailing
+      // literal, so matching stays linear. (AWS SECRET keys are 40-char base64: a slashless one is caught by
+      // the opaque rule; a '/'-containing one is an ACCEPTED residual — a '/'-inclusive rule would redact
+      // long real filesystem paths, breaking F6's path passthrough — same class as the prefix-less opaque.)
+      .replace(/\b(?:sk-[A-Za-z0-9_-]+|gh[po]_[A-Za-z0-9_-]+|github_pat_[A-Za-z0-9_-]+|gsk_[A-Za-z0-9_-]+|csk-[A-Za-z0-9_-]+|lin_(?:api|oauth)_[A-Za-z0-9_-]+|xox[baprs]-[A-Za-z0-9_-]+|A[KS]IA[A-Z0-9]{16,})/g, '[redacted]')
       // key=value where the key NAME contains a sensitive word (ZAI_API_KEY=, aws_secret_access_key=,
       // "api_key": …). No \b so an embedded keyword matches; the {0,80}-bounded suffix stays ReDoS-safe
       // (an unbounded suffix is O(n^2) on a repeated-keyword run) and covers every realistic key name; any
