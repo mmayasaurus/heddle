@@ -1,7 +1,8 @@
 import { existsSync, mkdirSync, readdirSync, statSync } from 'node:fs';
-import { join } from 'node:path';
-import { describe, expect, it, vi } from 'vitest';
-import { createDoctorStep } from '../../src/wizard/doctor.js';
+import { homedir } from 'node:os';
+import { join, resolve, sep } from 'node:path';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { createDoctorStep, homePaths, relocateHomePath } from '../../src/wizard/doctor.js';
 import { runDoctor as realRunDoctor, formatDoctorReport, type DoctorReport, type DoctorDeps } from '../../src/doctor.js';
 import { ScriptedPrompter } from '../../src/wizard/prompt.js';
 import type { WizardContext, WizardIO } from '../../src/wizard/step.js';
@@ -9,6 +10,10 @@ import { useTempResources } from '../helpers.js';
 import { fakeDeps } from '../doctor-fixtures.js';
 
 const FIXED = new Date('2026-09-14T00:00:00.000Z');
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
 
 /** A canned DoctorReport with the given summary counts (checks empty — the step reads summary + formats). */
 function report(summary: Partial<DoctorReport['summary']>): DoctorReport {
@@ -27,6 +32,35 @@ function makeIO(): { io: WizardIO; lines: string[] } {
     lines,
   };
 }
+
+describe('homePaths', () => {
+  const { tempDir } = useTempResources('heddle-wizard-doctor-home-paths-');
+
+  it('returns the complete home-scoped doctor path set under <home>/.heddle', () => {
+    const home = tempDir();
+    const paths = homePaths(home);
+    const heddleDir = resolve(home, '.heddle');
+
+    expect(Object.keys(paths).sort()).toEqual(['accounts', 'comms', 'heddle', 'operatorToken', 'projects']);
+    for (const path of Object.values(paths)) {
+      expect(path).toBeDefined();
+      const resolvedPath = resolve(path!);
+      expect(resolvedPath === heddleDir || resolvedPath.startsWith(`${heddleDir}${sep}`)).toBe(true);
+      expect(resolvedPath.startsWith(resolve(home))).toBe(true);
+    }
+  });
+
+  it('relocates a genuine process-home default beneath the requested home', () => {
+    const home = tempDir();
+    expect(relocateHomePath(home, join(homedir(), '.heddle', 'fixture.json')))
+      .toBe(join(home, '.heddle', 'fixture.json'));
+  });
+
+  it('throws when a default path would escape the requested home', () => {
+    const outsideDefault = resolve(homedir(), '..', 'outside-default.json');
+    expect(() => relocateHomePath(tempDir(), outsideDefault)).toThrow(outsideDefault);
+  });
+});
 
 describe('createDoctorStep (HED-476 wizard finish = read-only `heddle doctor`)', () => {
   const { tempDir } = useTempResources('heddle-wizard-doctor-');
@@ -91,15 +125,45 @@ describe('createDoctorStep (HED-476 wizard finish = read-only `heddle doctor`)',
     expect(result.summary).toBe('setup NOT verified — no checks ran');
   });
 
-  it('runs a FULL sweep (no provider filter) with the wizard clock, imposing no path overrides (F1/F7)', async () => {
+  it('runs a FULL sweep with the wizard clock and home-scoped config paths (F1/F7)', async () => {
+    const home = tempDir();
     const spy = vi.fn(async (_opts: { provider?: string }, _partial: Partial<DoctorDeps>) => report({ ok: 1 }));
     const step = createDoctorStep({ runDoctor: spy });
-    await step.run(makeCtx(tempDir()), makeIO().io);
+    await step.run(makeCtx(home), makeIO().io);
     expect(spy).toHaveBeenCalledTimes(1);
     const [opts, partial] = spy.mock.calls[0];
     expect(opts).toEqual({}); // full sweep — no {provider} filter (cursor F7)
     expect(partial.now?.()).toEqual(FIXED); // the wizard's clock reaches the runner
-    expect(partial.paths).toBeUndefined(); // the step imposes NO path relocation (cursor F1)
+    expect(partial.paths).toEqual(homePaths(home));
+    for (const path of Object.values(partial.paths!)) {
+      expect(resolve(path!).startsWith(resolve(home))).toBe(true);
+    }
+  });
+
+  it('ignores HEDDLE_ACCOUNTS in the composed step even when ctx.homeDir is the default home', async () => {
+    const envAccounts = join(tempDir(), 'env-accounts.json');
+    vi.stubEnv('HEDDLE_ACCOUNTS', envAccounts);
+    const spy = vi.fn(async (_opts: { provider?: string }, _partial: Partial<DoctorDeps>) => report({ ok: 1 }));
+    const step = createDoctorStep({ runDoctor: spy });
+
+    await step.run(makeCtx(homedir()), makeIO().io);
+
+    const [, partial] = spy.mock.calls[0];
+    expect(partial.paths?.accounts).toBe(join(homedir(), '.heddle', 'accounts.json'));
+    expect(partial.paths?.accounts).not.toBe(envAccounts);
+  });
+
+  it('preserves an injected doctorDeps path over the home-scoped base paths', async () => {
+    const spy = vi.fn(async (_opts: { provider?: string }, _partial: Partial<DoctorDeps>) => report({ ok: 1 }));
+    const step = createDoctorStep({
+      runDoctor: spy,
+      doctorDeps: { paths: { accounts: '/injected/x' } },
+    });
+
+    await step.run(makeCtx(tempDir()), makeIO().io);
+
+    const [, partial] = spy.mock.calls[0];
+    expect(partial.paths?.accounts).toBe('/injected/x');
   });
 
   it('threads injected doctorDeps into the runner, while ctx stays authoritative for the clock', async () => {
@@ -117,7 +181,7 @@ describe('createDoctorStep (HED-476 wizard finish = read-only `heddle doctor`)',
     // a hermetic test's injected deps thread straight through
     expect(partial.env).toBe(env);
     expect(partial.gitBehindOriginMain).toBe(gitBehindOriginMain);
-    expect(partial.paths).toBe(paths); // the step adds none of its own; the injected tree passes through
+    expect(partial.paths).toMatchObject(paths); // injected paths win over the step's home-scoped base
     // ctx.now is spread AFTER doctorDeps, so the wizard's clock beats any injected now
     expect(partial.now?.()).toEqual(FIXED);
     expect(partial.now?.()).not.toEqual(strayNow());

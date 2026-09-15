@@ -7,21 +7,56 @@
 // (dashboard source vs installed), and provider catalog freshness. It does NOT check hook rules or
 // skill packs — those wizard steps carry their own results.
 //
-// It verifies the REAL resolved environment, exactly as `heddle doctor` does: it passes NO path
-// overrides, so each path resolves through runDoctor's own resolution — the HEDDLE_* env var where
-// one exists, otherwise runDoctor's built-in default (routing/lanes under the repo; accounts/comms/
-// operator-token under ~/.heddle). Relocating only some paths under ctx.homeDir would split the view
-// (drift under one root, accounts under another); relocating all of them would diverge from what
-// `heddle doctor` reports and clobber the operator's HEDDLE_* env. A hermetic test relocates the
-// whole tree via injected doctorDeps.
+// In the composed wizard flow, the finish step relocates the home-scoped config tree (accounts,
+// projects, comms, operator token, and the heddle root used by the drift check) under ctx.homeDir via
+// homePaths. That mirrors exactly what accountsStep wrote under --home and ignores HEDDLE_* for
+// those paths, preventing a split install. Standalone `heddle doctor` (runDoctor via the CLI, not
+// this step) keeps its real-environment resolution unchanged. Routing and lanes are repo-scoped
+// config-as-code and are never re-rooted.
 //
 // This is HED-564's read-only step: it makes NO config changes of its own. runDoctor is a read-only
 // probe with one incidental exception — opening an EXISTING older comms.db applies the standard
 // schema migration on construction (idempotent; a current-version db is a no-op; an absent db is not
 // created). Because the sweep changes no config, re-running `heddle setup` (or `heddle doctor`)
 // always reflects current truth rather than a one-time claim.
+import { homedir } from 'node:os';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { WizardStep, WizardContext, WizardIO, WizardStepResult, WizardStepStatus } from './step.js';
 import { runDoctor as realRunDoctor, formatDoctorReport, type DoctorReport, type DoctorDeps } from '../doctor.js';
+import { DEFAULT_ACCOUNTS_PATH } from '../capaware.js';
+import { DEFAULT_PROJECTS_PATH } from '../projects.js';
+import { DEFAULT_COMMS_PATH } from '../comms/log.js';
+import { OPERATOR_TOKEN_PATH } from '../comms/server.js';
+
+/** Re-root a process-home default beneath `home`, failing closed if that default could escape. */
+export function relocateHomePath(home: string, defaultPath: string): string {
+  const relativePath = relative(homedir(), defaultPath);
+  const relocated = join(home, relativePath);
+  const resolvedHome = resolve(home);
+  const resolvedRelocated = resolve(relocated);
+  const relativeToHome = relative(resolvedHome, resolvedRelocated);
+  if (
+    isAbsolute(relativePath)
+    || relativeToHome === ''
+    || isAbsolute(relativeToHome)
+    || relativeToHome === '..'
+    || relativeToHome.startsWith(`..${sep}`)
+  ) {
+    throw new Error(`Cannot relocate default path "${defaultPath}": expected it to be under "${homedir()}"`);
+  }
+  return relocated;
+}
+
+/** Home-scoped path overrides for the composed setup wizard's doctor finish gate. */
+export function homePaths(home: string): Partial<DoctorDeps['paths']> {
+  return {
+    accounts: relocateHomePath(home, DEFAULT_ACCOUNTS_PATH),
+    projects: relocateHomePath(home, DEFAULT_PROJECTS_PATH),
+    comms: relocateHomePath(home, DEFAULT_COMMS_PATH),
+    operatorToken: relocateHomePath(home, OPERATOR_TOKEN_PATH),
+    heddle: join(home, '.heddle'),
+  };
+}
 
 /**
  * WizardStep.run carries `ctx.now` but NOT doctor's execFile/gitBehindOriginMain/paths seams, so a
@@ -33,11 +68,9 @@ export interface DoctorStepDeps {
   /** Override the doctor runner (tests return a canned report; default = the real runDoctor). */
   runDoctor?: (opts: { provider?: string }, partial: Partial<DoctorDeps>) => Promise<DoctorReport>;
   /**
-   * DoctorDeps overrides for a HERMETIC integration test — relocate the WHOLE config tree
-   * (paths.{routing,lanes,projects,accounts,comms,operatorToken,heddle,repoRoot}) plus
-   * execFile/readFileBytes/gitBehindOriginMain, so no real ~/.heddle is read and no binary is
-   * spawned. The step imposes NO paths of its own; ctx.now still wins over any injected `now`
-   * (the wizard owns the run clock).
+   * DoctorDeps overrides for a HERMETIC integration test. Injected paths win over the composed
+   * step's home-scoped base paths; ctx.now still wins over any injected `now` (the wizard owns the
+   * run clock).
    */
   doctorDeps?: Partial<DoctorDeps>;
 }
@@ -49,18 +82,20 @@ export function createDoctorStep(injected: DoctorStepDeps = {}): WizardStep {
     id: 'doctor',
     title: 'Verify setup',
     // No `applies` — doctor is the finish gate, so it always runs. targetDir is unused (global sweep),
-    // and homeDir is intentionally NOT used to relocate config (see the header): the step verifies the
-    // real resolved environment like `heddle doctor`.
+    // while homeDir relocates only the home-scoped config tree (see the header).
     async run(ctx: WizardContext, io: WizardIO): Promise<WizardStepResult> {
       // The verification itself is the ONLY failure that means "could not verify", so its catch is
       // scoped to just the runDoctor call — a later progress-reporting error must never be
       // misattributed as a verification failure (a real report would then be silently swallowed).
       let report: DoctorReport;
       try {
-        // Verify the real resolved config: pass no path overrides (like `heddle doctor`). A hermetic
-        // test threads the whole tree through doctorDeps; ctx.now stays authoritative (wizard clock),
-        // spread AFTER doctorDeps so an injected `now` can never override the wizard's run clock.
-        report = await run({}, { ...injected.doctorDeps, now: () => ctx.now() });
+        // Verify what the composed wizard wrote. Hermetic path overrides still win over the
+        // home-scoped base, while ctx.now remains authoritative for the wizard's run clock.
+        report = await run({}, {
+          ...injected.doctorDeps,
+          paths: { ...homePaths(ctx.homeDir), ...injected.doctorDeps?.paths },
+          now: () => ctx.now(),
+        });
       } catch (error) {
         // A thrown doctor run must not abort the wizard — report it as a failed verification instead.
         // Stringify defensively: a non-Error throwable (a null-prototype object, a Symbol) can make
