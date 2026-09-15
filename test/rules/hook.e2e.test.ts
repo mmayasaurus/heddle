@@ -15,8 +15,13 @@ function writePolicy(home: string, policy: unknown, mode = 0o600): void {
   chmodSync(path, mode);
 }
 async function runHook(rules: string, stdin: string, env: Record<string, string> = {}): Promise<{ stdout: string; stderr: string; code: number }> {
+  // Mirror HOME into USERPROFILE: homedir() reads USERPROFILE on Windows, so a HOME-only env would let the
+  // hook resolve the policy from the REAL operator home there. Matches test/helpers/cli.ts cleanEnv. (The
+  // hook is POSIX-only in practice — shebang + secure-fs geteuid — so this is isolation hygiene, not a
+  // Windows correctness claim.) — cursor #237
+  const home = env.HOME ?? join(rules, '.home');
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', 'dist/hook.js', '--rules', rules], { cwd: PROJECT_ROOT, env: { PATH: process.env.PATH ?? '', HOME: join(rules, '.home'), ...env }, stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', 'dist/hook.js', '--rules', rules], { cwd: PROJECT_ROOT, env: { PATH: process.env.PATH ?? '', HOME: home, USERPROFILE: home, ...env }, stdio: ['pipe', 'pipe', 'pipe'] });
     let stdout = ''; let stderr = ''; child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8');
     child.stdout.on('data', (s) => { stdout += s; }); child.stderr.on('data', (s) => { stderr += s; });
     child.once('error', reject); child.once('close', (code) => resolve({ stdout, stderr, code: code ?? 1 })); child.stdin.end(stdin);
@@ -104,7 +109,7 @@ describe('heddle-hook bin', () => {
     mkdirSync(policyDir, { recursive: true, mode: 0o700 });
     execFileSync('mkfifo', [join(policyDir, 'rules.json')]); // Node has no mkfifo
     const r = await new Promise<{ stdout: string; stderr: string; code: number; timedOut: boolean }>((resolve, reject) => {
-      const child = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', 'dist/hook.js', '--rules', rules], { cwd: PROJECT_ROOT, env: { PATH: process.env.PATH ?? '', HOME: home }, stdio: ['pipe', 'pipe', 'pipe'] });
+      const child = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', 'dist/hook.js', '--rules', rules], { cwd: PROJECT_ROOT, env: { PATH: process.env.PATH ?? '', HOME: home, USERPROFILE: home }, stdio: ['pipe', 'pipe', 'pipe'] });
       let stdout = ''; let stderr = ''; child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8');
       child.stdout.on('data', (s) => { stdout += s; }); child.stderr.on('data', (s) => { stderr += s; });
       const timer = setTimeout(() => { child.kill('SIGKILL'); resolve({ stdout, stderr, code: -1, timedOut: true }); }, 4000);

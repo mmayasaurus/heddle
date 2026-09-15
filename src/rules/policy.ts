@@ -43,9 +43,13 @@ export function loadRulesPolicy(path: string): RulesPolicyLoadResult {
   let parsed: unknown;
   try {
     parsed = JSON.parse(contents);
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
-    return { warning: `rules policy at ${path} is not valid JSON (${detail}); using catalog enforcement` };
+  } catch {
+    // Deliberately DROP the parser's message: JSON.parse echoes a snippet of the RAW file content, which for
+    // a same-uid-planted policy could carry terminal escape sequences into this stderr diagnostic (PR #237
+    // qodo HIGH — log/terminal injection). The path already names the file to inspect (`jq . <path>`) and the
+    // content adds nothing safe. (The path itself is homedir-derived — the operator's own trust domain, and
+    // it matches the hook's existing stderr lines — so it is retained; secure-fs details are path-only too.)
+    return { warning: `rules policy at ${path} is not valid JSON; using catalog enforcement` };
   }
   if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
     return { warning: `rules policy at ${path} is not a v1 policy object; using catalog enforcement` };
