@@ -404,6 +404,12 @@ export async function runAccountsAdd(
     try {
       writeAccountRegistry({ schemaVersion: 2, accounts: [] }, registryPath);
     } catch (error) {
+      // [P2] Only when the summary is otherwise empty (added=0 AND failed=0) would summarizeAccounts read
+      // this run as 'skipped'. Record a 'registry' failure sentinel in exactly that case so a fail-closed
+      // empty-registry write (same unsafe-parent refusal as the per-account writes) surfaces as 'failed'
+      // instead of an acceptable no-op. If accounts were attempted and failed, the run already reads as
+      // 'failed' — a second sentinel would just double-count (the report line below still fires either way).
+      if (!summary.added.length && !summary.failed.length) summary.failed.push('registry');
       deps.report?.(`FAIL (registry: ${error instanceof Error ? error.message : String(error)})`);
     }
   }

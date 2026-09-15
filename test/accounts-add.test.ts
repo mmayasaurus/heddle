@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { loadAccountRegistry } from '../src/accounts.js';
 import { runAccountsAdd } from '../src/wizard/accounts-add.js';
+import { summarizeAccounts } from '../src/wizard/setup.js';
 import { ScriptedPrompter } from '../src/wizard/prompt.js';
 import type { CliRunner } from '../src/wizard/cli-runner.js';
 import { useTempResources } from './helpers.js';
@@ -196,6 +197,27 @@ describe('accounts add wizard', () => {
     expect(summary.failed).toEqual(['work']);
     expect(summary.added).toEqual([]);
     expect(transcript.some((line) => line.startsWith('FAIL cursor work (registry'))).toBe(true);
+  });
+
+  it('surfaces an all-declined run as failed (not skipped) when the terminal empty-registry write is refused (HED-590 [P2])', async () => {
+    const home = tempDir();
+    mkdirSync(join(home, '.heddle'), { recursive: true });
+    chmodSync(join(home, '.heddle'), 0o770); // group-writable creds home — secureWriteFile refuses the empty-registry write
+    const path = join(home, '.heddle', 'accounts.json');
+    const transcript: string[] = [];
+    // Decline every provider: nothing is added, so runAccountsAdd reaches the terminal empty-registry write.
+    // That write hits the same unsafe-parent refusal as a per-account write. It must be recorded as a failure
+    // (sentinel 'registry'), not left as an empty summary — otherwise summarizeAccounts reads the run as
+    // 'skipped' and `heddle setup` exits 0 though it failed to persist the registry it was meant to create.
+    const summary = await runAccountsAdd({ registryPath: path, homeDir: home }, {
+      prompter: new ScriptedPrompter(Array.from({ length: 16 }, () => false)), runner: fakeRunner,
+      report: (line) => transcript.push(line),
+    });
+    expect(summary.added).toEqual([]);
+    expect(summary.failed).toContain('registry');
+    expect(summary.skipped).toEqual(['claude', 'codex', 'cursor']);
+    expect(transcript.some((line) => line.startsWith('FAIL (registry'))).toBe(true);
+    expect(summarizeAccounts(summary).status).toBe('failed'); // [P2]: no longer masquerades as 'skipped'
   });
 
   it('echoes the signed-in identity on the claude PASS line, never a token field (HED-585)', async () => {
