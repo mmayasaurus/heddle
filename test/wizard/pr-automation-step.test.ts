@@ -205,10 +205,14 @@ describe('prAutomationStep', () => {
     expect(lines.join('\n')).toContain('detected default branch: main');
   });
 
-  it('only applies to a target repository root', () => {
+  it('applies to a git-repo target, offers when there is no target, stays out of a non-repo target (HED-624 three-way)', () => {
     const targetDir = tempDir();
-    expect(prAutomationStep().applies?.(context(undefined))).toBe(false);
+    // No target (undefined OR an empty --target): applies so run() can OFFER to enter a repo path.
+    expect(prAutomationStep().applies?.(context(undefined))).toBe(true);
+    expect(prAutomationStep().applies?.(context(''))).toBe(true);
+    // An explicit target that is NOT a git repo stays not-applicable — never scaffold into a named non-repo dir.
     expect(prAutomationStep().applies?.(context(targetDir))).toBe(false);
+    // A git-repo target applies.
     mkdirSync(join(targetDir, '.git'));
     expect(prAutomationStep().applies?.(context(targetDir))).toBe(true);
   });
@@ -233,10 +237,11 @@ describe('prAutomationStep', () => {
     const lines: string[] = [];
     const result = await prAutomationStep().run(context(targetDir, false, true), io([false], lines));
     expect(result.status).toBe('skipped');
-    expect(result.summary).toMatch(/declined/);
+    expect(result.summary).toBe('PR automation: declined');
     expect(existsSync(join(targetDir, '.github', 'workflows', 'deterministic-review.yml'))).toBe(false);
     expect(existsSync(join(targetDir, '.github', 'workflows', 'gate.yml'))).toBe(false);
-    expect(lines.some((line) => line.includes('declined scaffolding'))).toBe(true);
+    // Derived target → the confirm is preceded by the detection disclosure (a manually-entered path is not).
+    expect(lines.some((line) => line.includes(`Detected a git repository at ${targetDir}`))).toBe(true);
   });
 
   it('auto-detected target: accepting the confirm scaffolds as normal (HED-624)', async () => {
@@ -255,6 +260,57 @@ describe('prAutomationStep', () => {
     expect(result.summary).toContain('auto-detected repo, would confirm first');
     expect(lines.join('\n')).toContain('a real run would confirm before writing');
     expect(existsSync(join(targetDir, '.github', 'workflows', 'deterministic-review.yml'))).toBe(false);
+  });
+
+  // ---- HED-624: offer-to-add-repo when the wizard reached PR automation with NO target -----------------
+  // applies() now returns true without a target so run() OFFERS a repo path; each entry is validated with the
+  // same gitRepositoryFor helper cli.ts uses to auto-derive (real `git init` repos here, not a bare .git dir).
+  it('no target + dry-run: discloses it would offer a path then confirm, prompts and writes nothing (HED-624)', async () => {
+    const lines: string[] = [];
+    // io([]) scripts ZERO answers — a fired prompt would throw "answer script exhausted", so this also proves
+    // the dry-run path never prompts.
+    const result = await prAutomationStep().run(context(undefined, true), io([], lines));
+    expect(result.status).toBe('skipped');
+    expect(result.summary).toContain('a real run would offer a path, then confirm');
+    expect(lines.join('\n')).toContain('a real run would offer to enter a git repository path');
+  });
+
+  it('no target: a blank entry at the offer prompt skips with nothing written (HED-624)', async () => {
+    const result = await prAutomationStep().run(context(undefined), io(['']));
+    expect(result.status).toBe('skipped');
+    expect(result.summary).toBe('PR automation: no repository provided');
+  });
+
+  it('no target: three non-repo entries exhaust the retry cap and skip (HED-624)', async () => {
+    const notRepo = tempDir();
+    // Exactly three answers: a fourth attempt would throw "answer script exhausted", so a clean cap-skip here
+    // proves the loop stops at three.
+    const result = await prAutomationStep().run(context(undefined), io([notRepo, notRepo, notRepo]));
+    expect(result.status).toBe('skipped');
+    expect(result.summary).toBe('PR automation: no git repository entered');
+  });
+
+  it('no target: a bad path then a real repo reaches the confirm; declining writes nothing (HED-624)', async () => {
+    const notRepo = tempDir();
+    const repo = tempDir();
+    execFileSync('git', ['init', '-q', repo]);
+    const result = await prAutomationStep().run(context(undefined), io([notRepo, repo, false]));
+    expect(result.status).toBe('skipped');
+    expect(result.summary).toBe('PR automation: declined');
+    expect(existsSync(join(repo, '.github', 'workflows', 'gate.yml'))).toBe(false);
+  });
+
+  it('no target: entering a SUBDIRECTORY normalizes to the repo toplevel and scaffolds there on confirm (HED-624)', async () => {
+    const repo = tempDir();
+    execFileSync('git', ['init', '-q', repo]);
+    const toplevel = execFileSync('git', ['-C', repo, 'rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim();
+    const subdir = join(repo, 'packages', 'app');
+    mkdirSync(subdir, { recursive: true });
+    const result = await prAutomationStep().run(context(undefined), io([subdir, true, 'TS/Node']));
+    expect(result.status).toBe('done');
+    // .github lands at the repo TOPLEVEL, not under the entered subdirectory (gitRepositoryFor normalization).
+    expect(existsSync(join(toplevel, '.github', 'workflows', 'gate.yml'))).toBe(true);
+    expect(existsSync(join(subdir, '.github'))).toBe(false);
   });
 
   it('renderGate throws (fail-closed) on a defaultBranch that fails SAFE_BRANCH (HED-616)', () => {

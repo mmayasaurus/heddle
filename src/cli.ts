@@ -94,7 +94,7 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
   heddle projects [--json]       registered projects and their fleets (~/.heddle/projects.json; HED-160)
   heddle accounts list [--json]  registered Claude, Codex, and Cursor accounts
   heddle accounts verify         verify local credential paths and recorded Claude login state
-  heddle setup [--only <ids>] [--skip <ids>] [--dry-run] [--answers <file>] [--home <dir>] [--target <dir>] [--json]  guided fresh-machine onboarding walkthrough (composes the wizard steps in order; exit 1 if any step failed)
+  heddle setup [--only <ids>] [--skip <ids>] [--dry-run] [--answers <file>] [--home <dir>] [--target <dir>] [--json]  guided fresh-machine onboarding walkthrough (composes the wizard steps in order; without --target, PR automation uses the current repo or offers to add one, confirming before it writes; exit 1 if any step failed)
   heddle accounts add [--provider <p>] [--answers <file>]  add native-login or env-repoint accounts interactively
   heddle comms init [--json]     initialize the comms database, operator token, and registered project rooms
   heddle fleet install-hooks [--dry-run] [--json]  install vendored fleet hooks under ~/.heddle/fleet/hooks
