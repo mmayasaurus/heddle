@@ -32,7 +32,7 @@ import { runPrOwn } from './pr-own.js';
 import { runPrSweep } from './pr-sweep.js';
 import { runPrWatch } from './pr-watch.js';
 import { bootstrapComms } from './comms/bootstrap.js';
-import { loadAccountRegistry } from './accounts.js';
+import { loadAccountRegistry, reconcileRegistryIdentity, writeAccountRegistry, type IdentityReconcileChange, type IdentityReconcileWarning } from './accounts.js';
 import { DEFAULT_ACCOUNTS_PATH } from './capaware.js';
 import { migrateConfigFile } from './config-migrations.js';
 import { diffFleetBin, diffFleetHooks, diffFleetLaunchers, installFleetBin, installFleetHooks, installFleetLaunchers } from './fleet.js';
@@ -178,9 +178,10 @@ const json = has('--json');
  * Skipped too for `setup` (HED-564): `heddle setup` is the fresh-machine onboarding walkthrough
  * (accounts, model-economy, meters, rules, doctor) — like `comms init` it runs before any dispatch
  * exists and must not incur ledger startup, migration, or SQLite locking; each step owns its writes.
- * Skipped too for `usage poll-claude` (HED-329): a scheduled vendor-poll that only writes usage
- * sidecars runs headless on a launchd timer (~5 min), has no ledger reads to make honest, and must
- * not mutate the ledger — closing orphans as a side effect of a background poll — on that cadence.
+ * Skipped too for `usage poll-claude` (HED-329): a scheduled vendor-poll that writes usage sidecars
+ * and populates registry identity via a local atomic accounts.json upsert runs headless on a launchd
+ * timer (~5 min), has no ledger reads to make honest, and must not mutate the ledger — closing
+ * orphans as a side effect of a background poll — on that cadence.
  * Skipped too for `usage install-poll-launchd` (HED-517): a local launchd installer that only writes
  * a plist and calls launchctl has no ledger reads to make honest and must not sweep orphans — a
  * `--dry-run` preview especially must observe, not mutate.
@@ -794,10 +795,48 @@ try {
           renameSync(tempPath, path);
           written.push(path);
         }
-        out(json, { written, skipped, warnings: result.warnings }, () => result.rows.map((row) => {
-          const path = written.find((candidate) => candidate.endsWith(`claude-${row.id.replace(/[^A-Za-z0-9_.-]/g, '_')}.oauth-usage.json`));
-          return path ? `${row.id} → written (${row.source})` : `${row.id} → skipped (${row.source})`;
-        }).join('\n'));
+        // HED-492: populate persistent registry identity (accountUuid/orgId) from the live poll, on this same
+        // cadence. Load the FULL registry now (readClaudeAccounts above is the poll projection, not the registry)
+        // to minimise the read-modify-write window (a true CAS is HED-503). Populate-only: a live identity that
+        // CONFLICTS with a persisted one is refused + warned, never overwritten. FAIL-OPEN: the strict
+        // loadAccountRegistry throws on states readClaudeAccounts (which never throws) tolerates — a duplicate
+        // id, a non-array provider value, corrupt JSON — so guard the whole reconcile; a registry hiccup must
+        // never crash this launchd feeder (~5 min) or drop the sidecar report (HED-451 poller fail-open).
+        let idChanges: IdentityReconcileChange[] = [];
+        let idWarnings: IdentityReconcileWarning[] = [];
+        let identityError: string | undefined;
+        try {
+          const registry = loadAccountRegistry();
+          const identity = reconcileRegistryIdentity(registry, { rows: result.rows.map((r) => ({ id: r.id, configDir: r.configDir, liveIdentity: r.liveIdentity })) });
+          if (identity.changes.length) writeAccountRegistry(identity.registry);
+          // Report changes/warnings only AFTER a successful write: a writeAccountRegistry throw (disk full,
+          // EACCES, concurrent lock) then jumps to catch with idChanges still [] — the output surfaces the
+          // error and never claims a persist that did not happen (gemini adversarial review, HED-492).
+          idChanges = identity.changes;
+          idWarnings = identity.warnings;
+        } catch (error) {
+          identityError = error instanceof Error ? error.message : String(error);
+          process.stderr.write(`heddle: warning: usage poll-claude: registry identity reconcile skipped (${identityError})\n`);
+        }
+        out(json, {
+          written,
+          skipped,
+          warnings: result.warnings,
+          identity: {
+            written: idChanges,
+            refused: idWarnings.filter((warning) => warning.code === 'identity-conflict'),
+            unmatched: idWarnings.filter((warning) => warning.code === 'no-registry-match'),
+            ...(identityError ? { error: identityError } : {}),
+          },
+        }, () => [
+          ...result.rows.map((row) => {
+            const path = written.find((candidate) => candidate.endsWith(`claude-${row.id.replace(/[^A-Za-z0-9_.-]/g, '_')}.oauth-usage.json`));
+            return path ? `${row.id} → written (${row.source})` : `${row.id} → skipped (${row.source})`;
+          }),
+          ...idChanges.map((change) => `${change.id} → identity populated (accountUuid ${change.accountUuid}${change.orgId ? `, org ${change.orgId}` : ''})`),
+          ...idWarnings.map((warning) => `${warning.id} → ${warning.message}`),
+          ...(identityError ? [`identity reconcile skipped: ${identityError}`] : []),
+        ].join('\n'));
         break;
       }
       if (process.argv[3] === 'install-poll-launchd') {
