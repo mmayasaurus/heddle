@@ -218,6 +218,22 @@ describe('secure filesystem primitives', () => {
     releaseCredentialLock(path, 4242);
   });
 
+  it('acquireCredentialLock forces the lock to mode 0o600 despite a restrictive umask (keeps the holder detectable)', () => {
+    const path = join(tempDir(), 'credential.lock'); // resolve tempDir BEFORE changing the umask
+    const prevUmask = process.umask(0o400); // masks owner-READ from newly created files
+    try {
+      expect(acquireCredentialLock(path, 111)).toEqual({ ok: true });
+      // claimLock fchmod()s the temp fd to 0o600, which carries through link() to the lock. Without it a
+      // plain writeFileSync(mode) would be umask-masked to 0o200 (write-only): a second acquirer past the
+      // creation grace could not read the pid, would misclassify the lock as garbage, and would reclaim it
+      // → dual-acquire. The lock MUST end up exactly 0o600 and owner-readable.
+      expect(statSync(path).mode & 0o777).toBe(0o600);
+      expect(readFileSync(path, 'utf8')).toBe('111');
+    } finally {
+      process.umask(prevUmask);
+    }
+  });
+
   it('acquireCredentialLock rejects an invalid pid rather than writing a self-reclaimable holder', () => {
     // NaN / 0 / fractional would be written then read back as unreadable/dead → instantly reclaimable by
     // a second live caller, so both "hold" it. Reject at the door instead.
@@ -274,6 +290,18 @@ describe('secure filesystem primitives', () => {
     // (isAlive claims 1000 IS alive to prove the point). The /^\d+$/ guard makes it null → a garbage lock
     // older than the grace → reclaimable → we win.
     expect(acquireCredentialLock(path, 222, { isAlive: (pid) => pid === 1000 })).toEqual({ ok: true });
+    expect(readFileSync(path, 'utf8')).toBe('222');
+  });
+
+  it('acquireCredentialLock treats a whitespace-padded body (" 1 ") as garbage, not pid 1 (no trim)', () => {
+    const path = join(tempDir(), 'credential.lock');
+    writeFileSync(path, ' 1 '); // a trim()+Number() would read this as pid 1 (init, always "alive")
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(path, old, old); // beyond the creation grace
+
+    // readLockPid requires the RAW body to be ^\d+$ (no trim), so ' 1 ' is null → a garbage lock older
+    // than the grace is reclaimable → we win, instead of the lock being wedged forever as a fake live pid 1.
+    expect(acquireCredentialLock(path, 222, { isAlive: (pid) => pid === 1 })).toEqual({ ok: true });
     expect(readFileSync(path, 'utf8')).toBe('222');
   });
 

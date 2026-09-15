@@ -189,6 +189,10 @@ export function acquireCredentialLock(
   const pre = inspectLock(lockPath, euid, isAlive);
   if (pre.refuse) return pre.result;
 
+  // The reclaim gate is a NAME, not a permission boundary: mkdir's mode is umask-subject, but that is
+  // irrelevant here — mutual exclusion is the atomic EEXIST on the name, and creating/removing it needs
+  // only the (already validated) parent's permissions. umask can only REMOVE bits, so a created dir can
+  // never gain the group/other-writable bits assertSafeExistingDir rejects (same for the lock parent).
   const reclaimPath = `${lockPath}.reclaim`;
   try {
     mkdirSync(reclaimPath, { mode: 0o700 });
@@ -286,21 +290,43 @@ function inspectLock(
  */
 function claimLock(lockPath: string, pid: number): boolean {
   const temporary = join(dirname(lockPath), `.${basename(lockPath)}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`);
+  let fd: number | undefined;
   try {
-    // Full pid write to a private temp, then link it into place. The random suffix makes a temp-name
-    // EEXIST collision effectively impossible; the EEXIST that matters is link()'s — a name already at
-    // lockPath — which is our lost-race signal. Either way we never stomp or write through an existing name.
-    writeFileSync(temporary, String(pid), { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+    // Write the pid to a private temp through an OPEN fd and fchmod THAT fd, exactly as secureWriteFile
+    // does, so the 0o600 is guaranteed against a restrictive umask. A plain writeFileSync mode is
+    // umask-masked: under a umask that strips owner-read the lock would be created non-owner-readable, and
+    // then a second acquirer past the creation grace cannot read the pid, misclassifies the lock as
+    // garbage, and reclaims it — admitting a second holder. Mode is an inode property, so fchmod on the
+    // temp fd carries through link() to lockPath. link() then publishes the fully-written inode atomically:
+    // the lock name never exists empty, and a pre-existing name (a regular file OR a planted symlink)
+    // yields EEXIST — our lost-race signal — never a stomp or a write-through. link()'s atomicity and its
+    // EEXIST-on-symlink behavior are trusted POSIX syscall properties, like O_EXCL's.
+    fd = openSync(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600);
+    writeFileSync(fd, String(pid), 'utf8');
+    fchmodSync(fd, 0o600);
+    closeSync(fd);
+    fd = undefined;
     linkSync(temporary, lockPath);
     return true;
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'EEXIST') return false;
+    if ((err as NodeJS.ErrnoException).code === 'EEXIST') return false; // name already taken → we lost
     throw err;
   } finally {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        // Best-effort: preserve the original failure.
+      }
+    }
+    // Best-effort: drop the temp. After a successful link() the lock keeps its own link, so this only
+    // removes the now-redundant temp name; a failed cleanup here leaves benign litter (a stray .tmp / an
+    // nlink of 2), never a correctness issue. We must NOT roll back a lock we already hold on a cleanup
+    // failure — that would strand our own critical section.
     try {
-      unlinkSync(temporary); // the lock keeps its own link; drop the temp (best-effort)
+      unlinkSync(temporary);
     } catch {
-      // A failed temp create leaves nothing to remove; never mask the claim outcome.
+      // The temp may never have been created, or cleanup failed; never mask the claim outcome.
     }
   }
 }
@@ -351,9 +377,13 @@ function processAlive(pid: number): boolean {
 
 function readLockPid(lockPath: string): number | null {
   try {
-    const raw = readFileSync(lockPath, 'utf8').trim();
-    // Only a plain decimal run is a pid. A bare `Number()` would accept '1e3' (1000), '0x10' (16) and
-    // '  42  ' (via trim) — letting a garbage lock body masquerade as a live holder.
+    // No trim: our writer emits exactly `String(pid)` (no surrounding whitespace or newline), so the RAW
+    // body must be a plain decimal run. A bare `Number()` would accept '1e3' (1000) or '0x10' (16); a
+    // `.trim()` would let '  1  ' pass as pid 1 (init — always "alive") and wedge the lock forever.
+    // Requiring ^\d+$ on the raw bytes makes any malformed body null (garbage → reclaimable when stale),
+    // the safe classification. (JS `$` without the `m` flag matches end-of-input only, so a trailing
+    // newline is rejected too, not tolerated.)
+    const raw = readFileSync(lockPath, 'utf8');
     if (!/^\d+$/.test(raw)) return null;
     const pid = Number(raw);
     return Number.isSafeInteger(pid) && pid > 0 ? pid : null;
