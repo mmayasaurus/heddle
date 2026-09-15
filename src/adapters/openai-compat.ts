@@ -5,6 +5,21 @@ import type { DispatchOptions, TokenUsage, WorkerAdapter, WorkerResult } from '.
 
 export const DEFAULT_SECRETS_PATH = join(homedir(), '.heddle', 'secrets.env');
 
+/**
+ * A credential-reader refusal is security-significant, unlike an absent key or a provider error.
+ * Keep this discriminator at the adapter boundary: secure-fs owns the filesystem checks, while
+ * dispatch needs a stable, typed signal to avoid treating that refusal as a fallback candidate.
+ */
+export class InsecureCredentialFileError extends Error {
+  readonly file: string;
+
+  constructor(file: string, cause: unknown) {
+    super(`refusing to read credential file ${file}: ${cause instanceof Error ? cause.message : String(cause)}`, { cause });
+    this.name = 'InsecureCredentialFileError';
+    this.file = file;
+  }
+}
+
 /** Read one key from heddle’s secrets file; adapter credentials never come from process.env. */
 export function readSecretsEnvValue(keyEnv: string, path = DEFAULT_SECRETS_PATH): string | undefined {
   let contents: string;
@@ -12,7 +27,10 @@ export function readSecretsEnvValue(keyEnv: string, path = DEFAULT_SECRETS_PATH)
     contents = secureReadFile(path);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return undefined; // absent file → key not configured (benign)
-    throw err; // symlink / foreign-owned / loose-perm violation → fail closed, surface to the caller
+    // secureReadFile's non-ENOENT failures are its refusal-to-read contract (symlink, ownership,
+    // permissions, or another unsafe-open condition). Preserve the cause for diagnostics while
+    // giving dispatch a typed security discriminator without changing secure-fs itself.
+    throw new InsecureCredentialFileError(path, err);
   }
   for (const line of contents.split(/\r?\n/)) {
     const match = line.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/);
@@ -152,9 +170,13 @@ export class OpenAICompatAdapter implements WorkerAdapter {
     try {
       apiKey = this.loadKey();
     } catch (err) {
+      const securityRefusal = err instanceof InsecureCredentialFileError
+        ? { code: 'insecure-credential-file' as const, file: err.file }
+        : undefined;
       return completed({
         ok: false, output: '', exitCode: null,
         error: `${this.provider}: refusing to use ~/.heddle/secrets.env — ${err instanceof Error ? err.message : String(err)}`,
+        ...(securityRefusal ? { securityRefusal } : {}),
       });
     }
     if (!apiKey) return completed(this.keyMissingResult());

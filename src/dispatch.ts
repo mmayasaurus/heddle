@@ -299,7 +299,25 @@ export async function dispatch(
       },
     });
   };
+  // An unsafe credential file is a local security boundary failure, not a provider availability
+  // failure. The adapter's typed marker prevents this from being mistaken for a benign failed leg
+  // and silently routed around. Match runTarget's existing warning channel: stderr plus the durable
+  // ledger error, while retaining the primary's already-finished failed outcome.
+  const suppressFallbackForInsecureCredential = (outcome: DispatchOutcome): DispatchOutcome | null => {
+    if (!outcome.securityRefusal) return null;
+    const note = `WARNING: insecure credential file ${outcome.securityRefusal.file}; fallback suppressed for safety.`;
+    process.stderr.write(`heddle: ${note}\n`);
+    outcome.error = outcome.error ? `${outcome.error}; ${note}` : note;
+    try {
+      ledger.annotateError(outcome.ledgerId, note);
+    } catch {
+      // The warning remains on the returned outcome if the best-effort ledger annotation fails.
+    }
+    return outcome;
+  };
   let primary = await runTarget(target, req, ctx, route, plan.decision.routedAwayForCap ? `${route.provider}/${route.model}` : null);
+  const primarySecurityRefusal = suppressFallbackForInsecureCredential(primary);
+  if (primarySecurityRefusal) return primarySecurityRefusal;
   // Capability-fit fallback: when the PRIMARY provider merely lacks the knob (`unenforceable`) and
   // the class declares a fallback whose provider CAN enforce every requested capability, route there
   // — that's fit-routing, same spirit as the model fallback. Caller/operator errors stay terminal;
