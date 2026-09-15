@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 for (const k of ['HEDDLE_AGENT', 'FLEET_AGENT', 'HEDDLE_WORKER', 'HEDDLE_DISPATCH_ID', 'HEDDLE_PARENT',
-  'HEDDLE_ROUTING', 'HEDDLE_PACKS', 'CLAUDE_CONFIG_DIR']) {
+  'HEDDLE_ROUTING', 'HEDDLE_PACKS', 'HEDDLE_CANONICAL', 'CLAUDE_CONFIG_DIR']) {
   delete process.env[k];
 }
 // Cap-aware routing (HED-67/68) reads ~/.heddle/usage + ~/.heddle/accounts.json — point both at an
