@@ -173,6 +173,22 @@ describe('createDoctorStep (HED-476 wizard finish = read-only `heddle doctor`)',
     expect(partial.paths?.accounts).toBe('/injected/x');
   });
 
+  it('prunes an injected accounts:undefined so it does NOT clobber the home-scoped path (#204 §1b r2 LOW)', async () => {
+    // Complement to the test above: a DEFINED injected path wins, but an explicit `undefined` must be
+    // treated as "not provided". Otherwise `{ ...homePaths, accounts: undefined }` sets accounts=undefined
+    // and resolveDoctorPaths falls through to the process-home DEFAULT (real ~/.heddle), not ctx.homeDir.
+    // Removing createDoctorStep's `if (value !== undefined)` prune guard fails this test.
+    const home = tempDir();
+    const spy = vi.fn(async (_opts: { provider?: string }, _partial: Partial<DoctorDeps>) => report({ ok: 1 }));
+    const step = createDoctorStep({
+      runDoctor: spy,
+      doctorDeps: { env: {} as NodeJS.ProcessEnv, paths: { accounts: undefined } },
+    });
+    await step.run(makeCtx(home), makeIO().io);
+    const [, partial] = spy.mock.calls[0];
+    expect(partial.paths?.accounts).toBe(join(home, '.heddle', 'accounts.json')); // homePaths won; undefined pruned
+  });
+
   it('threads injected doctorDeps into the runner, while ctx stays authoritative for the clock', async () => {
     const env = { HEDDLE_ROUTING: '/fixture/routing.yaml' } as NodeJS.ProcessEnv;
     const gitBehindOriginMain = async () => 7;
@@ -251,15 +267,14 @@ describe('createDoctorStep (HED-476 wizard finish = read-only `heddle doctor`)',
 
   it('the REAL sweep OPENS the home-scoped registry, proven by its distinctive parse outcome (#204 MED)', async () => {
     // The spy tests prove homePaths is CALLED and threaded; this proves the REAL runDoctor OPENS the
-    // home-derived file end-to-end, DETERMINISTICALLY — independent of the tester's real ~/.heddle.
-    // Trick: write a DISTINCTIVELY MALFORMED registry at <home>/.heddle/accounts.json (claude is not an
-    // array). accountResult then reports `fail` "accounts.json has no claude[] array" — an outcome the
-    // fall-through target can NEVER produce: on a homePaths regression, resolveDoctorPaths falls through
-    // to DEFAULT_ACCOUNTS_PATH (the real ~/.heddle/accounts.json), which on any real machine is either
-    // absent (→ warn) or a VALID registry (→ ok), never this `fail`. A count-based "1 Claude account"
-    // assertion could pass spuriously off that real registry (and is a substring of "11 Claude
-    // accounts"); this outcome-based one cannot. So `fail` + "no claude[] array" here ⟹ the sweep read
-    // OUR home-scoped file.
+    // home-derived file. Trick: write a DISTINCTIVELY MALFORMED registry (claude is not an array) at
+    // <home>/.heddle/accounts.json → accountResult reports `fail` + "no claude[] array". On a homePaths
+    // regression, resolveDoctorPaths falls through to DEFAULT_ACCOUNTS_PATH (the real ~/.heddle): a VALID
+    // default → `ok`, an ABSENT default → `warn`, so this catches the regression for the common operator
+    // states — unlike a count-based "1 Claude account" (which matches a real registry, and is a substring
+    // of "11 Claude accounts"). NOT airtight: a default itself broken to a non-array `claude` (e.g. `{}`)
+    // would also `fail` here — not a normal install state, so this is a STRONG discriminator, not an
+    // absolute one (#204 §1b r3 LOW).
     const base = fakeDeps();
     const home = tempDir();
     mkdirSync(join(home, '.heddle'), { recursive: true });
