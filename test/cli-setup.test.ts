@@ -20,7 +20,7 @@ describe('heddle setup — targetDir auto-derive (HED-624)', () => {
     expect(result.code, result.stderr).toBe(0);
     const pr = prAutomation(result.stdout);
     // Auto-derive activated the step (without a target it would be "no target directory"); the derived flag
-    // makes the dry-run disclose that a real run would confirm first (Maya's Option B).
+    // makes the dry-run disclose that a real run would confirm first (the operator's Option B).
     expect(pr, 'pr-automation step should be present once the target is auto-derived').toBeDefined();
     expect(pr?.status).toBe('skipped'); // dry-run
     expect(pr?.summary).toContain('auto-detected repo, would confirm first');

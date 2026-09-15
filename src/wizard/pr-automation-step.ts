@@ -283,7 +283,7 @@ export function prAutomationStep(): WizardStep {
 
       // HED-624: when the target was auto-detected from the cwd (not named via --target), confirm before
       // scaffolding into it — the operator never pointed us at this repo, so writing silently would assume
-      // intent (Maya's Option B). An explicit --target is the opt-in and skips this; decline → nothing written.
+      // intent (the operator's Option B). An explicit --target is the opt-in and skips this; decline → nothing written.
       if (ctx.targetDirDerived) {
         const proceed = await io.prompter.confirm(`Detected a git repository at ${ctx.targetDir}. Scaffold CI review workflows into its .github/?`, false);
         if (!proceed) {
