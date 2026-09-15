@@ -2,6 +2,26 @@ import { describe, expect, it } from 'vitest';
 import { redactSecrets } from '../src/redact.js';
 
 describe('redactSecrets', () => {
+  it('redacts credential shapes in shapes-only mode while preserving long opaque filenames', () => {
+    const sk = 'sk-' + 'DEADBEEF1234567890';
+    const glm = 'abcdef0123456789abcdef0123456789.abcdef0123456789';
+    const bearer = 'Bearer ' + 'tok1234567890';
+    const github = 'gh' + 'p_EXAMPLE000000000000000000000000';
+    const akia = 'AKIA' + 'IOSFODNN7EXAMPLE';
+
+    for (const value of [sk, glm, bearer, github, akia]) {
+      expect(redactSecrets(value, { shapesOnly: true })).toContain('[redacted]');
+    }
+
+    for (const filename of [
+      'release-20260915-build-artifact.txt',
+      'a1b2c3d4e5f6a1b2c3d4e5f6',
+    ]) {
+      expect(redactSecrets(filename, { shapesOnly: true })).toBe(filename);
+      expect(redactSecrets(filename)).toContain('[redacted]');
+    }
+  });
+
   it('redacts recognized credential shapes', () => {
     // Split literals so these shipped source lines carry no contiguous credential shape (public-scrub
     // convention — src/release/scrub.ts credentialPatterns); the runtime values are the full tokens.
@@ -191,5 +211,87 @@ describe('redactSecrets — review-hardened cases', () => {
       'AKIA' + 'A'.repeat(300_000),                          // AWS access-key arm, unbounded {16,} suffix
     ]) redactSecrets(s);
     expect(Date.now() - start).toBeLessThan(2000);
+  });
+});
+
+// HED-651 qodo HIGH: shapes-only turns the opaque backstop OFF, so a recognized credential DECORATED
+// into a filename (backup_sk-…, notes_lin_api_…) slips the \b-anchored shared prefix rule and the _-
+// excluding GLM lookbehind. The supplementary embedded pass must catch it. Each fixture LEAKS on the
+// pre-fix HEAD and is load-bearing on the else branch. Split literals keep the shipped source free of
+// scannable credential shapes (public-scrub convention — same split points as scrub.ts / the cases above).
+describe('redactSecrets — shapes-only decorated credentials (HED-651)', () => {
+  const S = (t: string) => redactSecrets(t, { shapesOnly: true });
+
+  it('redacts a recognized credential decorated into a filename, across prefix arms and decorations', () => {
+    // Porcelain-prefixed exactly as escapedPaths()/destroyedWork() emit them ("<status> <path>").
+    const cases: [string, string][] = [
+      ['?? backup_' + 'sk-' + 'DEADBEEF1234567890', '?? backup_[redacted]'],   // sk-, underscore-decorated
+      ['?? v2' + 'sk-' + 'DEADBEEF1234567890', '?? v2[redacted]'],             // sk-, digit-decorated
+      ['?? backup_' + 'gh' + 'p_EXAMPLE000000000000000000000000', '?? backup_[redacted]'],
+      ['?? backup_' + 'github_' + 'pat_ABCDEFGHIJKL1234', '?? backup_[redacted]'],
+      ['M v2_' + 'g' + 'sk_ABCDEFGHIJKL1234', 'M v2_[redacted]'],
+      ['?? my_' + 'c' + 'sk-' + 'ABCDEFGHIJKL1234', '?? my_[redacted]'],
+      ['reverted-or-deleted notes_' + 'lin_' + 'api_ABCDEFGHIJKL1234', 'reverted-or-deleted notes_[redacted]'],
+      ['?? x_' + 'xox' + 'b-ABCDEFGHIJKL1234', '?? x_[redacted]'],
+      ['?? pre_' + 'AKIA' + 'IOSFODNN7EXAMPLE', '?? pre_[redacted]'],
+      // GLM <32>.<16> whose left run is _-decorated — the shared lookbehind excludes _ and misses it.
+      ['?? backup_abcdef0123456789abcdef0123456789.abcdef0123456789', '?? backup_[redacted]'],
+    ];
+    for (const [input, want] of cases) {
+      const out = S(input);
+      expect(out).toBe(want);
+      expect(out).not.toContain('DEADBEEF');
+      expect(out).not.toContain('ABCDEFGHIJKL');
+    }
+  });
+
+  it('redacts a GLM key with an over-long contiguous run glued to it — the shapes-only dotted rule is unbounded (no {64} ceiling)', () => {
+    // Round-2 adversarial MEDIUM: the shared full-mode GLM rule caps each side at {20,64}; with the opaque
+    // backstop OFF, a decorated key whose contiguous alnum run exceeds 64 on either side outran that ceiling
+    // and leaked (the lookbehind pins the ONLY valid start at the run head, so backtracking never reaches
+    // the dot). Shapes-only lifts the cap to {20,}/{12,}; the pinned start keeps it linear (ReDoS test above).
+    const glm = 'abcdef0123456789abcdef0123456789.abcdef0123456789'; // <32>.<16>, scrub/gitleaks-safe
+    for (const input of [
+      '?? ' + 'p'.repeat(33) + glm, // left run 65 = 33 filler + 32 — leaks on the pre-fix HEAD
+      '?? ' + 'p'.repeat(35) + glm, // left run 67
+      '?? ' + glm + 'q'.repeat(49), // right run 65 = 16 + 49
+      '?? ' + 'p'.repeat(32) + glm, // left run 64 — the ceiling edge, must still redact (no regression)
+    ]) {
+      const out = S(input);
+      expect(out).toBe('?? [redacted]');
+      expect(out).not.toContain('abcdef0123456789');
+    }
+  });
+
+  it('preserves ordinary filenames whose names merely contain an sk-/dotted substring', () => {
+    // sk- is a common English substring; the (?<![A-Za-z]) guard keeps letter-preceded words intact.
+    for (const f of [
+      'task-force-release-20260915-build.md',
+      'disk-usage-report-2026.txt',
+      'risk-assessment-final.md',
+      'desk-setup-notes.md',
+      'ask-me-anything.md',
+      'config.production.json',
+      'notes.readme',
+    ]) expect(S('?? ' + f)).toBe('?? ' + f);
+  });
+
+  it('full mode is byte-identical: the opaque backstop, not a changed prefix rule, catches the decorated token', () => {
+    // The SHARED chain is untouched, so full mode redacts the WHOLE decorated run via the opaque rule →
+    // "[redacted]" (a changed shared prefix rule would instead give "backup_[redacted]"). This assertion
+    // fails if the shared chain drifts.
+    expect(redactSecrets('?? backup_' + 'sk-' + 'DEADBEEF1234567890')).toBe('?? [redacted]');
+    expect(redactSecrets('?? backup_' + 'gh' + 'p_EXAMPLE000000000000000000000000')).toBe('?? [redacted]');
+  });
+
+  it('accepts the documented residual: a LETTER-decorated recognized prefix (xsk-) reads as an ordinary word in shapes-only, yet full mode still scrubs it', () => {
+    // Realistic ~100-char key body so full mode's opaque 24+ backstop actually FIRES — proving the residual
+    // is SHAPES-ONLY (letter-decoration reads as a word: no \b precedes the embedded sk-) while the
+    // vendor-error path (full mode) still scrubs the whole run. Split literals keep the shipped source
+    // free of a scannable sk- shape (public-scrub convention).
+    const body = 'ant-api03-' + 'A1b2c3D4e5'.repeat(9); // ~100 chars, obviously synthetic
+    const residual = '?? x' + 'sk-' + body;
+    expect(S(residual)).toBe(residual);                    // shapes-only: unchanged (accepted residual)
+    expect(redactSecrets(residual)).toBe('?? [redacted]'); // full mode: opaque backstop catches it
   });
 });
