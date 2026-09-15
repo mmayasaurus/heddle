@@ -766,6 +766,21 @@ export class Ledger {
       .run(mandateOk === null ? null : mandateOk ? 1 : 0, dispatchId);
   }
 
+  /** Whether another dispatch shared this cwd during this dispatch's run window. */
+  overlappingByCwd(cwd: string, excludeId: number): boolean {
+    const self = this.db.prepare('SELECT started_at FROM dispatches WHERE id = ?')
+      .get(excludeId) as { started_at: string } | undefined;
+    if (!self) return false;
+    const row = this.db.prepare(`
+      SELECT 1 FROM dispatches
+       WHERE cwd = ? AND id != ?
+         AND started_at <= ?
+         AND (finished_at IS NULL OR finished_at >= ?)
+       LIMIT 1
+    `).get(cwd, excludeId, new Date().toISOString(), self.started_at);
+    return row !== undefined;
+  }
+
   /** The follow-up: how many of the reviewer's findings the author accepted (the score that tunes reviewer pairs). */
   recordReviewOutcome(dispatchId: number, o: { findingsTotal: number; findingsAccepted: number; notes?: string }): boolean {
     if (!Number.isInteger(o.findingsTotal) || !Number.isInteger(o.findingsAccepted) || o.findingsTotal < 0 ||

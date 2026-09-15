@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Ledger } from '../src/ledger.js';
 import { useTempResources } from './helpers.js';
 
@@ -16,6 +16,33 @@ describe('ledger adversarial reviews', () => {
   function review(db: Ledger, id: number, author: string, reviewer: string): void {
     db.recordReview({ dispatchId: id, authorProvider: author, authorModel: 'author-model', authorDispatchId: null, reviewerProvider: reviewer, reviewerModel: 'reviewer-model' });
   }
+
+  afterEach(() => vi.useRealTimers());
+
+  it('finds only other same-cwd dispatches whose run window overlaps this dispatch', () => {
+    const db = ledger();
+    vi.useFakeTimers();
+    const at = (value: string): void => { vi.setSystemTime(new Date(value)); };
+    const startAt = (cwd: string, atTime: string): number => {
+      at(atTime);
+      return db.start({ orchestrator: null, taskClass: 'worker', provider: 'cursor', model: 'm', skills: null, issue: null, pr: null, cwd, promptPreview: 'p', sessionId: null, fellBackFrom: null });
+    };
+    const cwd = '/tmp/shared';
+    const finishedDuring = startAt(cwd, '2026-01-01T00:00:00.000Z');
+    const subject = startAt(cwd, '2026-01-01T00:00:02.000Z');
+    at('2026-01-01T00:00:03.000Z'); db.finish(finishedDuring, { ok: true });
+    at('2026-01-01T00:00:04.000Z');
+    expect(db.overlappingByCwd(cwd, subject)).toBe(true); // peer started before and finished during this run
+
+    const inFlight = startAt(cwd, '2026-01-01T00:00:05.000Z');
+    expect(db.overlappingByCwd(cwd, subject)).toBe(true); // in-flight peer overlaps
+    const otherCwd = startAt('/tmp/other', '2026-01-01T00:00:06.000Z');
+    expect(db.overlappingByCwd('/tmp/other', otherCwd)).toBe(false); // different cwd and own id are excluded
+
+    at('2026-01-01T00:00:07.000Z'); db.finish(inFlight, { ok: true }); db.finish(subject, { ok: true });
+    const afterAllPeers = startAt(cwd, '2026-01-01T00:00:08.000Z');
+    expect(db.overlappingByCwd(cwd, afterAllPeers)).toBe(false); // peers finished before this run; own id is excluded
+  });
 
   it('upserts reviewer identity without erasing the existing mandate or scored outcome', () => {
     const db = ledger(); const id = finished(db);

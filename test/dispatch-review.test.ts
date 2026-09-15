@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { dispatch } from '../src/dispatch.js';
@@ -27,6 +27,16 @@ function commitTrackedProbe(cwd: string): void {
   writeFileSync(join(cwd, 'tracked-probe.txt'), 'before');
   execFileSync('git', ['add', 'tracked-probe.txt'], { cwd });
   execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '-m', 'track probe'], { cwd });
+}
+
+function linkedWorktree(tempDir: () => string): { root: string; worktree: string } {
+  const root = join(tempDir(), 'repo');
+  mkdirSync(root);
+  gitRepo(root);
+  const worktree = join(tempDir(), 'linked-worktree');
+  execFileSync('git', ['worktree', 'add', '-q', worktree, '-b', 'review-probe'], { cwd: root });
+  commitTrackedProbe(worktree);
+  return { root, worktree };
 }
 
 // The copy flips auto_assess off for ALL classes (replaceAll): any class left true spawns a REAL
@@ -142,8 +152,33 @@ describe('adversarial review dispatch', () => {
     } finally { restore(); }
   });
 
-  it('HED-601: quarantines the findings and HARD-fails a write mandate violation without reverting files', async () => {
+  it('HED-609: warns without quarantine when a peer dispatch overlaps a changed shared cwd', async () => {
+    const restore = reviewRouting(tempDir); const { worktree: cwd } = linkedWorktree(tempDir); const ledger = tempLedger();
+    ledger.start({ orchestrator: null, taskClass: 'peer', provider: 'cursor', model: 'm', skills: null, issue: null, pr: null, cwd, promptPreview: 'peer', sessionId: null, fellBackFrom: null });
+    const writer: WorkerAdapter = { name: 'writer', provider: 'codex', dispatch: async (_prompt, opts) => { writeFileSync(join(opts.cwd, 'tracked-probe.txt'), 'after'); return { ok: true, output: 'done', exitCode: 0 }; } };
+    try {
+      const outcome = await dispatch({ taskClass: 'adversarial-review', authorProvider: 'claude', prompt: 'review', cwd, identity: unbound }, ledger, () => writer);
+      expect(outcome.ok).toBe(true);
+      expect(outcome.review?.mandateOk).toBeNull(); expect(ledger.getReview(outcome.ledgerId)?.mandate_ok).toBeNull();
+      expect(outcome.quarantine).toBeUndefined(); expect(outcome.output).toBe('done');
+      expect(ledger.recent(1)[0].error).toContain('read-only mandate:'); expect(ledger.recent(1)[0].error).toContain('concurrent writer was possible');
+    } finally { restore(); }
+  });
+
+  it('HED-609: warns without quarantine when a changed cwd is the shared/main checkout', async () => {
     const restore = reviewRouting(tempDir); const cwd = tempDir(); gitRepo(cwd); commitTrackedProbe(cwd); const ledger = tempLedger();
+    const writer: WorkerAdapter = { name: 'writer', provider: 'codex', dispatch: async (_prompt, opts) => { writeFileSync(join(opts.cwd, 'tracked-probe.txt'), 'after'); return { ok: true, output: 'done', exitCode: 0 }; } };
+    try {
+      const outcome = await dispatch({ taskClass: 'adversarial-review', authorProvider: 'claude', prompt: 'review', cwd, identity: unbound }, ledger, () => writer);
+      expect(outcome.ok).toBe(true);
+      expect(outcome.review?.mandateOk).toBeNull(); expect(ledger.getReview(outcome.ledgerId)?.mandate_ok).toBeNull();
+      expect(outcome.quarantine).toBeUndefined(); expect(outcome.output).toBe('done');
+      expect(ledger.recent(1)[0].error).toContain('read-only mandate:');
+    } finally { restore(); }
+  });
+
+  it('HED-601: quarantines the findings and HARD-fails an exclusive linked-worktree write mandate violation without reverting files', async () => {
+    const restore = reviewRouting(tempDir); const { worktree: cwd } = linkedWorktree(tempDir); const ledger = tempLedger();
     let writerCalls = 0;
     const writer: WorkerAdapter = { name: 'writer', provider: 'codex', dispatch: async (_prompt, opts) => { writerCalls += 1; writeFileSync(join(opts.cwd, 'tracked-probe.txt'), 'after'); return { ok: true, output: 'done', exitCode: 0 }; } };
     try {
@@ -175,7 +210,7 @@ describe('adversarial review dispatch', () => {
     // second-opinion is read_only with a glm fallback and NO reviewer_pool (so no review pair). Before
     // HED-601 the no-retry guard keyed on review.mandateOk — undefined here — so a non-review violation
     // would re-run in the already-mutated tree on the fallback. The quarantine-keyed guard closes that gap.
-    const restore = reviewRouting(tempDir); const cwd = tempDir(); gitRepo(cwd); commitTrackedProbe(cwd); const ledger = tempLedger();
+    const restore = reviewRouting(tempDir); const { worktree: cwd } = linkedWorktree(tempDir); const ledger = tempLedger();
     let calls = 0;
     const writer: WorkerAdapter = { name: 'w', provider: 'cursor', dispatch: async (_prompt, opts) => { calls += 1; writeFileSync(join(opts.cwd, 'tracked-probe.txt'), 'after'); return { ok: true, output: 'finding', exitCode: 0 }; } };
     try {
@@ -200,7 +235,7 @@ describe('adversarial review dispatch', () => {
 
     // (1) violation → quarantined → assess SKIPPED
     assess.mockClear();
-    const cwd = tempDir(); gitRepo(cwd); commitTrackedProbe(cwd);
+    const { worktree: cwd } = linkedWorktree(tempDir);
     const mutator: WorkerAdapter = { name: 'w', provider: 'codex', dispatch: async (_p, opts) => { writeFileSync(join(opts.cwd, 'tracked-probe.txt'), 'after'); return { ok: true, output: 'finding text', exitCode: 0 }; } };
     const violated = await dispatch({ taskClass: 'adversarial-review', authorProvider: 'claude', prompt: 'review', cwd, identity: unbound }, tempLedger(), () => mutator);
     expect(violated.quarantine).toBeDefined();
@@ -218,7 +253,7 @@ describe('adversarial review dispatch', () => {
   it('HED-601: hard-fails and quarantines a violation even when the worker returned no findings text', async () => {
     // LOW-3 edge: an empty-output violation is still a HARD failure with quarantine set (output '') —
     // the violation is recorded regardless of whether the reviewer produced any finding text.
-    const restore = reviewRouting(tempDir); const cwd = tempDir(); gitRepo(cwd); commitTrackedProbe(cwd); const ledger = tempLedger();
+    const restore = reviewRouting(tempDir); const { worktree: cwd } = linkedWorktree(tempDir); const ledger = tempLedger();
     const silentMutator: WorkerAdapter = { name: 'w', provider: 'codex', dispatch: async (_p, opts) => { writeFileSync(join(opts.cwd, 'tracked-probe.txt'), 'after'); return { ok: true, output: '', exitCode: 0 }; } };
     try {
       const outcome = await dispatch({ taskClass: 'adversarial-review', authorProvider: 'claude', prompt: 'review', cwd, identity: unbound }, ledger, () => silentMutator);
@@ -230,7 +265,7 @@ describe('adversarial review dispatch', () => {
   });
 
   it('catches a reviewer that edits the injected AGENTS.md — restore must not mask the violation', async () => {
-    const restore = reviewRouting(tempDir); const cwd = tempDir(); gitRepo(cwd); const ledger = tempLedger();
+    const restore = reviewRouting(tempDir); const { worktree: cwd } = linkedWorktree(tempDir); const ledger = tempLedger();
     // the cursor reviewer gets AGENTS.md materialized; an edit to it was invisible under the old
     // before-materialize/after-restore snapshot ordering (restore reinstated the original bytes)
     const agentsEditor: WorkerAdapter = { name: 'w', provider: 'codex', dispatch: async (_prompt, opts) => {
@@ -243,7 +278,7 @@ describe('adversarial review dispatch', () => {
   });
 
   it('catches a bare git add — the index is part of the mandate digest even when no bytes change', async () => {
-    const restore = reviewRouting(tempDir); const cwd = tempDir(); gitRepo(cwd); commitTrackedProbe(cwd); const ledger = tempLedger();
+    const restore = reviewRouting(tempDir); const { worktree: cwd } = linkedWorktree(tempDir); const ledger = tempLedger();
     writeFileSync(join(cwd, 'tracked-probe.txt'), 'dirty'); // dirty BEFORE the review starts
     const stager: WorkerAdapter = { name: 'w', provider: 'codex', dispatch: async (_prompt, opts) => {
       execFileSync('git', ['add', 'tracked-probe.txt'], { cwd: opts.cwd }); return { ok: true, output: 'done', exitCode: 0 };
