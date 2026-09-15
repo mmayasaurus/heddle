@@ -538,12 +538,9 @@ export function applyInstall(plan: InstallPlan, dryRun = false): InstallReport {
       // Content already matches, so no rewrite — but re-apply an explicit mode if it has drifted: a
       // launcher whose bytes are intact yet lost its execute bit (an external chmod, or a fresh clone
       // that dropped +x) is otherwise never repaired by a re-run, because stepFor keys 'ok' on content
-      // alone and cannot see the mode (HED-671, qodo correctness finding). Best-effort; a mode-less 'ok'
-      // (e.g. canonicalStep) is left untouched.
-      if (step.mode !== undefined) {
-        try { if ((statSync(step.path).mode & 0o7777) !== step.mode) chmodSync(step.path, step.mode); }
-        catch { /* mode repair is best-effort; never fail the install over it */ }
-      }
+      // alone and cannot see the mode (HED-671, qodo correctness finding). A mode-less 'ok' (e.g.
+      // canonicalStep) is untouched; like every other write here, a failed chmod throws.
+      if (step.mode !== undefined && (statSync(step.path).mode & 0o7777) !== step.mode) chmodSync(step.path, step.mode);
       continue;
     }
     if (step.action === 'skip') continue;

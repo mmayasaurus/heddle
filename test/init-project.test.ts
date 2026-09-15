@@ -818,11 +818,11 @@ describe('init-project', () => {
       expect(statSync(target).mode & 0o777).toBe(0o755);
     });
 
-    it('tolerates a mode-bearing (ok) step whose file is gone — best-effort mode repair never throws', () => {
+    it('throws (fail-loud) on a mode-bearing (ok) step whose file is gone — a stale plan, like the CAS check', () => {
       const base = tempDir();
       const target = join(base, 'launch-gone.sh');
       const plan = { options: { dir: base, canonical: base, name: 'toy', homeDir: base }, steps: [{ step: 'launcher', path: target, action: 'ok' as const, content: 'x', mode: 0o755 }] };
-      expect(() => applyInstall(plan)).not.toThrow();
+      expect(() => applyInstall(plan)).toThrow();
     });
   });
 
