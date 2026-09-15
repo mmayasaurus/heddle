@@ -4,18 +4,23 @@ import { basename, join } from 'node:path';
 import { result, sanitize, type CheckResult, type ProbeResult } from './probe.js';
 import type { Definition, DoctorContext } from './checks.js';
 
-// The shortest interactive-event timeout Claude Code uses (UserPromptSubmit = 30s). A hook that cannot
-// return within that window is broken for interactive use whatever its declared ceiling, so a budget-capped
-// probe that got at least this long is reported as hung (fail), not merely unverified.
+// 30s is UserPromptSubmit's default timeout, used here as a conservative "hung" floor: when the sweep
+// budget caps a probe below its declared timeout and the probe still times out, we report it hung (fail)
+// only if it ran at least this long, else merely unverified (warn). A hook that cannot return within 30s
+// is broken for interactive use whatever its declared ceiling. (Some events default lower — MessageDisplay
+// 10s, SessionEnd 1.5s — so this floor is deliberately conservative, not the minimum.)
 const HUNG_FLOOR_MS = 30_000;
 
 type HookEntry = { type?: unknown; command?: unknown; args?: unknown; timeout?: unknown };
 type HookGroup = { hooks?: unknown; matcher?: unknown };
 
 const defaultTimeoutSeconds = (event: string): number => {
-  if (event === 'UserPromptSubmit') return 30;
+  // Claude Code lowers the command/http/mcp_tool default (600s) on some events
+  // (https://code.claude.com/docs/en/hooks): 30s on UserPromptSubmit, PreModelSwitch, and
+  // PostModelSwitch; 10s on MessageDisplay; SessionEnd hooks share a 1.5s budget.
+  if (event === 'UserPromptSubmit' || event === 'PreModelSwitch' || event === 'PostModelSwitch') return 30;
+  if (event === 'MessageDisplay') return 10;
   if (event === 'SessionEnd') return 1.5;
-  // Claude Code hook timeout defaults are 600s except UserPromptSubmit (30s) and SessionEnd (1.5s).
   return 600;
 };
 

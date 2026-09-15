@@ -153,6 +153,38 @@ describe('hooksChecks', () => {
     expect(timeoutMs).toBe(30_000);
   });
 
+  test('uses the PreModelSwitch default timeout', async () => {
+    const clock = { value: 0 };
+    let timeoutMs = 0;
+    const ctx = context({ [userSettings]: settings('PreModelSwitch', { type: 'command', command: 'hook' }) }, clock, async (_c, _a, opts) => {
+      timeoutMs = opts.timeoutMs;
+      return { stdout: '', stderr: '', exitCode: 0, timedOut: false };
+    });
+    await run(await hooksChecks(ctx, projectDir));
+    expect(timeoutMs).toBe(30_000);
+  });
+
+  test('uses the MessageDisplay default timeout', async () => {
+    const clock = { value: 0 };
+    let timeoutMs = 0;
+    const ctx = context({ [userSettings]: settings('MessageDisplay', { type: 'command', command: 'hook' }) }, clock, async (_c, _a, opts) => {
+      timeoutMs = opts.timeoutMs;
+      return { stdout: '', stderr: '', exitCode: 0, timedOut: false };
+    });
+    await run(await hooksChecks(ctx, projectDir));
+    expect(timeoutMs).toBe(10_000);
+  });
+
+  test('fails a budget-capped timeout exactly at the interactive floor as hung', async () => {
+    const clock = { value: 0 };
+    const ctx = context({ [userSettings]: settings('PreToolUse', { type: 'command', command: 'hook' }) }, clock, async () => {
+      clock.value += 30_000;
+      return { stdout: '', stderr: '', exitCode: null, timedOut: true };
+    }, 30_000);
+    const [entry] = await run(await hooksChecks(ctx, projectDir));
+    expect(entry).toMatchObject({ outcome: 'fail', detail: expect.stringContaining('hung') });
+  });
+
   test('skips remaining hooks when the total budget is exhausted', async () => {
     const clock = { value: 0 };
     let calls = 0;
@@ -263,6 +295,18 @@ describe('hooksChecks', () => {
     }));
     expect(report.checks).toHaveLength(1);
     expect(report.checks[0]).toMatchObject({ id: 'hooks:user:PreToolUse:0.0', kind: 'hooks', outcome: 'ok' });
+  });
+
+  test('returns exit code 1 when a hook probe fails', async () => {
+    const paths = config();
+    const report = await runDoctor({ probeHooks: true }, fakeDeps({ ...paths, project: projectDir }, {
+      env: { CLAUDE_CONFIG_DIR: configDir },
+      readFileBytes: async (path) => path === userSettings
+        ? settings('PreToolUse', { type: 'command', command: 'not-found' })
+        : undefined,
+      execHook: async () => ({ stdout: '', stderr: '', exitCode: 127, timedOut: false }),
+    }));
+    expect(report.exitCode).toBe(1);
   });
 
   test('uses a supplied hooks budget for the hook probe deadline', async () => {

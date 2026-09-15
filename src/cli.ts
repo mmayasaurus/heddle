@@ -111,7 +111,7 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
   heddle whoami [--json]         this process's bound identity (HEDDLE_AGENT / FLEET_AGENT / .fleet-agent) + worker context
   heddle doctor [--json] [--provider <p>]   verify harnesses/accounts/config; --provider runs only that provider's checks plus global config checks (exit 1 on any fail)
   heddle doctor --hooks [--hooks-budget <seconds>] [--json]  probe configured hooks' latency — EXECUTES each configured hook
-                                            with a synthetic payload; probes the current directory's .claude settings — run from the project root; ignores --provider; runs under a default 180s total sweep budget, overridable with --hooks-budget <seconds>; a hook which doesn't return within its share of the budget fails as hung (exit 1); flags slow/perma-timeout/missing
+                                            with a synthetic payload; probes the current directory's .claude settings — run from the project root; ignores --provider; runs under a default 180s sweep budget (--hooks-budget <seconds> to raise it); a budget-truncated hook is hung (exit 1) or unverified if little budget remained; exits 1 on broken/missing/perma-timeout; flags slow
   heddle release --standalone <outDir> [--source-ref <git ref>] [--init-git] [--verify] [--json]
       requires a clean checkout at main's HEAD — headless-first invariant (HED-507)
   heddle workers [--stale <hours>] [--json]   dispatches still in flight (--stale: only orphans older than N hours)
@@ -570,7 +570,15 @@ try {
           break;
         }
       }
-      if (budgetArg !== undefined) {
+      if (process.argv.includes('--hooks-budget')) {
+        if (!probeHooks) {
+          usageError('doctor: --hooks-budget requires --hooks');
+          break;
+        }
+        if (!budgetArg || budgetArg.startsWith('--')) {
+          usageError('doctor: --hooks-budget needs a value in seconds');
+          break;
+        }
         const secs = Number(budgetArg);
         if (!Number.isFinite(secs) || secs <= 0) {
           usageError('doctor: --hooks-budget needs a positive number of seconds');

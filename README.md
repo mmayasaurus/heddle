@@ -180,8 +180,9 @@ hook with a synthetic stdin payload to report latency and hook health. It can tr
 external effects; it is never included in the default read-only doctor sweep. `--hooks` ignores
 `--provider`, probes the current directory's `.claude` settings (run from the project root), and runs
 under a default 180s sweep budget (`--hooks-budget <seconds>` to raise it). It exits 1 for broken,
-missing, or timed-out hooks — a hook that exceeds its budget share fails as hung; raise the budget to
-verify a long hook against its full declared timeout.
+missing, or permanently-timed-out hooks. When the sweep budget truncates a hook's run, the hook is
+flagged hung (fail) if it still ran past the ~30s interactive floor, or unverified (warn, exit 0) if
+little budget remained — raise `--hooks-budget` to verify a long hook against its full declared timeout.
 
 Framework-layer config lives under `~/.heddle/` (it spans projects, never a single repo):
 `accounts.json` (Claude accounts), `ledger.db` (dispatch/review ledger), `comms.db` (broker), and
