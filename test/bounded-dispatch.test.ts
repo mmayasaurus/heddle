@@ -92,11 +92,13 @@ describe('bounded FDL dispatch admission', () => {
 
   it('refuses oversized assembled input before the provider is called', async () => {
     const fake = fakeGlm();
+    let factoryCalls = 0;
     const outcome = await dispatch(
       boundedRequest(tempDir(), { prompt: 'x'.repeat(72_001) }),
-      tempLedger(), () => fake.adapter,
+      tempLedger(), () => { factoryCalls += 1; return fake.adapter; },
     );
     expect(outcome.refusal?.code).toBe('bounded-input-oversize');
+    expect(factoryCalls).toBe(0);
     expect(fake.calls).toHaveLength(0);
   });
 

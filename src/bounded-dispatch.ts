@@ -36,7 +36,7 @@ export function boundedEnforcementSupport(
     inputTokens: glm ? 'preflight-conservative' : 'unsupported',
     generatedTokens: glm ? 'native' : 'unsupported',
     totalTokens: glm ? 'atomic-ledger' : 'unsupported',
-    outputBytes: glm ? 'local-validation' : 'unsupported',
+    outputBytes: glm ? 'local-stream-cap' : 'unsupported',
     concurrency: 'atomic-ledger',
     hourlyDispatches: 'atomic-ledger',
     sessionDispatches: 'atomic-ledger',
@@ -97,7 +97,7 @@ export function createBoundedReceipt(
     remoteOutcome: null,
     stubs: [
       'provider-confirmed cancellation is not exposed by the current GLM HTTP API path',
-      'partial streaming output capture remains a later pass; non-streaming aborts retain no unavailable bytes',
+      'the conservative byte cap covers the complete HTTP response body, so JSON framing and usage metadata consume part of the output allowance',
     ],
   };
 }

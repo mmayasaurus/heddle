@@ -97,6 +97,7 @@ export function parseClaudeResult(stdout: string, exitCode: number | null): Work
     ? {
         inputTokens: u.input_tokens,
         cachedInputTokens: u.cache_read_input_tokens,
+        cacheCreationInputTokens: u.cache_creation_input_tokens,
         outputTokens: u.output_tokens,
         reasoningOutputTokens: u.output_tokens_details?.thinking_tokens,
       }

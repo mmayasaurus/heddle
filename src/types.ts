@@ -66,6 +66,8 @@ export interface DispatchOptions {
   responseSchema?: ResponseSchema;
   /** Native provider completion-token ceiling for this dispatch. Undefined uses the adapter default. */
   maxOutputTokens?: number;
+  /** Conservative transport ceiling for the complete HTTP response body, including JSON framing. */
+  maxOutputBytes?: number;
   /** Maximum provider requests this dispatch may issue. OpenAI-compatible bounded routes require 1. */
   maxModelRequests?: number;
   /** Disable the OpenAI-compatible empty-reasoning retry for single-request routes. */

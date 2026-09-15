@@ -83,26 +83,49 @@ export interface ChatResponse {
   };
 }
 
+type OpenAICompatProviderName = 'groq' | 'cerebras' | 'openrouter' | 'glm';
+
+/** Pure request construction shared by admission and the admitted adapter instance. */
+export function buildOpenAICompatRequest(
+  provider: OpenAICompatProviderName,
+  prompt: string,
+  opts: DispatchOptions,
+  apiKey: string,
+  requested = PROVIDER_REGISTRY[provider].maxTokensDefault,
+): { url: string; headers: Record<string, string>; body: string } {
+  const config = PROVIDER_REGISTRY[provider];
+  const budget = config.contextCap ? Math.min(requested, config.contextCap) : requested;
+  const model = config.models[opts.model] ?? opts.model;
+  const messages = opts.systemPromptAppend
+    ? [{ role: 'system', content: opts.systemPromptAppend }, { role: 'user', content: prompt }]
+    : [{ role: 'user', content: prompt }];
+  return {
+    url: `${config.baseUrl}/chat/completions`,
+    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model, messages, [config.tokenParam]: budget }),
+  };
+}
+
 /**
  * Conservative preflight bound for the exact in-process request body. Every tokenizer token consumes
  * at least one UTF-8 byte from this fully assembled body, so byte length may over-reserve but can
  * never treat unknown message/system/pack overhead as zero.
  */
 export function openAICompatInputTokenUpperBound(
-  provider: 'groq' | 'cerebras' | 'openrouter' | 'glm',
+  provider: OpenAICompatProviderName,
   prompt: string,
   opts: DispatchOptions,
 ): number {
-  return Buffer.byteLength(new OpenAICompatAdapter(provider).buildRequest(prompt, opts, '').body, 'utf8');
+  return Buffer.byteLength(buildOpenAICompatRequest(provider, prompt, opts, '').body, 'utf8');
 }
 
 /** Generic HTTP worker for OpenAI Chat Completions-compatible providers. */
 export class OpenAICompatAdapter implements WorkerAdapter {
   readonly name: string;
-  readonly provider: 'groq' | 'cerebras' | 'openrouter' | 'glm';
+  readonly provider: OpenAICompatProviderName;
   private readonly config: OpenAICompatProvider;
 
-  constructor(provider: 'groq' | 'cerebras' | 'openrouter' | 'glm') {
+  constructor(provider: OpenAICompatProviderName) {
     this.name = provider;
     this.provider = provider;
     this.config = PROVIDER_REGISTRY[provider];
@@ -112,16 +135,7 @@ export class OpenAICompatAdapter implements WorkerAdapter {
   buildRequest(prompt: string, opts: DispatchOptions, apiKey: string, requested = this.config.maxTokensDefault): {
     url: string; headers: Record<string, string>; body: string;
   } {
-    const budget = this.config.contextCap ? Math.min(requested, this.config.contextCap) : requested;
-    const model = this.config.models[opts.model] ?? opts.model;
-    const messages = opts.systemPromptAppend
-      ? [{ role: 'system', content: opts.systemPromptAppend }, { role: 'user', content: prompt }]
-      : [{ role: 'user', content: prompt }];
-    return {
-      url: `${this.config.baseUrl}/chat/completions`,
-      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model, messages, [this.config.tokenParam]: budget }),
-    };
+    return buildOpenAICompatRequest(this.provider, prompt, opts, apiKey, requested);
   }
 
   async dispatch(prompt: string, opts: DispatchOptions): Promise<WorkerResult> {
@@ -168,7 +182,34 @@ export class OpenAICompatAdapter implements WorkerAdapter {
       const response = await fetch(request.url, { method: 'POST', headers: request.headers, body: request.body, signal: controller.signal });
       let body: ChatResponse;
       try {
-        body = await response.json() as ChatResponse;
+        if (opts.maxOutputBytes !== undefined && response.body) {
+          const reader = response.body.getReader();
+          const chunks: Uint8Array[] = [];
+          let bytes = 0;
+          while (true) {
+            const next = await reader.read();
+            if (next.done) break;
+            const remaining = opts.maxOutputBytes - bytes;
+            if (next.value.byteLength > remaining) {
+              if (remaining > 0) chunks.push(next.value.slice(0, remaining));
+              bytes += Math.max(0, remaining);
+              await reader.cancel('bounded response byte cap exceeded');
+              controller.abort();
+              let partial = Buffer.concat(chunks.map(chunk => Buffer.from(chunk))).toString('utf8');
+              while (Buffer.byteLength(partial, 'utf8') > opts.maxOutputBytes) partial = partial.slice(0, -1);
+              return { result: {
+                ok: false, output: partial, exitCode: null, incomplete: true, remoteOutcome: 'unknown',
+                error: `${this.provider}: response exceeded the ${opts.maxOutputBytes}-byte bounded transport cap`,
+              } };
+            }
+            chunks.push(next.value);
+            bytes += next.value.byteLength;
+          }
+          const text = Buffer.concat(chunks.map(chunk => Buffer.from(chunk))).toString('utf8');
+          body = JSON.parse(text) as ChatResponse;
+        } else {
+          body = await response.json() as ChatResponse;
+        }
       } catch {
         return { result: { ok: false, output: '', exitCode: null, error: `${this.provider}: invalid JSON response (HTTP ${response.status})` } };
       }

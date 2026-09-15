@@ -202,7 +202,7 @@ export interface BoundedDispatchReceipt {
   account: string | null;
   repository: { commit: string | null; dirty: boolean | null };
   fingerprints: { adapter: string; route: string; lanes: string };
-  enforcementSupport: Record<string, 'native' | 'preflight-conservative' | 'atomic-ledger' | 'local-validation' | 'unsupported'>;
+  enforcementSupport: Record<string, 'native' | 'preflight-conservative' | 'atomic-ledger' | 'local-stream-cap' | 'local-validation' | 'unsupported'>;
   refusedDimensions: string[];
   reservation: { inputTokens: number; generatedTokens: number; totalTokens: number } | null;
   rawUsage: unknown;

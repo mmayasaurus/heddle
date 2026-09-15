@@ -339,6 +339,7 @@ export async function runTarget(
       skipPermissions: req.skipPermissions,
       mcpServers: isClaude ? mcp : undefined,
       maxOutputTokens: route.bounds?.maxGeneratedTokens,
+      maxOutputBytes: route.bounds?.maxOutputBytes,
       maxModelRequests: route.bounds?.maxModelRequests,
       allowReasoningRetry: route.bounds ? route.bounds.retry : undefined,
     });

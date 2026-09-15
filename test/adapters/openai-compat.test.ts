@@ -69,7 +69,8 @@ describe('OpenAICompatAdapter', () => {
     }));
     vi.stubGlobal('fetch', fetch);
     const result = await new OpenAICompatAdapter('glm').dispatch('hello', {
-      ...opts, model: 'glm-5.3', maxOutputTokens: 8_000, maxModelRequests: 1, allowReasoningRetry: false,
+      ...opts, model: 'glm-5.3', maxOutputTokens: 8_000, maxOutputBytes: 16_000,
+      maxModelRequests: 1, allowReasoningRetry: false,
     } as any);
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(JSON.parse(fetch.mock.calls[0][1].body).max_completion_tokens).toBe(8_000);
@@ -80,6 +81,25 @@ describe('OpenAICompatAdapter', () => {
         cacheCreationInputTokens: 3, outputTokens: 8_000, reasoningOutputTokens: 7_000,
       },
     });
+  });
+
+  it('actively cancels an oversized bounded response and retains the partial bytes', async () => {
+    vi.mocked(readFileSync).mockReturnValue('ZAI_API_KEY=secret\n');
+    const body = JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content: 'x'.repeat(20_000) } }] });
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(body, { status: 200 })));
+
+    const result = await new OpenAICompatAdapter('glm').dispatch('hello', {
+      ...opts, model: 'glm-5.3', maxOutputTokens: 8_000, maxOutputBytes: 16_000,
+      maxModelRequests: 1, allowReasoningRetry: false,
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      incomplete: true,
+      remoteOutcome: 'unknown',
+      error: expect.stringContaining('response exceeded'),
+    });
+    expect(Buffer.byteLength(result.output, 'utf8')).toBeLessThanOrEqual(16_000);
   });
 
   it('fails loudly when its key is missing', async () => {
