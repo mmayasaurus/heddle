@@ -5,10 +5,11 @@
 // per its own note, "the full account/rules/etc. scenario matrix belongs to … W's HED-571 harness" — this.
 //
 // It grows as buildSteps wires more steps (model-economy/spread/meters/rules/doctor): the assertions
-// iterate over buildSteps() output, and the headline "doctor green" bar lands when the doctor step wires
-// in (HED-476). The harness sets process.env.HOME = temp from day 1 so it stays hermetic then, too — the
-// doctor step verifies the REAL resolved env with no path overrides (T, msg 2094), so temp HOME is what
-// keeps it (and its secret reads) off the tester's real ~/.heddle.
+// iterate over buildSteps() output. The accounts scenarios SKIP the real doctor finish-gate — since #191
+// wired it into buildSteps it runs non-hermetic CLI probes (claude/codex/cursor auth, git) that HANG on a
+// dev box with real CLIs (HED-604); its wiring, guards, and green/warn/fail finish mapping are covered
+// HERMETICALLY by the doctor-green composition block (HED-599). The harness sets process.env.HOME = temp
+// from day 1 so every step (and any secret read) stays off the tester's real ~/.heddle.
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -150,6 +151,14 @@ function filesUnderHome(dir: string = tempHome): string[] {
   return out;
 }
 
+// The accounts-focused HED-571 scenarios run the composed walkthrough MINUS the real doctor finish-gate.
+// Since #191 wired the read-only doctor into buildSteps it runs real CLI execFile probes (claude/codex/
+// cursor auth, git) that are non-hermetic — they HANG on a dev box with real CLIs (30s timeout; a latent
+// CI flake), and these scenarios never assert the doctor's result anyway. Doctor's wiring, its dry-run /
+// alt-home guards, AND the green/warn/fail finish mapping are all covered HERMETICALLY by the HED-599
+// block below (which injects the report instead of probing). — HED-604
+const stepsWithoutRealDoctor = (runner: CliRunner) => buildSteps({ runner }).filter((step) => step.id !== 'doctor');
+
 // =================================================================================================
 describe('heddle setup — fresh-machine validation harness (HED-571)', () => {
   it('full-accept: logs in every native provider, writes the registry, all steps done', async () => {
@@ -157,7 +166,7 @@ describe('heddle setup — fresh-machine validation harness (HED-571)', () => {
       confirmTrue: [/Do you have a Claude account/, /Do you have a Codex account/, /Do you have a Cursor account/],
     });
     const runner = fakeRunner(loggedIn);
-    const results = await runSetup(ctx(), makeIO(prompter), buildSteps({ runner }));
+    const results = await runSetup(ctx(), makeIO(prompter), stepsWithoutRealDoctor(runner));
 
     // The wizard drove a login AND a status probe for EACH accepted native provider — not merely that
     // status happened to return logged-in (runAccountsAdd calls runner.login then runner.status per
@@ -187,7 +196,7 @@ describe('heddle setup — fresh-machine validation harness (HED-571)', () => {
 
   it('minimal (HED-400 #2): accept Claude only, decline every other service → still a valid, done setup', async () => {
     const prompter = new PlanPrompter({ confirmTrue: [/Do you have a Claude account/] });
-    const results = await runSetup(ctx(), makeIO(prompter), buildSteps({ runner: fakeRunner(loggedIn) }));
+    const results = await runSetup(ctx(), makeIO(prompter), stepsWithoutRealDoctor(fakeRunner(loggedIn)));
 
     expect(results.find((result) => result.id === 'accounts')?.status).toBe('done');
     const registry = readRegistry();
@@ -198,7 +207,7 @@ describe('heddle setup — fresh-machine validation harness (HED-571)', () => {
   it('decline everything: no provider added → accounts step skipped, empty registry, runner untouched', async () => {
     // untouchableRunner throws if any login/status happens — declining must reach neither.
     const prompter = new PlanPrompter({});
-    const results = await runSetup(ctx(), makeIO(prompter), buildSteps({ runner: untouchableRunner() }));
+    const results = await runSetup(ctx(), makeIO(prompter), stepsWithoutRealDoctor(untouchableRunner()));
 
     expect(results.find((result) => result.id === 'accounts')?.status).toBe('skipped');
     expect(readRegistry().accounts).toHaveLength(0);
@@ -219,7 +228,7 @@ describe('heddle setup — fresh-machine validation harness (HED-571)', () => {
 
   it('failed login is recorded failed (never a silent success): status → failed', async () => {
     const prompter = new PlanPrompter({ confirmTrue: [/Do you have a Claude account/] });
-    const results = await runSetup(ctx(), makeIO(prompter), buildSteps({ runner: fakeRunner(loggedOut) }));
+    const results = await runSetup(ctx(), makeIO(prompter), stepsWithoutRealDoctor(fakeRunner(loggedOut)));
 
     const accounts = results.find((result) => result.id === 'accounts');
     expect(accounts?.status).toBe('failed');
@@ -252,7 +261,7 @@ describe('heddle setup — fresh-machine validation harness (HED-571)', () => {
       ],
     });
     const io = makeIO(prompter);
-    await runSetup(ctx(), io, buildSteps({ runner: untouchableRunner() }));
+    await runSetup(ctx(), io, stepsWithoutRealDoctor(untouchableRunner()));
 
     const haystack = [io.lines.join('\n'), ...filesUnderHome().map((file) => readFileSync(file, 'utf8'))].join('\n');
     expect(haystack).not.toContain(SECRET_VALUE);           // the VALUE never appears anywhere
