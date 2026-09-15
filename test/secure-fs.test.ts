@@ -447,13 +447,54 @@ describe('secure filesystem primitives', () => {
     const prevUmask = process.umask(0o100); // masks owner-EXECUTE from newly created directories
     try {
       ensureSecureDir(dir, { mode: 0o700 });
-      // mkdir(0o700) under umask 0o100 lands as 0o600 — an un-enterable credential dir. forceDirMode
+      // mkdir(0o700) under umask 0o100 lands as 0o600 — an un-enterable credential dir. finalizeCreatedDir
       // fchmod()s the dir fd to exactly 0o700 regardless of umask (the fd-based technique the file writer
       // uses). Without that fchmod this reads 0o600.
       expect(statSync(dir).mode & 0o777).toBe(0o700);
     } finally {
       process.umask(prevUmask);
     }
+  });
+
+  it('ensureSecureDir forces EVERY created level to 0o700 under an owner-execute-stripping umask (multi-level)', () => {
+    // The qodo HIGH: a single `mkdir -p` under umask 0o100 would create the first ancestor un-enterable
+    // (0o600, no owner-execute), so creating the rest of the path fails EACCES and strands a partial tree.
+    // The per-level walk force-modes each component past umask on its own fd BEFORE descending, so all
+    // three land at exactly 0o700 and the create succeeds. Resolve tempDir BEFORE changing the umask.
+    const root = tempDir();
+    const a = join(root, 'x');
+    const b = join(a, 'y');
+    const dir = join(b, 'z');
+    const prevUmask = process.umask(0o100);
+    try {
+      ensureSecureDir(dir);
+      for (const level of [a, b, dir]) {
+        expect(statSync(level).isDirectory()).toBe(true);
+        expect(statSync(level).mode & 0o777).toBe(0o700); // every created level enterable, not just the leaf
+      }
+    } finally {
+      process.umask(prevUmask);
+    }
+  });
+
+  it('ensureSecureDir rejects an owner-inaccessible mode (no owner-execute), creating nothing', () => {
+    // A directory mode must grant the owner rwx or the credential dir cannot be entered/used. 0o600 clears
+    // the group/other-writable guard but is still un-enterable — reject it at the door, before any create.
+    const dir = join(tempDir(), 'ownerlocked');
+
+    expect(() => ensureSecureDir(dir, { mode: 0o600 })).toThrow(/owner|rwx|mode/i);
+    expect(existsSync(dir)).toBe(false);
+  });
+
+  it('ensureSecureDir rejects a created inode whose owner is not euid, and rolls the level back', () => {
+    // finding iaci_/iacfd: the absent-create path must enforce the SAME euid-ownership invariant the
+    // existing-dir path enforces, and must not strand a half-initialized level. With an injected foreign
+    // euid the just-created inode (owned by the real euid) fails finalizeCreatedDir's ownership check; the
+    // level is then rmdir'd so nothing partial is left for a later call to accept as "existing".
+    const dir = join(tempDir(), 'wrongowner');
+
+    expect(() => ensureSecureDir(dir, { euid: foreignEuid })).toThrow(/owner|owned/i);
+    expect(existsSync(dir)).toBe(false); // rolled back — no partial-init directory left behind
   });
 
   it('ensureSecureDir accepts an existing 0755 directory without changing its mode', () => {
