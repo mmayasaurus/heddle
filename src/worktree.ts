@@ -291,10 +291,17 @@ const AUTO_WIP_MESSAGE = 'heddle auto-wip: isolate failed-leg new paths';
 /**
  * Opt-in path-scoped auto-WIP of a failed leg's newly-created paths (HED-622).
  *
- * Commits ONLY paths in `postFp` that were absent from `preFp`, and only when HEAD is unchanged and
- * every pre-existing dirty path is byte-identical. Isolation uses a temporary index (never the real
- * `.git/index`). Any doubt — missing fingerprints, mixed dirt, vanished-all, git failure — refuses
- * and leaves the real index exactly as found.
+ * Commits ONLY paths present in `postFp` and absent from `preFp` that are newly-created UNTRACKED
+ * files ('??'), and only when HEAD is unchanged and every pre-existing dirty path is byte-identical.
+ * A leg that touched an established TRACKED file (modify/delete/rename) makes the whole operation
+ * unsafe → refuse (codex finding 2: checkoutFingerprint omits clean tracked files, so such a change
+ * ALSO lands in postFp∖preFp — and committing a change to project content is exactly what this
+ * barrier must never do). Staging is isolated in a temporary index; the real `.git/index` is written
+ * only once, and only to reconcile the leg's OWN committed paths to the new HEAD so they are not left
+ * staged-for-deletion (codex finding 3) — orchestrator index entries are never touched. HEAD is
+ * pinned to a captured value and moved via compare-and-swap, so a concurrent HEAD advance refuses
+ * instead of being reverted (codex finding 1). Any doubt — missing fingerprints, mixed dirt, a moved
+ * HEAD, vanished-all, or any git failure — refuses.
  */
 export function autoWipCommit(
   cwd: string, preFp: CheckoutFingerprint | null, postFp: CheckoutFingerprint | null,
@@ -318,9 +325,39 @@ export function autoWipCommit(
   if (cleared.length) unsafe.push(`pre-existing dirty path cleared: ${cleared.join(', ')}`);
   if (unsafe.length) return { committed: false, reason: unsafe.join('; ') };
 
-  const safeSet = [...postFp.entries.keys()].filter((p) => !preFp.entries.has(p));
+  // Membership guard (codex adversarial finding 2): a path absent from preFp is safe to auto-commit
+  // ONLY when it is a newly-created UNTRACKED file (git status '??'). checkoutFingerprint omits CLEAN
+  // tracked files, so a leg that MODIFIES (' M'), DELETES (' D'), or RENAMES ('R…') a clean tracked
+  // file ALSO produces a postFp∖preFp path; committing it would commit a change to an established
+  // project file. Any such path makes the whole operation UNSAFE (refuse), never merely skipped — the
+  // tree is entangled with real project changes that cannot be isolated at path granularity.
+  const safeSet: string[] = [];
+  const trackedTouched: string[] = [];
+  for (const [path, marker] of postFp.entries) {
+    if (preFp.entries.has(path)) continue;
+    if (marker.startsWith('??')) safeSet.push(path);
+    else trackedTouched.push(`${marker.slice(0, 2).trim() || '??'} ${path}`);
+  }
+  if (trackedTouched.length) {
+    return { committed: false, reason: `leg changed pre-existing tracked path(s): ${trackedTouched.join(', ')}` };
+  }
   if (safeSet.length === 0) {
     return { committed: false, reason: 'no isolable new paths (safeSet empty)' };
+  }
+
+  // Pin every HEAD reference to one captured value (codex finding 1). commit-tree re-resolving HEAD
+  // plus an unconditional update-ref would clobber a HEAD that advanced concurrently: the new tree is
+  // built from oldHead but the ref would move regardless, reverting whatever landed in between. Capture
+  // oldHead, parent and read-tree on it, and move HEAD via compare-and-swap. The pre-check closes the
+  // window between the caller's postFp and here; the CAS closes the window between here and update-ref.
+  let oldHead: string;
+  try {
+    oldHead = gitWithEnv(cwd, ['rev-parse', 'HEAD']).trim();
+  } catch (err) {
+    return { committed: false, reason: `no HEAD to commit onto: ${gitErrorMessage(err)}` };
+  }
+  if (oldHead !== postFp.head) {
+    return { committed: false, reason: `HEAD moved after fingerprint (${postFp.head.slice(0, 8)} → ${oldHead.slice(0, 8)})` };
   }
 
   let tmpDir: string | undefined;
@@ -333,7 +370,7 @@ export function autoWipCommit(
       GIT_LITERAL_PATHSPECS: '1',
     };
 
-    gitWithEnv(cwd, ['read-tree', 'HEAD'], indexEnv);
+    gitWithEnv(cwd, ['read-tree', oldHead], indexEnv);
 
     const existing = safeSet.filter((p) => pathStillExists(cwd, p));
     if (existing.length === 0) {
@@ -350,7 +387,7 @@ export function autoWipCommit(
     const tree = gitWithEnv(cwd, ['write-tree'], indexEnv).trim();
     let headTree: string;
     try {
-      headTree = gitWithEnv(cwd, ['rev-parse', 'HEAD^{tree}']).trim();
+      headTree = gitWithEnv(cwd, ['rev-parse', `${oldHead}^{tree}`]).trim();
     } catch (err) {
       return { committed: false, reason: `could not resolve HEAD tree: ${gitErrorMessage(err)}` };
     }
@@ -358,8 +395,32 @@ export function autoWipCommit(
       return { committed: false, reason: 'all isolable paths vanished before staging' };
     }
 
-    const commitSha = gitWithEnv(cwd, ['commit-tree', tree, '-p', 'HEAD', '-m', AUTO_WIP_MESSAGE]).trim();
-    gitWithEnv(cwd, ['update-ref', 'HEAD', commitSha]);
+    const commitSha = gitWithEnv(cwd, ['commit-tree', tree, '-p', oldHead, '-m', AUTO_WIP_MESSAGE]).trim();
+    // Compare-and-swap: refuse (leaving a dangling, GC-safe commit) if HEAD advanced past oldHead.
+    try {
+      gitWithEnv(cwd, ['update-ref', 'HEAD', commitSha, oldHead]);
+    } catch (err) {
+      return { committed: false, reason: `HEAD advanced during auto-WIP; refused to overwrite it: ${gitErrorMessage(err)}` };
+    }
+
+    // Reconcile ONLY the committed paths into the REAL index (codex finding 3). update-ref moved HEAD
+    // while the real index stayed seeded from oldHead, so those paths now read as staged-for-deletion
+    // against the new HEAD — a later real-index commit would delete the just-committed work, and the
+    // phantom deletion even hides under a '??' in the fingerprint we return (git lists the path both
+    // ways; the Map keeps the last). `git reset -- <paths>` copies the new HEAD's entries for EXACTLY
+    // those paths; the orchestrator's own index entries stay put. This is a deliberate, minimal
+    // departure from the temp-index-only route (R's amendment #1): the real index is written, but only
+    // to reconcile the leg's OWN committed paths, never an orchestrator entry. GIT_LITERAL_PATHSPECS
+    // only — NOT indexEnv — so this hits the real .git/index, not the (now-deleted) temp index.
+    try {
+      gitWithEnv(cwd, [
+        'reset', '-q',
+        `--pathspec-from-file=${pathspecFile}`,
+        '--pathspec-file-nul',
+      ], { GIT_LITERAL_PATHSPECS: '1' });
+    } catch (err) {
+      return { committed: false, reason: `auto-WIP committed HEAD but could not reconcile the real index: ${gitErrorMessage(err)}` };
+    }
 
     const newFp = checkoutFingerprint(cwd);
     if (newFp === null) {
@@ -371,7 +432,7 @@ export function autoWipCommit(
   } finally {
     if (tmpDir !== undefined) {
       try { rmSync(tmpDir, { recursive: true, force: true }); }
-      catch { /* temp cleanup is best-effort; the real index was never written */ }
+      catch { /* temp cleanup is best-effort; only the leg's own committed paths were written to the real index */ }
     }
   }
 }

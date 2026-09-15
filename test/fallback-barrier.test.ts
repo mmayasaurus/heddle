@@ -33,6 +33,16 @@ function indexState(cwd: string): string {
   return git(cwd, 'ls-files', '-s', '-z');
 }
 
+/** The real-index entry (mode + blob + stage) for a single path — the isolation-relevant slice. */
+function indexEntry(cwd: string, path: string): string {
+  return git(cwd, 'ls-files', '-s', '-z', '--', path);
+}
+
+/** Working-tree status of a single path; '' when it is clean (matches HEAD and the index). */
+function pathStatus(cwd: string, path: string): string {
+  return git(cwd, 'status', '--porcelain', '-z', '-uall', '--', path).replace(/\0/g, '').trim();
+}
+
 function statusState(cwd: string): string {
   return git(cwd, 'status', '--porcelain', '-z', '-uall');
 }
@@ -301,6 +311,53 @@ describe('autoWipCommit isolation', () => {
     expect(git(root, 'rev-list', '--count', 'HEAD').trim()).toBe('1');
   });
 
+  it('leg-modified clean tracked file refuses (finding 2): a modified tracked path is not a new path', () => {
+    const root = gitRepo(tempDir);
+    // gitRepo commits tracked.txt clean, so checkoutFingerprint omits it — it is ABSENT from preFp.
+    // The leg both MODIFIES tracked.txt and creates leg-new.txt, so postFp∖preFp is {tracked.txt,
+    // leg-new.txt}. Before the fix the modified tracked file entered safeSet and its change was
+    // committed; it must instead make the whole operation unsafe → refuse.
+    const preFp = requireFp(root);
+    writeFileSync(join(root, 'tracked.txt'), 'committed\nleg appended\n');
+    writeFileSync(join(root, 'leg-new.txt'), 'leg\n');
+    const postFp = requireFp(root);
+    const headBefore = git(root, 'rev-parse', 'HEAD').trim();
+    const indexBefore = indexState(root);
+
+    const result = autoWipCommit(root, preFp, postFp);
+    expect(result.committed).toBe(false);
+    if (!result.committed) {
+      expect(result.reason).toContain('tracked path');
+      expect(result.reason).toContain('tracked.txt');
+    }
+    // Nothing committed, nothing staged — the modification stays the operator's to resolve.
+    expect(git(root, 'rev-parse', 'HEAD').trim()).toBe(headBefore);
+    expect(git(root, 'rev-list', '--count', 'HEAD').trim()).toBe('1');
+    expect(indexState(root)).toBe(indexBefore);
+  });
+
+  it('head-moved-under-us refuses (finding 1): a HEAD advance after the fingerprint is not overwritten', () => {
+    const root = gitRepo(tempDir);
+    const preFp = requireFp(root);
+    writeFileSync(join(root, 'leg-new.txt'), 'leg\n');
+    const postFp = requireFp(root);
+    // HEAD advances AFTER postFp was captured — a concurrent leg/commit lands real work at B. An
+    // unconditional update-ref parented on the re-resolved HEAD would revert it; the pre-check (and,
+    // for a tighter race, the update-ref compare-and-swap) must refuse instead.
+    writeFileSync(join(root, 'concurrent.txt'), 'landed between fingerprint and auto-wip\n');
+    git(root, 'add', 'concurrent.txt');
+    git(root, 'commit', '-q', '-m', 'concurrent B');
+    const headB = git(root, 'rev-parse', 'HEAD').trim();
+
+    const result = autoWipCommit(root, preFp, postFp);
+    expect(result.committed).toBe(false);
+    if (!result.committed) expect(result.reason).toContain('HEAD moved after fingerprint');
+    // The concurrent commit is NOT reverted and no auto-WIP commit was layered on: HEAD is still B.
+    expect(git(root, 'rev-parse', 'HEAD').trim()).toBe(headB);
+    expect(git(root, 'log', '-1', '--format=%s').trim()).toBe('concurrent B');
+    expect(git(root, 'rev-list', '--count', 'HEAD').trim()).toBe('2');
+  });
+
   it('path-scope isolation: commits only the leg new file; orchestrator staged file is untouched', () => {
     const root = gitRepo(tempDir);
     writeFileSync(join(root, 'orch-staged.txt'), 'orchestrator staged\n');
@@ -308,13 +365,16 @@ describe('autoWipCommit isolation', () => {
     const preFp = requireFp(root);
     writeFileSync(join(root, 'leg-new.txt'), 'leg created\n');
     const postFp = requireFp(root);
-    const indexBefore = indexState(root);
+    const orchEntryBefore = indexEntry(root, 'orch-staged.txt');
     const stagedBefore = git(root, 'diff', '--cached', '--', 'orch-staged.txt');
 
     const result = autoWipCommit(root, preFp, postFp);
     expect(result.committed).toBe(true);
     expect(committedPaths(root)).toEqual(['leg-new.txt']);
-    expect(indexState(root)).toBe(indexBefore);
+    // The orchestrator's staged entry is byte-identical, and the committed path is reconciled CLEAN
+    // (finding 3) instead of left staged-for-deletion — so the whole index is no longer identical.
+    expect(indexEntry(root, 'orch-staged.txt')).toBe(orchEntryBefore);
+    expect(pathStatus(root, 'leg-new.txt')).toBe('');
     expect(git(root, 'diff', '--cached', '--', 'orch-staged.txt')).toBe(stagedBefore);
     expect(git(root, 'ls-tree', '-r', '--name-only', 'HEAD').split('\n')).not.toContain('orch-staged.txt');
     expect(git(root, 'show', 'HEAD:leg-new.txt')).toBe('leg created\n');
@@ -348,15 +408,21 @@ describe('autoWipCommit isolation', () => {
     const result = autoWipCommit(root, preFp, postFp);
     expect(result.committed).toBe(true);
     if (!result.committed) throw new Error('expected commit');
+    // Finding 3 guard: the committed path is reconciled CLEAN, so it is ABSENT from the refreshed
+    // fingerprint. Before the fix it lingered as a '??' entry masking a staged-for-deletion — the
+    // phantom that would install a hidden staged deletion as the next barrier's baseline.
+    expect(result.newFp.entries.has('leg-new.txt')).toBe(false);
+    expect(pathStatus(root, 'leg-new.txt')).toBe('');
     const barrier = fallbackBarrier(root, result.newFp);
     expect(barrier.blocked).toBe(false);
   });
 
-  it('index-restore: real index is untouched on success and on a forced-failure path', () => {
+  it('index isolation: orchestrator entry untouched; committed path reconciled on success; index untouched on refusal', () => {
     const root = gitRepo(tempDir);
     writeFileSync(join(root, 'orch-staged.txt'), 'staged\n');
     git(root, 'add', 'orch-staged.txt');
     const indexBefore = indexState(root);
+    const orchEntryBefore = indexEntry(root, 'orch-staged.txt');
     const statusBefore = statusState(root);
 
     const preFp = requireFp(root);
@@ -368,13 +434,20 @@ describe('autoWipCommit isolation', () => {
     const failed = autoWipCommit(root, preFp, postFp);
     expect(failed.committed).toBe(false);
     if (!failed.committed) expect(failed.reason).toContain('vanished');
+    // A REFUSED auto-WIP touches the real index zero times — whole-index byte-identity still holds.
     expect(indexState(root)).toBe(indexBefore);
 
     writeFileSync(join(root, 'leg-new.txt'), 'leg\n');
     const successPost = requireFp(root);
     const success = autoWipCommit(root, preFp, successPost);
     expect(success.committed).toBe(true);
-    expect(indexState(root)).toBe(indexBefore);
+    // On SUCCESS the real index is written once, and only to reconcile the leg's OWN committed path:
+    // the orchestrator's staged entry is byte-identical, the committed path is now a clean index entry
+    // (not staged-for-deletion — finding 3), and nothing else moved. The whole index is intentionally
+    // no longer identical (that assertion enshrined the phantom-deletion bug).
+    expect(indexEntry(root, 'orch-staged.txt')).toBe(orchEntryBefore);
+    expect(pathStatus(root, 'leg-new.txt')).toBe('');
+    expect(indexEntry(root, 'leg-new.txt').length).toBeGreaterThan(0);
     expect(git(root, 'diff', '--cached', '--', 'orch-staged.txt').length).toBeGreaterThan(0);
     expect(statusBefore.includes('orch-staged.txt')).toBe(true);
     expect(statusState(root).includes('orch-staged.txt')).toBe(true);
