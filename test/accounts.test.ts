@@ -1,8 +1,9 @@
-import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { readClaudeAccounts } from '../src/capaware.js';
 import {
+  atomicWriteFile,
   loadAccountRegistry,
   reconcileRegistryIdentity,
   upsertAccount,
@@ -11,6 +12,32 @@ import {
 } from '../src/accounts.js';
 import { readRotationAccounts } from '../src/rotation.js';
 import { useTempResources } from './helpers.js';
+
+describe('writeAccountRegistry / atomicWriteFile permission hardening (F8/HED-590)', () => {
+  const { tempDir } = useTempResources('heddle-accounts-f8-');
+
+  it('writes the account registry owner-only 0600 (it holds credential references)', () => {
+    const path = join(tempDir(), 'accounts.json');
+    writeAccountRegistry({ schemaVersion: 2, accounts: [] }, path);
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+  });
+
+  it('forces 0600 over a pre-existing permissive registry instead of preserving its mode', () => {
+    const path = join(tempDir(), 'accounts.json');
+    writeFileSync(path, '{}');
+    chmodSync(path, 0o666);
+    writeAccountRegistry({ schemaVersion: 2, accounts: [] }, path);
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+  });
+
+  it('atomicWriteFile no longer copies a pre-existing permissive mode onto the write (policy files)', () => {
+    const path = join(tempDir(), 'policy.json');
+    writeFileSync(path, '{}');
+    chmodSync(path, 0o644);
+    atomicWriteFile(path, '{"strategy":"even-spread"}\n');
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+  });
+});
 
 describe('loadAccountRegistry', () => {
   const { tempDir } = useTempResources('heddle-accounts-test-');
