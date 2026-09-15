@@ -1,14 +1,19 @@
 import { beforeAll, describe, expect, it } from 'vitest';
 import { spawn } from 'node:child_process';
-import { writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ensureBuilt, PROJECT_ROOT } from '../helpers/cli.js';
 import { useTempResources } from '../helpers.js';
 
 const rule = (id: string, event: string, action: string, enforce: boolean, message: string) => `id: ${id}\nevent: ${event}\nmatch: {}\naction: ${action}\nenforce: ${enforce}\nsubagent_aware: false\nmessage: ${message}\nfail_open: true\n`;
+function writePolicy(home: string, policy: unknown): void {
+  const dir = join(home, '.heddle', 'policy');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'rules.json'), typeof policy === 'string' ? policy : JSON.stringify(policy));
+}
 async function runHook(rules: string, stdin: string, env: Record<string, string> = {}): Promise<{ stdout: string; stderr: string; code: number }> {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', 'dist/hook.js', '--rules', rules], { cwd: PROJECT_ROOT, env: { PATH: process.env.PATH ?? '', ...env }, stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', 'dist/hook.js', '--rules', rules], { cwd: PROJECT_ROOT, env: { PATH: process.env.PATH ?? '', HOME: join(rules, '.home'), ...env }, stdio: ['pipe', 'pipe', 'pipe'] });
     let stdout = ''; let stderr = ''; child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8');
     child.stdout.on('data', (s) => { stdout += s; }); child.stderr.on('data', (s) => { stderr += s; });
     child.once('error', reject); child.once('close', (code) => resolve({ stdout, stderr, code: code ?? 1 })); child.stdin.end(stdin);
@@ -18,6 +23,53 @@ describe('heddle-hook bin', () => {
   const { tempDir } = useTempResources('heddle-hook-e2e-');
   beforeAll(async () => { await ensureBuilt(); }, 120_000);
   it('denies a matching enforced PreToolUse rule', async () => { const d = tempDir(); writeFileSync(join(d, 'deny.yaml'), rule('deny', 'PreToolUse', 'block', true, 'denied')); const r = await runHook(d, JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: 'Bash' })); expect(r.code).toBe(0); expect(JSON.parse(r.stdout).hookSpecificOutput.permissionDecision).toBe('deny'); });
+  it('downgrades a selected catalog block when policy enforcement is false', async () => {
+    const rules = tempDir(); const home = tempDir();
+    writeFileSync(join(rules, 'sample-block.yaml'), rule('sample-block', 'PreToolUse', 'block', true, 'denied'));
+    writePolicy(home, { schemaVersion: 1, rules: [{ id: 'sample-block', enforce: false }] });
+    const r = await runHook(rules, JSON.stringify({ hook_event_name: 'PreToolUse' }), { HOME: home });
+    const output = JSON.parse(r.stdout);
+    expect(output.hookSpecificOutput.permissionDecision).toBeUndefined();
+    expect(output.hookSpecificOutput.additionalContext).toContain('(would block) denied');
+  });
+  it('downgrades an unselected catalog block without dropping its warning', async () => {
+    const rules = tempDir(); const home = tempDir();
+    writeFileSync(join(rules, 'sample-block.yaml'), rule('sample-block', 'PreToolUse', 'block', true, 'denied'));
+    writePolicy(home, { schemaVersion: 1, rules: [] });
+    const r = await runHook(rules, JSON.stringify({ hook_event_name: 'PreToolUse' }), { HOME: home });
+    const output = JSON.parse(r.stdout);
+    expect(output.hookSpecificOutput.permissionDecision).toBeUndefined();
+    expect(output.hookSpecificOutput.additionalContext).toContain('(would block) denied');
+  });
+  it('preserves an enforced catalog block selected for enforcement', async () => {
+    const rules = tempDir(); const home = tempDir();
+    writeFileSync(join(rules, 'sample-block.yaml'), rule('sample-block', 'PreToolUse', 'block', true, 'denied'));
+    writePolicy(home, { schemaVersion: 1, rules: [{ id: 'sample-block', enforce: true }] });
+    const r = await runHook(rules, JSON.stringify({ hook_event_name: 'PreToolUse' }), { HOME: home });
+    expect(JSON.parse(r.stdout).hookSpecificOutput.permissionDecision).toBe('deny');
+  });
+  it('caps a policy enforcement up-dial at the catalog warning level', async () => {
+    const rules = tempDir(); const home = tempDir();
+    writeFileSync(join(rules, 'sample-block.yaml'), rule('sample-block', 'PreToolUse', 'block', false, 'denied'));
+    writePolicy(home, { schemaVersion: 1, rules: [{ id: 'sample-block', enforce: true }] });
+    const r = await runHook(rules, JSON.stringify({ hook_event_name: 'PreToolUse' }), { HOME: home });
+    const output = JSON.parse(r.stdout);
+    expect(output.hookSpecificOutput.permissionDecision).toBeUndefined();
+    expect(output.hookSpecificOutput.additionalContext).toContain('(would block) denied');
+  });
+  it.each([
+    ['missing', undefined],
+    ['invalid JSON', '{'],
+    ['non-v1', { schemaVersion: 2, rules: [{ id: 'sample-block', enforce: false }] }],
+  ])('warns for %s policy and preserves catalog enforcement', async (_name, policy) => {
+    const rules = tempDir(); const home = tempDir();
+    writeFileSync(join(rules, 'sample-block.yaml'), rule('sample-block', 'PreToolUse', 'block', true, 'denied'));
+    if (policy !== undefined) writePolicy(home, policy);
+    const r = await runHook(rules, JSON.stringify({ hook_event_name: 'PreToolUse' }), { HOME: home });
+    expect(JSON.parse(r.stdout).hookSpecificOutput.permissionDecision).toBe('deny');
+    expect(r.stderr).toContain('rules policy');
+    expect(r.stderr).not.toContain('FAILED OPEN');
+  });
   it('treats HEDDLE_WORKER=0 as an orchestrator for role-matched rules', async () => {
     const d = tempDir();
     writeFileSync(join(d, 'orchestrator.yaml'), rule('orchestrator', 'PreToolUse', 'nudge', false, 'orchestrator rule').replace('match: {}', 'match:\n  agent_role: orchestrator'));
