@@ -181,7 +181,7 @@ describe('fallback commit barrier', () => {
       expect(outcome.refusal?.reason).toContain(`dispatch #${primary.id}`);
       expect(outcome.refusal?.reason).toContain('primary-dirt.txt');
       expect(outcome.refusal?.instruction).toBe(
-        `Commit or discard the changes in ${root}, then re-dispatch. Or re-dispatch with fallbackWipCommit to auto-commit the failed leg's own new files (a tree with pre-existing local changes is never auto-committed).`,
+        `Commit or discard the changes in ${root}, then re-dispatch. Or re-dispatch with the CLI flag --fallback-wip-commit (MCP tool: fallback_wip_commit) to auto-commit the failed leg's own new files (a tree with pre-existing local changes is never auto-committed).`,
       );
       // The refusal fires on a fallback path, so the row is attributed as a fallback (HED-622: the
       // direct refusalOutcome path must set usedFallback, not inherit the hard-coded false).
@@ -331,6 +331,27 @@ describe('autoWipCommit isolation', () => {
       expect(result.reason).toContain('tracked.txt');
     }
     // Nothing committed, nothing staged — the modification stays the operator's to resolve.
+    expect(git(root, 'rev-parse', 'HEAD').trim()).toBe(headBefore);
+    expect(git(root, 'rev-list', '--count', 'HEAD').trim()).toBe('1');
+    expect(indexState(root)).toBe(indexBefore);
+  });
+
+  it('renamed tracked file refuses (qodo #5): a rename destination is not an untracked new path', () => {
+    const root = gitRepo(tempDir);
+    const preFp = requireFp(root);
+    // The leg renames a clean tracked file. checkoutFingerprint records the rename under its
+    // destination path with an 'R' status (the source is consumed as the paired NUL field), so the
+    // destination is absent from preFp but is NOT '??'. It must refuse — never stage the destination
+    // and leave the source deleted (a copy committed while the fallback inherits the source deletion).
+    git(root, 'mv', 'tracked.txt', 'renamed.txt');
+    const postFp = requireFp(root);
+    expect(postFp.entries.get('renamed.txt')?.startsWith('R')).toBe(true);
+    const headBefore = git(root, 'rev-parse', 'HEAD').trim();
+    const indexBefore = indexState(root);
+
+    const result = autoWipCommit(root, preFp, postFp);
+    expect(result.committed).toBe(false);
+    if (!result.committed) expect(result.reason).toContain('tracked path');
     expect(git(root, 'rev-parse', 'HEAD').trim()).toBe(headBefore);
     expect(git(root, 'rev-list', '--count', 'HEAD').trim()).toBe('1');
     expect(indexState(root)).toBe(indexBefore);
