@@ -460,7 +460,14 @@ export function freshnessCheck(
       const days = Math.floor(
         (ctx.deps.now().getTime() - new Date(config.lastVerified).getTime()) / 86_400_000,
       );
-      const present = Boolean(readSecretsEnvValue(config.keyEnv, ctx.deps.paths.secrets));
+      let present: boolean;
+      try {
+        present = Boolean(readSecretsEnvValue(config.keyEnv, ctx.deps.paths.secrets));
+      } catch (err) {
+        const secretsPath = ctx.deps.paths.secrets;
+        return result('fail', err instanceof Error ? err.message : String(err),
+          `secure ${secretsPath}: a regular file you own, mode 0600, not a symlink (e.g. chmod 600 ${secretsPath})`);
+      }
       const verification =
         days > ctx.lanes.value.floors.menial_verify_days
           ? `last verified ${days} days ago (> ${ctx.lanes.value.floors.menial_verify_days})`

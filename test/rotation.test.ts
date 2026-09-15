@@ -1,9 +1,9 @@
-import { chmodSync, existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   classifyRotationRefusal, isCooled, pickCodexAccount, pickCursorAccount,
-  coolingTempPath, readCooling, readRotationAccounts, writeCooling, type CoolingStore,
+  coolingTempPath, readCooling, readCursorKey, readRotationAccounts, writeCooling, type CoolingStore,
 } from '../src/rotation.js';
 import { useTempResources } from './helpers.js';
 import { dispatch } from '../src/dispatch.js';
@@ -28,6 +28,36 @@ describe('rotation registry', () => {
     const registry = readRotationAccounts(path);
     expect(pickCodexAccount(registry, { schemaVersion: 1, lanes: {} }, undefined, Date.parse('2026-09-03T12:00:00Z') / 1000)?.id).toBe('bonus');
     expect(pickCodexAccount(registry, { schemaVersion: 1, lanes: {} }, undefined, Date.parse('2026-09-04T00:00:00Z') / 1000)?.id).toBe('first');
+  });
+});
+
+describe('Cursor key reads', () => {
+  it('refuses a loose-permission key loudly, then accepts it after permissions are fixed', () => {
+    const path = join(tempDir(), 'cursor-key');
+    writeFileSync(path, '  cursor-key\n');
+    chmodSync(path, 0o644);
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+    expect(readCursorKey(path)).toBeNull();
+    expect(stderr).toHaveBeenCalledWith(expect.stringContaining(path));
+    expect(stderr).toHaveBeenCalledWith(expect.stringContaining('chmod 600'));
+
+    chmodSync(path, 0o600);
+    expect(readCursorKey(path)).toBe('cursor-key');
+    stderr.mockRestore();
+  });
+
+  it('refuses symlinked keys, trims secure keys, and treats a missing key as absent', () => {
+    const dir = tempDir();
+    const target = join(dir, 'cursor-key');
+    const link = join(dir, 'cursor-key-link');
+    writeFileSync(target, '  cursor-key\n');
+    chmodSync(target, 0o600);
+    symlinkSync(target, link);
+
+    expect(readCursorKey(link)).toBeNull();
+    expect(readCursorKey(target)).toBe('cursor-key');
+    expect(readCursorKey(join(dir, 'missing-key'))).toBeNull();
   });
 });
 
