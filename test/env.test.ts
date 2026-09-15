@@ -67,6 +67,22 @@ describe('buildWorkerEnv — subscription-billing worker isolation (HED-30 allow
       expect(stripped).toContain('CLAUDE_CODE_OAUTH_TOKEN');
     });
 
+    it('strips operator-only comms auth and additional vendor credentials (HED-583/F1)', () => {
+      process.env.HEDDLE_COMMS_OPERATOR_TOKEN = 'operator-token';
+      process.env.HEDDLE_COMMS_ROLE = 'operator';
+      process.env.GROQ_API_KEY = 'groq-key';
+      process.env.CEREBRAS_API_KEY = 'cerebras-key';
+      process.env.OPENROUTER_API_KEY = 'openrouter-key';
+
+      const { env, stripped } = buildWorkerEnv();
+
+      for (const key of ['HEDDLE_COMMS_OPERATOR_TOKEN', 'HEDDLE_COMMS_ROLE', 'GROQ_API_KEY',
+        'CEREBRAS_API_KEY', 'OPENROUTER_API_KEY']) {
+        expect(env[key], `${key} must be stripped`).toBeUndefined();
+        expect(stripped).toContain(key);
+      }
+    });
+
     it('does NOT strip the CLAUDE_CONFIG_DIR / CODEX_HOME selectors by prefix', () => {
       process.env.CLAUDE_CONFIG_DIR = '/parent/.claude';
       process.env.CODEX_HOME = '/parent/.codex';

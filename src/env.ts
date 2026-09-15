@@ -54,6 +54,12 @@ const ACCOUNT_SELECTOR_VARS = new Set([
 const PARENT_IDENTITY_VARS = ['HEDDLE_AGENT', 'FLEET_AGENT'] as const;
 
 /**
+ * Operator/orchestrator comms auth must not leak into a worker. Workers receive their own stamps,
+ * never the operator token or role (HED-583/F1).
+ */
+const OPERATOR_ONLY_VARS = ['HEDDLE_COMMS_OPERATOR_TOKEN', 'HEDDLE_COMMS_ROLE'] as const;
+
+/**
  * Stripped from the INHERITED env but allowed as an explicit override: a credential that overrides
  * the account selection heddle just made. CLAUDE_CODE_OAUTH_TOKEN beats CLAUDE_CONFIG_DIR's OAuth
  * inside Claude Code, so a stray export would run every worker as the token's account no matter
@@ -66,8 +72,9 @@ const INHERITED_CREDENTIAL_VARS = ['CLAUDE_CODE_OAUTH_TOKEN'] as const;
  * of these is stripped from a worker. A denylist of exact names can't keep pace with each vendor's new
  * `*_BASE_URL` / `*_API_KEY` / `*_PROJECT` / `*_USE_VERTEXAI` switch — the HED-30 audit found ~15 current
  * Anthropic override vars alone (ANTHROPIC_PROFILE, the FEDERATION/WORKSPACE ids, CUSTOM_HEADERS, the
- * AWS_/BEDROCK_/VERTEX_/FOUNDRY_ base-URLs + keys, AWS_BEARER_TOKEN_BEDROCK, …) plus OpenAI/Google/Cursor
- * ones that the exact-name list missed — so strip by namespace and stay correct as vendors add more.
+ * AWS_/BEDROCK_/VERTEX_/FOUNDRY_ base-URLs + keys, AWS_BEARER_TOKEN_BEDROCK, …) plus
+ * OpenAI/Google/Cursor/Groq/Cerebras/OpenRouter ones that the exact-name list missed — so strip by
+ * namespace and stay correct as vendors add more.
  * BILLING_SWITCH_VARS above stays for CODEX_API_KEY (a bare `CODEX_` prefix would also catch the
  * CODEX_HOME account selector) and to name the switch in the override-refusal message. Account selectors
  * are re-applied as overrides AFTER this strip, so an inherited stale selector is replaced by heddle's
@@ -76,6 +83,7 @@ const INHERITED_CREDENTIAL_VARS = ['CLAUDE_CODE_OAUTH_TOKEN'] as const;
 const VENDOR_CREDENTIAL_PREFIXES = [
   'ANTHROPIC_', 'OPENAI_', 'GEMINI_', 'GOOGLE_', 'GCLOUD_', 'VERTEXAI_', 'VERTEX_',
   'CLAUDE_CODE_USE_', 'CURSOR_', 'AWS_', 'BEDROCK_', 'FOUNDRY_', 'ZAI_', 'GLM_',
+  'GROQ_', 'CEREBRAS_', 'OPENROUTER_',
 ] as const;
 
 /**
@@ -128,8 +136,13 @@ export function buildWorkerEnv(opts: WorkerEnvOptions = {}): {
   // Scoped to this call: env-repoint permission must not change the module-level allowlist.
   const allowedOverrides = new Set([...OVERRIDE_ALLOWLIST, ...Object.keys(envRepointOverrides)]);
 
-  // Fixed strips in one pass: billing-switch vars + the orchestrator's identity + the inherited credential.
-  for (const key of [...BILLING_SWITCH_VARS, ...PARENT_IDENTITY_VARS, ...INHERITED_CREDENTIAL_VARS]) {
+  // Fixed strips in one pass: billing switches + orchestrator identity/auth + the inherited credential.
+  for (const key of [
+    ...BILLING_SWITCH_VARS,
+    ...PARENT_IDENTITY_VARS,
+    ...OPERATOR_ONLY_VARS,
+    ...INHERITED_CREDENTIAL_VARS,
+  ]) {
     if (env[key] !== undefined) {
       delete env[key];
       stripped.push(key);
