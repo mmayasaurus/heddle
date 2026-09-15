@@ -180,6 +180,13 @@ export function checkoutFingerprint(root: string): CheckoutFingerprint | null {
   try {
     let head = '(no HEAD)';
     try { head = git(root, ['rev-parse', 'HEAD']).trim(); } catch { /* fresh repo, no commits */ }
+    // git status emits REPO-ROOT-relative paths regardless of the directory it runs in, so join them
+    // back onto the repo top level — NOT `root`, which may be a nested cwd — else a nested-cwd
+    // fingerprint hashes the wrong path and every digest degrades to '<missing>' (codex P2 review).
+    // Falls back to `root` if the top level is unreadable (e.g. a bare repo); the status read below
+    // then decides overall readability.
+    let base = root;
+    try { base = git(root, ['rev-parse', '--show-toplevel']).trim() || root; } catch { /* keep root */ }
     // -z: NUL-separated records, so paths with spaces/newlines/quotes parse correctly.
     // -uall lists untracked FILES individually. Without it git collapses an untracked directory to
     // a single `dir/` entry, so deleting one file inside pre-existing untracked work would leave the
@@ -214,7 +221,7 @@ export function checkoutFingerprint(root: string): CheckoutFingerprint | null {
         // spike memory. lstat (not stat) so a symlink is classified here, never followed to whatever it
         // points at. Each marker still CHANGES when the underlying dirt does, so escapedPaths keeps
         // detecting a retargeted symlink or a rewritten large file at an already-dirty path.
-        const fullPath = join(root, path);
+        const fullPath = join(base, path);
         const st = lstatSync(fullPath);
         if (st.isSymbolicLink()) {
           // Hash the link TARGET TEXT — readlink reads the link itself (never opens/follows the
@@ -360,6 +367,20 @@ export function autoWipCommit(
   if ('refuse' in classified) return { committed: false, reason: classified.refuse };
   const { safeSet } = classified;
 
+  // git status --porcelain emits REPO-ROOT-relative paths regardless of the directory it runs in
+  // (verified), so under a nested cwd `pathStillExists` and the `git add`/`reset` pathspecs would
+  // resolve each path against the wrong base (cwd/<root-rel-path>) and silently drop every safe path
+  // as "vanished" — the opt-in then fails to rescue exactly the safe new-file-only case it exists for
+  // (codex P2 review). Resolve the repo top level once and run all path-based git ops and existence
+  // checks against it; the final newFp stays at `cwd` so it matches the caller's preFp/postFp basis.
+  let base: string;
+  try {
+    base = git(cwd, ['rev-parse', '--show-toplevel']).trim();
+    if (!base) throw new Error('empty --show-toplevel');
+  } catch (err) {
+    return { committed: false, reason: `could not resolve the repo top level: ${gitErrorMessage(err)}` };
+  }
+
   // Pin every HEAD reference to one captured value (codex finding 1). commit-tree re-resolving HEAD
   // plus an unconditional update-ref would clobber a HEAD that advanced concurrently: the new tree is
   // built from oldHead but the ref would move regardless, reverting whatever landed in between. Capture
@@ -367,7 +388,7 @@ export function autoWipCommit(
   // window between the caller's postFp and here; the CAS closes the window between here and update-ref.
   let oldHead: string;
   try {
-    oldHead = gitWithEnv(cwd, ['rev-parse', 'HEAD']).trim();
+    oldHead = gitWithEnv(base, ['rev-parse', 'HEAD']).trim();
   } catch (err) {
     return { committed: false, reason: `no HEAD to commit onto: ${gitErrorMessage(err)}` };
   }
@@ -385,24 +406,24 @@ export function autoWipCommit(
       GIT_LITERAL_PATHSPECS: '1',
     };
 
-    gitWithEnv(cwd, ['read-tree', oldHead], indexEnv);
+    gitWithEnv(base, ['read-tree', oldHead], indexEnv);
 
-    const existing = safeSet.filter((p) => pathStillExists(cwd, p));
+    const existing = safeSet.filter((p) => pathStillExists(base, p));
     if (existing.length === 0) {
       return { committed: false, reason: 'all isolable paths vanished before staging' };
     }
 
     writeFileSync(pathspecFile, existing.join('\0') + '\0');
-    gitWithEnv(cwd, [
+    gitWithEnv(base, [
       'add', '--ignore-errors',
       `--pathspec-from-file=${pathspecFile}`,
       '--pathspec-file-nul',
     ], indexEnv);
 
-    const tree = gitWithEnv(cwd, ['write-tree'], indexEnv).trim();
+    const tree = gitWithEnv(base, ['write-tree'], indexEnv).trim();
     let headTree: string;
     try {
-      headTree = gitWithEnv(cwd, ['rev-parse', `${oldHead}^{tree}`]).trim();
+      headTree = gitWithEnv(base, ['rev-parse', `${oldHead}^{tree}`]).trim();
     } catch (err) {
       return { committed: false, reason: `could not resolve HEAD tree: ${gitErrorMessage(err)}` };
     }
@@ -410,10 +431,10 @@ export function autoWipCommit(
       return { committed: false, reason: 'all isolable paths vanished before staging' };
     }
 
-    const commitSha = gitWithEnv(cwd, ['commit-tree', tree, '-p', oldHead, '-m', AUTO_WIP_MESSAGE]).trim();
+    const commitSha = gitWithEnv(base, ['commit-tree', tree, '-p', oldHead, '-m', AUTO_WIP_MESSAGE]).trim();
     // Compare-and-swap: refuse (leaving a dangling, GC-safe commit) if HEAD advanced past oldHead.
     try {
-      gitWithEnv(cwd, ['update-ref', 'HEAD', commitSha, oldHead]);
+      gitWithEnv(base, ['update-ref', 'HEAD', commitSha, oldHead]);
     } catch (err) {
       // The CAS update-ref failed — HEAD advanced past oldHead, or a ref-lock/permission error. Either
       // way update-ref is atomic, so HEAD was NOT moved; report only that certain invariant, not a
@@ -431,7 +452,7 @@ export function autoWipCommit(
     // to reconcile the leg's OWN committed paths, never an orchestrator entry. GIT_LITERAL_PATHSPECS
     // only — NOT indexEnv — so this hits the real .git/index, not the (now-deleted) temp index.
     try {
-      gitWithEnv(cwd, [
+      gitWithEnv(base, [
         'reset', '-q',
         `--pathspec-from-file=${pathspecFile}`,
         '--pathspec-file-nul',
@@ -447,7 +468,7 @@ export function autoWipCommit(
       // (HEAD moved past our commit) leaves the auto-WIP commit on HEAD and says so.
       const resetErr = gitErrorMessage(err);
       try {
-        gitWithEnv(cwd, ['update-ref', 'HEAD', oldHead, commitSha]);
+        gitWithEnv(base, ['update-ref', 'HEAD', oldHead, commitSha]);
         return { committed: false, reason: `could not reconcile the real index; rolled HEAD back to the tree as found: ${resetErr}` };
       } catch (rollbackErr) {
         // Both the reconcile AND the rollback failed. HEAD's state is uncertain: the rollback CAS fails

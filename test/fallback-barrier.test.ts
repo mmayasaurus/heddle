@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { dispatch, type AdapterFactory, type DispatchRequest } from '../src/dispatch.js';
@@ -577,5 +577,29 @@ describe('autoWipCommit isolation', () => {
     expect(result.committed).toBe(true);
     expect(committedPaths(root)).toEqual(['visible.txt']);
     expect(git(root, 'ls-tree', '-r', '--name-only', 'HEAD').split('\n')).not.toContain('secret.bin');
+  });
+
+  it('nested cwd: rescues the safe new file when dispatched from a subdirectory (codex P2)', () => {
+    const root = gitRepo(tempDir);
+    const sub = join(root, 'sub');
+    mkdirSync(sub);
+    // Fingerprint FROM the nested cwd. git status emits ROOT-relative paths there ('sub/new.txt'),
+    // so before the fix pathStillExists/git add resolved them against the subdir and dropped the file
+    // as "vanished" — the opt-in silently failed. autoWipCommit must resolve the repo top level.
+    const preFp = requireFp(sub);
+    writeFileSync(join(sub, 'new.txt'), 'leg created in sub\n');
+    const postFp = requireFp(sub);
+    expect(postFp.entries.has('sub/new.txt')).toBe(true);
+    // checkoutFingerprint hashed the real path from the repo top level, not sub/sub/new.txt — so the
+    // digest is a real content hash, not the '<missing>' a nested-cwd join would have produced.
+    expect(postFp.entries.get('sub/new.txt')).not.toContain('<missing>');
+
+    const result = autoWipCommit(sub, preFp, postFp);
+    expect(result.committed).toBe(true);
+    expect(committedPaths(root)).toEqual(['sub/new.txt']);
+    expect(git(root, 'show', 'HEAD:sub/new.txt')).toBe('leg created in sub\n');
+    // The committed path reconciles clean even though the fingerprint was taken from the nested cwd.
+    expect(pathStatus(root, 'sub/new.txt')).toBe('');
+    if (result.committed) expect(result.newFp.entries.has('sub/new.txt')).toBe(false);
   });
 });
