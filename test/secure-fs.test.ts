@@ -64,6 +64,16 @@ describe('secure filesystem primitives', () => {
     const path = join(tempDir(), 'credential');
     writeFileSync(path, 'FAKE_OLD_SECRET');
 
+    // A pre-existing target trips the TARGET ownership check (which runs before the parent check).
+    expect(() => secureWriteFile(path, 'FAKE_SECRET_SENTINEL', { euid: foreignEuid })).toThrow(/owner|owned/i);
+  });
+
+  it('secureWriteFile rejects a foreign-owned parent when the target is absent', () => {
+    // With no pre-existing target, the foreign-owned PARENT must still be caught — the writer requires a
+    // euid-owned parent because it renames by pathname after its checks. This keeps the parent guard
+    // seam-testable independently of the target guard above.
+    const path = join(tempDir(), 'credential');
+
     expect(() => secureWriteFile(path, 'FAKE_SECRET_SENTINEL', { euid: foreignEuid })).toThrow(/owner|owned/i);
   });
 
@@ -164,7 +174,18 @@ describe('secure filesystem primitives', () => {
 
     expect(acquireCredentialLock(path, 12345)).toEqual({ ok: true });
     expect(readFileSync(path, 'utf8')).toBe('12345');
-    releaseCredentialLock(path);
+    releaseCredentialLock(path, 12345);
+  });
+
+  it('acquireCredentialLock rejects an invalid pid rather than writing a self-reclaimable holder', () => {
+    // NaN / 0 / fractional would be written then read back as unreadable/dead → instantly reclaimable by
+    // a second live caller, so both "hold" it. Reject at the door instead.
+    const path = join(tempDir(), 'credential.lock');
+
+    expect(() => acquireCredentialLock(path, Number.NaN)).toThrow(/invalid pid/i);
+    expect(() => acquireCredentialLock(path, 0)).toThrow(/invalid pid/i);
+    expect(() => acquireCredentialLock(path, 1.5)).toThrow(/invalid pid/i);
+    expect(existsSync(path)).toBe(false);
   });
 
   it('acquireCredentialLock refuses a live holder and names it', () => {
@@ -210,7 +231,7 @@ describe('secure filesystem primitives', () => {
     // stale-read and our post-gate re-inspection. The re-inspection must refuse, not stomp pid 999.
     const result = acquireCredentialLock(path, 222, {
       isAlive: (pid) => pid === 999,
-      onReclaimGate: () => writeFileSync(path, '999'),
+      onReclaimGate: () => { unlinkSync(path); writeFileSync(path, '999', { flag: 'wx' }); },
     });
 
     expect(result).toEqual({ ok: false, heldBy: 999 });
@@ -270,6 +291,16 @@ describe('secure filesystem primitives', () => {
     writeFileSync(path, '111');
 
     expect(acquireCredentialLock(path, 222, { euid: foreignEuid, isAlive: () => false })).toEqual({ ok: false });
+  });
+
+  it('releaseCredentialLock does not unlink a lock now held by a different pid', () => {
+    const path = join(tempDir(), 'credential.lock');
+    writeFileSync(path, '111'); // we (pid 111) held it
+    writeFileSync(path, '222'); // ...but it was reclaimed by 222 while we ran
+
+    releaseCredentialLock(path, 111);
+
+    expect(readFileSync(path, 'utf8')).toBe('222'); // 222's lock is NOT stranded by our release
   });
 
   it('withCredentialLock runs its function under the lock and releases afterward', () => {

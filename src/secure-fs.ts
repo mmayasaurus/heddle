@@ -1,4 +1,4 @@
-import { chmodSync, closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, constants, fchmodSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 
 /**
@@ -10,12 +10,17 @@ import { basename, dirname, join } from 'node:path';
  * target is checked at the open FD / file level (regular file, owned by the effective uid, not a symlink,
  * no group/other permission for a secret) — that FD-level ownership check is the authoritative cross-uid
  * guard. The immediate parent is checked for being a real directory, not a symlink, and not
- * group/other-WRITABLE. They do NOT walk ancestors, nor do they assert OWNERSHIP of the parent: Node
- * exposes no per-component `O_NOFOLLOW`/`openat`/`RESOLVE_NO_SYMLINKS` and this project takes zero native
- * deps, so a symlink or a group/other-writable directory HIGHER in the path, or a foreign-owned immediate
- * parent, is not detected here. That is acceptable only because every path these guard is heddle-owned
- * under `~/.heddle` or a user-owned profile dir — a same-uid trust domain a cross-uid attacker cannot
- * write to. Callers MUST pass paths whose ancestors are user-owned and not group/other-writable.
+ * group/other-WRITABLE; the WRITER additionally requires the parent to be euid-OWNED, because it performs
+ * pathname operations (rename) AFTER its checks, which a foreign parent owner could redirect — the reader
+ * (all post-check ops are on the open fd) and the lock (its claim is a single O_EXCL create) have no such
+ * pathname-redirect surface, so they do not require parent ownership.
+ *
+ * They do NOT walk ancestors: Node exposes no per-component `O_NOFOLLOW`/`openat`/`RESOLVE_NO_SYMLINKS`
+ * and this project takes zero native deps, so a symlink or a group/other-writable directory HIGHER in the
+ * path (or, for the reader/lock, a foreign-owned immediate parent) is not detected here. That is acceptable
+ * only because every path these guard is heddle-owned under `~/.heddle` or a user-owned profile dir — a
+ * same-uid trust domain a cross-uid attacker cannot write to, and a same-uid process already holds the
+ * credentials outright. Callers MUST pass paths whose ancestors are user-owned and not group/other-writable.
  */
 
 let temporarySequence = 0;
@@ -30,13 +35,14 @@ export interface CredentialLockResult {
 /**
  * Atomically write a secret without inheriting permissions from an older, possibly permissive file.
  *
- * Secret-bearing profile directories can legitimately be 0755, so an existing parent is checked for
- * directory-ness, for not being a symlink, and for the absence of group/other WRITE (which would let
- * another account swap the file) — but is intentionally neither chmodded nor required to be private.
+ * The target is validated FIRST (a symlink / non-file / foreign-owned name is refused), THEN the parent:
+ * checking the target before the parent keeps BOTH ownership guards seam-testable (a foreign pre-existing
+ * target trips the target check; a foreign parent with an absent target trips the parent check). Secret-
+ * bearing profile directories can legitimately be 0755, so an existing parent is accepted at that mode —
+ * but it must be a euid-owned directory (not a symlink, not group/other-writable) and is never chmodded.
  */
 export function secureWriteFile(path: string, content: string, opts: { mode?: number; dirMode?: number; euid?: number } = {}): void {
   const euid = effectiveUid(opts.euid);
-  ensureSafeParent(dirname(path), opts.dirMode ?? 0o700);
 
   try {
     const target = lstatSync(path);
@@ -47,18 +53,33 @@ export function secureWriteFile(path: string, content: string, opts: { mode?: nu
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
   }
 
+  // The writer performs pathname ops (rename) after its checks, so it requires a euid-OWNED parent: a
+  // foreign parent owner could otherwise swap the predictable temp name for a symlink between create and
+  // rename. (The reader/lock have no such surface — see the module invariant.)
+  ensureSafeParent(dirname(path), opts.dirMode ?? 0o700, euid);
+
   const mode = opts.mode ?? 0o600;
   const temporary = join(dirname(path), `.${basename(path)}.${process.pid}.${temporarySequence++}.tmp`);
+  let fd: number | undefined;
   try {
-    // The temporary file is in the target directory, making rename atomic on one filesystem. `wx`
-    // (O_EXCL) never follows a symlink and never clobbers a pre-existing temp. Explicit chmod counters a
-    // restrictive umask and guarantees the requested final mode. rename() replaces the target NAME
-    // without following a symlink at that name, so a symlink swapped in after the lstat above is
-    // overwritten, not written through.
-    writeFileSync(temporary, content, { encoding: 'utf8', flag: 'wx', mode });
-    chmodSync(temporary, mode);
+    // O_EXCL create (never clobbers, never follows a symlink at the temp name); write, fchmod and close
+    // all act on the OPEN fd, so an explicit chmod cannot be redirected through a swapped symlink and the
+    // requested mode is guaranteed against a restrictive umask. rename() then replaces the target NAME
+    // atomically without following a symlink at that name.
+    fd = openSync(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, mode);
+    writeFileSync(fd, content, 'utf8');
+    fchmodSync(fd, mode);
+    closeSync(fd);
+    fd = undefined;
     renameSync(temporary, path);
   } finally {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        // Best-effort: preserve the original failure.
+      }
+    }
     try {
       unlinkSync(temporary);
     } catch {
@@ -113,9 +134,13 @@ export function secureReadFile(path: string, opts: { euid?: number } = {}): stri
  * serializes reclaimers; the reclaim re-inspects the lock UNDER the gate and, if it was released and a
  * fresh claimant took it, the reclaiming `wx` fails EEXIST and we refuse rather than stomp it.
  *
- * Narrow limitation: a crash after making `.reclaim` but before removing it leaves that directory and
- * blocks future reclaims until a manual `heddle rotate unlock` (HED-452 PR-2). Deliberate — the normal
- * races are fully guarded and the gate is entered only for a genuine stale reclaim.
+ * Threat model: races between acquirers that all use THIS function are fully guarded — the gate serializes
+ * reclaimers and a fresh acquirer's `wx` cannot create over a present lock, so a stale lock stays put until
+ * the gate holder replaces it. A same-uid process that manipulates the lock file OUTSIDE this library (an
+ * out-of-band unlink between our inspect and our remove, say) is out of scope: it already holds the
+ * credentials this lock coordinates, so it is not a boundary we can or need to defend (same residual as
+ * deep-ancestor path components). Narrow crash limitation: a crash after making `.reclaim` but before
+ * removing it blocks future reclaims until a manual `heddle rotate unlock` (HED-452 PR-2).
  */
 export function acquireCredentialLock(
   lockPath: string,
@@ -126,6 +151,7 @@ export function acquireCredentialLock(
   // our O_EXCL claim (the window a non-gated fresh claimant can win — the finding-#1 interleave).
   opts: { isAlive?: (pid: number) => boolean; euid?: number; onReclaimGate?: () => void; onBeforeClaim?: () => void } = {},
 ): CredentialLockResult {
+  if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error(`refusing to claim credential lock: invalid pid ${pid}`);
   const euid = effectiveUid(opts.euid);
   const isAlive = opts.isAlive ?? processAlive;
   ensureSafeParent(dirname(lockPath), 0o700);
@@ -174,12 +200,18 @@ export function acquireCredentialLock(
   }
 }
 
-/** Best-effort release for `finally`: a leftover lock is reclaimed safely by a later process. */
-export function releaseCredentialLock(lockPath: string): void {
+/**
+ * Best-effort release for `finally`. Unlinks ONLY if the lock still holds `pid` (our claim): if it was
+ * reclaimed and a different process now holds the name, removing it would strand that holder and admit a
+ * third — so a lock that is not ours, or is no longer a regular file, is left untouched.
+ */
+export function releaseCredentialLock(lockPath: string, pid: number = process.pid): void {
   try {
+    if (!lstatSync(lockPath).isFile()) return; // symlink / non-file → not a lock we wrote
+    if (readLockPid(lockPath) !== pid) return; // someone else holds it now → do not unlink
     unlinkSync(lockPath);
   } catch {
-    // Deliberately swallowed: cleanup must not mask a credential operation's outcome.
+    // ENOENT (already gone) or any error: cleanup must not mask the credential operation's outcome.
   }
 }
 
@@ -189,7 +221,8 @@ export function withCredentialLock<T>(
   fn: () => T,
   opts: { pid?: number; isAlive?: (pid: number) => boolean; euid?: number } = {},
 ): T {
-  const result = acquireCredentialLock(lockPath, opts.pid, { isAlive: opts.isAlive, euid: opts.euid });
+  const pid = opts.pid ?? process.pid;
+  const result = acquireCredentialLock(lockPath, pid, { isAlive: opts.isAlive, euid: opts.euid });
   if (!result.ok) {
     throw new Error(result.heldBy === undefined
       ? `could not acquire credential lock at ${lockPath}`
@@ -198,7 +231,7 @@ export function withCredentialLock<T>(
   try {
     return fn();
   } finally {
-    releaseCredentialLock(lockPath);
+    releaseCredentialLock(lockPath, pid);
   }
 }
 
@@ -224,10 +257,13 @@ function inspectLock(
   return { refuse: false, result: { ok: false }, present: true };
 }
 
-/** Create a missing parent at `mode`, or accept an existing one only if it is tamper-resistant. */
-function ensureSafeParent(parent: string, mode: number): void {
+/**
+ * Create a missing parent at `mode`, or accept an existing one only if it is tamper-resistant. Pass `euid`
+ * to additionally require the existing directory to be owned by it (the writer does; the lock does not).
+ */
+function ensureSafeParent(parent: string, mode: number, euid?: number): void {
   try {
-    assertSafeExistingDir(parent);
+    assertSafeExistingDir(parent, euid);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
     mkdirSync(parent, { recursive: true, mode });
@@ -236,16 +272,16 @@ function ensureSafeParent(parent: string, mode: number): void {
 
 /**
  * Reject an immediate parent another user could tamper with: a symlink, a non-directory, or one that is
- * group/other-WRITABLE. A 0755 profile dir passes (`0o755 & 0o022 === 0`); 0775/0777/0757 do not.
- * Ownership is NOT asserted here (see the module invariant — the target's own FD/file ownership check is
- * the authoritative cross-uid guard). Throws the underlying ENOENT when the directory is absent so
- * callers can distinguish "create it".
+ * group/other-WRITABLE. A 0755 profile dir passes (`0o755 & 0o022 === 0`); 0775/0777/0757 do not. When
+ * `euid` is given, the directory must also be owned by it. Throws the underlying ENOENT when the directory
+ * is absent so callers can distinguish "create it".
  */
-function assertSafeExistingDir(dir: string): void {
+function assertSafeExistingDir(dir: string, euid?: number): void {
   const stats = lstatSync(dir);
   if (stats.isSymbolicLink()) throw new Error(`refusing: directory ${dir} is a symlink`);
   if (!stats.isDirectory()) throw new Error(`refusing: ${dir} is not a directory`);
   if ((stats.mode & 0o022) !== 0) throw new Error(`refusing: directory ${dir} is group- or other-writable`);
+  if (euid !== undefined && stats.uid !== euid) throw new Error(`refusing: directory ${dir} is not owned by effective uid ${euid}`);
 }
 
 function effectiveUid(injected: number | undefined): number {
