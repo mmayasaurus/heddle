@@ -55,9 +55,9 @@ function mandateBytes(cwd: string, rel: string, raw: Buffer): Buffer {
  *    cursor/agy have none, so heddle proves the mandate structurally: a CONTENT digest (HEAD + the
  *    git index + every tracked/untracked non-ignored file's mode+size+content + the stash list)
  *    before and after the run. A changed worktree is a
- *    mandate violation — recorded on the review row and surfaced in the outcome; findings are still
- *    returned (never discard the reviewer's work), nothing is reverted (never delete the reviewer's
- *    or anyone's changes — the operator decides).
+ *    mandate violation — recorded on the review row, the dispatch HARD-fails, and the findings are
+ *    QUARANTINED (HED-601: withheld from the outcome's trusted `output`, kept on the ledger record — never
+ *    discarded); nothing is reverted (never delete the reviewer's or anyone's changes — the operator decides).
  */
 
 export interface ReviewerPick {

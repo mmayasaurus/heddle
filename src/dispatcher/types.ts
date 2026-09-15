@@ -112,7 +112,7 @@ export interface DispatchRequest {
  * `refusal` column.
  */
 export interface DispatchRefusal {
-  code: 'claude-in-session' | 'no-dispatchable-account' | 'not-dispatchable' | 'depth-1' | 'max-children' | 'capability-denied' | 'tier-read-only' | 'metered-pool-exhausted' | 'same-provider-review' | 'override-reason-required' | 'fleet-paused' | 'billing.pay-per-token' | 'billing.open-billing-at-cap' | 'billing.prepaid-exhausted' | 'headless-claude-review-unreliable' | 'env-repoint.missing-token' | 'env-repoint.invalid-config';
+  code: 'claude-in-session' | 'no-dispatchable-account' | 'not-dispatchable' | 'depth-1' | 'max-children' | 'capability-denied' | 'tier-read-only' | 'metered-pool-exhausted' | 'same-provider-review' | 'override-reason-required' | 'fleet-paused' | 'fallback-blocked-dirty-tree' | 'billing.pay-per-token' | 'billing.open-billing-at-cap' | 'billing.prepaid-exhausted' | 'headless-claude-review-unreliable' | 'env-repoint.missing-token' | 'env-repoint.invalid-config';
   reason: string;
   /** What to do instead, when there is a clear alternative. */
   instruction?: string;
@@ -162,7 +162,20 @@ export interface DispatchOutcome extends WorkerResult {
     mandateOk: boolean | null;
     reviewerPick?: string;
   };
-  /** HED-3 (`auto_assess: true` classes): assess_result on the worker's output — done | needs-rework | needs-human. */
+  /**
+   * HED-601: a read-only dispatch whose worker VIOLATED the mandate (changed the worktree).
+   * The violation is a HARD failure (`ok` is false) and the worker output is QUARANTINED — WITHHELD from the
+   * trusted `output` field (which is emptied) and held HERE instead (`quarantine.output` always carries the
+   * findings in the returned outcome). The VIOLATION is durably recorded on the ledger row (ok=0,
+   * MANDATE-VIOLATION `error`, and `reviews.mandate_ok=0` for review classes); the findings TEXT is
+   * best-effort-persisted to the ledger output store (`outputs/<id>.md`, exactly as any worker output — a
+   * persist failure is logged, not fatal). Adopting anything from a quarantined run is a DELIBERATE act —
+   * read `quarantine.output` or the ledger record; nothing downstream may treat it as a trustworthy finding. A
+   * dedicated field, NOT `error` (same discipline as `escape`/`destroyed`): the withheld findings need a typed
+   * home and callers that key on a non-empty `error` as failure must not misread it.
+   */
+  quarantine?: { reason: 'mandate-violation'; note: string; output: string; ledgerId: number };
+  /** HED-3 (`auto_assess: true` classes): assess_result on the worker's output — done | needs-rework | needs-human. Absent on a quarantined run (a mandate violation is never graded). */
   assessment?: ResultAssessment;
   /** Set on capability-denied refusals: which check failed (`unenforceable` means a fallback may fit). */
   capabilityRefusalKind?: 'unknown-token' | 'operator-gate' | 'opt-in' | 'unenforceable';

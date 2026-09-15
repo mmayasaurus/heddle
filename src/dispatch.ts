@@ -15,6 +15,7 @@ import { overrideReasonGate } from './dispatcher/override-gate.js';
 import { monocultureNote, formatMonocultureWarning } from './dispatcher/monoculture.js';
 import { planDispatch, resolveRotationAccount, hasNoDispatchableClaudeAccount, noDispatchableClaudeAccountReason, capabilityFitFallbackEligible } from './dispatcher/plan.js';
 import { runTarget } from './dispatcher/run.js';
+import { checkoutFingerprint, fallbackBarrier } from './worktree.js';
 import type { AdapterFactory, DispatchContext, DispatchRequest, DispatchOutcome } from './dispatcher/types.js';
 
 // Public surface — exactly what src/dispatch.ts exported before the HED-282 split (nothing widened).
@@ -261,6 +262,32 @@ export async function dispatch(
   // prior rate-limit that may already have reset), and a preemptive jump to the class fallback bypassed
   // both that fallback's own account selection and the HED-261 floor. Run the primary as usual — a real
   // rate-limit then cools + fails over (below), and a genuinely dead pool reaches the normal fallback path.
+  const preFp = checkoutFingerprint(req.cwd);
+  // One barrier for both fallback re-dispatch points (account-failover + class fallback): if the
+  // failed leg left the parent checkout dirty since `preFp`, refuse rather than let the next leg
+  // inherit it (HED-487). `failedLeg` is whichever leg just failed — the primary, or the reassigned
+  // account-failover outcome. Returns the refusal outcome to return, or null to proceed. Auto-WIP
+  // recovery was cut before merge; its design constraints live in HED-622.
+  const dirtBarrier = (routeTarget: RouteTarget, failedLeg: DispatchOutcome): DispatchOutcome | null => {
+    const barrier = fallbackBarrier(req.cwd, preFp);
+    if (!barrier.blocked) return null;
+    const refusal = {
+      code: 'fallback-blocked-dirty-tree' as const,
+      reason: `failed leg ${failedLeg.provider}/${failedLeg.model} (dispatch #${failedLeg.ledgerId}) left checkout dirt: ${(barrier.dirt ?? []).join(', ')}`,
+      instruction: `Commit or discard the changes in ${req.cwd}, then re-dispatch.`,
+    };
+    return refusalOutcome(ctx, req, route.taskClass, routeTarget, skillsForRefusal, refusal, {
+      fellBackFrom: failedLeg.provider,
+      // A leg that escaped its worktree or destroyed work and THEN failed must not have that warning
+      // dropped when the barrier refuses the fallback — the tree is still dirty and someone has to
+      // know (the non-barrier fallback paths below preserve these; PR #28 / PR #40).
+      extra: {
+        usedFallback: true,
+        ...(failedLeg.destroyed ? { destroyed: failedLeg.destroyed } : {}),
+        ...(failedLeg.escape ? { escape: failedLeg.escape } : {}),
+      },
+    });
+  };
   let primary = await runTarget(target, req, ctx, route, plan.decision.routedAwayForCap ? `${route.provider}/${route.model}` : null);
   // Capability-fit fallback: when the PRIMARY provider merely lacks the knob (`unenforceable`) and
   // the class declares a fallback whose provider CAN enforce every requested capability, route there
@@ -313,7 +340,9 @@ export async function dispatch(
   }
   // A read-only MANDATE VIOLATION is a policy failure of the reviewer, not a provider failure — never
   // "retry" it on the fallback (that would re-run in an already-mutated tree and mask the violation).
-  if (primary.ok || primary.refusal || primary.review?.mandateOk === false) return primary;
+  // HED-601: keyed on `quarantine` (set for ANY read_only violation, review pair or not), so a non-review
+  // read-only violation is not retried on the fallback either.
+  if (primary.ok || primary.refusal || primary.quarantine) return primary;
   if (req.noFallback) {
     if ((target.provider === 'codex' || target.provider === 'cursor') && ctx.rotationAccount
         && classifyRotationRefusal(target.provider, primary) === 'rate-limit') {
@@ -338,6 +367,8 @@ export async function dispatch(
     if (retry && retry.id !== from) {
       ctx.rotationAccount = retry; ctx.account = retry.id;
       ctx.routeReason = `${plan.decision.routeReason}; account-failover:${from}→${retry.id} (rate-limit); ${retry.reason}`;
+      const failoverBarrier = dirtBarrier(target, primary);
+      if (failoverBarrier) return failoverBarrier;
       let retryOutcome = await runTarget(target, req, ctx, route, `${target.provider}/${target.model} (account-failover)`);
       if (primary.destroyed && !retryOutcome.destroyed) retryOutcome = { ...retryOutcome, destroyed: primary.destroyed };
       else if (primary.destroyed && retryOutcome.destroyed) {
@@ -348,7 +379,7 @@ export async function dispatch(
         retryOutcome = { ...retryOutcome, escape: { ...retryOutcome.escape, note: `${primary.escape.note}; then ${retryOutcome.escape.note}` } };
       }
       primary = retryOutcome;
-      if (primary.ok || primary.refusal || primary.review?.mandateOk === false || req.noFallback) return primary;
+      if (primary.ok || primary.refusal || primary.quarantine || req.noFallback) return primary;
       if (classifyRotationRefusal(target.provider, primary) === 'rate-limit') {
         cooling.lanes[`${target.provider}:${retry.id}`] = { cooledAt: req.nowS ?? Math.floor(Date.now() / 1000), reason: 'rate-limit', cooldownS: DEFAULT_COOLDOWN_S };
         writeCooling(coolingPath, cooling);
@@ -434,6 +465,8 @@ export async function dispatch(
   // / 5h-headroom evidence the scoreboard is built on (PR #24, found by the dispatched test worker).
   ctx.routeReason = `${ctx.routeReason ?? plan.decision.routeReason}; ${target.provider}/${target.model} failed → class fallback`
     + (ctx.claudeAccount ? `; ${ctx.claudeAccount.reason}` : ctx.rotationAccount ? `; ${ctx.rotationAccount.reason}` : '');
+  const classBarrier = dirtBarrier(fallback, primary);
+  if (classBarrier) return classBarrier;
   let fbOutcome = await runTarget(fallback, req, ctx, route, `${route.provider}/${route.model}`);
   // A PRIMARY that escaped its worktree and then FAILED must not have that warning discarded when
   // the fallback succeeds — the parent checkout is still dirty and someone has to know (PR #28).

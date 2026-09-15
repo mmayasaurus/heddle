@@ -1,13 +1,22 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { dispatch } from '../src/dispatch.js';
 import { CodexAdapter } from '../src/adapters/codex.js';
 import { ClaudeAdapter } from '../src/adapters/claude.js';
 import type { CapsByProvider } from '../src/usage.js';
 import type { WorkerAdapter } from '../src/types.js';
 import { fakeAdapter, IDENTITIES, initRepoFixture, useTempResources } from './helpers.js';
+import { assessResult } from '../src/classify.js';
+
+// HED-601: mock assessResult to a spy so the auto-assess-on-violation guard is proven by INVOCATION
+// (not merely the absence of an assessment field — which a classifier that throws would also produce).
+// No test in this file needs the real classifier; every dispatch here supplies a fake worker adapter.
+vi.mock('../src/classify.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/classify.js')>();
+  return { ...actual, assessResult: vi.fn() } as typeof actual;
+});
 
 function gitRepo(cwd: string): void {
   execFileSync('git', ['init', '-q'], { cwd });
@@ -133,17 +142,90 @@ describe('adversarial review dispatch', () => {
     } finally { restore(); }
   });
 
-  it('surfaces and records a write mandate violation without discarding findings or reverting files', async () => {
+  it('HED-601: quarantines the findings and HARD-fails a write mandate violation without reverting files', async () => {
     const restore = reviewRouting(tempDir); const cwd = tempDir(); gitRepo(cwd); commitTrackedProbe(cwd); const ledger = tempLedger();
     let writerCalls = 0;
     const writer: WorkerAdapter = { name: 'writer', provider: 'codex', dispatch: async (_prompt, opts) => { writerCalls += 1; writeFileSync(join(opts.cwd, 'tracked-probe.txt'), 'after'); return { ok: true, output: 'done', exitCode: 0 }; } };
     try {
       const outcome = await dispatch({ taskClass: 'adversarial-review', authorProvider: 'claude', prompt: 'review', cwd, identity: unbound }, ledger, () => writer);
-      expect(readFileSync(join(cwd, 'tracked-probe.txt'), 'utf8')).toBe('after'); expect(outcome.review?.mandateOk).toBe(false); expect(ledger.getReview(outcome.ledgerId)?.mandate_ok).toBe(0); expect(outcome.error).toContain('MANDATE VIOLATION'); expect(outcome.output).toBe('done');
+      // nothing reverted; the violation is a HARD failure recorded on the review row
+      expect(readFileSync(join(cwd, 'tracked-probe.txt'), 'utf8')).toBe('after');
+      expect(outcome.ok).toBe(false);
+      expect(outcome.review?.mandateOk).toBe(false); expect(ledger.getReview(outcome.ledgerId)?.mandate_ok).toBe(0);
+      expect(outcome.error).toContain('MANDATE VIOLATION');
+      // the findings are WITHHELD from the trusted output channel and QUARANTINED instead
+      expect(outcome.output).toBe('');
+      expect(outcome.quarantine).toMatchObject({ reason: 'mandate-violation', output: 'done', ledgerId: outcome.ledgerId });
+      expect(outcome.quarantine?.note).toContain('QUARANTINED');
+      // the durable ledger record KEEPS the findings for deliberate adoption: the row is ok=0 and its
+      // output was persisted (output_path set) — quarantine withholds from the outcome, never from the record
+      const row = ledger.recent(1)[0];
+      expect(row.ok).toBe(0);
+      expect(row.output_path).toBeTruthy();
+      // and the PERSISTED BYTES are the findings themselves ('done'), not the mandate note or ''
+      expect(ledger.getWithOutput(outcome.ledgerId)?.output).toBe('done');
       // a violation is a POLICY failure of this reviewer, never retried on the class fallback —
       // the tree is already mutated, so a second reviewer would review tampered state
       expect(writerCalls).toBe(1);
       expect(ledger.recent()).toHaveLength(1);
+    } finally { restore(); }
+  });
+
+  it('HED-601: quarantines a NON-review read-only violation and does not retry it on the class fallback', async () => {
+    // second-opinion is read_only with a glm fallback and NO reviewer_pool (so no review pair). Before
+    // HED-601 the no-retry guard keyed on review.mandateOk — undefined here — so a non-review violation
+    // would re-run in the already-mutated tree on the fallback. The quarantine-keyed guard closes that gap.
+    const restore = reviewRouting(tempDir); const cwd = tempDir(); gitRepo(cwd); commitTrackedProbe(cwd); const ledger = tempLedger();
+    let calls = 0;
+    const writer: WorkerAdapter = { name: 'w', provider: 'cursor', dispatch: async (_prompt, opts) => { calls += 1; writeFileSync(join(opts.cwd, 'tracked-probe.txt'), 'after'); return { ok: true, output: 'finding', exitCode: 0 }; } };
+    try {
+      const outcome = await dispatch({ taskClass: 'second-opinion', prompt: 'diagnose', cwd, identity: unbound }, ledger, () => writer);
+      expect(outcome.review).toBeUndefined(); // not a review class — no author→reviewer pair
+      expect(outcome.ok).toBe(false);
+      expect(outcome.quarantine).toMatchObject({ reason: 'mandate-violation', output: 'finding' });
+      expect(outcome.output).toBe('');
+      expect(ledger.getWithOutput(outcome.ledgerId)?.output).toBe('finding'); // durable record holds the findings
+      expect(calls).toBe(1); // the glm fallback was NOT tried
+      expect(ledger.recent()).toHaveLength(1);
+    } finally { restore(); }
+  });
+
+  it('HED-601: skips auto-assess on a quarantined violation but DOES assess a clean review (proves the guard)', async () => {
+    // SHIPPED routing (adversarial-review has auto_assess: true). assessResult is a spy (mocked at file top),
+    // so this asserts INVOCATION — not just the absence of an assessment field, which a classifier that
+    // threw would also produce. A quarantined violation must NOT call assessResult (grading re-surfaces
+    // untrusted findings + spends a classifier); a clean read-only review MUST — proving `!quarantine`
+    // actually discriminates, so removing that guard would flip the first assertion red.
+    const assess = vi.mocked(assessResult);
+
+    // (1) violation → quarantined → assess SKIPPED
+    assess.mockClear();
+    const cwd = tempDir(); gitRepo(cwd); commitTrackedProbe(cwd);
+    const mutator: WorkerAdapter = { name: 'w', provider: 'codex', dispatch: async (_p, opts) => { writeFileSync(join(opts.cwd, 'tracked-probe.txt'), 'after'); return { ok: true, output: 'finding text', exitCode: 0 }; } };
+    const violated = await dispatch({ taskClass: 'adversarial-review', authorProvider: 'claude', prompt: 'review', cwd, identity: unbound }, tempLedger(), () => mutator);
+    expect(violated.quarantine).toBeDefined();
+    expect(violated.assessment).toBeUndefined();
+    expect(assess).not.toHaveBeenCalled();
+
+    // (2) clean review (no mutation, non-empty output) → assess RUNS
+    assess.mockClear();
+    const cwd2 = tempDir(); gitRepo(cwd2); commitTrackedProbe(cwd2);
+    const clean = await dispatch({ taskClass: 'adversarial-review', authorProvider: 'claude', prompt: 'review', cwd: cwd2, identity: unbound }, tempLedger(), () => fakeAdapter({ ok: true, output: 'a real finding', exitCode: 0 }).adapter);
+    expect(clean.quarantine).toBeUndefined();
+    expect(assess).toHaveBeenCalledTimes(1);
+  });
+
+  it('HED-601: hard-fails and quarantines a violation even when the worker returned no findings text', async () => {
+    // LOW-3 edge: an empty-output violation is still a HARD failure with quarantine set (output '') —
+    // the violation is recorded regardless of whether the reviewer produced any finding text.
+    const restore = reviewRouting(tempDir); const cwd = tempDir(); gitRepo(cwd); commitTrackedProbe(cwd); const ledger = tempLedger();
+    const silentMutator: WorkerAdapter = { name: 'w', provider: 'codex', dispatch: async (_p, opts) => { writeFileSync(join(opts.cwd, 'tracked-probe.txt'), 'after'); return { ok: true, output: '', exitCode: 0 }; } };
+    try {
+      const outcome = await dispatch({ taskClass: 'adversarial-review', authorProvider: 'claude', prompt: 'review', cwd, identity: unbound }, ledger, () => silentMutator);
+      expect(outcome.ok).toBe(false);
+      expect(outcome.review?.mandateOk).toBe(false);
+      expect(outcome.quarantine).toMatchObject({ reason: 'mandate-violation', output: '' });
+      expect(outcome.output).toBe('');
     } finally { restore(); }
   });
 
@@ -254,6 +336,8 @@ describe('adversarial review dispatch', () => {
     try {
       const outcome = await dispatch({ taskClass: 'adversarial-review', authorProvider: 'claude', prompt: 'review', cwd: tempDir(), identity: unbound }, ledger, () => fakeAdapter().adapter);
       expect(outcome.review?.mandateOk).toBeNull(); expect(ledger.getReview(outcome.ledgerId)?.mandate_ok).toBeNull(); expect(outcome.error).toBeUndefined();
+      // HED-601: mandateOk null (non-git) is NOT a violation — no quarantine, and the output is preserved
+      expect(outcome.quarantine).toBeUndefined(); expect(outcome.output).toBe('done');
     } finally { restore(); }
   });
 

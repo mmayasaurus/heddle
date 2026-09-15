@@ -2,10 +2,9 @@
 // into ONE ordered walkthrough and is the SINGLE writer of step composition — step modules stay on
 // disjoint files, never import each other, and never edit this file. Owners land their step module
 // (model-economy HED-473, spread HED-474, meters HED-475, rules HED-544, permissions HED-600,
-// doctor HED-476) and it is wired here as a one-line addition to `buildSteps`; accounts,
-// model-economy, spread, meters, rules, permissions, and the doctor finish-gate are all wired.
-import { homedir } from 'node:os';
-import { resolve } from 'node:path';
+// pr-automation HED-597, doctor HED-476) and it is wired here as a one-line addition to `buildSteps`;
+// accounts, model-economy, spread, meters, rules, permissions, pr-automation, and the doctor
+// finish-gate are all wired.
 import type { WizardContext, WizardIO, WizardStep, WizardStepResult, WizardStepStatus } from './step.js';
 import type { CliRunner } from './cli-runner.js';
 import { runAccountsAdd, type AccountsAddSummary } from './accounts-add.js';
@@ -15,6 +14,7 @@ import { spreadStep } from './spread-policy.js';
 import { metersStep } from './meters-step.js';
 import { rulesStep } from './rules-step.js';
 import { permissionsStep } from './permissions-step.js';
+import { prAutomationStep } from './pr-automation-step.js';
 import { resolveCatalogRoot } from '../rules/lifecycle.js';
 
 /**
@@ -117,44 +117,18 @@ export function dryRunGate(step: WizardStep, would: string): WizardStep {
 }
 
 /**
- * Wrap the doctor finish-gate so it SKIPS when the setup home diverges from the default home
- * (`heddle setup --home <dir>`). The doctor module deliberately verifies the resolved DEFAULT
- * environment (doctor.ts:10-16) — it does NOT relocate its home-scoped paths under `ctx.homeDir` —
- * whereas accountsStep writes UNDER `ctx.homeDir`. So under an alternate --home the gate would verify a
- * DIFFERENT installation than setup just wrote, and paint a hollow green (or a spurious red) for an
- * install it never looked at. Until the doctor module can verify a home-scoped install (HED-596), skip
- * HONESTLY here rather than claim a verification that did not happen. In the common case
- * (ctx.homeDir === the real home, i.e. no --home) doctor runs normally. `resolve` on both sides so a
- * trailing slash or a relative --home does not spuriously read as divergence.
- */
-function skipDoctorUnderAltHome(step: WizardStep): WizardStep {
-  return {
-    ...step,
-    async run(ctx: WizardContext, io: WizardIO): Promise<WizardStepResult> {
-      if (resolve(ctx.homeDir) !== resolve(homedir())) {
-        io.report(`  – skipped: ${step.id} verifies the default install (~/.heddle), not a --home install — home-aware verification is tracked in HED-596.`);
-        return {
-          id: step.id,
-          status: 'skipped',
-          summary: `skipped — a --home install is not verified by the doctor gate yet (HED-596)`,
-        };
-      }
-      return step.run(ctx, io);
-    },
-  };
-}
-
-/**
  * Build the ordered built-in step set, in walkthrough order:
- * accounts → model-economy → spread → meters → rules → permissions → doctor (last). Each self-contained
- * step module is registered here as one line by its owner as it lands (HED-564 protocol). model-economy,
- * spread, meters, rules, and permissions each write UNDER `ctx.homeDir` and self-handle --dry-run inside their own module,
- * so they need no wrapper here. `rulesStep` is the one step taking a construction dep — the rule catalog
+ * accounts → model-economy → spread → meters → rules → permissions → pr-automation → doctor (last). Each
+ * self-contained step module is registered here as one line by its owner as it lands (HED-564 protocol).
+ * model-economy, spread, meters, rules, and permissions each write UNDER `ctx.homeDir` and self-handle
+ * --dry-run inside their own module; pr-automation writes under `ctx.targetDir` (the target repo's
+ * `.github/`) and self-gates via `applies` on a git target (skipped when no `--target` is set) — all
+ * self-dry-run, so they need no wrapper here. `rulesStep` is the one step taking a construction dep — the rule catalog
  * — defaulted to the bundled catalog (`resolveCatalogRoot()`) so
- * `buildSteps({ runner })` stays the caller contract. Doctor is the read-only finish gate, composed
- * with two guards: `skipDoctorUnderAltHome` (skip when --home diverges — it would otherwise verify a
- * different install than setup wrote, HED-596) and, OUTSIDE that, `dryRunGate` (a --dry-run preview
- * skips it); dryRunGate is outermost so a dry-run preview always wins over the home check.
+ * `buildSteps({ runner })` stays the caller contract. Doctor is the read-only finish gate, wrapped only
+ * in `dryRunGate` (a --dry-run preview skips it). It now runs under `heddle setup --home <dir>` too: the
+ * doctor module re-roots the account registry it verifies under `ctx.homeDir` (doctor.ts `homePaths`,
+ * HED-596), so the gate honestly verifies the --home install rather than the default one.
  */
 export function buildSteps(deps: SetupDeps): WizardStep[] {
   return [
@@ -164,9 +138,10 @@ export function buildSteps(deps: SetupDeps): WizardStep[] {
     metersStep,
     rulesStep(deps.catalogRoot ?? resolveCatalogRoot()),
     permissionsStep(),
+    prAutomationStep(),
     // doctor (HED-476) is ALWAYS last — the read-only finish gate that verifies setup end-to-end.
     dryRunGate(
-      skipDoctorUnderAltHome(doctorStep),
+      doctorStep,
       'dry-run — doctor: a real setup would run `heddle doctor` to verify the configured environment end-to-end; nothing was verified.',
     ),
   ];
@@ -241,7 +216,7 @@ export async function runSetup(base: SetupContext, io: WizardIO, steps: WizardSt
   const failed = ordered.filter((result) => result.status === 'failed').length;
   // The doctor finish-gate, when it ran and passed, IS the end-to-end verification — so don't tell the
   // operator to re-run `heddle doctor` in that case (it would ask them to repeat the check just done).
-  // Only when doctor was skipped (dry-run / --home / --skip doctor) or excluded do they still need it.
+  // Only when doctor was skipped (dry-run / --skip doctor) or excluded do they still need it.
   const doctorVerified = results.get('doctor')?.status === 'done';
   io.report(
     failed

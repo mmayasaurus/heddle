@@ -24,13 +24,13 @@ function pathFor(provider: NativeProvider, id: string, home: string = homedir())
 function envRepointHarness(entry: ProviderMatrixEntry): 'claude' | 'codex' {
   if (entry.harnessStyle === 'anthropic-compat') return 'claude';
   if (entry.harnessStyle === 'openai-compat') return 'codex';
+  if (entry.harnessStyle === 'local-runtime') return 'codex';
   throw new Error(`env-repoint provider ${entry.key} has unsupported harness style ${entry.harnessStyle}`);
 }
 
-// Slice-3 onboards only the KEYED env-repoint styles (anthropic-compat -> claude, openai-compat -> codex).
-// local-runtime (Ollama/LM Studio, HED-529) and browser-oauth (Gemini, HED-528) are deferred: offering
-// them here would crash envRepointHarness or misroute a non-native key into the native login path.
-const ENV_REPOINT_WIZARD_STYLES: ReadonlySet<ProviderMatrixEntry['harnessStyle']> = new Set(['anthropic-compat', 'openai-compat']);
+// The wizard supports keyed env-repoint styles and keyless local runtimes via the codex harness.
+// browser-oauth (Gemini, HED-528) remains deferred because it needs a native OAuth flow.
+const ENV_REPOINT_WIZARD_STYLES: ReadonlySet<ProviderMatrixEntry['harnessStyle']> = new Set(['anthropic-compat', 'openai-compat', 'local-runtime']);
 function envRepointWizardSupported(entry: ProviderMatrixEntry): boolean {
   return entry.envRepoint && ENV_REPOINT_WIZARD_STYLES.has(entry.harnessStyle);
 }
@@ -251,6 +251,44 @@ export async function addEnvRepointOne(
   deps.report?.(`ADDED ${entry.key} ${id}`);
 }
 
+/** Add a keyless local OpenAI-compatible runtime without native login or API-key checks. */
+export async function addLocalRuntimeOne(
+  entry: ProviderMatrixEntry, deps: AccountsAddDeps, ordinal: number, registryPath: string, summary: AccountsAddSummary, home: string = homedir(),
+): Promise<void> {
+  if (!entry.envRepoint) throw new Error(`${entry.key} is not an env-repoint provider`);
+  const id = await deps.prompter.text(`Account id for ${entry.displayName}`, `${entry.key}-${ordinal}`);
+  validateId(id);
+  const provider = envRepointHarness(entry);
+  // Local runtimes share the codex namespace with native accounts; do not let an upsert replace one.
+  if (loadAccountRegistry(registryPath).accounts.some((account) => account.provider === provider && account.id === id)) {
+    summary.failed.push(id);
+    deps.report?.(`FAIL ${entry.key} ${id} (id already used by an existing ${provider} account — choose another)`);
+    return;
+  }
+  const baseUrl = await deps.prompter.text(`${entry.displayName} base URL`, entry.baseUrl);
+  validateBaseUrl(baseUrl);
+  let configPath: string;
+  try {
+    configPath = createIsolatedConfigDir(provider, id, home);
+  } catch (error) {
+    summary.failed.push(id);
+    deps.report?.(`FAIL ${entry.key} ${id} (${error instanceof Error ? error.message : String(error)})`);
+    return;
+  }
+  // Keyless by design: local runtimes need no cloud key. Record a heddle-namespaced token ref rather
+  // than OPENAI_API_KEY so a real cloud key in ~/.heddle/secrets.env can never be materialized toward a
+  // localhost endpoint when env-repoint consume reaches codex (HED-619); an operator who secures their
+  // local server opts in by exporting exactly this var. Absent from secrets.env, consume fail-closes.
+  const account: Account = {
+    id, provider, harness: 'codex-cli', credentialRef: `${provider}:${entry.key}:${configPath}`,
+    billingClass: 'free-tier', tier: 'T0',
+    envRepoint: { baseUrl, authTokenRef: 'HEDDLE_LOCAL_RUNTIME_TOKEN', service: entry.key }, codexHome: configPath,
+  };
+  writeAccountRegistry(upsertAccount(loadAccountRegistry(registryPath), account), registryPath);
+  summary.added.push(id);
+  deps.report?.(`ADDED ${entry.key} ${id} (local runtime)`);
+}
+
 function customService(name: string): string {
   const service = name.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
   if (!service) throw new Error('custom provider display name must contain letters or digits');
@@ -327,10 +365,10 @@ export async function runAccountsAdd(
     const isNative = providers.includes(opts.provider as NativeProvider);
     if (!matrixProvider && !isNative) throw new Error(`unknown accounts-add provider ${opts.provider}`);
     // A matrix key that is neither a native CLI nor a wizard-supported env-repoint style is a deferred
-    // surface — refuse clearly instead of crashing envRepointHarness (local-runtime) or falling through
-    // to the native login path with an undefined service name (browser-oauth: gemini/copilot/amazonq).
+    // surface — refuse clearly instead of falling through to the native login path with an undefined
+    // service name (browser-oauth: gemini/copilot/amazonq).
     if (matrixProvider && !isNative && !envRepointWizardSupported(matrixProvider)) {
-      throw new Error(`accounts-add does not yet support ${opts.provider} (${matrixProvider.harnessStyle}) — see HED-528 (browser-oauth), HED-529 (local-runtime), HED-530 (OpenCode)`);
+      throw new Error(`accounts-add does not yet support ${opts.provider} (${matrixProvider.harnessStyle}) — see HED-528 (browser-oauth), HED-530 (OpenCode)`);
     }
   }
   const selectedEnv = matrixProvider && envRepointWizardSupported(matrixProvider) ? matrixProvider : undefined;
@@ -344,7 +382,10 @@ export async function runAccountsAdd(
   for (const entry of envProviders) {
     if (!await deps.prompter.confirm(`Do you have a ${entry.displayName} account?`, false)) continue;
     let ordinal = loadAccountRegistry(registryPath).accounts.filter((account) => account.envRepoint?.service === entry.key).length + 1;
-    do { await addEnvRepointOne(entry, deps, ordinal++, registryPath, summary, home); }
+    do {
+      if (entry.harnessStyle === 'local-runtime') await addLocalRuntimeOne(entry, deps, ordinal++, registryPath, summary, home);
+      else await addEnvRepointOne(entry, deps, ordinal++, registryPath, summary, home);
+    }
     while (await deps.prompter.confirm(`Any other ${entry.displayName} accounts to cycle through?`, false));
   }
   const blocked = selectedEnv?.blocked ? [selectedEnv] : opts.provider ? [] : listEnvRepointProviders().filter((entry) => entry.blocked && envRepointWizardSupported(entry));

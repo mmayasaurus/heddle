@@ -1,10 +1,10 @@
-import { readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { CommsLog } from '../src/comms/log.js';
 import { Ledger } from '../src/ledger.js';
 import { assembleTop, renderTopText } from '../src/top.js';
-import { useTempResources } from './helpers.js';
+import { useTempResources, writeMetersPolicy } from './helpers.js';
 import { runCli } from './helpers/cli.js';
 
 const { tempDir } = useTempResources('heddle-top-test-');
@@ -47,6 +47,8 @@ function fixture(opts: { stale?: boolean; accounts?: number; providerWindow?: bo
   }));
   return { usageDir, accountsPath };
 }
+
+const metersPolicy = (contents: string): string => writeMetersPolicy(tempDir(), contents);
 
 function snapshot(dir: string): Map<string, number> {
   return new Map(readdirSync(dir).sort().map((name) => [name, statSync(join(dir, name)).mtimeMs]));
@@ -144,6 +146,58 @@ describe('heddle top', () => {
 
     expect(view.accounts.find((account) => account.id === 'acct-1')?.usage)
       .toEqual(expect.arrayContaining([expect.objectContaining({ account: null, window: 'included-total', usedPercentage: 42 })]));
+  });
+
+  it('keeps opted-out accounts visible but with no meters', () => {
+    const { usageDir, accountsPath } = fixture();
+    const view = assembleTop({
+      usageDir, accountsPath,
+      metersPolicyPath: metersPolicy(JSON.stringify({ accounts: { 'acct-1': { meters: false } } })),
+    });
+
+    expect(view.accounts.find((account) => account.id === 'acct-1')).toMatchObject({ usage: [] });
+    expect(view.accounts.find((account) => account.id === 'acct-2')?.usage).not.toHaveLength(0);
+  });
+
+  it('fails open for absent, corrupt, and directory policy paths', () => {
+    const { usageDir, accountsPath } = fixture({ providerWindow: true });
+    const absent = join(tempDir(), 'absent-meters.json');
+    const corrupt = metersPolicy('{ not json');
+    const directory = join(tempDir(), 'meters-directory');
+    mkdirSync(directory);
+
+    for (const metersPolicyPath of [absent, corrupt, directory]) {
+      expect(() => assembleTop({ usageDir, accountsPath, metersPolicyPath })).not.toThrow();
+      const view = assembleTop({ usageDir, accountsPath, metersPolicyPath });
+      expect(view.accounts.find((account) => account.id === 'acct-1')?.usage).not.toHaveLength(0);
+      expect(view.accounts.find((account) => account.id === 'acct-1')?.usage)
+        .toEqual(expect.arrayContaining([expect.objectContaining({ account: null, window: 'included-total' })]));
+    }
+  });
+
+  it('shows opted-in and unlisted accounts', () => {
+    const { usageDir, accountsPath } = fixture();
+    const view = assembleTop({
+      usageDir, accountsPath,
+      metersPolicyPath: metersPolicy(JSON.stringify({ accounts: { 'acct-1': { meters: true } } })),
+    });
+
+    expect(view.accounts.find((account) => account.id === 'acct-1')?.usage).not.toHaveLength(0);
+    expect(view.accounts.find((account) => account.id === 'acct-2')?.usage).not.toHaveLength(0);
+  });
+
+  it('does not attach provider-level meters to an opted-out first account', () => {
+    const { usageDir, accountsPath } = fixture({ providerWindow: true });
+    const view = assembleTop({
+      usageDir, accountsPath,
+      metersPolicyPath: metersPolicy(JSON.stringify({ accounts: { 'acct-1': { meters: false } } })),
+    });
+
+    // acct-1 is the first account, so the provider-level row previously attached to it; opting it out must
+    // suppress BOTH its per-account meters AND the provider-level row — the latter moves to acct-2.
+    expect(view.accounts.find((account) => account.id === 'acct-1')?.usage).toEqual([]);
+    expect(view.accounts.find((account) => account.id === 'acct-2')?.usage)
+      .toEqual(expect.arrayContaining([expect.objectContaining({ account: null, window: 'included-total' })]));
   });
 
   it('reads HEDDLE_LEDGER_DB without changing the ledger or showing classifications as workers', async () => {
