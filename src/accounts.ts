@@ -65,6 +65,30 @@ export interface AccountRegistry {
   accounts: Account[];
 }
 
+export interface IdentityReconcileInput {
+  /** Each poll row carries the configDir it was fetched from, so reconcile can refuse to write a live
+   *  identity onto a row replaced under the same id mid-poll (raw string-or-null, matching the registry). */
+  rows: Array<{ id: string; configDir: string | null; liveIdentity: { accountUuid: string; organizationUuid: string | null } | null }>;
+}
+
+export interface IdentityReconcileChange {
+  id: string;
+  accountUuid: string;
+  orgId?: string;
+}
+
+export interface IdentityReconcileWarning {
+  code: 'identity-conflict' | 'no-registry-match';
+  id: string;
+  message: string;
+}
+
+export interface IdentityReconcileResult {
+  registry: AccountRegistry;
+  changes: IdentityReconcileChange[];
+  warnings: IdentityReconcileWarning[];
+}
+
 type Provider = Account['provider'];
 /**
  * The provider identities that appear DIRECTLY as an `Account.provider` — the native harness logins
@@ -291,6 +315,70 @@ export function upsertAccount(registry: AccountRegistry, account: Account): Acco
   if (index === -1) accounts.push(account);
   else accounts[index] = { ...accounts[index], ...account };
   return { schemaVersion: ACCOUNTS_SCHEMA_VERSION, accounts };
+}
+
+export function reconcileRegistryIdentity(
+  registry: AccountRegistry,
+  poll: IdentityReconcileInput,
+): IdentityReconcileResult {
+  let result = registry;
+  const changes: IdentityReconcileChange[] = [];
+  const warnings: IdentityReconcileWarning[] = [];
+  for (const row of poll.rows) {
+    if (!row.liveIdentity) continue;
+    const acct = result.accounts.find((account) => account.provider === 'claude' && account.id === row.id);
+    if (!acct) {
+      warnings.push({ code: 'no-registry-match', id: row.id, message: 'no matching claude registry account' });
+      continue;
+    }
+    // The live identity was fetched from the PRE-poll snapshot's credential (its configDir), but this row is
+    // matched by id against the registry loaded AFTER the ~seconds-long poll. If the account was replaced
+    // under the same id meanwhile (configDir changed), the polled identity belongs to the OLD credential —
+    // writing it would mis-attribute it, and populate-only would make that wrong value STICKY (every later
+    // poll then warns identity-conflict until a human clears it). Refuse when the configDir no longer matches
+    // what we polled. Both sides derive configDir identically (raw string-or-null: normalizedPath /
+    // readClaudeAccounts), so an unchanged account compares equal and is never spuriously skipped (HED-503).
+    if ((acct.configDir ?? null) !== row.configDir) {
+      warnings.push({ code: 'no-registry-match', id: row.id, message: 'registry account was replaced during the poll (configDir changed); identity not written' });
+      continue;
+    }
+    const polledUuid = row.liveIdentity.accountUuid;
+    const polledOrg = row.liveIdentity.organizationUuid;
+    if (acct.accountUuid && acct.accountUuid !== polledUuid) {
+      warnings.push({
+        code: 'identity-conflict',
+        id: row.id,
+        message: `persisted accountUuid ${acct.accountUuid} != live ${polledUuid}; left unchanged (re-auth or fix credentialRef, then clear the stale accountUuid to re-populate)`,
+      });
+      continue;
+    }
+    // orgId is POPULATE-ONLY too: fill it when blank, but leave a DIFFERING persisted value untouched
+    // (a loud conflict, never a silent overwrite — the same discipline as accountUuid above). Test with
+    // TRUTHINESS, not `!= null`: optionalString yields "" for an empty-string orgId on disk, and an empty
+    // orgId is unset — so it must backfill (never block) and never spuriously conflict (qodo). A null live
+    // value means "not exposed this response", never "clear".
+    if (polledOrg != null && acct.orgId && acct.orgId !== polledOrg) {
+      warnings.push({
+        code: 'identity-conflict',
+        id: row.id,
+        message: `persisted orgId ${acct.orgId} != live ${polledOrg}; left unchanged (clear the stale orgId to re-populate)`,
+      });
+    }
+    const setUuid = acct.accountUuid !== polledUuid;
+    const setOrg = polledOrg != null && !acct.orgId;
+    if (!setUuid && !setOrg) continue;
+    result = upsertAccount(result, {
+      ...acct,
+      accountUuid: polledUuid,
+      ...(setOrg ? { orgId: polledOrg } : {}),
+    });
+    changes.push({
+      id: row.id,
+      accountUuid: polledUuid,
+      ...(setOrg ? { orgId: polledOrg } : {}),
+    });
+  }
+  return { registry: result, changes, warnings };
 }
 
 function accountRow(account: Account): Row {

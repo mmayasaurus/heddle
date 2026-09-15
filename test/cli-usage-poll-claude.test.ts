@@ -35,4 +35,27 @@ describe('heddle usage poll-claude CLI', () => {
     expect(result.stderr).toContain('heddle usage poll-claude: no registry account with id "missing"');
     expect(oauthSidecars(usageDir)).toEqual([]);
   });
+
+  it('fails open when the strict registry loader rejects a registry the poll tolerates', async () => {
+    // readClaudeAccounts tolerates a duplicate id (never throws), so the poll runs; the strict
+    // loadAccountRegistry that HED-492 added throws on it. The identity reconcile must be SKIPPED,
+    // never crash this launchd feeder or drop the report (HED-451 poller fail-open discipline).
+    const root = tempDir();
+    const accountsPath = join(root, 'accounts.json');
+    writeFileSync(accountsPath, JSON.stringify({
+      claude: [
+        { id: 'dup', configDir: '/x/a' },
+        { id: 'dup', configDir: '/x/b' },
+      ],
+    }));
+    const usageDir = join(root, 'usage');
+    const result = await runCli(['usage', 'poll-claude', '--json'], {
+      env: { HEDDLE_ACCOUNTS: accountsPath, HEDDLE_USAGE_DIR: usageDir },
+    });
+
+    expect(result.code).toBe(0);
+    const parsed = JSON.parse(result.stdout);
+    expect(parsed.identity.error).toContain('duplicate');
+    expect(parsed.identity.written).toEqual([]);
+  });
 });
