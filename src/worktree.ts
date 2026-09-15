@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { lstatSync, readFileSync, readlinkSync } from 'node:fs';
+import { lstatSync, mkdtempSync, readFileSync, readlinkSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { isToolRuntimePath } from './tool-runtime.js';
 
@@ -61,6 +62,28 @@ function git(cwd: string, args: string[]): string {
     cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], env: gitEnv(),
     timeout: 30_000, maxBuffer: 64 * 1024 * 1024,
   });
+}
+
+/** Like `git`, but merges extra env AFTER the inherited-override strip (so a temp GIT_INDEX_FILE can be set) and keeps stderr for error reasons. */
+function gitWithEnv(cwd: string, args: string[], extraEnv: NodeJS.ProcessEnv = {}): string {
+  return execFileSync('git', args, {
+    cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: { ...gitEnv(), ...extraEnv },
+    timeout: 30_000, maxBuffer: 64 * 1024 * 1024,
+  });
+}
+
+function gitErrorMessage(err: unknown): string {
+  if (err && typeof err === 'object') {
+    const e = err as { stderr?: unknown; message?: unknown };
+    if (typeof e.stderr === 'string' && e.stderr.trim()) return e.stderr.trim();
+    if (typeof e.message === 'string' && e.message.trim()) return e.message.trim();
+  }
+  return String(err);
+}
+
+function pathStillExists(cwd: string, rel: string): boolean {
+  try { lstatSync(join(cwd, rel)); return true; }
+  catch { return false; }
 }
 
 /** Git repository identity for cwd-based policy decisions; null outside a readable Git repository. */
@@ -246,10 +269,10 @@ export function escapedPaths(
  * (postFp null with a non-null preFp — e.g. the leg destroyed `.git`) is the ultimate dirt and
  * blocks: `escapedPaths` reports that as "undecidable" (null), which must never pass a wrecked tree.
  *
- * Refuse-with-report ONLY. The opt-in that auto-committed the leg's dirt so the fallback could
- * proceed was cut before merge: git add/commit cannot isolate one leg's contribution at path
- * granularity, so it risks sweeping in the orchestrator's own uncommitted work (four independent
- * reviewers converged on six defects, PR #206). That designed feature is HED-622.
+ * Refuse-with-report by default. Opt-in recovery that auto-commits isolable new paths lives in
+ * `autoWipCommit` (HED-622): a naive git add/commit cannot isolate one leg's contribution at path
+ * granularity, so recovery is membership-guarded and temp-index-only; when isolation is undecidable
+ * this barrier still refuses.
  */
 export function fallbackBarrier(
   cwd: string, preFp: CheckoutFingerprint | null,
@@ -261,6 +284,96 @@ export function fallbackBarrier(
   const dirt = escapedPaths(preFp, postFp);
   if (dirt === null || dirt.length === 0) return { blocked: false, dirt };
   return { blocked: true, dirt };
+}
+
+const AUTO_WIP_MESSAGE = 'heddle auto-wip: isolate failed-leg new paths';
+
+/**
+ * Opt-in path-scoped auto-WIP of a failed leg's newly-created paths (HED-622).
+ *
+ * Commits ONLY paths in `postFp` that were absent from `preFp`, and only when HEAD is unchanged and
+ * every pre-existing dirty path is byte-identical. Isolation uses a temporary index (never the real
+ * `.git/index`). Any doubt — missing fingerprints, mixed dirt, vanished-all, git failure — refuses
+ * and leaves the real index exactly as found.
+ */
+export function autoWipCommit(
+  cwd: string, preFp: CheckoutFingerprint | null, postFp: CheckoutFingerprint | null,
+): { committed: true; newFp: CheckoutFingerprint } | { committed: false; reason: string } {
+  if (preFp === null || postFp === null) {
+    return { committed: false, reason: 'undecidable: missing pre or post fingerprint' };
+  }
+
+  const unsafe: string[] = [];
+  if (postFp.head !== preFp.head) {
+    unsafe.push(`HEAD moved ${preFp.head.slice(0, 8)} → ${postFp.head.slice(0, 8)}`);
+  }
+  const changed: string[] = [];
+  const cleared: string[] = [];
+  for (const [path, state] of preFp.entries) {
+    const now = postFp.entries.get(path);
+    if (now === undefined) cleared.push(path);
+    else if (now !== state) changed.push(path);
+  }
+  if (changed.length) unsafe.push(`pre-existing dirty path changed: ${changed.join(', ')}`);
+  if (cleared.length) unsafe.push(`pre-existing dirty path cleared: ${cleared.join(', ')}`);
+  if (unsafe.length) return { committed: false, reason: unsafe.join('; ') };
+
+  const safeSet = [...postFp.entries.keys()].filter((p) => !preFp.entries.has(p));
+  if (safeSet.length === 0) {
+    return { committed: false, reason: 'no isolable new paths (safeSet empty)' };
+  }
+
+  let tmpDir: string | undefined;
+  try {
+    tmpDir = mkdtempSync(join(tmpdir(), 'heddle-autowip-'));
+    const indexFile = join(tmpDir, 'index');
+    const pathspecFile = join(tmpDir, 'pathspec');
+    const indexEnv: NodeJS.ProcessEnv = {
+      GIT_INDEX_FILE: indexFile,
+      GIT_LITERAL_PATHSPECS: '1',
+    };
+
+    gitWithEnv(cwd, ['read-tree', 'HEAD'], indexEnv);
+
+    const existing = safeSet.filter((p) => pathStillExists(cwd, p));
+    if (existing.length === 0) {
+      return { committed: false, reason: 'all isolable paths vanished before staging' };
+    }
+
+    writeFileSync(pathspecFile, existing.join('\0') + '\0');
+    gitWithEnv(cwd, [
+      'add', '--ignore-errors',
+      `--pathspec-from-file=${pathspecFile}`,
+      '--pathspec-file-nul',
+    ], indexEnv);
+
+    const tree = gitWithEnv(cwd, ['write-tree'], indexEnv).trim();
+    let headTree: string;
+    try {
+      headTree = gitWithEnv(cwd, ['rev-parse', 'HEAD^{tree}']).trim();
+    } catch (err) {
+      return { committed: false, reason: `could not resolve HEAD tree: ${gitErrorMessage(err)}` };
+    }
+    if (tree === headTree) {
+      return { committed: false, reason: 'all isolable paths vanished before staging' };
+    }
+
+    const commitSha = gitWithEnv(cwd, ['commit-tree', tree, '-p', 'HEAD', '-m', AUTO_WIP_MESSAGE]).trim();
+    gitWithEnv(cwd, ['update-ref', 'HEAD', commitSha]);
+
+    const newFp = checkoutFingerprint(cwd);
+    if (newFp === null) {
+      return { committed: false, reason: 'auto-WIP updated HEAD but checkout fingerprint is unreadable' };
+    }
+    return { committed: true, newFp };
+  } catch (err) {
+    return { committed: false, reason: gitErrorMessage(err) };
+  } finally {
+    if (tmpDir !== undefined) {
+      try { rmSync(tmpDir, { recursive: true, force: true }); }
+      catch { /* temp cleanup is best-effort; the real index was never written */ }
+    }
+  }
 }
 
 /**

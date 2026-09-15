@@ -59,6 +59,11 @@ export function refusalOutcome(
   };
 }
 
+/** Instruction on fallback-blocked-dirty-tree refusals — advertises the opt-in now that it is wired. */
+export function dirtyTreeInstruction(cwd: string): string {
+  return `Commit or discard the changes in ${cwd}, then re-dispatch. Or re-dispatch with fallbackWipCommit to auto-commit the failed leg's own new files (a tree with pre-existing local changes is never auto-committed).`;
+}
+
 export function refuseBilling(
   ctx: DispatchContext, req: DispatchRequest, taskClass: string, target: RouteTarget,
   skills: string[], refusal: DispatchRefusal, fellBackFrom: string | null = null,

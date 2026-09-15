@@ -3,6 +3,7 @@ import { rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { dispatch, type AdapterFactory, type DispatchRequest } from '../src/dispatch.js';
+import { autoWipCommit, checkoutFingerprint, fallbackBarrier } from '../src/worktree.js';
 import type { Account } from '../src/accounts.js';
 import type { CapsByProvider } from '../src/usage.js';
 import type { DispatchOptions, WorkerAdapter, WorkerResult } from '../src/types.js';
@@ -26,6 +27,25 @@ function gitRepo(tempDir: () => string): string {
   git(root, 'add', 'tracked.txt');
   git(root, 'commit', '-q', '-m', 'init');
   return root;
+}
+
+function indexState(cwd: string): string {
+  return git(cwd, 'ls-files', '-s', '-z');
+}
+
+function statusState(cwd: string): string {
+  return git(cwd, 'status', '--porcelain', '-z', '-uall');
+}
+
+function committedPaths(cwd: string): string[] {
+  return git(cwd, 'diff-tree', '--no-commit-id', '--name-only', '-r', '-z', 'HEAD')
+    .split('\0').filter(Boolean).sort();
+}
+
+function requireFp(cwd: string) {
+  const fp = checkoutFingerprint(cwd);
+  if (fp === null) throw new Error(`expected fingerprint at ${cwd}`);
+  return fp;
 }
 
 function installRouting(tempDir: () => string): () => void {
@@ -151,7 +171,7 @@ describe('fallback commit barrier', () => {
       expect(outcome.refusal?.reason).toContain(`dispatch #${primary.id}`);
       expect(outcome.refusal?.reason).toContain('primary-dirt.txt');
       expect(outcome.refusal?.instruction).toBe(
-        `Commit or discard the changes in ${root}, then re-dispatch.`,
+        `Commit or discard the changes in ${root}, then re-dispatch. Or re-dispatch with fallbackWipCommit to auto-commit the failed leg's own new files (a tree with pre-existing local changes is never auto-committed).`,
       );
       // The refusal fires on a fallback path, so the row is attributed as a fallback (HED-622: the
       // direct refusalOutcome path must set usedFallback, not inherit the hard-coded false).
@@ -257,5 +277,184 @@ describe('fallback commit barrier', () => {
       expect(git(root, 'rev-list', '--count', 'HEAD').trim()).toBe('2');
       expect(harness.calls.map((call) => call.provider)).toEqual(['codex']);
     } finally { restore(); }
+  });
+});
+
+describe('autoWipCommit isolation', () => {
+  const { tempDir, tempLedger } = useTempResources('heddle-autowip-test-');
+
+  it('membership-block: a changed pre-existing dirty path refuses and commits nothing', () => {
+    const root = gitRepo(tempDir);
+    writeFileSync(join(root, 'pre-existing.txt'), 'orchestrator\n');
+    const preFp = requireFp(root);
+    writeFileSync(join(root, 'pre-existing.txt'), 'leg overwrote it\n');
+    writeFileSync(join(root, 'leg-new.txt'), 'new\n');
+    const postFp = requireFp(root);
+    const headBefore = git(root, 'rev-parse', 'HEAD').trim();
+    const indexBefore = indexState(root);
+
+    const result = autoWipCommit(root, preFp, postFp);
+    expect(result.committed).toBe(false);
+    if (!result.committed) expect(result.reason).toContain('pre-existing dirty path changed');
+    expect(git(root, 'rev-parse', 'HEAD').trim()).toBe(headBefore);
+    expect(indexState(root)).toBe(indexBefore);
+    expect(git(root, 'rev-list', '--count', 'HEAD').trim()).toBe('1');
+  });
+
+  it('path-scope isolation: commits only the leg new file; orchestrator staged file is untouched', () => {
+    const root = gitRepo(tempDir);
+    writeFileSync(join(root, 'orch-staged.txt'), 'orchestrator staged\n');
+    git(root, 'add', 'orch-staged.txt');
+    const preFp = requireFp(root);
+    writeFileSync(join(root, 'leg-new.txt'), 'leg created\n');
+    const postFp = requireFp(root);
+    const indexBefore = indexState(root);
+    const stagedBefore = git(root, 'diff', '--cached', '--', 'orch-staged.txt');
+
+    const result = autoWipCommit(root, preFp, postFp);
+    expect(result.committed).toBe(true);
+    expect(committedPaths(root)).toEqual(['leg-new.txt']);
+    expect(indexState(root)).toBe(indexBefore);
+    expect(git(root, 'diff', '--cached', '--', 'orch-staged.txt')).toBe(stagedBefore);
+    expect(git(root, 'ls-tree', '-r', '--name-only', 'HEAD').split('\n')).not.toContain('orch-staged.txt');
+    expect(git(root, 'show', 'HEAD:leg-new.txt')).toBe('leg created\n');
+  });
+
+  it('pathspec-magic literal: a :(glob) filename commits as a literal path', () => {
+    const root = gitRepo(tempDir);
+    writeFileSync(join(root, 'x'), 'would match glob\n');
+    const preFp = requireFp(root);
+    writeFileSync(join(root, ':(glob)x'), 'literal magic\n');
+    const postFp = requireFp(root);
+
+    const result = autoWipCommit(root, preFp, postFp);
+    expect(result.committed).toBe(true);
+    expect(committedPaths(root)).toEqual([':(glob)x']);
+    const ls = git(root, 'ls-tree', '-r', 'HEAD');
+    const line = ls.split('\n').find((row) => row.endsWith('\t:(glob)x'));
+    expect(line).toBeTruthy();
+    const blob = line!.split(/\s+/)[2];
+    expect(git(root, 'cat-file', '-p', blob)).toBe('literal magic\n');
+    expect(git(root, 'ls-tree', '-r', '--name-only', 'HEAD').split('\n')).not.toContain('x');
+    expect(git(root, 'status', '--short', '--', 'x')).toContain('x');
+  });
+
+  it('refresh-no-false-block: fallbackBarrier against the refreshed fingerprint does not block', () => {
+    const root = gitRepo(tempDir);
+    const preFp = requireFp(root);
+    writeFileSync(join(root, 'leg-new.txt'), 'leg\n');
+    const postFp = requireFp(root);
+
+    const result = autoWipCommit(root, preFp, postFp);
+    expect(result.committed).toBe(true);
+    if (!result.committed) throw new Error('expected commit');
+    const barrier = fallbackBarrier(root, result.newFp);
+    expect(barrier.blocked).toBe(false);
+  });
+
+  it('index-restore: real index is untouched on success and on a forced-failure path', () => {
+    const root = gitRepo(tempDir);
+    writeFileSync(join(root, 'orch-staged.txt'), 'staged\n');
+    git(root, 'add', 'orch-staged.txt');
+    const indexBefore = indexState(root);
+    const statusBefore = statusState(root);
+
+    const preFp = requireFp(root);
+    writeFileSync(join(root, 'keep.txt'), 'keep\n');
+    writeFileSync(join(root, 'gone.txt'), 'gone\n');
+    const postFp = requireFp(root);
+    rmSync(join(root, 'keep.txt'));
+    rmSync(join(root, 'gone.txt'));
+    const failed = autoWipCommit(root, preFp, postFp);
+    expect(failed.committed).toBe(false);
+    if (!failed.committed) expect(failed.reason).toContain('vanished');
+    expect(indexState(root)).toBe(indexBefore);
+
+    writeFileSync(join(root, 'leg-new.txt'), 'leg\n');
+    const successPost = requireFp(root);
+    const success = autoWipCommit(root, preFp, successPost);
+    expect(success.committed).toBe(true);
+    expect(indexState(root)).toBe(indexBefore);
+    expect(git(root, 'diff', '--cached', '--', 'orch-staged.txt').length).toBeGreaterThan(0);
+    expect(statusBefore.includes('orch-staged.txt')).toBe(true);
+    expect(statusState(root).includes('orch-staged.txt')).toBe(true);
+  });
+
+  it('vanished-path tolerance: remaining safeSet paths still commit; all-vanished refuses', () => {
+    const root = gitRepo(tempDir);
+    const preFp = requireFp(root);
+    writeFileSync(join(root, 'keep.txt'), 'keep\n');
+    writeFileSync(join(root, 'gone.txt'), 'gone\n');
+    const postFp = requireFp(root);
+    rmSync(join(root, 'gone.txt'));
+
+    const partial = autoWipCommit(root, preFp, postFp);
+    expect(partial.committed).toBe(true);
+    expect(committedPaths(root)).toEqual(['keep.txt']);
+
+    const pre2 = requireFp(root);
+    writeFileSync(join(root, 'a.txt'), 'a\n');
+    writeFileSync(join(root, 'b.txt'), 'b\n');
+    const post2 = requireFp(root);
+    rmSync(join(root, 'a.txt'));
+    rmSync(join(root, 'b.txt'));
+    const headBefore = git(root, 'rev-parse', 'HEAD').trim();
+    const allGone = autoWipCommit(root, pre2, post2);
+    expect(allGone.committed).toBe(false);
+    expect(git(root, 'rev-parse', 'HEAD').trim()).toBe(headBefore);
+  });
+
+  it('opt-in surface: absent/false refuses; true with an isolable tree proceeds', async () => {
+    const restore = installRouting(tempDir);
+    try {
+      const absentRoot = gitRepo(tempDir);
+      const absentHarness = adapterHarness({
+        codex: () => { writeFileSync(join(absentRoot, 'primary-dirt.txt'), 'dirty\n'); return failure(); },
+        cursor: success,
+      });
+      const absent = await dispatch(request(absentRoot), tempLedger(), absentHarness.factory);
+      expect(absent.refusal?.code).toBe('fallback-blocked-dirty-tree');
+      expect(absentHarness.calls.map((call) => call.provider)).toEqual(['codex']);
+      expect(git(absentRoot, 'rev-list', '--count', 'HEAD').trim()).toBe('1');
+
+      const falseRoot = gitRepo(tempDir);
+      const falseHarness = adapterHarness({
+        codex: () => { writeFileSync(join(falseRoot, 'primary-dirt.txt'), 'dirty\n'); return failure(); },
+        cursor: success,
+      });
+      const off = await dispatch(request(falseRoot, { fallbackWipCommit: false }), tempLedger(), falseHarness.factory);
+      expect(off.refusal?.code).toBe('fallback-blocked-dirty-tree');
+      expect(falseHarness.calls.map((call) => call.provider)).toEqual(['codex']);
+      expect(git(falseRoot, 'rev-list', '--count', 'HEAD').trim()).toBe('1');
+
+      const onRoot = gitRepo(tempDir);
+      const onHarness = adapterHarness({
+        codex: () => { writeFileSync(join(onRoot, 'primary-dirt.txt'), 'dirty\n'); return failure(); },
+        cursor: success,
+      });
+      const on = await dispatch(request(onRoot, { fallbackWipCommit: true }), tempLedger(), onHarness.factory);
+      expect(on).toMatchObject({ ok: true, provider: 'cursor', usedFallback: true });
+      expect(onHarness.calls.map((call) => call.provider)).toEqual(['codex', 'cursor']);
+      expect(committedPaths(onRoot)).toEqual(['primary-dirt.txt']);
+      expect(git(onRoot, 'show', 'HEAD:primary-dirt.txt')).toBe('dirty\n');
+    } finally { restore(); }
+  });
+
+  it('gitignored leg files never enter safeSet and are not committed', () => {
+    const root = gitRepo(tempDir);
+    writeFileSync(join(root, '.gitignore'), 'secret.bin\n');
+    git(root, 'add', '.gitignore');
+    git(root, 'commit', '-q', '-m', 'ignore');
+    const preFp = requireFp(root);
+    writeFileSync(join(root, 'secret.bin'), 'ignored\n');
+    writeFileSync(join(root, 'visible.txt'), 'visible\n');
+    const postFp = requireFp(root);
+    expect(postFp.entries.has('secret.bin')).toBe(false);
+    expect(postFp.entries.has('visible.txt')).toBe(true);
+
+    const result = autoWipCommit(root, preFp, postFp);
+    expect(result.committed).toBe(true);
+    expect(committedPaths(root)).toEqual(['visible.txt']);
+    expect(git(root, 'ls-tree', '-r', '--name-only', 'HEAD').split('\n')).not.toContain('secret.bin');
   });
 });

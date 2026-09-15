@@ -87,6 +87,7 @@ server.tool(
       'Grants are ledgered and passed only to a provider whose CLI can enforce them (codex); an ' +
       'unenforceable or unknown grant is refused (refusal.code=capability-denied).'),
     no_fallback: z.boolean().optional().describe('Do not try the routing table fallback on failure.'),
+    fallback_wip_commit: z.boolean().optional().describe('Opt-in (default off): auto-commit ONLY the failed leg\'s newly-created paths so fallback can proceed; a tree with pre-existing local changes is never auto-committed.'),
     timeout_ms: z.number().optional().describe('Wall-clock budget (default 600000).'),
   },
   async (a) => {
@@ -109,6 +110,7 @@ server.tool(
         env: Object.keys(env).length ? env : undefined,
         optIn: a.opt_in, overrideReason: a.override_reason,
         noFallback: a.no_fallback,
+        fallbackWipCommit: a.fallback_wip_commit,
         timeoutMs: a.timeout_ms,
         capabilities: a.capabilities,
         inSession: a.in_session,
