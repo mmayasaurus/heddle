@@ -105,6 +105,36 @@ task_classes:
     expect(ledgerError).not.toContain(esc);
   });
 
+  it('treats an ABSENT credential file as benign (ENOENT): no security marker, fallback not suppressed', async () => {
+    // A HOME with NO .heddle/secrets.env at all → secureReadFile surfaces ENOENT → readSecretsEnvValue
+    // returns undefined (key simply not configured). This is the fail-OPEN counterpart to the insecure
+    // case above: an absent file is not a security boundary failure, so NO securityRefusal is set and the
+    // safety short-circuit must not fire (codacy #239 — the ENOENT branch).
+    const home = tempDir();
+    process.env.HOME = home;
+    process.env.HEDDLE_ROUTING = fallbackRouting(tempDir());
+    vi.resetModules();
+
+    const [{ dispatch }, { OpenAICompatAdapter }] = await Promise.all([
+      import('../src/dispatch.js'),
+      import('../src/adapters/openai-compat.js'),
+    ]);
+    const fallback = fakeAdapter({ ok: true, output: 'fallback result', exitCode: 0 }, { readAgents: false });
+    const outcome = await dispatch(
+      { taskClass: 'security-fallback', prompt: 'x', cwd: tempDir(), identity: IDENTITIES.unbound },
+      tempLedger(),
+      (provider) => provider === 'groq' ? new OpenAICompatAdapter('groq') : fallback.adapter,
+    );
+
+    // The security invariant: an absent file is NOT a security refusal, so the fallback is not suppressed
+    // for safety (contrast the insecure-file test, which sets securityRefusal and suppresses).
+    expect(outcome.securityRefusal).toBeUndefined();
+    expect(outcome.error ?? '').not.toContain('fallback suppressed for safety');
+    // And the missing key lets the class fall back to its configured secondary, like any benign primary miss.
+    expect(outcome).toMatchObject({ usedFallback: true, provider: 'codex', ok: true });
+    expect(fallback.calls).toHaveLength(1);
+  });
+
   it('still falls back after an ordinary provider failure', async () => {
     process.env.HEDDLE_ROUTING = fallbackRouting(tempDir());
     const { dispatch } = await import('../src/dispatch.js');
