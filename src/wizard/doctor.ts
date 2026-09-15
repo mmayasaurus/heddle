@@ -8,10 +8,12 @@
 // skill packs — those wizard steps carry their own results.
 //
 // It verifies the REAL resolved environment, exactly as `heddle doctor` does: it passes NO path
-// overrides, so every path resolves uniformly through runDoctor (HEDDLE_* env → ~/.heddle default).
-// Relocating only some paths under ctx.homeDir would split the view (drift under one root, accounts
-// under another); relocating all of them would diverge from what `heddle doctor` reports and clobber
-// the operator's HEDDLE_* env. A hermetic test relocates the whole tree via injected doctorDeps.
+// overrides, so each path resolves through runDoctor's own resolution — the HEDDLE_* env var where
+// one exists, otherwise runDoctor's built-in default (routing/lanes under the repo; accounts/comms/
+// operator-token under ~/.heddle). Relocating only some paths under ctx.homeDir would split the view
+// (drift under one root, accounts under another); relocating all of them would diverge from what
+// `heddle doctor` reports and clobber the operator's HEDDLE_* env. A hermetic test relocates the
+// whole tree via injected doctorDeps.
 //
 // This is HED-564's read-only step: it makes NO config changes of its own. runDoctor is a read-only
 // probe with one incidental exception — opening an EXISTING older comms.db applies the standard
@@ -79,7 +81,15 @@ export function createDoctorStep(injected: DoctorStepDeps = {}): WizardStep {
         return { id: 'doctor', status, summary, detail: text };
       } catch (error) {
         // A thrown doctor run must not abort the wizard — report it as a failed verification instead.
-        const detail = error instanceof Error ? error.message : String(error);
+        // Stringify defensively: a non-Error throwable (a null-prototype object, a Symbol) can make
+        // String() itself throw, which would break the very "never aborts" guarantee this catch exists
+        // for — so the conversion is itself wrapped.
+        let detail: string;
+        try {
+          detail = error instanceof Error ? error.message : String(error);
+        } catch {
+          detail = 'a non-Error value was thrown';
+        }
         return { id: 'doctor', status: 'failed', summary: `verification could not run: ${detail}`, detail };
       }
     },

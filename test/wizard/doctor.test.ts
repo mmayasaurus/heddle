@@ -1,4 +1,4 @@
-import { mkdirSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { createDoctorStep } from '../../src/wizard/doctor.js';
@@ -143,20 +143,24 @@ describe('createDoctorStep (HED-476 wizard finish = read-only `heddle doctor`)',
     expect(treeSnapshot(home)).toEqual(before);
   });
 
-  it('maps a REAL runDoctor report end-to-end on hermetic deps, imposing no config writes (F5)', async () => {
+  it('maps a REAL runDoctor report end-to-end on hermetic deps, and does not create the comms.db it probes (F5)', async () => {
     // Exercise the actual runDoctor (not a canned report) through the step, with the whole config
     // tree + probes relocated via doctor-fixtures.fakeDeps() so nothing touches the real ~/.heddle
     // and no binary is spawned. Capture the real report and assert the MAPPING against it (robust to
-    // check-count drift), then that the temp home is untouched (no comms.db there → no migration).
-    const home = tempDir();
+    // check-count drift). For read-only-ness we pin the ONE write runDoctor could make — the comms.db
+    // schema-migration-on-open — by asserting the (absent) comms.db it probes is never created.
+    // (runDoctor's broader read-only-ness is doctor.ts's own contract, covered by its suite; the
+    // wrapper-adds-no-writes regression is the faked-runner test above.)
+    const deps = fakeDeps();
+    const commsPath = deps.paths!.comms!;
+    expect(existsSync(commsPath)).toBe(false); // precondition: fixtures point comms at an absent path
     let rep: DoctorReport | undefined;
     const step = createDoctorStep({
       runDoctor: async (o, p) => (rep = await realRunDoctor(o, p)),
-      doctorDeps: fakeDeps(),
+      doctorDeps: deps,
     });
-    const before = treeSnapshot(home);
     const { io, lines } = makeIO();
-    const result = await step.run(makeCtx(home), io);
+    const result = await step.run(makeCtx(tempDir()), io);
 
     expect(rep).toBeDefined();
     const { ok, warn, fail } = rep!.summary;
@@ -166,7 +170,17 @@ describe('createDoctorStep (HED-476 wizard finish = read-only `heddle doctor`)',
     expect(result.status).toBe(fail > 0 || ran === 0 ? 'failed' : 'done');
     expect(result.detail).toBe(formatDoctorReport(rep!));
     expect(lines).toEqual(formatDoctorReport(rep!).split('\n'));
-    expect(treeSnapshot(home)).toEqual(before);
+    expect(existsSync(commsPath)).toBe(false); // the read-only sweep created no comms.db (no migration)
+  });
+
+  it('returns failed (never throws) even when the runner rejects with a non-Error throwable', async () => {
+    // The "never aborts the wizard" guarantee must hold for ANY throwable — a null-prototype object
+    // makes String() itself throw, so the catch's stringify is defensively wrapped (codex r2 LOW).
+    const step = createDoctorStep({ runDoctor: async () => { throw Object.create(null); } });
+    const result = await step.run(makeCtx(tempDir()), makeIO().io);
+    expect(result.status).toBe('failed');
+    expect(result.summary).toContain('verification could not run');
+    expect(result.detail).toBe('a non-Error value was thrown');
   });
 });
 
