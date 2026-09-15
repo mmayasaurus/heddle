@@ -114,6 +114,8 @@ describe('modelEconomyStep', () => {
     '{ not json',
     JSON.stringify({ version: 1, premium: { agents: 'R' } }),
     JSON.stringify({ version: 1, modelPins: 'yes' }),
+    JSON.stringify({ version: 2 }),
+    JSON.stringify({ version: '1' }),
   ])('fails loudly on a corrupt policy without overwriting its bytes', async (raw) => {
     const homeDir = home();
     const file = writePriorPolicy(homeDir, raw);
@@ -121,7 +123,8 @@ describe('modelEconomyStep', () => {
     const result = await modelEconomyStep.run(context(homeDir), io([], []));
 
     expect(result).toMatchObject({ id: 'model-economy', status: 'failed' });
-    expect(result.summary).toMatch(/corrupt/i);
+    // The summary names why it is corrupt (the thrown reason), then how to recover.
+    expect(result.summary).toMatch(/corrupt: .+ — fix or remove /);
     expect(readFileSync(file, 'utf8')).toBe(raw);
   });
 });

@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { atomicWriteFile, policyPath } from './persist.js';
-import type { WizardStep } from './step.js';
+import type { WizardIO, WizardStep } from './step.js';
 
 const POLICY_ID = 'model-economy';
 const DEFAULT_MODEL = 'claude-opus-4-8[1m]';
@@ -72,6 +72,11 @@ function readPriorEconomyPolicy(path: string): Record<string, unknown> {
   const parsed: unknown = JSON.parse(raw);
   if (!isPlainObject(parsed)) throw new Error('model-economy policy is not a JSON object');
 
+  // A policy from a newer schema must not be silently reshaped into v1 and overwritten; fail loudly.
+  if ('version' in parsed && parsed.version !== 1) {
+    throw new Error('model-economy policy "version" is not 1');
+  }
+
   if ('default' in parsed) {
     if (!isPlainObject(parsed.default)) throw new Error('model-economy policy "default" is not an object');
     if ('model' in parsed.default && typeof parsed.default.model !== 'string') {
@@ -102,6 +107,40 @@ function readPriorEconomyPolicy(path: string): Record<string, unknown> {
   return parsed;
 }
 
+/**
+ * Prompt for every economy decision, seeding each prompt's default from the prior policy so a saved
+ * choice stays visible. An empty text answer cannot express "no agents", so a confirm gates the list.
+ */
+async function promptDecision(io: WizardIO, prior: Record<string, unknown>): Promise<EconomyDecision> {
+  const priorDefault = asObj(prior.default) as Partial<EconomyPolicy['default']>;
+  const priorPremium = asObj(prior.premium) as Partial<EconomyPolicy['premium']>;
+  const priorModelPins = prior.modelPins as boolean | undefined;
+  const defaultModel = await io.prompter.text('default model for the fleet', priorDefault.model ?? DEFAULT_MODEL);
+  const defaultEffort = await io.prompter.text('default effort', priorDefault.effort ?? DEFAULT_EFFORT);
+  const priorHadAgents = Array.isArray(priorPremium.agents) ? priorPremium.agents.length > 0 : true;
+  const anyPremium = await io.prompter.confirm('do any agents ride a premium model?', priorHadAgents);
+
+  let agents: string[];
+  let premiumModel: string;
+  let premiumEffort: string;
+  if (anyPremium) {
+    const agentsRaw = await io.prompter.text(
+      'which agents ride the premium model? (comma-separated letters)',
+      (priorPremium.agents ?? PREMIUM_AGENTS).join(','),
+    );
+    agents = agentsRaw.split(',').map((agent) => agent.trim()).filter(Boolean);
+    premiumModel = await io.prompter.text('premium model', priorPremium.model ?? PREMIUM_MODEL);
+    premiumEffort = await io.prompter.text('premium effort', priorPremium.effort ?? PREMIUM_EFFORT);
+  } else {
+    agents = [];
+    premiumModel = priorPremium.model ?? PREMIUM_MODEL;
+    premiumEffort = priorPremium.effort ?? PREMIUM_EFFORT;
+  }
+
+  const modelPins = await io.prompter.confirm('pin the model per agent?', priorModelPins ?? DEFAULT_MODEL_PINS);
+  return { defaultModel, defaultEffort, premiumAgents: agents, premiumModel, premiumEffort, modelPins };
+}
+
 export const modelEconomyStep: WizardStep = {
   id: 'model-economy',
   title: 'Model economy',
@@ -120,40 +159,13 @@ export const modelEconomyStep: WizardStep = {
     let prior: Record<string, unknown>;
     try {
       prior = readPriorEconomyPolicy(file);
-    } catch {
-      return { id: 'model-economy', status: 'failed', summary: 'existing model-economy policy is corrupt — fix or remove ' + file };
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      return { id: 'model-economy', status: 'failed', summary: `existing model-economy policy is corrupt: ${reason} — fix or remove ${file}` };
     }
 
-    const priorDefault = asObj(prior.default) as Partial<EconomyPolicy['default']>;
-    const priorPremium = asObj(prior.premium) as Partial<EconomyPolicy['premium']>;
-    const priorModelPins = prior.modelPins as boolean | undefined;
-    const defaultModel = await io.prompter.text('default model for the fleet', priorDefault.model ?? DEFAULT_MODEL);
-    const defaultEffort = await io.prompter.text('default effort', priorDefault.effort ?? DEFAULT_EFFORT);
-    // An empty text answer cannot express no agents when the default is non-empty, so gate the list.
-    const priorHadAgents = Array.isArray(priorPremium.agents) ? priorPremium.agents.length > 0 : true;
-    const anyPremium = await io.prompter.confirm('do any agents ride a premium model?', priorHadAgents);
-
-    let agents: string[];
-    let premiumModel: string;
-    let premiumEffort: string;
-    if (anyPremium) {
-      const agentsRaw = await io.prompter.text(
-        'which agents ride the premium model? (comma-separated letters)',
-        (priorPremium.agents ?? PREMIUM_AGENTS).join(','),
-      );
-      agents = agentsRaw.split(',').map((agent) => agent.trim()).filter(Boolean);
-      premiumModel = await io.prompter.text('premium model', priorPremium.model ?? PREMIUM_MODEL);
-      premiumEffort = await io.prompter.text('premium effort', priorPremium.effort ?? PREMIUM_EFFORT);
-    } else {
-      agents = [];
-      premiumModel = priorPremium.model ?? PREMIUM_MODEL;
-      premiumEffort = priorPremium.effort ?? PREMIUM_EFFORT;
-    }
-
-    const modelPins = await io.prompter.confirm('pin the model per agent?', priorModelPins ?? DEFAULT_MODEL_PINS);
-    const policy = computeEconomyPolicy({
-      defaultModel, defaultEffort, premiumAgents: agents, premiumModel, premiumEffort, modelPins,
-    }, prior);
+    const decision = await promptDecision(io, prior);
+    const policy = computeEconomyPolicy(decision, prior);
 
     // Persist through the shared atomic writer (temp-in-dir plus rename) after every decision is known.
     try {
@@ -166,6 +178,7 @@ export const modelEconomyStep: WizardStep = {
       };
     }
 
+    const { defaultModel, defaultEffort, premiumAgents: agents, premiumModel, premiumEffort, modelPins } = decision;
     return {
       id: 'model-economy',
       status: 'done',
