@@ -9,8 +9,8 @@ import { ScriptedPrompter } from '../../src/wizard/prompt.js';
 import type { WizardContext, WizardIO } from '../../src/wizard/step.js';
 import { useTempResources } from '../helpers.js';
 
-function context(targetDir: string | undefined, dryRun = false): WizardContext {
-  return { homeDir: targetDir ?? '/unused', targetDir, dryRun, now: () => new Date(), results: new Map() };
+function context(targetDir: string | undefined, dryRun = false, targetDirDerived = false): WizardContext {
+  return { homeDir: targetDir ?? '/unused', targetDir, targetDirDerived, dryRun, now: () => new Date(), results: new Map() };
 }
 
 function io(answers: unknown[], lines: string[] = []): WizardIO {
@@ -140,8 +140,9 @@ describe('prAutomationStep', () => {
     execFileSync('git', ['-C', fallback, 'checkout', '-q', '-b', 'feature-only']);
     commit(fallback);
     execFileSync('git', ['-C', fallback, 'checkout', '-q', '--detach']);
-    // A charset-hostile origin/HEAD (git allows `$`, `"`, backtick, … in a ref; only a bare space is
-    // rejected) must never be interpolated into a workflow — detection falls through to the
+    // A charset-hostile origin/HEAD (git permits `$`, `"`, backtick, … in a ref — it rejects space, `~`,
+    // `^`, `:`, `?`, `*`, `[`, backslash and control chars, but the permitted set is still hostile here)
+    // must never be interpolated into a workflow — detection falls through to the
     // conventional-name lookup, then the 'main' default (qodo/codeant HED-616 sanitization). Set the
     // ref directly rather than via push/clone: it drives the exact symbolic-ref read detection uses and
     // keeps this git-heavy integration test fast.
@@ -222,5 +223,43 @@ describe('prAutomationStep', () => {
     expect(templates.workflowTemplate).toContain('Deterministic Review');
     expect(templates.gitleaksRangeScan).toContain('set -eu');
     expect(templates.gateTemplate).toContain('__HEDDLE_GATE_BUILD_STEPS__');
+  });
+
+  // ---- HED-624: confirm-first when the target was AUTO-DETECTED from cwd (targetDirDerived) -----------
+  // An explicit --target stays silent (covered by every test above, which passes targetDirDerived=false and
+  // never scripts a leading confirm answer — a confirm firing there would throw on the non-boolean preset).
+  it('auto-detected target: declining the confirm skips without writing anything (HED-624)', async () => {
+    const targetDir = targetRepo(tempDir);
+    const lines: string[] = [];
+    const result = await prAutomationStep().run(context(targetDir, false, true), io([false], lines));
+    expect(result.status).toBe('skipped');
+    expect(result.summary).toMatch(/declined/);
+    expect(existsSync(join(targetDir, '.github', 'workflows', 'deterministic-review.yml'))).toBe(false);
+    expect(existsSync(join(targetDir, '.github', 'workflows', 'gate.yml'))).toBe(false);
+    expect(lines.some((line) => line.includes('declined scaffolding'))).toBe(true);
+  });
+
+  it('auto-detected target: accepting the confirm scaffolds as normal (HED-624)', async () => {
+    const targetDir = targetRepo(tempDir);
+    const result = await prAutomationStep().run(context(targetDir, false, true), io([true, 'TS/Node']));
+    expect(result.status).toBe('done');
+    expect(existsSync(join(targetDir, '.github', 'workflows', 'deterministic-review.yml'))).toBe(true);
+    expect(existsSync(join(targetDir, '.github', 'workflows', 'gate.yml'))).toBe(true);
+  });
+
+  it('auto-detected target dry-run: discloses it would confirm first, writes nothing (HED-624)', async () => {
+    const targetDir = targetRepo(tempDir);
+    const lines: string[] = [];
+    const result = await prAutomationStep().run(context(targetDir, true, true), io([], lines));
+    expect(result.status).toBe('skipped');
+    expect(result.summary).toContain('auto-detected repo, would confirm first');
+    expect(lines.join('\n')).toContain('a real run would confirm before writing');
+    expect(existsSync(join(targetDir, '.github', 'workflows', 'deterministic-review.yml'))).toBe(false);
+  });
+
+  it('renderGate throws (fail-closed) on a defaultBranch that fails SAFE_BRANCH (HED-616)', () => {
+    // The fail-closed throw added in 10ee703 was left unasserted — detection never returns a failing value
+    // and the presets default to 'main', so nothing pinned it. Pin it here (X, HED-616 review rider).
+    expect(() => renderGate({ ...TS_NODE, defaultBranch: 'foo"bar' })).toThrow(/not a safe ref name/);
   });
 });

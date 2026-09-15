@@ -144,7 +144,8 @@ function gateBuildSteps(options: RenderOptions): string {
 
 // A git branch ref may legally contain characters that are hostile in the YAML and shell contexts the
 // templates interpolate the branch into: `git check-ref-format` permits `"`, `$`, backtick, `,` and more —
-// only a bare space (and a few structural sequences) are rejected. Constrain any branch that reaches a
+// it rejects space, `~`, `^`, `:`, `?`, `*`, `[`, backslash and control chars (plus structural sequences),
+// yet the permitted set is still hostile here. Constrain any branch that reaches a
 // template to a conservative charset. detectDefaultBranch treats a name that fails this as undetectable
 // (it falls through to the conventional-name lookup); renderWorkflow throws, so no caller — including the
 // exported render helpers — can smuggle an unvetted value into a workflow (qodo/codeant, HED-616).
@@ -271,12 +272,24 @@ export function prAutomationStep(): WizardStep {
       const paths = targetPaths(ctx.targetDir);
       const defaultBranch = detectDefaultBranch(ctx.targetDir);
       if (ctx.dryRun) {
-        io.report(`dry-run — PR automation: a real run would write ${paths.workflow}, ${paths.gate}, and ${paths.gitleaks} using the TS/Node preset; detected default branch: ${defaultBranch}; nothing was prompted or written.`);
+        const detectedNote = ctx.targetDirDerived ? ' (auto-detected repository — a real run would confirm before writing)' : '';
+        io.report(`dry-run — PR automation: a real run would write ${paths.workflow}, ${paths.gate}, and ${paths.gitleaks} using the TS/Node preset; detected default branch: ${defaultBranch}${detectedNote}; nothing was prompted or written.`);
         return {
           id: 'pr-automation',
           status: 'skipped',
-          summary: `dry-run — PR automation: TS/Node preset; detected default branch ${defaultBranch}; workflow, gate, and script write skipped`,
+          summary: `dry-run — PR automation: TS/Node preset; detected default branch ${defaultBranch}; workflow, gate, and script write skipped${ctx.targetDirDerived ? ' (auto-detected repo, would confirm first)' : ''}`,
         };
+      }
+
+      // HED-624: when the target was auto-detected from the cwd (not named via --target), confirm before
+      // scaffolding into it — the operator never pointed us at this repo, so writing silently would assume
+      // intent (Maya's Option B). An explicit --target is the opt-in and skips this; decline → nothing written.
+      if (ctx.targetDirDerived) {
+        const proceed = await io.prompter.confirm(`Detected a git repository at ${ctx.targetDir}. Scaffold CI review workflows into its .github/?`, false);
+        if (!proceed) {
+          io.report('PR automation skipped: declined scaffolding into the auto-detected repository.');
+          return { id: 'pr-automation', status: 'skipped', summary: 'PR automation: declined for auto-detected repository' };
+        }
       }
 
       const preset = presetFor(await io.prompter.select('Language preset', presetChoices));
