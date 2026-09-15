@@ -122,6 +122,19 @@ describe('heddle-hook bin', () => {
     expect(r.stderr).toContain('rules policy');
     expect(r.stderr).not.toContain('FAILED OPEN');
   });
+  it('does NOT echo invalid-policy file content into stderr (no log/terminal injection)', async () => {
+    // PR #237 qodo HIGH regression pin, through the REAL binary: a planted invalid policy whose content
+    // carries a distinctive marker must NOT surface in the hook's stderr — the warning names the path only.
+    // A revert that re-interpolated JSON.parse's message (which echoes the raw bytes) would leak the marker.
+    const rules = tempDir(); const home = tempDir();
+    writeFileSync(join(rules, 'sample-block.yaml'), rule('sample-block', 'PreToolUse', 'block', true, 'denied'));
+    writePolicy(home, 'INJECT3D_MARKER_ZZZ not json'); // raw invalid-JSON string, written 0600 (starts at char 0)
+    const r = await runHook(rules, JSON.stringify({ hook_event_name: 'PreToolUse' }), { HOME: home });
+    expect(r.stderr).toContain('rules policy'); // loud: present-but-unusable
+    expect(r.stderr).not.toContain('INJECT3D'); // raw file content must NOT leak into stderr
+    expect(JSON.parse(r.stdout).hookSpecificOutput.permissionDecision).toBe('deny'); // catalog preserved
+    expect(r.stderr).not.toContain('FAILED OPEN');
+  });
   it('treats HEDDLE_WORKER=0 as an orchestrator for role-matched rules', async () => {
     const d = tempDir();
     writeFileSync(join(d, 'orchestrator.yaml'), rule('orchestrator', 'PreToolUse', 'nudge', false, 'orchestrator rule').replace('match: {}', 'match:\n  agent_role: orchestrator'));

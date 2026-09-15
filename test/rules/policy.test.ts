@@ -82,11 +82,17 @@ describe('loadRulesPolicy', () => {
     expect(result.policy).toBeUndefined();
   });
 
-  it('fails open LOUDLY (warning names the path) for invalid JSON', () => {
-    const path = writePolicyFile('{ not json');
+  it('fails open LOUDLY for invalid JSON WITHOUT echoing the file content (no log/terminal injection)', () => {
+    // The invalid-JSON warning must name the PATH but never the file CONTENT: JSON.parse's message echoes a
+    // snippet of the raw bytes, so a same-uid-planted policy could inject terminal escapes / spoofed text
+    // into the hook's stderr (PR #237 qodo HIGH). The content starts at char 0 with a distinctive marker, so
+    // any parser snippet would carry it — this FAILS if the fix is reverted to interpolate the parser detail.
+    const marker = 'INJECT3D_MARKER_ZZZ';
+    const path = writePolicyFile(`${marker} not json`);
     const result = loadRulesPolicy(path);
     expect(result.warning).toContain(path);
     expect(result.warning).toContain('not valid JSON');
+    expect(result.warning).not.toContain('INJECT3D'); // raw file content must not reach the warning/stderr
     expect(result.policy).toBeUndefined();
     expect(result.absent).toBeUndefined();
   });
