@@ -659,6 +659,39 @@ describe('secure filesystem primitives', () => {
 
       expect(() => ensureSecureDir(dir, { boundary: unrelated })).toThrow(/boundary|ancestor/i);
     });
+
+    it('normalizes a trailing-slash boundary so it still stops at the trust root (exclusive preserved)', () => {
+      const root = tempDir();
+      const home = join(root, 'home'); mkdirSync(home, { mode: 0o700 });
+      const heddle = join(home, '.heddle'); mkdirSync(heddle, { mode: 0o700 });
+      const leaf = join(heddle, 'creds'); mkdirSync(leaf, { mode: 0o700 });
+      chmodSync(home, 0o777); // loose home = operator domain, must NOT be validated
+
+      // Without normalization the exact-string stop (`${home}/` !== resolved home) never matches, so the walk
+      // climbs into `home` and wrongly rejects it. resolve() collapses the trailing slash → stops exactly at home.
+      expect(() => ensureSecureDir(leaf, { boundary: `${home}/` })).not.toThrow();
+    });
+
+    it('still rejects an unsafe grandparent BELOW a trailing-slash boundary (walk not disabled by normalization)', () => {
+      const root = tempDir();
+      const home = join(root, 'home'); mkdirSync(home, { mode: 0o700 });
+      const grand = join(home, '.heddle'); mkdirSync(grand, { mode: 0o700 });
+      const parent = join(grand, 'accounts'); mkdirSync(parent, { mode: 0o700 });
+      const leaf = join(parent, 'creds'); mkdirSync(leaf, { mode: 0o700 });
+      chmodSync(grand, 0o777); // ~/.heddle (below home) is loose → still caught
+
+      expect(() => ensureSecureDir(leaf, { boundary: `${home}/` })).toThrow(/writable/i);
+    });
+
+    it('does not false-reject a boundary-child directory whose name begins with ".." (e.g. ..config)', () => {
+      const root = tempDir();
+      const oddParent = join(root, '..config'); mkdirSync(oddParent, { mode: 0o700 });
+      const leaf = join(oddParent, 'creds'); mkdirSync(leaf, { mode: 0o700 });
+
+      // `..config` is a legitimate descendant of the boundary, not an upward escape — a bare `..` prefix test
+      // would wrongly reject it; the exact `..` / `../` check accepts it.
+      expect(() => ensureSecureDir(leaf, { boundary: root })).not.toThrow();
+    });
   });
 
   it('assertSecureDir accepts a safe existing directory and bubbles ENOENT for an absent one', () => {

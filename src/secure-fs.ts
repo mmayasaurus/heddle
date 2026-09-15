@@ -1,6 +1,6 @@
 import { closeSync, constants, fchmodSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
-import { basename, dirname, isAbsolute, join, relative } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 /**
  * Hardened filesystem primitives for credential files and rotation locks (HED-452). Shared + exported
@@ -20,7 +20,12 @@ import { basename, dirname, isAbsolute, join, relative } from 'node:path';
  * `O_NOFOLLOW`/`openat`/`RESOLVE_NO_SYMLINKS` and this project takes zero native deps, so a symlink or a
  * group/other-writable directory HIGHER in the path (or, for the reader/lock, a foreign-owned immediate
  * parent) is not detected in that mode. Two seams narrow this: `ensureSecureDir` already walks to the
- * deepest existing ancestor when CREATING and validates + force-modes each level it makes; and\n * `ensureSecureDir` accepts an optional `boundary` (a trust root, e.g. the caller's home directory) that\n * extends the STRUCTURAL check up the whole EXISTING ancestor chain to — but excluding — that boundary, in\n * both its fast path and the shared create walk (HED-643, closing the higher-ancestor redirect window). The\n * shared walk (`createSecureDirTree`) carries the `boundary` for `ensureSafeParent` too, though its\n * writer/lock callers do not pass one yet (HED-642). The default (no `boundary`) is acceptable only because every path these guard is
+ * deepest existing ancestor when CREATING and validates + force-modes each level it makes; and
+ * `ensureSecureDir` accepts an optional `boundary` (a trust root, e.g. the caller's home directory) that
+ * extends the STRUCTURAL check up the whole EXISTING ancestor chain to — but excluding — that boundary, in
+ * both its fast path and the shared create walk (HED-643, closing the higher-ancestor redirect window). The
+ * shared walk (`createSecureDirTree`) carries the `boundary` for `ensureSafeParent` too, though its
+ * writer/lock callers do not pass one yet (HED-642). The default (no `boundary`) is acceptable only because every path these guard is
  * heddle-owned under `~/.heddle` or a user-owned profile dir — a same-uid trust domain a cross-uid attacker
  * cannot write to, and a same-uid process already holds the credentials outright. Callers MUST pass paths
  * whose ancestors are user-owned and not group/other-writable.
@@ -176,9 +181,14 @@ export function ensureSecureDir(dir: string, opts: { mode?: number; euid?: numbe
   // group/other-writable ancestor ABOVE the immediate parent could relocate the credential directory. It
   // must be a strict ancestor of `dir` (otherwise the walk would climb past the intended trust root and
   // into the operator/OS domain); absent → the immediate-parent-only contract (HED-634) is unchanged.
-  const boundary = opts.boundary;
-  if (boundary !== undefined && !isStrictlyWithin(dir, boundary)) {
-    throw new Error(`refusing to create credential directory ${dir}: boundary ${boundary} is not an ancestor of it`);
+  // Normalize the boundary ONCE with resolve() — lexical only (it collapses `.`/`..`/trailing slashes and
+  // makes the path absolute WITHOUT touching the filesystem, so symlink component names are preserved for
+  // the lstat checks). Comparing resolved paths throughout means a trailing-slash or dot-aliased `boundary`
+  // (e.g. `home + "/"`) still stops the walk exactly at the trust root rather than being passed and climbing
+  // into the operator/OS domain (qodo correctness finding on #234).
+  const boundary = opts.boundary === undefined ? undefined : resolve(opts.boundary);
+  if (boundary !== undefined && !isStrictlyWithin(resolve(dir), boundary)) {
+    throw new Error(`refusing to create credential directory ${dir}: boundary ${opts.boundary} is not an ancestor of it`);
   }
 
   // Fast path: the target already exists and is a safe, euid-owned directory → accept as-is (never
@@ -257,8 +267,9 @@ function createSecureDirTree(dir: string, mode: number, euid: number, boundary?:
   // it is among the `missing` components created + mode-forced + euid-verified below by finalizeCreatedDir,
   // and `cur` then sits ABOVE `boundary` (the operator/OS domain) — nothing to validate, and we must not
   // climb into it.
-  if (boundary !== undefined && (cur === boundary || isStrictlyWithin(cur, boundary))) {
-    assertSafeAncestorsUpTo(cur, boundary);
+  if (boundary !== undefined) {
+    const rcur = resolve(cur); // canonical compare — `boundary` was resolved once at the entry point
+    if (rcur === boundary || isStrictlyWithin(rcur, boundary)) assertSafeAncestorsUpTo(cur, boundary);
   }
 
   // Create each missing component top-down. Each is created then immediately finalized on its own fd
@@ -538,13 +549,15 @@ function assertSafeExistingDir(dir: string, euid?: number): void {
 /**
  * True iff `child` is a STRICT descendant of `ancestor`. Used to validate a caller-supplied `boundary`
  * (trust root) before an ancestor-chain walk, so a boundary that is not actually above the target fails
- * loud at the entry point rather than letting the walk climb to the filesystem root. POSIX-only paths
- * (this module relies on `process.geteuid`): a `relative()` result that is empty (equal), starts with `..`
- * (escapes upward), or is absolute (different root) means `child` is at or outside `ancestor`.
+ * loud at the entry point rather than letting the walk climb to the filesystem root. Both args are already
+ * resolved (canonical, absolute). POSIX-only (this module relies on `process.geteuid`): `relative()` returns
+ * empty when equal; a result that IS `..` or begins with `../` escapes upward; absolute means a different
+ * root — any of those means `child` is at or outside `ancestor`. Testing the exact `..` / `../` forms (not a
+ * bare `..` prefix) avoids wrongly rejecting a legitimate child directory named e.g. `..config`.
  */
 function isStrictlyWithin(child: string, ancestor: string): boolean {
   const rel = relative(ancestor, child);
-  return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel);
+  return rel !== '' && rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
 }
 
 /**
@@ -562,7 +575,9 @@ function isStrictlyWithin(child: string, ancestor: string): boolean {
  * fire here.
  */
 function assertSafeAncestorsUpTo(from: string, boundary: string): void {
-  let cur = from;
+  // `boundary` is pre-resolved by the caller; resolve `from` to the same canonical form so the stop compare
+  // is exact even when the caller's boundary had a trailing slash or a `.`/`..` alias.
+  let cur = resolve(from);
   while (cur !== boundary) {
     assertSafeExistingDir(cur);
     const parent = dirname(cur);
