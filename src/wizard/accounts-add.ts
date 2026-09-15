@@ -2,7 +2,7 @@ import { chmodSync, existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { loadAccountRegistry, upsertAccount, writeAccountRegistry, type Account, type AccountTier, type BillingClass } from '../accounts.js';
-import { loginStatus } from '../health/parse.js';
+import { loginStatus, loginIdentity } from '../health/parse.js';
 import type { CliRunner, NativeProvider } from './cli-runner.js';
 import type { Prompter } from './prompt.js';
 import { getProvider, listEnvRepointProviders, type ProviderMatrixEntry } from '../provider-matrix.js';
@@ -16,20 +16,20 @@ export interface AccountsAddSummary { added: string[]; failed: string[]; skipped
 // validated at runtime in runAccountsAdd. (Kept as `string` because the literal union is subsumed by it.)
 type AccountsAddProvider = string;
 
-function pathFor(provider: NativeProvider, id: string): string {
-  return join(homedir(), '.heddle', 'accounts', provider, id);
+function pathFor(provider: NativeProvider, id: string, home: string = homedir()): string {
+  return join(home, '.heddle', 'accounts', provider, id);
 }
 
 function envRepointHarness(entry: ProviderMatrixEntry): 'claude' | 'codex' {
   if (entry.harnessStyle === 'anthropic-compat') return 'claude';
   if (entry.harnessStyle === 'openai-compat') return 'codex';
+  if (entry.harnessStyle === 'local-runtime') return 'codex';
   throw new Error(`env-repoint provider ${entry.key} has unsupported harness style ${entry.harnessStyle}`);
 }
 
-// Slice-3 onboards only the KEYED env-repoint styles (anthropic-compat -> claude, openai-compat -> codex).
-// local-runtime (Ollama/LM Studio, HED-529) and browser-oauth (Gemini, HED-528) are deferred: offering
-// them here would crash envRepointHarness or misroute a non-native key into the native login path.
-const ENV_REPOINT_WIZARD_STYLES: ReadonlySet<ProviderMatrixEntry['harnessStyle']> = new Set(['anthropic-compat', 'openai-compat']);
+// The wizard supports keyed env-repoint styles and keyless local runtimes via the codex harness.
+// browser-oauth (Gemini, HED-528) remains deferred because it needs a native OAuth flow.
+const ENV_REPOINT_WIZARD_STYLES: ReadonlySet<ProviderMatrixEntry['harnessStyle']> = new Set(['anthropic-compat', 'openai-compat', 'local-runtime']);
 function envRepointWizardSupported(entry: ProviderMatrixEntry): boolean {
   return entry.envRepoint && ENV_REPOINT_WIZARD_STYLES.has(entry.harnessStyle);
 }
@@ -55,20 +55,43 @@ function validateBaseUrl(value: string): void {
   }
 }
 
-function createIsolatedConfigDir(provider: 'claude' | 'codex', id: string): string {
-  const configPath = pathFor(provider, id);
+function createIsolatedConfigDir(provider: 'claude' | 'codex', id: string, home: string = homedir()): string {
+  const configPath = pathFor(provider, id, home);
   if (existsSync(configPath)) throw new Error(`isolated config directory already exists for ${provider} ${id}`);
   mkdirSync(configPath, { recursive: true });
   chmodSync(configPath, 0o700);
   return configPath;
 }
 
+// Ambient Anthropic credentials that outrank or short-circuit the per-account /login credential in the
+// documented auth-precedence chain: if any is inherited from the operator's shell (an env-repoint
+// ANTHROPIC_BASE_URL would even aim the native OAuth flow at a gateway), `claude auth login` and
+// `auth status` would resolve THAT identity instead of the isolated CLAUDE_CONFIG_DIR — so onboarding
+// could silently accept, and record loggedIn against, an inherited account (HED-585). Stripped on the
+// claude onboarding path only; codex's OPENAI_* surface is a separate audit. Denylist of the documented
+// precedence vars; an allowlist rebuild of the env is the harder-edged follow-up.
+const CLAUDE_AMBIENT_CRED_VARS = [
+  'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_PROFILE',
+  'ANTHROPIC_BASE_URL', 'ANTHROPIC_FEDERATION_RULE_ID', 'ANTHROPIC_ORGANIZATION_ID',
+  'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY',
+] as const;
+
 // claude/codex isolate an account with a per-account dir + config-dir env var. cursor uses the
 // MACHINE login (its per-account isolation is undocumented — HED-503): no dir, and it records
 // keyFile:null, which is exactly the machine-login row rotation.pickCursorAccount selects (a non-null
 // keyFile would be misread as an API-key file by readCursorKey and the account would be unusable).
 function accountEnv(provider: NativeProvider, configPath: string | null): NodeJS.ProcessEnv {
-  if (provider === 'claude' && configPath) return { ...process.env, CLAUDE_CONFIG_DIR: configPath };
+  if (provider === 'claude' && configPath) {
+    // Copy process.env first, then strip the ambient creds from the COPY — never mutate process.env.
+    // Match keys case-INSENSITIVELY: Windows env var names are case-insensitive, and the copied object
+    // can retain a mixed-case spelling (e.g. anthropic_api_key) that a fixed-case delete would miss.
+    const strip = new Set<string>(CLAUDE_AMBIENT_CRED_VARS.map((name) => name.toUpperCase()));
+    const env: NodeJS.ProcessEnv = { ...process.env, CLAUDE_CONFIG_DIR: configPath };
+    for (const key of Object.keys(env)) {
+      if (strip.has(key.toUpperCase())) delete env[key];
+    }
+    return env;
+  }
   if (provider === 'codex' && configPath) return { ...process.env, CODEX_HOME: configPath };
   return { ...process.env };
 }
@@ -80,15 +103,21 @@ function makeAccount(provider: NativeProvider, id: string, configPath: string | 
   return { ...base, keyFile: null };
 }
 
-async function addOne(provider: NativeProvider, deps: AccountsAddDeps, ordinal: number, registryPath: string, summary: AccountsAddSummary): Promise<void> {
+async function addOne(provider: NativeProvider, deps: AccountsAddDeps, ordinal: number, registryPath: string, summary: AccountsAddSummary, home: string = homedir()): Promise<void> {
   const id = await deps.prompter.text(`Account id for ${services[provider]}`, `${provider}-${ordinal}`);
   // Confine the id — it becomes a path segment under ~/.heddle/accounts, so reject path separators
   // and traversal (must start alphanumeric; letters/digits/'.'/'_'/'-' only).
   validateId(id);
   // cursor uses the machine login (no per-account dir); claude/codex isolate under a per-account dir.
-  const configPath = provider === 'cursor' ? null : pathFor(provider, id);
+  const configPath = provider === 'cursor' ? null : pathFor(provider, id, home);
   const env = accountEnv(provider, configPath);
-  if (configPath) mkdirSync(configPath, { recursive: true });
+  if (configPath) {
+    // 0700: `claude auth login` now persists .credentials.json here, so lock the dir to the owner on
+    // shared machines — mirrors createIsolatedConfigDir (the env-repoint path). recursive mkdir is
+    // idempotent so a native re-run is fine; the chmod re-asserts perms on an existing dir too.
+    mkdirSync(configPath, { recursive: true });
+    chmodSync(configPath, 0o700);
+  }
   try {
     deps.runner.login(provider, env);
   } catch (error) {
@@ -111,8 +140,11 @@ async function addOne(provider: NativeProvider, deps: AccountsAddDeps, ordinal: 
   const loggedIn = probe.exitCode === 0 && loginStatus(probe.stdout, probe.stderr) === true;
   registry = upsertAccount(registry, { ...account, loggedIn, lastVerified: (deps.now ?? (() => new Date()))().toISOString() });
   writeAccountRegistry(registry, registryPath);
+  // Surface the signed-in identity so the operator can confirm the browser step landed on the intended
+  // account (claude only — from the verified `auth status --json` identity schema; HED-585).
+  const identity = loggedIn && provider === 'claude' ? loginIdentity(probe.stdout) : undefined;
   (loggedIn ? summary.added : summary.failed).push(id);
-  deps.report?.(`${loggedIn ? 'PASS' : 'FAIL'} ${provider} ${id}`);
+  deps.report?.(`${loggedIn ? 'PASS' : 'FAIL'} ${provider} ${id}${identity ? ` — ${identity}` : ''}`);
 }
 
 async function envRepointBaseUrl(entry: ProviderMatrixEntry, deps: AccountsAddDeps): Promise<{ baseUrl: string; region?: string }> {
@@ -133,7 +165,7 @@ async function envRepointBaseUrl(entry: ProviderMatrixEntry, deps: AccountsAddDe
 
 /** Add an env-repoint account without invoking a native harness login or status probe. */
 export async function addEnvRepointOne(
-  entry: ProviderMatrixEntry, deps: AccountsAddDeps, ordinal: number, registryPath: string, summary: AccountsAddSummary,
+  entry: ProviderMatrixEntry, deps: AccountsAddDeps, ordinal: number, registryPath: string, summary: AccountsAddSummary, home: string = homedir(),
 ): Promise<void> {
   if (!entry.envRepoint) throw new Error(`${entry.key} is not an env-repoint provider`);
   const id = await deps.prompter.text(`Account id for ${entry.displayName}`, `${entry.key}-${ordinal}`);
@@ -171,7 +203,7 @@ export async function addEnvRepointOne(
   // reason to abort the whole wizard (an interrupted prior run can leave the dir behind).
   let configPath: string;
   try {
-    configPath = createIsolatedConfigDir(provider, id);
+    configPath = createIsolatedConfigDir(provider, id, home);
   } catch (error) {
     summary.failed.push(id);
     deps.report?.(`FAIL ${entry.key} ${id} (${error instanceof Error ? error.message : String(error)})`);
@@ -193,6 +225,44 @@ export async function addEnvRepointOne(
   deps.report?.(`ADDED ${entry.key} ${id}`);
 }
 
+/** Add a keyless local OpenAI-compatible runtime without native login or API-key checks. */
+export async function addLocalRuntimeOne(
+  entry: ProviderMatrixEntry, deps: AccountsAddDeps, ordinal: number, registryPath: string, summary: AccountsAddSummary, home: string = homedir(),
+): Promise<void> {
+  if (!entry.envRepoint) throw new Error(`${entry.key} is not an env-repoint provider`);
+  const id = await deps.prompter.text(`Account id for ${entry.displayName}`, `${entry.key}-${ordinal}`);
+  validateId(id);
+  const provider = envRepointHarness(entry);
+  // Local runtimes share the codex namespace with native accounts; do not let an upsert replace one.
+  if (loadAccountRegistry(registryPath).accounts.some((account) => account.provider === provider && account.id === id)) {
+    summary.failed.push(id);
+    deps.report?.(`FAIL ${entry.key} ${id} (id already used by an existing ${provider} account — choose another)`);
+    return;
+  }
+  const baseUrl = await deps.prompter.text(`${entry.displayName} base URL`, entry.baseUrl);
+  validateBaseUrl(baseUrl);
+  let configPath: string;
+  try {
+    configPath = createIsolatedConfigDir(provider, id, home);
+  } catch (error) {
+    summary.failed.push(id);
+    deps.report?.(`FAIL ${entry.key} ${id} (${error instanceof Error ? error.message : String(error)})`);
+    return;
+  }
+  // Keyless by design: local runtimes need no cloud key. Record a heddle-namespaced token ref rather
+  // than OPENAI_API_KEY so a real cloud key in ~/.heddle/secrets.env can never be materialized toward a
+  // localhost endpoint when env-repoint consume reaches codex (HED-619); an operator who secures their
+  // local server opts in by exporting exactly this var. Absent from secrets.env, consume fail-closes.
+  const account: Account = {
+    id, provider, harness: 'codex-cli', credentialRef: `${provider}:${entry.key}:${configPath}`,
+    billingClass: 'free-tier', tier: 'T0',
+    envRepoint: { baseUrl, authTokenRef: 'HEDDLE_LOCAL_RUNTIME_TOKEN', service: entry.key }, codexHome: configPath,
+  };
+  writeAccountRegistry(upsertAccount(loadAccountRegistry(registryPath), account), registryPath);
+  summary.added.push(id);
+  deps.report?.(`ADDED ${entry.key} ${id} (local runtime)`);
+}
+
 function customService(name: string): string {
   const service = name.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
   if (!service) throw new Error('custom provider display name must contain letters or digits');
@@ -200,7 +270,7 @@ function customService(name: string): string {
   return service;
 }
 
-async function addCustomProvider(deps: AccountsAddDeps, registryPath: string, summary: AccountsAddSummary): Promise<void> {
+async function addCustomProvider(deps: AccountsAddDeps, registryPath: string, summary: AccountsAddSummary, home: string = homedir()): Promise<void> {
   const displayName = await deps.prompter.text('Custom provider display name');
   const service = customService(displayName);
   const style = await deps.prompter.select('Custom provider API style', ['openai-compatible', 'anthropic-compatible', 'custom']);
@@ -236,7 +306,7 @@ async function addCustomProvider(deps: AccountsAddDeps, registryPath: string, su
   // Per-account freshness failure must not abort the wizard (see addEnvRepointOne).
   let configPath: string;
   try {
-    configPath = createIsolatedConfigDir(provider, id);
+    configPath = createIsolatedConfigDir(provider, id, home);
   } catch (error) {
     summary.failed.push(id);
     deps.report?.(`FAIL ${service} ${id} (${error instanceof Error ? error.message : String(error)})`);
@@ -256,33 +326,40 @@ async function addCustomProvider(deps: AccountsAddDeps, registryPath: string, su
 
 /** Data-driven provider loop; each account persists before the next question. */
 export async function runAccountsAdd(
-  opts: { provider?: AccountsAddProvider; registryPath?: string }, deps: AccountsAddDeps,
+  opts: { provider?: AccountsAddProvider; registryPath?: string; homeDir?: string }, deps: AccountsAddDeps,
 ): Promise<AccountsAddSummary> {
-  const registryPath = opts.registryPath ?? process.env.HEDDLE_ACCOUNTS ?? join(homedir(), '.heddle', 'accounts.json');
+  // Single install root: the registry AND the per-account credential dirs both derive from `home`, so
+  // `heddle setup --home <dir>` yields a self-contained install instead of splitting the registry from
+  // the credential dirs (which otherwise default to the process user's real home). Defaults to homedir().
+  const home = opts.homeDir ?? homedir();
+  const registryPath = opts.registryPath ?? process.env.HEDDLE_ACCOUNTS ?? join(home, '.heddle', 'accounts.json');
   const summary: AccountsAddSummary = { added: [], failed: [], skipped: [] };
   const matrixProvider = opts.provider === undefined ? undefined : getProvider(opts.provider);
   if (opts.provider && opts.provider !== 'custom') {
     const isNative = providers.includes(opts.provider as NativeProvider);
     if (!matrixProvider && !isNative) throw new Error(`unknown accounts-add provider ${opts.provider}`);
     // A matrix key that is neither a native CLI nor a wizard-supported env-repoint style is a deferred
-    // surface — refuse clearly instead of crashing envRepointHarness (local-runtime) or falling through
-    // to the native login path with an undefined service name (browser-oauth: gemini/copilot/amazonq).
+    // surface — refuse clearly instead of falling through to the native login path with an undefined
+    // service name (browser-oauth: gemini/copilot/amazonq).
     if (matrixProvider && !isNative && !envRepointWizardSupported(matrixProvider)) {
-      throw new Error(`accounts-add does not yet support ${opts.provider} (${matrixProvider.harnessStyle}) — see HED-528 (browser-oauth), HED-529 (local-runtime), HED-530 (OpenCode)`);
+      throw new Error(`accounts-add does not yet support ${opts.provider} (${matrixProvider.harnessStyle}) — see HED-528 (browser-oauth), HED-530 (OpenCode)`);
     }
   }
   const selectedEnv = matrixProvider && envRepointWizardSupported(matrixProvider) ? matrixProvider : undefined;
   for (const provider of opts.provider && !selectedEnv && opts.provider !== 'custom' ? [opts.provider as NativeProvider] : opts.provider ? [] : providers) {
     if (!await deps.prompter.confirm(`Do you have a ${services[provider]} account?`, false)) { summary.skipped.push(provider); continue; }
     let ordinal = loadAccountRegistry(registryPath).accounts.filter((account) => account.provider === provider).length + 1;
-    do { await addOne(provider, deps, ordinal++, registryPath, summary); }
+    do { await addOne(provider, deps, ordinal++, registryPath, summary, home); }
     while (await deps.prompter.confirm(`Any other ${services[provider]} accounts to cycle through?`, false));
   }
   const envProviders = selectedEnv && !selectedEnv.blocked ? [selectedEnv] : opts.provider ? [] : listEnvRepointProviders().filter((entry) => entry.wizardDefault && !entry.blocked && envRepointWizardSupported(entry));
   for (const entry of envProviders) {
     if (!await deps.prompter.confirm(`Do you have a ${entry.displayName} account?`, false)) continue;
     let ordinal = loadAccountRegistry(registryPath).accounts.filter((account) => account.envRepoint?.service === entry.key).length + 1;
-    do { await addEnvRepointOne(entry, deps, ordinal++, registryPath, summary); }
+    do {
+      if (entry.harnessStyle === 'local-runtime') await addLocalRuntimeOne(entry, deps, ordinal++, registryPath, summary, home);
+      else await addEnvRepointOne(entry, deps, ordinal++, registryPath, summary, home);
+    }
     while (await deps.prompter.confirm(`Any other ${entry.displayName} accounts to cycle through?`, false));
   }
   const blocked = selectedEnv?.blocked ? [selectedEnv] : opts.provider ? [] : listEnvRepointProviders().filter((entry) => entry.blocked && envRepointWizardSupported(entry));
@@ -290,10 +367,10 @@ export async function runAccountsAdd(
     deps.report?.(`COMING ${entry.displayName}: ${entry.blocked!.reason}`);
     if (!await deps.prompter.confirm(`I already have a working ${entry.displayName} key — add it anyway?`, false)) continue;
     let ordinal = loadAccountRegistry(registryPath).accounts.filter((account) => account.envRepoint?.service === entry.key).length + 1;
-    do { await addEnvRepointOne(entry, deps, ordinal++, registryPath, summary); }
+    do { await addEnvRepointOne(entry, deps, ordinal++, registryPath, summary, home); }
     while (await deps.prompter.confirm(`Any other ${entry.displayName} accounts to cycle through?`, false));
   }
-  if (opts.provider === 'custom' || !opts.provider && await deps.prompter.confirm('Any provider/key/model not listed?', false)) await addCustomProvider(deps, registryPath, summary);
+  if (opts.provider === 'custom' || !opts.provider && await deps.prompter.confirm('Any provider/key/model not listed?', false)) await addCustomProvider(deps, registryPath, summary, home);
   if (!loadAccountRegistry(registryPath).accounts.length) writeAccountRegistry({ schemaVersion: 2, accounts: [] }, registryPath);
   return summary;
 }

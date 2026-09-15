@@ -50,7 +50,10 @@ server.tool(
     'provider+model directly, OR both (class = policy, named model = route, no fallback). Workers ' +
     'run on subscription CLIs as subprocesses; this call blocks until the worker finishes (seconds ' +
     'to minutes). Returns {ok, output, provider, model, skills, sessionId (resume handle), usage, ' +
-    'ledgerId, account, routeReason}. Claude classes run as a headless `claude -p` worker on the ' +
+    'ledgerId, account, routeReason}. On a read-only mandate violation (a reviewer/worker that changed the ' +
+    'worktree) the dispatch HARD-fails (ok:false) and its output is QUARANTINED — the top-level output is ' +
+    'emptied and the findings move to a quarantine field (the ledger keeps the record); never auto-trust a ' +
+    'quarantined run. Claude classes run as a headless `claude -p` worker on the ' +
     'registry account with the most 5h headroom (automatic account rotation); pass in_session:true to ' +
     'get {ok:false, refusal:{code:"claude-in-session", instruction}} and run it as your own Agent-tool ' +
     'subagent instead (shared prompt cache, same account).',

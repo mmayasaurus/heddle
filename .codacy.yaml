@@ -1,0 +1,28 @@
+---
+# heddle Codacy configuration.
+#
+# The YAML document-start marker (---) MUST be the first line: Codacy requires it
+# (https://docs.codacy.com/repositories-configure/codacy-configuration-file/ — "The file must start
+# with a line containing a triple dash"). Keep these comments BELOW it, never above.
+#
+# fleet/ holds DARK-VENDORED, byte-parity copies of the workspace canon bin tools
+# (fleet/bin mirrors the workspace .claude/bin, pinned by fleet/MANIFEST.sha256). They are NOT
+# heddle's own source: the canon is linted at its real home in the workspace repo, and a finding
+# cannot be fixed in the vendored copy without breaking byte-parity. So exclude fleet/ from Codacy
+# analysis — the same doctrine the scrub gates already apply (fleet/ is structurally outside heddle
+# source). Unblocks fleet/bin re-vendors, e.g. HED-575 #182, where Codacy flagged a non-crypto sha1
+# dedup key as "insecure" (a false positive; the algorithm is deliberate for digest-stability).
+#
+# NOTE: a repo .codacy.yaml REPLACES the Codacy dashboard "Ignored files" settings entirely (it does
+# not merge). Confirmed with the account owner (Maya, firsthand 2026-09-15): no existing UI ignores
+# to preserve. (HED-578)
+exclude_paths:
+  - "fleet/**"
+  # Gate tooling, not app source (PR #187 Codex review, 2026-09-15): Codacy's own analysis
+  # runs ESLint with configSource "codacy" and never applies .codacy/tools-configs/eslint.config.mjs
+  # (that file binds only inside Verity's runner), so Node scripts under .claude/skills/ produced
+  # 51 false no-undef findings (process/console/Buffer) and .codacy/ itself was routed for
+  # analysis. Exclude both at the routing level here — the config Codacy actually reads.
+  # Verity's gate still lints the skill scripts with proper Node globals via its own config.
+  - ".claude/skills/**"
+  - ".codacy/**"

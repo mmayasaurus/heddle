@@ -7,8 +7,10 @@ import { materializeAgentsMd, readPack, composePacks } from '../skillpacks.js';
 import { materializeWorkerMcp, validateWorkerMcp, codexMcpFlags, claudeMcpConfigFile, webCapable } from '../mcp.js';
 import { isInProcessHttpProvider, isOpenAICompatProvider, openAICompatInputTokenUpperBound, readSecretsEnvValue } from '../adapters/openai-compat.js';
 import { assessResult, type ResultAssessment } from '../classify.js';
-import { snapshotWorktree, sameSnapshot, diffInstruction, embeddedDiff } from '../review.js';
+import { snapshotWorktree, sameSnapshot, diffInstruction, embeddedDiff, READ_ONLY_MANDATE } from '../review.js';
 import { parentCheckoutOf, checkoutFingerprint, escapedPaths, destroyedWork } from '../worktree.js';
+import { loadAccountRegistry } from '../accounts.js';
+import { effectiveFences } from '../fences.js';
 import { decideCapabilities, capabilityPolicy } from '../capabilities.js';
 import { capAwarePolicy } from '../capaware.js';
 import { WORKER_ENV } from '../identity.js';
@@ -17,6 +19,7 @@ import type { WorkerResult } from '../types.js';
 import { packsFor, requestedPacks } from './packs.js';
 import { baseRecord, refusalOutcome, refuseBilling, webRefusalReason } from './refusals.js';
 import { billingVerdict } from './billing.js';
+import { tierReadOnlyVerdict } from './tier-gate.js';
 import type { DispatchContext, DispatchRequest, DispatchOutcome, DispatchRefusal } from './types.js';
 import { validateEnvRepoint, type AccountEnvRepoint } from '../accounts.js';
 import { createBoundedReceipt, finalizeBoundedResult, normalizedBoundedUsage } from '../bounded-dispatch.js';
@@ -134,9 +137,14 @@ export async function runTarget(
     permitPayPerToken: capAwarePolicy(ctx.table).permitPayPerToken,
     table: ctx.table,
   });
+  const tierGate = tierReadOnlyVerdict({
+    accountId: ctx.account ?? null,
+    provider: target.provider,
+    readOnly: route.readOnly,
+  });
   const gateChecks: Array<() => DispatchRefusal | null> = [
     () => billing.refusal ?? null, // HED-395 billing/overage — money-safety, first
-    // HED-404 (tier read-only): add its typed check here — billing stays first.
+    () => tierGate.refusal ?? null, // HED-404 structural read-only tier eligibility — after billing
   ];
   for (const check of gateChecks) {
     const veto = check();
@@ -163,6 +171,20 @@ export async function runTarget(
   // written and nothing is left in flight.
   for (const p of skills) readPack(p);
   validateWorkerMcp(target.provider, mcp);
+  // HED-404: only a bound native account whose harness positively enforces read-only may be
+  // recorded as fenced. Every resolution error or mismatch degrades to the explicit mandate.
+  const fence = (() => {
+    if (!route.readOnly) return undefined;
+    try {
+      const account = ctx.account === null ? undefined
+        : loadAccountRegistry().accounts.find((a) => a.provider === target.provider && a.id === ctx.account);
+      return effectiveFences(account?.harness ?? '', account?.fences).readOnlyEnforceable ? 'fenced' : 'mandate-only';
+    } catch {
+      return 'mandate-only';
+    }
+  })();
+  const mandateOnly = fence === 'mandate-only';
+
   const isHttp = isInProcessHttpProvider(target.provider);
   const boundedReceipt = route.bounds
     ? createBoundedReceipt(route, target, req, ctx.table, 'incomplete')
@@ -191,7 +213,7 @@ export async function runTarget(
       totalTokens: inputTokens + route.bounds.maxGeneratedTokens,
     };
     started = ctx.ledger.startBoundedUnderCap(
-      baseRecord(ctx, req, route.taskClass, target, skills, fellBackFrom, caps.granted),
+      baseRecord(ctx, req, route.taskClass, target, skills, fellBackFrom, caps.granted, fence),
       ctx.caps,
       { ...req.boundedAdmission, inputTokens },
       route.bounds,
@@ -200,7 +222,7 @@ export async function runTarget(
   } else {
     // Legacy max-children behavior is untouched when the route declares no resource envelope.
     started = ctx.ledger.startUnderCap(
-      baseRecord(ctx, req, route.taskClass, target, skills, fellBackFrom, caps.granted), ctx.caps,
+      baseRecord(ctx, req, route.taskClass, target, skills, fellBackFrom, caps.granted, fence), ctx.caps,
     );
   }
   if (started.refused) {
@@ -221,6 +243,9 @@ export async function runTarget(
     }, { extra: { usedFallback: fellBackFrom !== null, ...(boundedReceipt ? { boundedReceipt } : {}) }, ledgerId: started.id });
   }
   const ledgerId = started.id;
+  // Adapter construction stays BELOW admission on purpose: a bounded route must refuse
+  // (oversize input, exhausted headroom) before any provider factory runs (HED-570 invariant,
+  // proven by test/bounded-dispatch.test.ts). Nothing above this line uses the adapter.
   const adapter = ctx.adapterFor(target.provider);
   // HED-3: review rows carry the author→reviewer pair from the moment the row exists.
   if (ctx.review) {
@@ -304,13 +329,21 @@ export async function runTarget(
     // The mandate baseline is taken AFTER materialization and compared BEFORE restore (in finally):
     // injected files are part of the baseline, so a reviewer that edits AGENTS.md/.mcp.json is
     // caught — with the old before-materialize/after-restore ordering, restore MASKED those edits.
+    // Detect escapes for EVERY read-only dispatch, not only the mandate-only path: a claude `--tools`
+    // fence is not a complete worktree fence (MCP is attached via --strict-mcp-config, outside --tools),
+    // so a "fenced" worker can still write — keep the belt-and-suspenders snapshot. (HED-404 r2.)
     before = route.readOnly ? snapshotWorktree(req.cwd) : null;
     // HTTP providers cannot run git; Claude read-only reviewers also receive an embedded diff because
     // their tool set has no Bash. Tool-less HTTP prompts must not mention Read/Grep/Glob.
     const embedDiff = (isClaude && route.readOnly) || isHttp;
-    const basePrompt = boundedPrompt ?? (req.diffBase
-      ? (embedDiff ? embeddedDiff(req.cwd, req.diffBase, undefined, !isHttp) : diffInstruction(req.diffBase)) + req.prompt
-      : req.prompt);
+    const mandate = mandateOnly ? `${READ_ONLY_MANDATE}\n\n` : '';
+    // Bounded routes use the admission-time prompt VERBATIM: it was diff-embedded and
+    // byte-counted for the input reservation upstream, and bounded targets are tool-less
+    // single-response HTTP where a read-only mandate has nothing to govern — any
+    // post-admission addition would silently break the reserved input bound.
+    const mandatedPrompt = boundedPrompt ?? (req.diffBase
+      ? (embedDiff ? embeddedDiff(req.cwd, req.diffBase, undefined, !isHttp) : diffInstruction(req.diffBase)) + mandate + req.prompt
+      : mandate + req.prompt);
     // Best-effort PREVENTION to pair with the detection above: state the boundary explicitly, since
     // a worker that walks up to find "the project root" lands in the parent checkout and has no
     // other way to know it is inside a linked worktree.
@@ -318,8 +351,8 @@ export async function runTarget(
       ? `Your project root is the git WORKTREE ${wt.worktreeRoot} (your working directory is ` +
         `${req.cwd}). Create and edit files ONLY under that worktree. Do NOT walk up to ` +
         `${wt.parentRoot} — that is a different checkout shared with other agents, and writing ` +
-        `there corrupts their work.\n\n${basePrompt}`
-      : basePrompt;
+        `there corrupts their work.\n\n${mandatedPrompt}`
+      : mandatedPrompt;
     result = await adapter.dispatch(prompt, {
       model: target.model,
       cwd: req.cwd,
@@ -404,23 +437,32 @@ export async function runTarget(
     process.stderr.write(`heddle: ${note}\n`);
   }
 
-  // HED-3 read-only mandate: the worktree must be exactly as it was. A violation is recorded and
-  // surfaced — the reviewer's findings are still returned and nothing is reverted (operator's call).
+  // HED-3 / HED-601 read-only mandate: the worktree must be exactly as it was. A violation is recorded,
+  // the dispatch HARD-fails (ok=0), and the reviewer's output is QUARANTINED (withheld from the trusted
+  // `output` channel); nothing is reverted (operator's call).
   let mandateOk: boolean | null = null;
+  let quarantine: DispatchOutcome['quarantine'];
   if (before && after) {
     mandateOk = sameSnapshot(before, after);
     if (ctx.review) ctx.ledger.setReviewMandate(ledgerId, mandateOk);
     if (mandateOk === false) {
-      // A reviewer that changed the worktree did NOT do the job it was given: the dispatch is not ok
-      // (ledger ok=0), the findings are still returned, nothing is reverted (operator's call).
-      const note = 'MANDATE VIOLATION: the read-only worker changed the worktree (content digest of HEAD + tracked/untracked files + stash differs from before the run) — inspect `git status`/`git diff` before trusting the findings; nothing was reverted';
+      // HED-601: a reviewer that changed the worktree did NOT do the job it was given —
+      // a read-only MANDATE VIOLATION is a HARD failure whose output is QUARANTINED, never auto-trusted.
+      // The findings are WITHHELD from the trusted `output` channel (emptied in the returned outcome below)
+      // and moved to `quarantine`; the ledger row keeps them (output persisted to outputs/<id>.md, ok=0) as
+      // the durable record, so adopting any finding is a deliberate act on it. Nothing is reverted.
+      const note = `MANDATE VIOLATION: the read-only worker changed the worktree (content digest of HEAD + tracked/untracked files + stash differs from before the run) — nothing was reverted; the worker output is QUARANTINED (dispatch ok=0), never auto-trusted. The violation is durably recorded on the ledger row (ok=0 + this error, plus mandate_ok=0 on review rows); the findings ride this outcome's quarantine.output and are best-effort-persisted to the ledger output store (outputs/${ledgerId}.md when the write succeeds). Inspect \`git status\`/\`git diff\`, then adopt any finding only as a deliberate act on that quarantine record.`;
+      process.stderr.write(`heddle: ${note}\n`);
       result.ok = false;
       result.error = result.error ? `${result.error}; ${note}` : note;
+      quarantine = { reason: 'mandate-violation', note, output: result.output ?? '', ledgerId };
     }
   }
   // HED-3 auto-assess: judge the reviewer's output with the cheap classifier (best-effort).
+  // HED-601: never grade QUARANTINED output — a mandate-violating worker did not do its task, so assessing it
+  // would both re-surface it as a trustworthy result and spend a classifier on withheld findings.
   let assessment: ResultAssessment | undefined;
-  if (route.autoAssess && result.output) {
+  if (route.autoAssess && result.output && !quarantine) {
     try { assessment = await assessResult(req.prompt, result.output, result.ok, req.cwd, ctx.ledger); } catch (err) {
       // Best-effort by design, but never SILENT: a classifier outage should be visible in the logs.
       process.stderr.write(`heddle: auto-assess failed (${err instanceof Error ? err.message : String(err)}) — outcome recorded without assessment\n`);
@@ -453,6 +495,9 @@ export async function runTarget(
 
   return {
     ...result,
+    // HED-601: a quarantined run withholds its findings from the trusted `output` channel — a caller must
+    // reach into `quarantine` (a deliberate act) to see them; the ledger keeps the full record.
+    ...(quarantine ? { output: '' } : {}),
     taskClass: route.taskClass,
     provider: target.provider,
     model: target.model,
@@ -472,5 +517,6 @@ export async function runTarget(
     ...(boundedReceipt ? { boundedReceipt } : {}),
     ...(ctx.review ? { review: { authorProvider: ctx.review.authorProvider, reviewerProvider: target.provider, reviewerModel: target.model, mandateOk, reviewerPick: ctx.review.reviewerPick } } : {}),
     ...(assessment ? { assessment } : {}),
+    ...(quarantine ? { quarantine } : {}),
   };
 }

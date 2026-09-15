@@ -20,6 +20,9 @@ import { isToolRuntimePath } from './tool-runtime.js';
 const isTransientBasename = (base: string): boolean => base.startsWith('.heddle-');
 const HEDDLE_SPAN = /[ \t]*<!-- heddle:begin( id=[A-Za-z0-9._-]+)? -->[\s\S]*?<!-- heddle:end(?: id=[A-Za-z0-9._-]+)? -->\n?/g;
 
+/** The explicit instruction paired with snapshotWorktree() for harnesses without a real read-only fence. */
+export const READ_ONLY_MANDATE = 'READ-ONLY MANDATE: Never fix, never write. Do not edit, create, delete, or format any file; do not run commands that change state. Report findings only.';
+
 function mandateBytes(cwd: string, rel: string, raw: Buffer): Buffer {
   const base = rel.split('/').pop() ?? rel;
   if (base === 'AGENTS.md') return Buffer.from(raw.toString('utf8').replace(HEDDLE_SPAN, ''), 'utf8');
@@ -52,9 +55,9 @@ function mandateBytes(cwd: string, rel: string, raw: Buffer): Buffer {
  *    cursor/agy have none, so heddle proves the mandate structurally: a CONTENT digest (HEAD + the
  *    git index + every tracked/untracked non-ignored file's mode+size+content + the stash list)
  *    before and after the run. A changed worktree is a
- *    mandate violation — recorded on the review row and surfaced in the outcome; findings are still
- *    returned (never discard the reviewer's work), nothing is reverted (never delete the reviewer's
- *    or anyone's changes — the operator decides).
+ *    mandate violation — recorded on the review row, the dispatch HARD-fails, and the findings are
+ *    QUARANTINED (HED-601: withheld from the outcome's trusted `output`, kept on the ledger record — never
+ *    discarded); nothing is reverted (never delete the reviewer's or anyone's changes — the operator decides).
  */
 
 export interface ReviewerPick {

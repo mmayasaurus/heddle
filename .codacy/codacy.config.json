@@ -1,0 +1,226 @@
+{
+  "version": 1,
+  "metadata": {
+    "source": "local",
+    "languages": [
+      "TypeScript",
+      "Shell",
+      "Python",
+      "JavaScript"
+    ]
+  },
+  "exclude": [
+    "**/node_modules/**",
+    "**/dist/**",
+    "**/build/**",
+    "**/.git/**",
+    "**/vendor/**",
+    "**/coverage/**",
+    "fleet/**",
+    ".worktrees/**"
+  ],
+  "tools": [
+    {
+      "toolId": "ESLint9",
+      "patterns": [
+        {
+          "patternId": "ESLint9_no-eval"
+        },
+        {
+          "patternId": "ESLint9_no-implied-eval"
+        },
+        {
+          "patternId": "ESLint9_no-new-func"
+        },
+        {
+          "patternId": "ESLint9_no-script-url"
+        },
+        {
+          "patternId": "ESLint9_no-unused-vars"
+        },
+        {
+          "patternId": "ESLint9_no-undef"
+        },
+        {
+          "patternId": "ESLint9_no-unreachable"
+        },
+        {
+          "patternId": "ESLint9_no-constant-condition"
+        },
+        {
+          "patternId": "ESLint9_no-dupe-keys"
+        },
+        {
+          "patternId": "ESLint9_no-duplicate-case"
+        },
+        {
+          "patternId": "ESLint9_no-fallthrough"
+        },
+        {
+          "patternId": "ESLint9_no-self-assign"
+        },
+        {
+          "patternId": "ESLint9_no-self-compare"
+        },
+        {
+          "patternId": "ESLint9_use-isnan"
+        },
+        {
+          "patternId": "ESLint9_valid-typeof"
+        },
+        {
+          "patternId": "ESLint9_no-loss-of-precision"
+        },
+        {
+          "patternId": "ESLint9_no-unsafe-optional-chaining"
+        },
+        {
+          "patternId": "ESLint9_@typescript-eslint_no-explicit-any"
+        },
+        {
+          "patternId": "ESLint9_@typescript-eslint_no-unused-vars"
+        },
+        {
+          "patternId": "ESLint9_eqeqeq"
+        },
+        {
+          "patternId": "ESLint9_no-var"
+        },
+        {
+          "patternId": "ESLint9_prefer-const"
+        }
+      ],
+      "useLocalConfigurationFile": false,
+      "localConfigurationFile": "./.codacy/tools-configs/eslint.config.mjs"
+    },
+    {
+      "toolId": "Ruff",
+      "patterns": [
+        {
+          "patternId": "Ruff_F401_unused-import"
+        },
+        {
+          "patternId": "Ruff_F811_redefined-while-unused"
+        },
+        {
+          "patternId": "Ruff_F841_unused-variable"
+        },
+        {
+          "patternId": "Ruff_F821_undefined-name"
+        },
+        {
+          "patternId": "Ruff_B006_mutable-argument-default"
+        },
+        {
+          "patternId": "Ruff_B007_unused-loop-control-variable"
+        },
+        {
+          "patternId": "Ruff_B018_useless-expression"
+        },
+        {
+          "patternId": "Ruff_S101_assert"
+        },
+        {
+          "patternId": "Ruff_S102_exec-builtin"
+        },
+        {
+          "patternId": "Ruff_S103_bad-file-permissions"
+        },
+        {
+          "patternId": "Ruff_S104_hardcoded-bind-all-interfaces"
+        },
+        {
+          "patternId": "Ruff_S105_hardcoded-password-string"
+        },
+        {
+          "patternId": "Ruff_S106_hardcoded-password-func-arg"
+        },
+        {
+          "patternId": "Ruff_S107_hardcoded-password-default"
+        },
+        {
+          "patternId": "Ruff_S108_hardcoded-temp-file"
+        },
+        {
+          "patternId": "Ruff_S110_try-except-pass"
+        },
+        {
+          "patternId": "Ruff_S301_suspicious-pickle-usage"
+        },
+        {
+          "patternId": "Ruff_S608_hardcoded-sql-expression"
+        },
+        {
+          "patternId": "Ruff_ANN001_missing-type-function-argument"
+        },
+        {
+          "patternId": "Ruff_ANN201_missing-return-type-undocumented-public-function"
+        }
+      ]
+    },
+    {
+      "toolId": "Trivy",
+      "patterns": [
+        {
+          "patternId": "Trivy_malicious_packages"
+        },
+        {
+          "patternId": "Trivy_secret"
+        },
+        {
+          "patternId": "Trivy_vulnerability_critical"
+        },
+        {
+          "patternId": "Trivy_vulnerability_high"
+        }
+      ]
+    },
+    {
+      "toolId": "shellcheck",
+      "patterns": [
+        {
+          "patternId": "shellcheck_SC2086"
+        },
+        {
+          "patternId": "shellcheck_SC2046"
+        },
+        {
+          "patternId": "shellcheck_SC2006"
+        },
+        {
+          "patternId": "shellcheck_SC2034"
+        },
+        {
+          "patternId": "shellcheck_SC2064"
+        },
+        {
+          "patternId": "shellcheck_SC2155"
+        },
+        {
+          "patternId": "shellcheck_SC2164"
+        },
+        {
+          "patternId": "shellcheck_SC2181"
+        },
+        {
+          "patternId": "shellcheck_SC2162"
+        },
+        {
+          "patternId": "shellcheck_SC2002"
+        },
+        {
+          "patternId": "shellcheck_SC2004"
+        },
+        {
+          "patternId": "shellcheck_SC2116"
+        },
+        {
+          "patternId": "shellcheck_SC2148"
+        },
+        {
+          "patternId": "shellcheck_SC2229"
+        }
+      ]
+    }
+  ]
+}

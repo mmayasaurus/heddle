@@ -92,9 +92,26 @@ function paths(assetSet: FleetAssetSet, options: FleetHookOptions): { canonicalD
 }
 
 function canonicalFiles(assetSet: FleetAssetSet, canonicalDir: string): string[] {
-  if (!existsSync(canonicalDir)) throw new Error(`fleet ${assetSet.kind} canon not found: ${canonicalDir}`);
+  let stat: ReturnType<typeof lstatSync>;
+  try {
+    stat = lstatSync(canonicalDir);
+  } catch (error) {
+    // A non-ENOENT stat error (permission, I/O) is a broken environment, not absence: surface it.
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    // The kind-dir is genuinely absent. For the default canon, dirname(canonicalDir) is FLEET_ROOT — the
+    // fleet container. If that container is ALSO absent, this pack ships no fleet/ at all (the standalone
+    // ship-set excludes it): a fleetless pack, nothing of any kind to install/diff/uninstall → no-op
+    // (HED-561). If the container IS present, the pack shipped fleet assets and just this kind-dir is
+    // missing: a CORRUPT checkout, not fleetlessness → throw, so uninstall's all-or-nothing preflight
+    // (verifyFleetCanon) and `heddle upgrade` abort rather than silently skipping the missing kind.
+    if (!existsSync(dirname(canonicalDir))) return [];
+    throw new Error(`fleet ${assetSet.kind} canon not found: ${canonicalDir}`);
+  }
+  // A canon path that exists but is not a real directory (a symlink — possibly dangling — or a file) is a
+  // broken checkout, never a fleetless pack: refuse rather than follow it or silently no-op.
+  if (!stat.isDirectory()) throw new Error(`fleet ${assetSet.kind} canon is not a directory: ${canonicalDir}`);
   const names = assetSet.files(canonicalDir);
-  // An empty canon is a broken checkout, never a vacuously clean install/diff.
+  // A present-but-empty canon is a broken checkout, never a vacuously clean install/diff.
   if (names.length === 0) throw new Error(`fleet ${assetSet.kind} canon is empty: ${canonicalDir}`);
   return names;
 }
@@ -112,6 +129,11 @@ function manifestHashes(): Map<string, string> {
 
 function verifyDefaultCanon(assetSet: FleetAssetSet, canonicalDir: string, names: string[]): void {
   if (canonicalDir !== assetSet.canonicalDir) return;
+  // Genuinely fleetless default canon: canonicalFiles returns no names only when FLEET_ROOT (the parent
+  // of the default kind-dir) is absent — the pack ships no fleet/ at all, so there is no MANIFEST.sha256
+  // to verify and manifestHashes() below would throw. No-op (HED-561). A present FLEET_ROOT with a
+  // missing kind-dir never reaches here: canonicalFiles throws (corrupt checkout) first.
+  if (names.length === 0) return;
   const hashes = manifestHashes();
   for (const name of names) {
     const directory = assetSet.kind === 'bin' ? 'bin' : `${assetSet.kind}s`;
@@ -299,10 +321,11 @@ export function diffFleetBin(options: FleetBinOptions = {}): FleetBinDiffReport 
 }
 
 /**
- * Verify a fleet asset set's canon is present, non-empty, and (for the default canon) manifest-
- * identical — WITHOUT touching any installed target. `uninstall` runs this for every asset set before
- * removing anything, so a manifest/canon failure aborts the whole command rather than leaving one set
- * removed and another intact.
+ * Verify a fleet asset set's canon before uninstall touches any installed target: a PRESENT canon must
+ * be non-empty and (for the default canon) manifest-identical, or this aborts the whole command rather
+ * than leaving one set removed and another intact. A genuinely FLEETLESS canon (the fleet container is
+ * absent) is a no-op (HED-561); a present-but-empty canon, a container-present-but-kind-missing corrupt
+ * checkout, and a non-directory canon path all still abort.
  */
 export function verifyFleetCanon(kind: FleetAssetSet['kind'], options: FleetHookOptions = {}): void {
   const assetSet = ASSET_SETS[kind];

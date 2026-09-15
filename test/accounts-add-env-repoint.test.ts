@@ -55,6 +55,49 @@ describe('accounts add env-repoint wizard', () => {
     expect(`${report.join('\n')}\n${readFileSync(path, 'utf8')}`).not.toContain(fakeValue);
   });
 
+  it('honors opts.homeDir for BOTH the registry and the isolated credential dir (no split install)', async () => {
+    // Regression for the split-home finding: `heddle setup --home <dir>` must relocate the credential
+    // dir too, not just the registry — otherwise the registry lands under <dir> while credential dirs
+    // default to the process user's real home.
+    const home = tempDir();      // the requested --home
+    const realHome = tempDir();  // the process user's real home — must receive nothing
+    withHome(realHome);
+    vi.stubEnv('HEDDLE_ACCOUNTS', undefined);
+    vi.stubEnv('ZAI_API_KEY', 'FAKE_GLM_SENTINEL');
+    const summary = await runAccountsAdd({ provider: 'glm', homeDir: home }, {
+      prompter: new ScriptedPrompter([true, '', 'global', '', 'ZAI_API_KEY', 'paid', 'T2', false]),
+      runner: fakeRunner,
+    });
+    expect(summary.added).toEqual(['glm-1']);
+    const account = loadAccountRegistry(join(home, '.heddle', 'accounts.json')).accounts[0]!;
+    expect(account.configDir).toBe(join(home, '.heddle', 'accounts', 'claude', 'glm-1'));
+    expect(existsSync(account.configDir!)).toBe(true);
+    expect(existsSync(join(home, '.heddle', 'accounts.json'))).toBe(true);
+    // Nothing leaked to the process user's real home.
+    expect(existsSync(join(realHome, '.heddle'))).toBe(false);
+  });
+
+  it('honors opts.homeDir for the NATIVE (claude/codex) credential dir too', async () => {
+    // Companion to the env-repoint case above, covering the finding as the reviewers worded it ("Claude
+    // and Codex credential directories"): the native login path derives its isolated dir from `home` as
+    // well. addOne creates the dir (mkdirSync) BEFORE calling runner.login, so a login that throws still
+    // proves the dir landed under the requested --home — no status-probe fixture needed, and the account
+    // fails cleanly rather than aborting the wizard.
+    const home = tempDir();      // the requested --home
+    const realHome = tempDir();  // the process user's real home — must receive nothing
+    withHome(realHome);
+    vi.stubEnv('HEDDLE_ACCOUNTS', undefined);
+    const summary = await runAccountsAdd({ provider: 'claude', homeDir: home }, {
+      // confirm "Do you have a Claude account?" → id (empty → default claude-1) → login throws → "any other?" no.
+      prompter: new ScriptedPrompter([true, '', false]), runner: fakeRunner,
+    });
+    expect(summary.failed).toEqual(['claude-1']);
+    // The isolated credential dir was created under the requested home, before the failing login.
+    expect(existsSync(join(home, '.heddle', 'accounts', 'claude', 'claude-1'))).toBe(true);
+    // Nothing leaked to the process user's real home.
+    expect(existsSync(join(realHome, '.heddle'))).toBe(false);
+  });
+
   it('records an openai-compat (codex-harness) account with an operator-supplied base URL', async () => {
     // grok has no matrix baseUrl default — the wizard must prompt for it — and repoints the codex harness.
     const path = join(tempDir(), 'grok.json');
@@ -167,22 +210,77 @@ describe('accounts add env-repoint wizard', () => {
     expect(report.join('\n')).toContain('FAIL glm glm-1');
   });
 
-  it('does not offer local-runtime providers in the default wizard (never crashes envRepointHarness)', async () => {
+  it('onboards Ollama without requiring a key and records its default local endpoint', async () => {
+    const path = join(tempDir(), 'ollama.json');
+    const home = tempDir();
+    withHome(home);
+    // A real cloud OPENAI_API_KEY may sit in the environment — the local-runtime account must NOT bind it
+    // as its token ref (that would route the cloud key to a localhost endpoint once HED-619 wires consume).
+    vi.stubEnv('OPENAI_API_KEY', 'cloud-key-present');
+
+    const summary = await runAccountsAdd({ provider: 'ollama', registryPath: path, homeDir: home }, {
+      prompter: new ScriptedPrompter([true, '', '', false]), runner: fakeRunner,
+    });
+
+    const account = loadAccountRegistry(path).accounts[0]!;
+    expect(summary.added).toEqual(['ollama-1']);
+    expect(account).toMatchObject({
+      id: 'ollama-1', provider: 'codex', harness: 'codex-cli', billingClass: 'free-tier', tier: 'T0',
+      credentialRef: `codex:ollama:${account.codexHome}`,
+      envRepoint: { baseUrl: 'http://localhost:11434/v1', authTokenRef: 'HEDDLE_LOCAL_RUNTIME_TOKEN', service: 'ollama' },
+    });
+    expect(account.trainsOnInputs).toBeUndefined();
+  });
+
+  it('records an overridden LM Studio local endpoint', async () => {
+    const path = join(tempDir(), 'lmstudio.json');
+    withHome(tempDir());
+    const baseUrl = 'http://127.0.0.1:4567/v1';
+
+    const summary = await runAccountsAdd({ provider: 'lmstudio', registryPath: path }, {
+      prompter: new ScriptedPrompter([true, '', baseUrl, false]), runner: fakeRunner,
+    });
+
+    expect(summary.added).toEqual(['lmstudio-1']);
+    expect(loadAccountRegistry(path).accounts[0]).toMatchObject({
+      envRepoint: { baseUrl, authTokenRef: 'HEDDLE_LOCAL_RUNTIME_TOKEN', service: 'lmstudio' },
+      billingClass: 'free-tier', tier: 'T0',
+    });
+  });
+
+  it('fails a local-runtime id collision without replacing the existing codex account', async () => {
+    const path = join(tempDir(), 'ollama-collision.json');
+    withHome(tempDir());
+    writeFileSync(path, JSON.stringify({
+      schemaVersion: 2,
+      codex: [{ id: 'shared', codexHome: '/tmp/native-codex', billingClass: 'subscription-quota', tier: 'T1', loggedIn: true }],
+    }));
+    const report: string[] = [];
+
+    const prompter = new RecordingPrompter(new ScriptedPrompter([true, 'shared', false]));
+    const summary = await runAccountsAdd({ provider: 'ollama', registryPath: path }, {
+      prompter, runner: fakeRunner, report: (line) => report.push(line),
+    });
+
+    expect(summary).toMatchObject({ added: [], failed: ['shared'] });
+    expect(loadAccountRegistry(path).accounts).toMatchObject([{ id: 'shared', provider: 'codex', loggedIn: true }]);
+    expect(report.join('\n')).toContain('already used by an existing codex account');
+    expect(prompter.questions).toContain('Any other Ollama accounts to cycle through?');
+  });
+
+  it('offers local-runtime providers in the default wizard', async () => {
     const path = join(tempDir(), 'localruntime.json');
     withHome(tempDir());
     const prompter = new RecordingPrompter(new ScriptedPrompter(Array.from({ length: 16 }, () => false)));
     const summary = await runAccountsAdd({ registryPath: path }, { prompter, runner: fakeRunner });
-    expect(prompter.questions).not.toContain('Do you have a Ollama account?');
-    expect(prompter.questions).not.toContain('Do you have a LM Studio account?');
+    expect(prompter.questions).toContain('Do you have a Ollama account?');
+    expect(prompter.questions).toContain('Do you have a LM Studio account?');
     expect(summary.added).toEqual([]);
   });
 
-  it('refuses deferred provider surfaces (local-runtime, browser-oauth) via --provider', async () => {
+  it('refuses deferred browser-oauth provider surfaces via --provider', async () => {
     const path = join(tempDir(), 'deferred.json');
     withHome(tempDir());
-    await expect(runAccountsAdd({ provider: 'ollama', registryPath: path }, {
-      prompter: new ScriptedPrompter([]), runner: fakeRunner,
-    })).rejects.toThrow(/does not yet support/i);
     await expect(runAccountsAdd({ provider: 'gemini', registryPath: path }, {
       prompter: new ScriptedPrompter([]), runner: fakeRunner,
     })).rejects.toThrow(/does not yet support/i);
