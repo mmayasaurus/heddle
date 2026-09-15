@@ -52,33 +52,15 @@ export function createDoctorStep(injected: DoctorStepDeps = {}): WizardStep {
     // and homeDir is intentionally NOT used to relocate config (see the header): the step verifies the
     // real resolved environment like `heddle doctor`.
     async run(ctx: WizardContext, io: WizardIO): Promise<WizardStepResult> {
+      // The verification itself is the ONLY failure that means "could not verify", so its catch is
+      // scoped to just the runDoctor call — a later progress-reporting error must never be
+      // misattributed as a verification failure (a real report would then be silently swallowed).
+      let report: DoctorReport;
       try {
         // Verify the real resolved config: pass no path overrides (like `heddle doctor`). A hermetic
         // test threads the whole tree through doctorDeps; ctx.now stays authoritative (wizard clock),
         // spread AFTER doctorDeps so an injected `now` can never override the wizard's run clock.
-        const report = await run({}, { ...injected.doctorDeps, now: () => ctx.now() });
-        const text = formatDoctorReport(report);
-        // WizardIO.report is a per-LINE progress sink — emit each table row, not one multi-line blob.
-        for (const line of text.split('\n')) io.report(line);
-        const { ok, warn, fail, skipped } = report.summary;
-        const ran = ok + warn + fail;
-        // ran===0 (nothing verified) maps to `failed`, not a hollow-green `done` — a finish screen that
-        // keys off status (not the prose) must never paint success when nothing was proven. This branch
-        // is unreachable with the real runDoctor (configChecks pushes 4 unconditional ok/fail
-        // definitions → ran>=4); the guard covers the injected-runner / degenerate-report path.
-        const status: WizardStepStatus = fail > 0 || ran === 0 ? 'failed' : 'done';
-        const skippedSuffix = skipped > 0 ? ` (${skipped} skipped)` : '';
-        const summary =
-          fail > 0
-            ? `setup NOT proven — ${fail} check(s) failing (${ok} ok, ${warn} warn, ${skipped} skipped)`
-            : ran === 0
-              ? `setup NOT verified — no checks ran${skippedSuffix}`
-              : warn > 0
-                ? `setup verified with ${warn} warning(s) (${ok} ok, ${skipped} skipped)`
-                : skipped > 0
-                  ? `setup verified — ${ok} checks pass (${skipped} skipped)`
-                  : `setup verified — all ${ok} checks pass`;
-        return { id: 'doctor', status, summary, detail: text };
+        report = await run({}, { ...injected.doctorDeps, now: () => ctx.now() });
       } catch (error) {
         // A thrown doctor run must not abort the wizard — report it as a failed verification instead.
         // Stringify defensively: a non-Error throwable (a null-prototype object, a Symbol) can make
@@ -92,6 +74,36 @@ export function createDoctorStep(injected: DoctorStepDeps = {}): WizardStep {
         }
         return { id: 'doctor', status: 'failed', summary: `verification could not run: ${detail}`, detail };
       }
+
+      // Verification succeeded. Emit the report as progress (best-effort: a throwing io.report must
+      // neither abort the wizard NOR be misreported as a verification failure — the verified result
+      // below is what matters). WizardIO.report is a per-LINE sink, so emit each table row.
+      const text = formatDoctorReport(report);
+      try {
+        for (const line of text.split('\n')) io.report(line);
+      } catch {
+        // progress output is best-effort; swallow so a broken reporter can't corrupt a real result.
+      }
+      // Pure mapping (cannot throw): map the report summary to the finish-screen result.
+      const { ok, warn, fail, skipped } = report.summary;
+      const ran = ok + warn + fail;
+      // ran===0 (nothing verified) maps to `failed`, not a hollow-green `done` — a finish screen that
+      // keys off status (not the prose) must never paint success when nothing was proven. This branch
+      // is unreachable with the real runDoctor (configChecks pushes 4 unconditional ok/fail
+      // definitions → ran>=4); the guard covers the injected-runner / degenerate-report path.
+      const status: WizardStepStatus = fail > 0 || ran === 0 ? 'failed' : 'done';
+      const skippedSuffix = skipped > 0 ? ` (${skipped} skipped)` : '';
+      const summary =
+        fail > 0
+          ? `setup NOT proven — ${fail} check(s) failing (${ok} ok, ${warn} warn, ${skipped} skipped)`
+          : ran === 0
+            ? `setup NOT verified — no checks ran${skippedSuffix}`
+            : warn > 0
+              ? `setup verified with ${warn} warning(s) (${ok} ok, ${skipped} skipped)`
+              : skipped > 0
+                ? `setup verified — ${ok} checks pass (${skipped} skipped)`
+                : `setup verified — all ${ok} checks pass`;
+      return { id: 'doctor', status, summary, detail: text };
     },
   };
 }

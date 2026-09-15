@@ -182,6 +182,21 @@ describe('createDoctorStep (HED-476 wizard finish = read-only `heddle doctor`)',
     expect(result.summary).toContain('verification could not run');
     expect(result.detail).toBe('a non-Error value was thrown');
   });
+
+  it('still returns the verified result when io.report throws — progress output is best-effort (gemini r3)', async () => {
+    // A throwing reporter (e.g. broken stderr) must NOT be misattributed as "verification could not
+    // run": verification succeeded, so the real result stands and the wizard is not aborted.
+    const rep = report({ ok: 5 });
+    const step = createDoctorStep({ runDoctor: async () => rep });
+    const throwingIO: WizardIO = {
+      prompter: new ScriptedPrompter([]),
+      report: () => { throw new Error('stderr broken'); },
+    };
+    const result = await step.run(makeCtx(tempDir()), throwingIO);
+    expect(result.status).toBe('done');
+    expect(result.summary).toBe('setup verified — all 5 checks pass');
+    expect(result.detail).toBe(formatDoctorReport(rep));
+  });
 });
 
 /** Sorted `relative-path:size` list — proves no file was created, modified, or removed. */
