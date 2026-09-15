@@ -39,6 +39,16 @@ export function loadExistingRulesPolicy(path: string): Record<string, unknown> {
   return existing;
 }
 
+export function existingRuleSelection(existing: Record<string, unknown>): HookRuleSelection[] | undefined {
+  const raw = existing.rules;
+  if (!Array.isArray(raw)) return undefined;
+  const valid = raw.filter((entry): entry is HookRuleSelection =>
+    entry !== null && typeof entry === 'object' && !Array.isArray(entry)
+    && typeof (entry as HookRuleSelection).id === 'string'
+    && typeof (entry as HookRuleSelection).enforce === 'boolean');
+  return valid.length ? valid : undefined;
+}
+
 export function rulesStep(catalogRoot: string): WizardStep {
   return {
     id: 'rules',
@@ -70,7 +80,9 @@ export function rulesStep(catalogRoot: string): WizardStep {
           ? presetDefaults
           : (await runHooksChoose({ catalogRoot, defaults: presetDefaults }, { prompter: io.prompter, report: io.report })).selected;
       } else {
-        selection = (await runHooksChoose({ catalogRoot }, { prompter: io.prompter, report: io.report })).selected;
+        const prior = existingRuleSelection(existing);
+        if (prior) io.report(`Pre-filling the chooser from your existing policy (${prior.length} rule(s)); adjust as needed.`);
+        selection = (await runHooksChoose({ catalogRoot, defaults: prior }, { prompter: io.prompter, report: io.report })).selected;
       }
 
       if (!await io.prompter.confirm(`Save these rules to ${policyFile}?`, true)) {

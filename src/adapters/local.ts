@@ -16,6 +16,15 @@ interface LocalModel {
   [key: string]: unknown;
 }
 
+function readLocalBaseUrlSecret(): string | undefined {
+  try {
+    return readSecretsEnvValue('HEDDLE_LOCAL_BASE_URL');
+  } catch (err) {
+    process.stderr.write(`local: ignoring HEDDLE_LOCAL_BASE_URL from secrets.env — ${err instanceof Error ? err.message : String(err)}\n`);
+    return undefined;
+  }
+}
+
 export class LocalAdapter implements WorkerAdapter {
   readonly name = 'local';
   readonly provider = 'local' as const;
@@ -26,7 +35,7 @@ export class LocalAdapter implements WorkerAdapter {
   constructor(deps: LocalAdapterDeps = {}) {
     this.fetchImpl = deps.fetchImpl ?? fetch;
     this.pressureLevel = deps.pressureLevel ?? readPressureLevel;
-    this.baseUrl = normalizeBaseUrl(deps.baseUrl ?? process.env.HEDDLE_LOCAL_BASE_URL ?? readSecretsEnvValue('HEDDLE_LOCAL_BASE_URL') ?? DEFAULT_BASE_URL);
+    this.baseUrl = normalizeBaseUrl(deps.baseUrl ?? process.env.HEDDLE_LOCAL_BASE_URL ?? readLocalBaseUrlSecret() ?? DEFAULT_BASE_URL);
   }
 
   async dispatch(prompt: string, opts: DispatchOptions): Promise<WorkerResult> {

@@ -1,4 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
+const { secureReadFileMock } = vi.hoisted(() => ({
+  secureReadFileMock: vi.fn(() => { throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }); }),
+}));
+vi.mock('../../src/secure-fs.js', () => ({ secureReadFile: secureReadFileMock }));
 import { defaultAdapterFor } from '../../src/dispatch.js';
 import { LocalAdapter } from '../../src/adapters/local.js';
 import { isInProcessHttpProvider } from '../../src/adapters/openai-compat.js';
@@ -106,6 +110,30 @@ describe('LocalAdapter', () => {
 
   it('is constructible by the default factory without a secrets key', () => {
     expect(defaultAdapterFor('local')).toBeInstanceOf(LocalAdapter);
+  });
+
+  it('ignores an insecure secrets-file local base URL and uses the default URL', async () => {
+    const originalBaseUrl = process.env.HEDDLE_LOCAL_BASE_URL;
+    delete process.env.HEDDLE_LOCAL_BASE_URL;
+    secureReadFileMock.mockImplementation(() => {
+      throw new Error('refusing to read secret file /x: group or other permissions are present');
+    });
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const fetchImpl = vi.fn()
+        .mockResolvedValueOnce(modelsResponse([{ id: 'loaded-model' }]))
+        .mockResolvedValueOnce(completionResponse('done'));
+
+      await new LocalAdapter({ fetchImpl, pressureLevel: () => 0 }).dispatch('hello', opts);
+
+      expect(fetchImpl.mock.calls[0][0]).toMatch(/^http:\/\/localhost:1234\/v1/);
+      expect(stderr).toHaveBeenCalledWith(expect.stringContaining('local: ignoring HEDDLE_LOCAL_BASE_URL from secrets.env'));
+    } finally {
+      secureReadFileMock.mockImplementation(() => { throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }); });
+      if (originalBaseUrl === undefined) delete process.env.HEDDLE_LOCAL_BASE_URL;
+      else process.env.HEDDLE_LOCAL_BASE_URL = originalBaseUrl;
+      vi.restoreAllMocks();
+    }
   });
 
   it('leaves local unreferenced by all configured lane and task routes', () => {

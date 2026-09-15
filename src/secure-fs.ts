@@ -160,23 +160,10 @@ export function secureReadFile(path: string, opts: { euid?: number } = {}): stri
  * written) AND must NOT be group/other-writable, so a `mode` missing an owner bit (e.g. 0o600 — an
  * un-enterable directory) or carrying 0o022 is rejected rather than silently honored.
  *
- * When the directory is ABSENT it is built by a per-level walk, NOT a single recursive `mkdir`: climb to
- * the deepest existing ancestor (rejecting a symlinked / non-dir / group-or-other-writable ancestor along
- * the way), then create each missing component top-down and, on that component's own
- * `O_DIRECTORY | O_NOFOLLOW` fd, verify euid-ownership and force the mode to exactly `mode` BEFORE
- * descending into it. This is required because `mkdir`'s mode argument is umask-masked: a single recursive
- * create under a restrictive umask (one stripping owner-execute) would leave the FIRST new ancestor
- * un-enterable, so creating the rest of the path fails EACCES and strands a partial tree. Forcing each
- * level past umask on its fd as we go keeps every created ancestor enterable — so, unlike the file
- * primitives' immediate-parent-only model, a directory this function CREATES is never a deep-ancestor
- * residual; only a PRE-EXISTING ancestor above the deepest existing one stays out of scope (the module
- * invariant), and you cannot create UNDER a foreign-owned ancestor anyway (`mkdir` fails EACCES unless it
- * is group/other-writable, which the climb rejects). If a level's finalization fails (a symlink swapped in
- * at the name, or the ownership check), that half-initialized level is removed so a later call recreates it
- * rather than accepting a partial one. An EXISTING directory is validated but never chmodded (a legitimate
- * 0755 profile dir is accepted, exactly as the writer accepts a 0755 parent). Each component is created
- * NON-recursively, so a concurrent same-uid create of the same component surfaces EEXIST rather than being
- * silently adopted unvalidated — callers that create the same tree concurrently serialize or retry.
+ * When the directory is ABSENT it is built by `createSecureDirTree` — a validated per-level walk, NOT a
+ * single recursive `mkdir` (see that helper for why a umask stripping owner-execute makes the walk
+ * necessary, and for the intermediate-trust rule the climb uses). An EXISTING directory is validated but
+ * never chmodded (a legitimate 0755 profile dir is accepted, exactly as the writer accepts a 0755 parent).
  */
 export function ensureSecureDir(dir: string, opts: { mode?: number; euid?: number } = {}): void {
   const mode = opts.mode ?? 0o700;
@@ -189,11 +176,49 @@ export function ensureSecureDir(dir: string, opts: { mode?: number; euid?: numbe
   // chmodded, exactly like an existing parent). Its natural ENOENT means "absent → create it" below.
   try {
     assertSafeExistingDir(dir, euid);
+    // HED-634: an existing leaf is not enough — also reject an unsafe IMMEDIATE PARENT (symlink /
+    // non-dir / group-or-other-writable), matching the create-path climb in createSecureDirTree. Otherwise a safe,
+    // euid-owned leaf that already exists under a group/other-writable ancestor is accepted on a re-run,
+    // while a first run (which takes the create path) would refuse it. Structural only (no euid): a
+    // legitimately root-owned parent such as ~ or /Users is fine, and the parent is guaranteed to exist
+    // here because the leaf does.
+    assertSafeExistingDir(dirname(dir));
     return;
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
   }
 
+  // Absent → build the target and any missing ancestors via the validated per-level walk (shared with
+  // ensureSafeParent — HED-626). The fast path above already handled the existing-target case.
+  createSecureDirTree(dir, mode, euid);
+}
+
+/**
+ * Build an ABSENT directory and its missing ancestors by a per-level walk (never a single recursive
+ * `mkdir`): climb to the deepest existing ancestor — rejecting a symlinked / non-dir /
+ * group-or-other-writable ancestor STRUCTURALLY along the way — then create each missing component
+ * top-down and, on that component's own `O_DIRECTORY | O_NOFOLLOW` fd, verify euid-ownership and force the
+ * mode to exactly `mode` BEFORE descending into it. The walk is required because `mkdir`'s mode argument is
+ * umask-masked: a single recursive create under a restrictive umask (one stripping owner-execute) would
+ * leave the FIRST new ancestor un-enterable, so creating the rest of the path fails EACCES and strands a
+ * partial tree (HED-620). Forcing each level past umask on its own fd as we go keeps every created ancestor
+ * enterable — so a directory CREATED here is never a deep-ancestor residual; only a PRE-EXISTING ancestor
+ * above the deepest existing one stays out of scope (the module invariant), and you cannot create UNDER a
+ * foreign-owned ancestor anyway (`mkdir` fails EACCES unless it is group/other-writable, which the climb
+ * rejects). If a level's finalization fails (a symlink swapped in at the name, or the ownership check),
+ * that half-initialized level is removed so a later call recreates it rather than accepting a partial one.
+ * Each component is created NON-recursively, so a concurrent same-uid create of the same component surfaces
+ * EEXIST rather than being silently adopted unvalidated — callers that create the same tree concurrently
+ * serialize or retry.
+ *
+ * The climb is STRUCTURAL only (no euid) even though the caller resolved a `euid` for the levels created: a
+ * legitimately root-owned existing ancestor (`~`, `/Users`) must not be rejected against the caller's euid,
+ * and euid-ownership of what THIS function makes is enforced by `finalizeCreatedDir` on each created
+ * inode's fd. The caller owns `mode` and `euid` (both resolve/validate them before calling); this helper
+ * does not re-gate `mode`. Shared by `ensureSecureDir` (its absent-target create path) and `ensureSafeParent`
+ * (HED-626), so the writer's and lock's parent creation adopts the same umask-safe, ownership-verified walk.
+ */
+function createSecureDirTree(dir: string, mode: number, euid: number): void {
   // Climb to the deepest existing ancestor, collecting the missing components to create top-down. The
   // climb requires only STRUCTURAL safety of existing ancestors (not a symlink / not a non-dir / not
   // group-or-other-writable), not euid-ownership: you cannot `mkdir` under a foreign-owned ancestor unless
@@ -428,15 +453,48 @@ function claimLock(lockPath: string, pid: number): boolean {
 }
 
 /**
- * Create a missing parent at `mode`, or accept an existing one only if it is tamper-resistant. Pass `euid`
- * to additionally require the existing directory to be owned by it (the writer does; the lock does not).
+ * Create a missing parent (and any missing ancestors) at `mode` via the shared per-level walk
+ * `createSecureDirTree` (HED-626 — never a umask-subject recursive `mkdir`), or accept an existing one only
+ * if it is tamper-resistant. A concurrent same-uid creator is tolerated by RE-VALIDATING (not blindly
+ * adopting) the directory it won — see the body. Pass `euid` to additionally require the EXISTING directory
+ * to be owned by it (the writer does; the lock does not — so the existing-dir fast path stays euid-optional).
  */
 function ensureSafeParent(parent: string, mode: number, euid?: number): void {
-  try {
-    assertSafeExistingDir(parent, euid);
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-    mkdirSync(parent, { recursive: true, mode });
+  // Validate-or-create, retrying on a concurrent create. HED-626: the absent branch builds the parent (and
+  // any missing ancestors) with the SAME validated per-level walk ensureSecureDir uses, not a single
+  // umask-subject `mkdir -p` — otherwise a restrictive umask that strips owner-execute strands a partial,
+  // un-enterable tree (EACCES).
+  //
+  // The non-recursive walk throws EEXIST when another same-uid process creates a collected component between
+  // our climb and our mkdir. The OLD recursive `mkdir` tolerated that race — but BLINDLY: a peer that
+  // created `parent` group/other-writable in the window was accepted with NO re-validation and a secret was
+  // written into it. Looping back to assertSafeExistingDir re-validates the peer's directory (structural +,
+  // for the writer, euid), so this is race-tolerant AND tightening — it closes that gap rather than restoring it.
+  //
+  // The two validate calls are deliberately distinct: the fast path passes the RAW optional `euid` (so the
+  // lock, which passes none, keeps its euid-OPTIONAL existing-parent check — module invariant), while only
+  // the create branch resolves effectiveUid(euid) for the levels it makes (a dir it just created is
+  // process-owned, so finalizeCreatedDir passes). Do NOT collapse them into one euid.
+  //
+  // Bounded: each EEXIST means a peer advanced the missing chain by >=1 existing level, so honest iterations
+  // are bounded by the chain depth; the cap only stops a same-uid create-then-delete peer (already holds the
+  // credentials — out of the module's threat model) from spinning, and exhaustion rethrows EEXIST (fail closed).
+  const maxAttempts = 4;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      assertSafeExistingDir(parent, euid);
+      return;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    }
+    try {
+      createSecureDirTree(parent, mode, effectiveUid(euid));
+      return;
+    } catch (err) {
+      // A peer created a component first → re-validate the now-existing tree on the next iteration. Any
+      // other error (an unsafe peer dir trips assertSafeExistingDir next pass), or exhaustion, propagates.
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST' || attempt >= maxAttempts) throw err;
+    }
   }
 }
 

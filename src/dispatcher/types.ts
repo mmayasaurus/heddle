@@ -127,7 +127,7 @@ export interface BoundedAdmission {
  * `refusal` column.
  */
 export interface DispatchRefusal {
-  code: 'claude-in-session' | 'no-dispatchable-account' | 'not-dispatchable' | 'depth-1' | 'max-children' | 'capability-denied' | 'tier-read-only' | 'metered-pool-exhausted' | 'same-provider-review' | 'override-reason-required' | 'fleet-paused' | 'fallback-blocked-dirty-tree' | 'billing.pay-per-token' | 'billing.open-billing-at-cap' | 'billing.prepaid-exhausted' | 'headless-claude-review-unreliable' | 'env-repoint.missing-token' | 'env-repoint.invalid-config' | 'bounded-input-oversize' | 'bounded-unsupported-bound' | 'bounded-headroom-unknown' | 'bounded-headroom-stale' | 'bounded-account-mismatch' | 'bounded-aggregate-exhausted' | 'bounded-forbidden-fallback' | 'bounded-forbidden-extra-request' | 'bounded-forbidden-tools' | 'bounded-duplicate-request';
+  code: 'claude-in-session' | 'no-dispatchable-account' | 'not-dispatchable' | 'depth-1' | 'max-children' | 'capability-denied' | 'tier-read-only' | 'metered-pool-exhausted' | 'same-provider-review' | 'override-reason-required' | 'fleet-paused' | 'fallback-blocked-dirty-tree' | 'billing.pay-per-token' | 'billing.open-billing-at-cap' | 'billing.prepaid-exhausted' | 'headless-claude-review-unreliable' | 'env-repoint.missing-token' | 'env-repoint.insecure-secrets' | 'env-repoint.invalid-config' | 'bounded-input-oversize' | 'bounded-unsupported-bound' | 'bounded-headroom-unknown' | 'bounded-headroom-stale' | 'bounded-account-mismatch' | 'bounded-aggregate-exhausted' | 'bounded-forbidden-fallback' | 'bounded-forbidden-extra-request' | 'bounded-forbidden-tools' | 'bounded-duplicate-request';
   reason: string;
   /** What to do instead, when there is a clear alternative. */
   instruction?: string;

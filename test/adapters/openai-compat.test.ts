@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-vi.mock('node:fs', () => ({ readFileSync: vi.fn() }));
-import { readFileSync } from 'node:fs';
+vi.mock('../../src/secure-fs.js', () => ({ secureReadFile: vi.fn() }));
+import { secureReadFile } from '../../src/secure-fs.js';
 import { OpenAICompatAdapter, openAICompatInputTokenUpperBound } from '../../src/adapters/openai-compat.js';
 import type { DispatchOptions } from '../../src/types.js';
 
@@ -35,7 +35,7 @@ describe('OpenAICompatAdapter', () => {
   });
 
   it('maps a chat completion to WorkerResult', async () => {
-    vi.mocked(readFileSync).mockReturnValue('GROQ_API_KEY=secret\n');
+    vi.mocked(secureReadFile).mockReturnValue('GROQ_API_KEY=secret\n');
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response({ choices: [{ finish_reason: 'stop', message: { content: 'done' } }], usage: { prompt_tokens: 3, completion_tokens: 5, completion_tokens_details: { reasoning_tokens: 2 } } })));
     await expect(new OpenAICompatAdapter('groq').dispatch('hello', opts)).resolves.toMatchObject({
       ok: true, output: 'done', exitCode: null,
@@ -44,7 +44,7 @@ describe('OpenAICompatAdapter', () => {
   });
 
   it('retries empty reasoning content once with a larger token budget', async () => {
-    vi.mocked(readFileSync).mockReturnValue('GROQ_API_KEY=secret\n');
+    vi.mocked(secureReadFile).mockReturnValue('GROQ_API_KEY=secret\n');
     const fetch = vi.fn()
       .mockResolvedValueOnce(response({ choices: [{ finish_reason: 'length', message: { content: '' } }], usage: { prompt_tokens: 3, completion_tokens: 32768, completion_tokens_details: { reasoning_tokens: 4 } } }))
       .mockResolvedValueOnce(response({ choices: [{ finish_reason: 'stop', message: { content: 'after retry' } }], usage: { prompt_tokens: 5, completion_tokens: 7, completion_tokens_details: { reasoning_tokens: 2 } } }));
@@ -57,7 +57,7 @@ describe('OpenAICompatAdapter', () => {
   });
 
   it('uses the dispatch output cap and disables the reasoning retry for a bounded request', async () => {
-    vi.mocked(readFileSync).mockReturnValue('ZAI_API_KEY=secret\n');
+    vi.mocked(secureReadFile).mockReturnValue('ZAI_API_KEY=secret\n');
     const fetch = vi.fn().mockResolvedValue(response({
       id: 'glm-request-1',
       choices: [{ finish_reason: 'length', message: { content: '{"partial":true}' } }],
@@ -85,7 +85,7 @@ describe('OpenAICompatAdapter', () => {
   });
 
   it('actively cancels an oversized bounded response and retains the partial bytes', async () => {
-    vi.mocked(readFileSync).mockReturnValue('ZAI_API_KEY=secret\n');
+    vi.mocked(secureReadFile).mockReturnValue('ZAI_API_KEY=secret\n');
     const body = JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content: 'x'.repeat(20_000) } }] });
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(body, { status: 200 })));
 
@@ -104,7 +104,7 @@ describe('OpenAICompatAdapter', () => {
   });
 
   it('reports the HTTP status when an oversized error response is capped', async () => {
-    vi.mocked(readFileSync).mockReturnValue('ZAI_API_KEY=secret\n');
+    vi.mocked(secureReadFile).mockReturnValue('ZAI_API_KEY=secret\n');
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('x'.repeat(20_000), { status: 429 })));
     const result = await new OpenAICompatAdapter('glm').dispatch('hello', {
       ...opts, model: 'glm-5.3', maxOutputBytes: 16_000,
@@ -119,7 +119,7 @@ describe('OpenAICompatAdapter', () => {
   });
 
   it('fails loudly when its key is missing', async () => {
-    vi.mocked(readFileSync).mockImplementation(() => { throw new Error('ENOENT'); });
+    vi.mocked(secureReadFile).mockImplementation(() => { throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }); });
     await expect(new OpenAICompatAdapter('cerebras').dispatch('hello', opts)).resolves.toMatchObject({
       ok: false, output: '', exitCode: null,
       error: 'cerebras: CEREBRAS_API_KEY not found in ~/.heddle/secrets.env',
@@ -128,7 +128,7 @@ describe('OpenAICompatAdapter', () => {
   });
 
   it('trims a quoted secret value before using it in the authorization header', async () => {
-    vi.mocked(readFileSync).mockReturnValue('GROQ_API_KEY="secret"  \n');
+    vi.mocked(secureReadFile).mockReturnValue('GROQ_API_KEY="secret"  \n');
     const fetch = vi.fn().mockResolvedValue(response({ choices: [{ finish_reason: 'stop', message: { content: 'done' } }] }));
     vi.stubGlobal('fetch', fetch);
     await new OpenAICompatAdapter('groq').dispatch('hello', opts);
@@ -136,7 +136,7 @@ describe('OpenAICompatAdapter', () => {
   });
 
   it('returns a failure for an aborted request', async () => {
-    vi.mocked(readFileSync).mockReturnValue('OPENROUTER_API_KEY=secret\n');
+    vi.mocked(secureReadFile).mockReturnValue('OPENROUTER_API_KEY=secret\n');
     vi.stubGlobal('fetch', vi.fn((_url: string, init: RequestInit) => new Promise((_resolve, reject) => {
       init.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
     })));
@@ -147,7 +147,7 @@ describe('OpenAICompatAdapter', () => {
   });
 
   it('classifies an abort while reading a bounded response as a timeout', async () => {
-    vi.mocked(readFileSync).mockReturnValue('ZAI_API_KEY=secret\n');
+    vi.mocked(secureReadFile).mockReturnValue('ZAI_API_KEY=secret\n');
     vi.stubGlobal('fetch', vi.fn((_url: string, init: RequestInit) => Promise.resolve({
       ok: true,
       status: 200,
@@ -166,7 +166,7 @@ describe('OpenAICompatAdapter', () => {
   });
 
   it('does not start a reasoning retry after the shared deadline expires', async () => {
-    vi.mocked(readFileSync).mockReturnValue('GROQ_API_KEY=secret\n');
+    vi.mocked(secureReadFile).mockReturnValue('GROQ_API_KEY=secret\n');
     vi.spyOn(Date, 'now').mockReturnValueOnce(0).mockReturnValueOnce(0).mockReturnValueOnce(0).mockReturnValue(10);
     const fetch = vi.fn().mockResolvedValue(response({ choices: [{ finish_reason: 'length', message: { content: '' } }] }));
     vi.stubGlobal('fetch', fetch);

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { run, GRACE_MS } from '../src/adapters/subprocess.js';
+import { run, spawnProbe, GRACE_MS } from '../src/adapters/subprocess.js';
 import { useTempResources } from './helpers.js';
 
 // The shared runner all four adapters (codex/cursor/claude/agy) now depend on (HED-31). These pin
@@ -201,6 +201,49 @@ describe('subprocess run() — the shared adapter runner', () => {
         // The grandchild has already exited.
       }
     }
+  });
+
+  it.skipIf(process.platform === 'win32')('spawnProbe settles with the real exit status when the child exits fast but a detached grandchild holds the pipes', async () => {
+    const pidfile = join(tempDir(), 'spawn-probe-fastexit-grandchild.pid');
+    const TIMEOUT_MS = 15_000;
+    const parent = [
+      "const { spawn } = require('node:child_process');",
+      "const fs = require('node:fs');",
+      "const gc = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], { detached: true, stdio: 'inherit' });",
+      `fs.writeFileSync(${JSON.stringify(pidfile)}, String(gc.pid));`,
+      'process.exit(0);',
+    ].join(' ');
+    try {
+      const started = Date.now();
+      const r = await spawnProbe(NODE, ['-e', parent], {
+        cwd: process.cwd(), env: process.env, stdin: '', timeoutMs: TIMEOUT_MS,
+      });
+      const elapsed = Date.now() - started;
+
+      expect(r.exitCode).toBe(0);
+      expect(r.timedOut).toBe(false);
+      expect(elapsed).toBeGreaterThan(GRACE_MS - 200);
+      expect(elapsed).toBeLessThan(TIMEOUT_MS);
+      expect(existsSync(pidfile)).toBe(true);
+    } finally {
+      try {
+        if (existsSync(pidfile)) process.kill(Number(readFileSync(pidfile, 'utf8')), 'SIGKILL');
+      } catch {
+        // The grandchild has already exited.
+      }
+    }
+  });
+
+  it('spawnProbe reports a real deadline timeout', async () => {
+    const started = Date.now();
+    const r = await spawnProbe(NODE, ['-e', 'setTimeout(() => {}, 60000)'], {
+      cwd: process.cwd(), env: process.env, stdin: '', timeoutMs: 1_000,
+    });
+    const elapsed = Date.now() - started;
+
+    expect(r.timedOut).toBe(true);
+    expect(elapsed).toBeGreaterThanOrEqual(1_000);
+    expect(elapsed).toBeLessThan(6_000);
   });
 
   it.skipIf(process.platform === 'win32')('settles a natural fast exit via the drain window with the idle watchdog armed (smoke)', async () => {

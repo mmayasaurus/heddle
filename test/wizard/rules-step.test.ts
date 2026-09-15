@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { rulesStep, loadExistingRulesPolicy } from '../../src/wizard/rules-step.js';
+import { existingRuleSelection, rulesStep, loadExistingRulesPolicy } from '../../src/wizard/rules-step.js';
 import { resolvePreset } from '../../src/wizard/presets.js';
 import { policyPath } from '../../src/wizard/persist.js';
 import { ScriptedPrompter, type Prompter } from '../../src/wizard/prompt.js';
@@ -135,6 +135,45 @@ describe('rulesStep', () => {
     expect(result.status).toBe('done');
   });
 
+  it('pre-fills a custom chooser from the existing policy', async () => {
+    const catalogRoot = tempDir();
+    const homeDir = tempDir();
+    seedCatalog(catalogRoot);
+    seedPolicy(homeDir, JSON.stringify({
+      schemaVersion: 1,
+      rules: [{ id: 'no-rm-recursive-force', enforce: true }],
+    }));
+    const recording = new RecordingPrompter(['custom (choose each rule)', true, true, true]);
+
+    await rulesStep(catalogRoot).run(context(homeDir), { prompter: recording, report: () => {} });
+
+    expect(recording.calls.find((call) => call.question.includes('include no-rm-recursive-force'))?.defaultValue).toBe(true);
+    expect(recording.calls.find((call) => call.question.includes('enable ENFORCEMENT for no-rm-recursive-force'))?.defaultValue).toBe(true);
+  });
+
+  it('starts a first-run custom chooser blank', async () => {
+    const catalogRoot = tempDir();
+    const homeDir = tempDir();
+    seedCatalog(catalogRoot);
+    const recording = new RecordingPrompter(['custom (choose each rule)', true, true, true]);
+
+    await rulesStep(catalogRoot).run(context(homeDir), { prompter: recording, report: () => {} });
+
+    expect(recording.calls.find((call) => call.question.includes('include no-rm-recursive-force'))?.defaultValue).toBe(false);
+  });
+
+  it('leaves a custom chooser blank when existing rules are malformed', async () => {
+    const catalogRoot = tempDir();
+    const homeDir = tempDir();
+    seedCatalog(catalogRoot);
+    seedPolicy(homeDir, JSON.stringify({ schemaVersion: 1, rules: 'oops' }));
+    const recording = new RecordingPrompter(['custom (choose each rule)', true, true, true]);
+
+    await expect(rulesStep(catalogRoot).run(context(homeDir), { prompter: recording, report: () => {} })).resolves.toBeDefined();
+
+    expect(recording.calls.find((call) => call.question.includes('include no-rm-recursive-force'))?.defaultValue).toBe(false);
+  });
+
   it('preserves unknown top-level fields on a rerun (merge-preserving contract)', async () => {
     const catalogRoot = tempDir();
     const homeDir = tempDir();
@@ -222,5 +261,33 @@ describe('loadExistingRulesPolicy', () => {
   it('throws on a schemaVersion this writer does not own', () => {
     const path = seedPolicy(tempDir(), JSON.stringify({ schemaVersion: 2, rules: [] }));
     expect(() => loadExistingRulesPolicy(path)).toThrow(/schemaVersion/);
+  });
+});
+
+describe('existingRuleSelection', () => {
+  it('returns a valid rules array', () => {
+    const rules = [{ id: 'no-rm-recursive-force', enforce: true }];
+    expect(existingRuleSelection({ rules })).toEqual(rules);
+  });
+
+  it('returns undefined when rules are absent', () => {
+    expect(existingRuleSelection({})).toBeUndefined();
+  });
+
+  it('returns undefined when rules are not an array', () => {
+    expect(existingRuleSelection({ rules: 'oops' })).toBeUndefined();
+  });
+
+  it('keeps only valid entries from a mixed rules array', () => {
+    expect(existingRuleSelection({
+      rules: [
+        { id: 'valid', enforce: false },
+        { id: 'missing-enforce' },
+        { id: 1, enforce: true },
+        null,
+        [],
+      ],
+    })).toEqual([{ id: 'valid', enforce: false }]);
+    expect(existingRuleSelection({ rules: [null, 'invalid'] })).toBeUndefined();
   });
 });

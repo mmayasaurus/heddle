@@ -29,6 +29,25 @@ export type EnvRepointResolution =
   | { kind: 'refuse'; refusal: DispatchRefusal }
   | { kind: 'ok'; envRepoint: { baseUrl: string; authToken: string; service: string; model?: string } };
 
+type EnvRepointToken = { ok: true; token: string } | { ok: false; refusal: DispatchRefusal };
+
+function readEnvRepointToken(readSecret: (ref: string) => string, envRepoint: AccountEnvRepoint): EnvRepointToken {
+  let authToken: string;
+  try {
+    authToken = readSecret(envRepoint.authTokenRef);
+  } catch (err) {
+    return { ok: false, refusal: { code: 'env-repoint.insecure-secrets',
+      reason: `env-repoint ${envRepoint.service}: refusing to read ${envRepoint.authTokenRef} — ${err instanceof Error ? err.message : String(err)}`,
+      instruction: 'Fix ~/.heddle/secrets.env permissions (chmod 600; owner-only, no symlink) and retry.' } };
+  }
+  if (!authToken) {
+    return { ok: false, refusal: { code: 'env-repoint.missing-token',
+      reason: `env-repoint ${envRepoint.service}: ${envRepoint.authTokenRef} not found in ~/.heddle/secrets.env`,
+      instruction: 'Add the referenced free-tier credential to ~/.heddle/secrets.env and retry.' } };
+  }
+  return { ok: true, token: authToken };
+}
+
 export function resolveEnvRepoint(
   account: { id?: string; envRepoint?: AccountEnvRepoint } | undefined,
   targetProvider: string,
@@ -59,17 +78,9 @@ export function resolveEnvRepoint(
       },
     };
   }
-  const authToken = readSecret(envRepoint.authTokenRef);
-  if (!authToken) {
-    return {
-      kind: 'refuse',
-      refusal: {
-        code: 'env-repoint.missing-token',
-        reason: `env-repoint ${envRepoint.service}: ${envRepoint.authTokenRef} not found in ~/.heddle/secrets.env`,
-        instruction: 'Add the referenced free-tier credential to ~/.heddle/secrets.env and retry.',
-      },
-    };
-  }
+  const tokenResult = readEnvRepointToken(readSecret, envRepoint);
+  if (!tokenResult.ok) return { kind: 'refuse', refusal: tokenResult.refusal };
+  const authToken = tokenResult.token;
   return {
     kind: 'ok',
     envRepoint: {
