@@ -808,9 +808,12 @@ try {
         try {
           const registry = loadAccountRegistry();
           const identity = reconcileRegistryIdentity(registry, { rows: result.rows.map((r) => ({ id: r.id, liveIdentity: r.liveIdentity })) });
+          if (identity.changes.length) writeAccountRegistry(identity.registry);
+          // Report changes/warnings only AFTER a successful write: a writeAccountRegistry throw (disk full,
+          // EACCES, concurrent lock) then jumps to catch with idChanges still [] — the output surfaces the
+          // error and never claims a persist that did not happen (gemini adversarial review, HED-492).
           idChanges = identity.changes;
           idWarnings = identity.warnings;
-          if (identity.changes.length) writeAccountRegistry(identity.registry);
         } catch (error) {
           identityError = error instanceof Error ? error.message : String(error);
           process.stderr.write(`heddle: warning: usage poll-claude: registry identity reconcile skipped (${identityError})\n`);
