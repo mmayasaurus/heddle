@@ -13,7 +13,8 @@ export function ladderEligible(
   },
 ): boolean {
   return !opts.excluded.has(target.provider) &&
-    !(opts.editsCode && tier === 'T0') &&
+    !(opts.editsCode && tier === 'T0') && // T0 lanes are read-only by construction
+
     (opts.mcp.length === 0 || mcpAttachable(target.provider, opts.mcp)) &&
     (!opts.requiresWeb || webCapable(target.provider, opts.grantedCapabilities));
 }

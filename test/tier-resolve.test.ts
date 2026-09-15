@@ -123,6 +123,35 @@ describe('tier-symbol ladder eligibility', () => {
     expect(result.walk).toContain('T0 skipped (no concrete lane target)');
     expect(result.walk.join(' | ')).not.toMatch(/groq\/t0-tier chosen/);
   });
+
+  it('gates the DIRECT T3 fable candidate on capability (skips a non-web fable, descends to a web-capable lane)', () => {
+    const route = syntheticRoute({
+      taskClass: 'web-t3', provider: 'claude', model: 'opus', prefer: [{ tier: 'T3' }],
+      requiresWeb: true, editsCode: false,
+    });
+    const result = resolveTierTarget(route, [], {}, {
+      lanes: { ...lanes, tiers: { ...lanes.tiers, 'T3-orchestrator': ['fable'], 'T2-judgment': ['gemini-web'] } },
+      laneDefaults: { ...(table.laneDefaults ?? {}), 'gemini-web': { provider: 'gemini', model: 'gemini-web' } },
+    });
+    // fable (claude) is not web-capable → the DIRECT T3 fable is skipped (pre-fix it was chosen ungated);
+    // the descended T2 gemini lane (web-capable) wins instead.
+    expect(result).toMatchObject({ provider: 'gemini', model: 'gemini-web' });
+    expect(result.walk.join(' | ')).not.toMatch(/claude\/fable chosen/);
+  });
+
+  it('gates the DECLARED FALLBACK on capability (a non-web declared fallback is not selected for a web route)', () => {
+    const route = syntheticRoute({
+      taskClass: 'web-fb', provider: 'cursor', model: 'cursor-x', prefer: [{ tier: 'T1' }],
+      fallback: { provider: 'cursor', model: 'cursor-fb' }, requiresWeb: true, editsCode: false,
+    });
+    const result = resolveTierTarget(route, [], {}, {
+      lanes: { ...lanes, tiers: { ...lanes.tiers, 'T1-workhorse': ['cursor-only'] } },
+      laneDefaults: { ...(table.laneDefaults ?? {}), 'cursor-only': { provider: 'cursor', model: 'cursor-tier' } },
+    });
+    // The cursor declared fallback is NOT web-capable → skipped by the capability gate (matching walkLadder);
+    // it must NOT be selected for a requiresWeb route (pre-fix it was pushed ungated and chosen first).
+    expect(result.model).not.toBe('cursor-fb');
+  });
 });
 
 describe('Fable tier gate (C1): an unset tier is Fable-capable', () => {

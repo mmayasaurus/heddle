@@ -80,8 +80,13 @@ function tierCandidates(symbol: TargetTier, route: Route, context: TierResolveCo
     // C3 (HED-397): read the T3 lane directly — `lanesInTier`/TIER_KEY only map the auto-join tiers
     // (T0–T2), so routing 'T3-orchestrator' through it returns undefined and `.includes` throws.
     const t3Lanes = context.lanes.tiers['T3-orchestrator'] ?? [];
+    // Gate the DIRECT fable candidate too (not just the descended ladder) — capability ONLY (editsCode:false;
+    // fable is never T0). Without this a T3 preference requiring mcp/web could select an uncapable fable and
+    // reach dispatch validation instead of descending to a compatible lane (qodo/codacy #247).
+    const fableTarget = enrich(route, { provider: 'claude', model: 'fable' });
     const direct = t3Lanes.includes('fable')
-      ? [{ target: enrich(route, { provider: 'claude', model: 'fable' }), label: 'T3:fable' }]
+      && ladderEligible(fableTarget, DEFAULT_MIN_TIER, { ...eligibility, editsCode: false })
+      ? [{ target: fableTarget, label: 'T3:fable' }]
       : [];
     const descended = buildLadder(
       'T2', 'T0', 'T2', context.lanes, context.laneDefaults,
@@ -100,12 +105,18 @@ function tierCandidates(symbol: TargetTier, route: Route, context: TierResolveCo
 
 function fallbackCandidates(route: Route, context: TierResolveContext): Array<{ target: RouteTarget; label: string }> {
   const candidates: Array<{ target: RouteTarget; label: string }> = [];
-  if (route.fallback) candidates.push({ target: route.fallback, label: 'declared-fallback' });
   const excluded = new Set<string>([route.provider, route.fallback?.provider].filter((provider): provider is string => Boolean(provider)));
   const eligibility = {
     mcp: route.mcp ?? [], requiresWeb: route.requiresWeb, grantedCapabilities: route.capabilities ?? [],
     editsCode: route.editsCode, excluded,
   };
+  // The declared fallback leads the walk, but only if it clears the capability gate — matching walkLadder's
+  // declared-fallback check: capability ONLY (editsCode:false; empty excluded, since the fallback provider is
+  // itself in `excluded`). An uncapable fallback is skipped so a later compatible ladder candidate can win
+  // instead of a dispatch-time throw (qodo/codacy #247).
+  if (route.fallback && ladderEligible(route.fallback, route.minTier ?? DEFAULT_MIN_TIER, { ...eligibility, editsCode: false, excluded: new Set<string>() })) {
+    candidates.push({ target: route.fallback, label: 'declared-fallback' });
+  }
   const maxTier = route.maxTier ?? tierOfProvider(route.provider, context.lanes, context.laneDefaults) ?? DEFAULT_MIN_TIER;
   for (const candidate of buildLadder(
     tierOfProvider(route.provider, context.lanes, context.laneDefaults), route.minTier ?? DEFAULT_MIN_TIER, maxTier,
