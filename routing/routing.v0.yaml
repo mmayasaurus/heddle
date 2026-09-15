@@ -185,7 +185,9 @@ lane_defaults:
 #   read_only:  (HED-3) the worker must not change the worktree: heddle passes a read-only sandbox where
 #               the CLI has one (codex --sandbox read-only; claude --tools Read,Grep,Glob) and always
 #               snapshots `git status`/`git diff` before+after — a mutated worktree is a MANDATE
-#               VIOLATION recorded on the review row (findings are still returned).
+#               VIOLATION that HARD-FAILS the dispatch (ok=0) and QUARANTINES the findings — withheld
+#               from the trusted output, kept on the ledger record; adopting them is a deliberate,
+#               logged act (HED-601).
 #   auto_assess: (HED-3) run assess_result on the worker's output and return the assessment with it.
 #   reviewer_pool: (HED-3) ordered provider/model alternatives used when the caller names the
 #               author's provider (`author_provider`) — a reviewer must be a DIFFERENT family.

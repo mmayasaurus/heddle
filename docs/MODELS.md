@@ -151,7 +151,8 @@ the ledger scores each author→reviewer pair by accepted-finding rate.
   before and after (HEAD + every tracked/untracked non-ignored file + the stash
   list): a changed digest — or an after-snapshot that fails in a repo that worked
   before — is a **MANDATE VIOLATION**: `ok=false`, `review.mandateOk=false`,
-  `mandate_ok=0` on the review row, findings still returned, nothing reverted.
+  `mandate_ok=0` on the review row, findings quarantined (withheld from the
+  trusted output, kept on the ledger record), nothing reverted.
   Ignored paths (`.gitignore`) are outside the boundary by design.
 - **The mandate pack** (`skills/adversarial-review.md`): find only, never fix;
   adversarial not agreeable; five lenses — correctness, security, **test quality
