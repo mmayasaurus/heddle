@@ -240,8 +240,8 @@ describe('runDoctor', () => {
 
     expect(check(report, 'freshness:groq')).toMatchObject({
       outcome: 'fail',
-      detail: expect.stringMatching(/insecure permissions/),
-      hint: 'chmod 600 ~/.heddle/secrets.env',
+      detail: expect.stringMatching(/group or other permissions/),
+      hint: expect.stringContaining(secrets),
     });
   });
 

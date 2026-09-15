@@ -464,7 +464,9 @@ export function freshnessCheck(
       try {
         present = Boolean(readSecretsEnvValue(config.keyEnv, ctx.deps.paths.secrets));
       } catch (err) {
-        return result('fail', `secrets.env has insecure permissions — ${err instanceof Error ? err.message : String(err)}`, 'chmod 600 ~/.heddle/secrets.env');
+        const secretsPath = ctx.deps.paths.secrets;
+        return result('fail', err instanceof Error ? err.message : String(err),
+          `secure ${secretsPath}: a regular file you own, mode 0600, not a symlink (e.g. chmod 600 ${secretsPath})`);
       }
       const verification =
         days > ctx.lanes.value.floors.menial_verify_days

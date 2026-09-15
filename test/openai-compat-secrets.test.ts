@@ -2,6 +2,7 @@ import { chmodSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import { readSecretsEnvValue } from '../src/adapters/openai-compat.js';
+import type { DispatchOptions } from '../src/types.js';
 import { useTempResources } from './helpers.js';
 
 const resources = useTempResources('heddle-secrets-');
@@ -98,7 +99,8 @@ describe('readSecretsEnvValue', () => {
     const { OpenAICompatAdapter } = await import('../src/adapters/openai-compat.js');
     const adapter = new OpenAICompatAdapter('groq');
 
-    const result = await adapter.dispatch('x', { model: 'workhorse', timeoutMs: 1000 } as any);
+    const options: DispatchOptions = { model: 'workhorse', cwd: '/tmp', timeoutMs: 1000 };
+    const result = await adapter.dispatch('x', options);
 
     expect(result.ok).toBe(false);
     expect(result.error).toContain('refusing to use ~/.heddle/secrets.env');
