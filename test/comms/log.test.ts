@@ -1,9 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { CommsLog, COMMS_SCHEMA_VERSION } from '../../src/comms/log.js';
+import { CommsLog, COMMS_SCHEMA_VERSION, DEFAULT_ROOM } from '../../src/comms/log.js';
 import { seal } from '../../src/comms/seal.js';
 import type { TierDecision } from '../../src/comms/types.js';
 
@@ -424,5 +424,57 @@ describe('CommsLog (temp db)', () => {
       expect(log.mintChild('K').address).toBe('K.1');
       expect(other.mintChild('K').address).toBe('K.2');
     } finally { other.close(); }
+  });
+});
+
+describe('CommsLog read-only probe mode (HED-635)', () => {
+  let dir: string;
+  let path: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'heddle-comms-ro-'));
+    path = join(dir, 'comms.db');
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  it('reads a genuine older (v1) db without migrating it', () => {
+    const rw = new CommsLog(path);
+    rw.ensureDefaultRooms();
+    rw.close();
+    // A GENUINE v1 shape: drop the v2-only table and mark the file v1. A read-write open would
+    // re-provision message_mentions (db.exec(SCHEMA)) AND bump user_version to current; the read-only
+    // probe must do neither. A version-only downgrade on a v2-shaped db cannot catch a stray SCHEMA run.
+    const down = new DatabaseSync(path);
+    down.exec('DROP TABLE message_mentions;');
+    down.exec('PRAGMA user_version = 1;');
+    down.close();
+
+    const ro = new CommsLog(path, { readOnly: true });
+    try {
+      expect(ro.room(DEFAULT_ROOM)).not.toBeNull(); // room/version are schema-independent — read fine on v1
+    } finally { ro.close(); }
+
+    const after = new DatabaseSync(path, { readOnly: true });
+    try {
+      // No migration: still v1, and the v2-only table was NOT re-created (a read-write open would do both).
+      expect((after.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(1);
+      expect(after.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='message_mentions'").get()).toBeUndefined();
+    } finally { after.close(); }
+  });
+
+  it('is read-only — a write throws', () => {
+    const rw = new CommsLog(path);
+    rw.ensureDefaultRooms();
+    rw.close();
+    const ro = new CommsLog(path, { readOnly: true });
+    try {
+      expect(() => ro.append({ from: 'K', to: DEFAULT_ROOM, body: 'nope' })).toThrow(/readonly/i);
+    } finally { ro.close(); }
+  });
+
+  it('does not create a missing db or its parent directory', () => {
+    const missing = join(dir, 'nested', 'comms.db');
+    expect(() => new CommsLog(missing, { readOnly: true })).toThrow();
+    expect(existsSync(missing)).toBe(false);
+    expect(existsSync(dirname(missing))).toBe(false);
   });
 });

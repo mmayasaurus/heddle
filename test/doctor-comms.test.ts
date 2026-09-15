@@ -1,5 +1,6 @@
 import { existsSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { describe, expect, test } from 'vitest';
 import { bootstrapComms } from '../src/comms/bootstrap.js';
 import { CommsLog, DEFAULT_ROOM } from '../src/comms/log.js';
@@ -110,5 +111,35 @@ describe('runDoctor comms readiness', () => {
     expect(check(report, 'comms:ready')).toMatchObject({
       outcome: 'warn', detail: expect.stringMatching(/operator token/),
     });
+  });
+
+  test('opens the comms db read-only — a doctor run never migrates it (HED-635)', async () => {
+    const dir = resources.tempDir();
+    const dbPath = join(dir, 'comms.db');
+    const tokenPath = join(dir, 'operator.token');
+    const log = new CommsLog(dbPath);
+    log.ensureDefaultRooms();
+    log.close();
+    // A genuine older (v1) shape: drop the v2-only table and mark it v1. A read-WRITE open would
+    // re-provision message_mentions and bump user_version to the current schema; the read-only probe
+    // must leave both untouched — reverting commsCheck to a read-write open re-creates the table and
+    // bumps the version, failing the assertions below.
+    const down = new DatabaseSync(dbPath);
+    down.exec('DROP TABLE message_mentions;');
+    down.exec('PRAGMA user_version = 1;');
+    down.close();
+
+    const report = await runDoctor({}, fakeDeps({ ...config(), comms: dbPath, operatorToken: tokenPath }));
+    // The db + default room are read fine read-only (room is schema-independent); only the operator
+    // token is missing → warn, not fail.
+    expect(check(report, 'comms:ready').outcome).toBe('warn');
+
+    const after = new DatabaseSync(dbPath, { readOnly: true });
+    try {
+      expect((after.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(1);
+      expect(after.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='message_mentions'").get()).toBeUndefined();
+    } finally {
+      after.close();
+    }
   });
 });

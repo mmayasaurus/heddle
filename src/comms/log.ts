@@ -275,6 +275,18 @@ export interface FloorRecord {
 export interface CommsLogOptions {
   /** Clock override for deterministic tests; must return ISO-8601. */
   now?: () => string;
+  /**
+   * Open the db in read-only PROBE mode (HED-635): skip the mkdir, the WAL journal-mode write, and
+   * the schema migration, and open the sqlite file with SQLITE_OPEN_READONLY. For diagnostics
+   * (`heddle doctor` commsCheck) that must observe the shared db without mutating it. A newer-schema
+   * db is still refused (upgrade heddle). Scope of the promise: because migration is skipped, this
+   * mode is for OPENING plus the schema-independent reads a probe needs — room/rooms, participants,
+   * `user_version`, message counts. It does NOT provision the v2-only tables, so on a genuine pre-v2
+   * db the message-body readers that join `message_mentions` (get/transcript/inbox/pause-markers, via
+   * SELECT_WITH_MENTIONS) throw `no such table`; the broker migrates the file on its next real open.
+   * Only read methods are usable; a write throws.
+   */
+  readOnly?: boolean;
 }
 
 export interface RegisterInput {
@@ -294,13 +306,18 @@ export class CommsLog {
   private closed = false;
 
   constructor(path: string = DEFAULT_COMMS_PATH, opts: CommsLogOptions = {}) {
-    if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
+    const readOnly = opts.readOnly ?? false;
+    // Read-only probe mode never provisions: no mkdir, no journal-mode write, no migration. A normal
+    // read-write open still mkdirs the parent and creates the sqlite file exactly as before.
+    if (!readOnly && path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
     // Set up on a local handle; `this.db` is assigned only once the connection is fully usable, so a
     // constructor failure never leaves a half-initialised object (and closes what it opened).
-    const db = new DatabaseSync(path);
+    const db = readOnly ? new DatabaseSync(path, { readOnly: true }) : new DatabaseSync(path);
     try {
-      // WAL + a busy timeout: many agent processes share this file and write concurrently.
-      db.exec('PRAGMA journal_mode = WAL;');
+      // WAL is a journal-mode WRITE — skip it in read-only probe mode (a diagnostic must not touch the
+      // shared file). busy_timeout + foreign_keys are connection settings that work on a read-only
+      // handle too, and many agent processes share this file and write concurrently.
+      if (!readOnly) db.exec('PRAGMA journal_mode = WAL;');
       db.exec('PRAGMA busy_timeout = 5000;');
       db.exec('PRAGMA foreign_keys = ON;');
       // Never clobber a version we do not understand: a newer heddle may have migrated this file
@@ -309,11 +326,15 @@ export class CommsLog {
       if (found > COMMS_SCHEMA_VERSION) {
         throw new Error(`comms db ${path} is schema v${found}; this heddle understands v${COMMS_SCHEMA_VERSION} — upgrade heddle`);
       }
-      if (found !== 0 && found !== COMMS_SCHEMA_VERSION && !MIGRATABLE_VERSIONS.has(found)) {
-        throw new Error(`comms db ${path} is schema v${found}; no migration to v${COMMS_SCHEMA_VERSION} exists`);
+      if (!readOnly) {
+        // A read-write open migrates an older-but-migratable db in place; the read-only probe never
+        // mutates — it reads an older db as-is and leaves the migration to the broker's next real open.
+        if (found !== 0 && found !== COMMS_SCHEMA_VERSION && !MIGRATABLE_VERSIONS.has(found)) {
+          throw new Error(`comms db ${path} is schema v${found}; no migration to v${COMMS_SCHEMA_VERSION} exists`);
+        }
+        db.exec(SCHEMA); // idempotent (IF NOT EXISTS) — creates a fresh db, adds v2 tables to a v1 one, no-op on current
+        if (found !== COMMS_SCHEMA_VERSION) db.exec(`PRAGMA user_version = ${COMMS_SCHEMA_VERSION};`);
       }
-      db.exec(SCHEMA); // idempotent (IF NOT EXISTS) — creates a fresh db, adds v2 tables to a v1 one, no-op on current
-      if (found !== COMMS_SCHEMA_VERSION) db.exec(`PRAGMA user_version = ${COMMS_SCHEMA_VERSION};`);
     } catch (err) {
       db.close();
       throw err;
