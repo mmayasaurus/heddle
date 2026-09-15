@@ -284,10 +284,15 @@ function parseDiffSides(diff: string): DiffSides {
  */
 function extractCitations(output: string): ParsedCitation[] {
   const citations: ParsedCitation[] = [];
-  // Backtick is written as \x60 (not a literal `) so a naive tokenizer never reads it as a template-literal start.
-  const citationRe = /([^\s:,;()[\]{}"'\x60]+):(\d+)(?:\s*-\s*(\d+))?/g;
+  // Stop the path token only at whitespace / `:` / `,` / `;` — a deliberately simple class with no brackets,
+  // braces, quotes or backticks, which a line-counting linter can misparse (reading the rest of the file as this
+  // function's body). Wrapping punctuation is trimmed off the match below instead of excluded in the pattern.
+  const citationRe = /([^\s:,;]+):(\d+)(?:\s*-\s*(\d+))?/g;
+  const wrap = '()[]{}"\'\x60';
   for (const match of output.matchAll(citationRe)) {
-    const path = match[1] ?? '';
+    let path = match[1] ?? '';
+    while (path && wrap.includes(path.charAt(0))) path = path.slice(1);
+    while (path && wrap.includes(path.charAt(path.length - 1))) path = path.slice(0, -1);
     if (!/[A-Za-z]/.test(path)) continue;
     const start = Number(match[2]);
     if (!Number.isFinite(start)) continue;
