@@ -1,10 +1,13 @@
 import { describe, expect, it } from 'vitest';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { accountsStep, runSetup, buildSteps, dryRunGate, selectSteps, summarizeAccounts, type SetupContext } from '../../src/wizard/setup.js';
 import { policyPath } from '../../src/wizard/persist.js';
 import type { Prompter } from '../../src/wizard/prompt.js';
 import { ScriptedPrompter } from '../../src/wizard/prompt.js';
 import type { CliRunner } from '../../src/wizard/cli-runner.js';
 import type { WizardContext, WizardIO, WizardStep, WizardStepResult } from '../../src/wizard/step.js';
+import { useTempResources } from '../helpers.js';
 
 // HED-564: the `heddle setup` orchestrator — ordering, fail-soft, applies-gating, prior-result reads,
 // dry-run passthrough, and the finish screen, all against SYNTHETIC steps. The full account/rules/etc.
@@ -39,6 +42,16 @@ function step(id: string, opts: {
       return { id, status: opts.status ?? 'done', summary: opts.summary ?? `${id} ok` };
     },
   };
+}
+
+/** Seed a minimal rule catalog (one rule) so the rules step has real presets to resolve — mirrors the
+ *  fixture in rules-step.test.ts, kept local so this file exercises the rules wire-in hermetically. */
+function seedCatalog(root: string): void {
+  mkdirSync(join(root, 'tests'), { recursive: true });
+  writeFileSync(
+    join(root, 'no-rm-recursive-force.yaml'),
+    'id: no-rm-recursive-force\nevent: PreToolUse\nmatch:\n  tool: Bash\naction: block\nenforce: false\nsubagent_aware: false\nmessage: Do not recursively force-remove files.\nfail_open: true\n',
+  );
 }
 
 describe('runSetup orchestrator', () => {
@@ -169,10 +182,14 @@ describe('accountsStep adapter', () => {
     expect(result.summary.toLowerCase()).toContain('dry-run');
   });
 
-  it('buildSteps wires accounts first and the doctor finish-gate last', () => {
+  it('buildSteps wires the full walkthrough in order with the doctor finish-gate last', () => {
     const runner = {} as CliRunner;
     const ids = buildSteps({ runner }).map((s) => s.id);
-    expect(ids).toEqual(['accounts', 'doctor']);
+    // Walkthrough order (HED-564): accounts → spread → meters → rules → doctor. model-economy (HED-473)
+    // is not built yet; it slots after accounts when it lands. buildSteps({ runner }) with no catalogRoot
+    // defaults it to resolveCatalogRoot() (the bundled catalog), so this also proves the default path
+    // constructs without throwing.
+    expect(ids).toEqual(['accounts', 'spread', 'meters', 'rules', 'doctor']);
     // Doctor is the finish gate — it must ALWAYS be last so it verifies AFTER every write-step ran.
     expect(ids[ids.length - 1]).toBe('doctor');
   });
@@ -186,6 +203,8 @@ describe('policyPath', () => {
 });
 
 describe('composed walkthrough (buildSteps -> runSetup)', () => {
+  const { tempDir } = useTempResources('hed564-wire-');
+
   it('runs the wired step set end-to-end under --dry-run with no prompts, logins, writes, or doctor probe', async () => {
     // Throwing runner + exhausted prompter → any login or prompt fails the test. The doctor step is
     // dry-run-gated in buildSteps, so real runDoctor is never reached under --dry-run — that is what
@@ -198,8 +217,13 @@ describe('composed walkthrough (buildSteps -> runSetup)', () => {
     const lines: string[] = [];
     const io: WizardIO = { prompter: new ScriptedPrompter([]), report: (line) => { lines.push(line); } };
     const results = await runSetup(baseCtx({ dryRun: true }), io, buildSteps({ runner }));
+    // Every wired step self-handles --dry-run (spread/meters/rules inside their own module, doctor via
+    // dryRunGate) → all skipped, none prompts or writes. toEqual pins the exact composed order + shape.
     expect(results).toEqual([
       { id: 'accounts', status: 'skipped', summary: expect.stringContaining('dry-run') },
+      { id: 'spread', status: 'skipped', summary: expect.stringContaining('dry-run') },
+      { id: 'meters', status: 'skipped', summary: expect.stringContaining('dry-run') },
+      { id: 'rules', status: 'skipped', summary: expect.stringContaining('dry-run') },
       { id: 'doctor', status: 'skipped', summary: expect.stringContaining('dry-run') },
     ]);
     const text = lines.join('\n');
@@ -222,6 +246,24 @@ describe('composed walkthrough (buildSteps -> runSetup)', () => {
     expect(result.status).toBe('skipped');
     expect(result.summary).toContain('HED-596');
     expect(io.lines.join('\n')).toContain('--home');
+  });
+
+  it('plumbs an injected catalogRoot through to the rules step (not swallowed)', async () => {
+    // The order test proves the DEFAULT catalogRoot path (resolveCatalogRoot()) constructs; this proves
+    // an INJECTED catalogRoot is actually honored — run the composed rules step against a seeded fixture
+    // catalog and assert its summary names the seeded rule. Without plumbing, buildSteps would resolve
+    // the bundled catalog instead and this seeded id would never appear.
+    const catalogRoot = tempDir();
+    const homeDir = tempDir();
+    seedCatalog(catalogRoot);
+    const rules = buildSteps({ runner: {} as CliRunner, catalogRoot }).find((s) => s.id === 'rules');
+    if (!rules) throw new Error('rules step missing from buildSteps');
+    const ctx: WizardContext = { ...baseCtx({ homeDir }), results: new Map() };
+    // minimal preset → accept as-is → save (mirrors rules-step.test.ts's accepted-minimal flow).
+    const io: WizardIO = { prompter: new ScriptedPrompter(['minimal', true, true]), report: () => {} };
+    const result = await rules.run(ctx, io);
+    expect(result.status).toBe('done');
+    expect(result.summary).toContain('no-rm-recursive-force');
   });
 });
 
