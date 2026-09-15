@@ -106,6 +106,8 @@ export interface WorkerResult {
   exitCode: number | null;
   /** Populated on failure: what went wrong, adapter-diagnosed. */
   error?: string;
+  /** A credential reader rejected this exact file as unsafe; dispatch must never route around it. */
+  securityRefusal?: { code: 'insecure-credential-file'; file: string };
   /** Raw structured output for the ledger/dashboard; never parse downstream — use fields above. */
   raw?: unknown;
   /** The attempt ended without a complete usable result (timeout, truncation, or bounded validation). */
