@@ -37,6 +37,7 @@ import { DEFAULT_ACCOUNTS_PATH } from './capaware.js';
 import { migrateConfigFile } from './config-migrations.js';
 import { diffFleetBin, diffFleetHooks, diffFleetLaunchers, installFleetBin, installFleetHooks, installFleetLaunchers } from './fleet.js';
 import { uninstall } from './uninstall.js';
+import { gitRepositoryFor } from './worktree.js';
 import { NativeCliRunner, type NativeProvider } from './wizard/cli-runner.js';
 import { ReadlinePrompter, ScriptedPrompter, type Prompter } from './wizard/prompt.js';
 import { runAccountsAdd } from './wizard/accounts-add.js';
@@ -997,6 +998,13 @@ try {
       if (has('--home') && (homeArg === undefined || homeArg.startsWith('--'))) throw new Error('--home needs a directory path');
       const targetArg = arg('--target');
       if (has('--target') && (targetArg === undefined || targetArg.startsWith('--'))) throw new Error('--target needs a directory path');
+      // HED-624: with no explicit --target, auto-derive the project dir from the invocation cwd when it
+      // sits inside a git repository — resolved up front (before the terminal opens), alongside the other
+      // arg parsing. gitRepositoryFor is fail-safe (→ null off a repo, no git, or an unreadable one), so a
+      // non-repo cwd leaves targetDir unset and the pr-automation step stays inert. The derived flag makes
+      // that step CONFIRM before scaffolding — an explicit --target is the opt-in; a detected repo the
+      // operator never named is not.
+      const derivedTarget = targetArg === undefined ? gitRepositoryFor(process.cwd())?.topLevel : undefined;
       const parseStepIds = (flag: string): string[] | undefined => {
         if (!has(flag)) return undefined;
         const value = arg(flag);
@@ -1021,7 +1029,11 @@ try {
       try {
         const base: SetupContext = {
           homeDir: homeArg ?? homedir(),
-          ...(targetArg === undefined ? {} : { targetDir: targetArg }),
+          ...(targetArg !== undefined
+            ? { targetDir: targetArg }
+            : derivedTarget !== undefined
+              ? { targetDir: derivedTarget, targetDirDerived: true }
+              : {}),
           dryRun: has('--dry-run'),
           now: () => new Date(),
         };
