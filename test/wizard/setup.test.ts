@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { accountsStep, runSetup, buildSteps, dryRunGate, selectSteps, summarizeAccounts, type SetupContext } from '../../src/wizard/setup.js';
+import { createDoctorStep } from '../../src/wizard/doctor.js';
 import { policyPath } from '../../src/wizard/persist.js';
 import type { Prompter } from '../../src/wizard/prompt.js';
 import { ScriptedPrompter } from '../../src/wizard/prompt.js';
@@ -236,20 +237,28 @@ describe('composed walkthrough (buildSteps -> runSetup)', () => {
     expect(text).toContain('a real setup would run');
   });
 
-  it('skips the doctor gate under an alternate --home (default install != what setup wrote) — HED-596', async () => {
-    // Non-dry-run + a home that differs from the real home: the doctor gate must NOT run, because the
-    // doctor module verifies the DEFAULT ~/.heddle install — a DIFFERENT one than accounts wrote under
-    // --home — which would paint a hollow green/red. It skips honestly instead. If the guard were
-    // broken the real doctor would run and return done/failed (never 'skipped'), failing this loudly.
-    const runner = {} as CliRunner;
-    const doctor = buildSteps({ runner }).find((s) => s.id === 'doctor');
-    if (!doctor) throw new Error('doctor step missing from buildSteps');
+  it('runs the doctor gate under an alternate --home, verifying the re-rooted account registry — HED-596', async () => {
+    // HED-596: the doctor module is now home-aware — homePaths re-roots the account registry it verifies
+    // under ctx.homeDir — so the composed finish-gate RUNS under `heddle setup --home <dir>` and honestly
+    // verifies the --home install; it no longer honest-skips (the old skipDoctorUnderAltHome guard is
+    // gone). Inject a doctor runner that CAPTURES the paths it is handed (proving ctx.homeDir was threaded
+    // into homePaths) and returns a green report — fast + hermetic, so the real provider probes never run.
+    // A stubbed empty env keeps homePaths off any ambient HEDDLE_ACCOUNTS, making the path assertion exact.
+    const altHome = '/tmp/definitely-not-the-real-home';
+    let seenAccounts: string | undefined;
+    const doctor = createDoctorStep({
+      doctorDeps: { env: {} },
+      runDoctor: async (_opts, partial) => {
+        seenAccounts = partial.paths?.accounts;
+        return { checks: [], summary: { ok: 5, warn: 0, fail: 0, skipped: 0 }, exitCode: 0 };
+      },
+    });
     const io = makeIO();
-    const ctx: WizardContext = { ...baseCtx({ homeDir: '/tmp/definitely-not-the-real-home', dryRun: false }), results: new Map() };
+    const ctx: WizardContext = { ...baseCtx({ homeDir: altHome, dryRun: false }), results: new Map() };
     const result = await doctor.run(ctx, io);
-    expect(result.status).toBe('skipped');
-    expect(result.summary).toContain('HED-596');
-    expect(io.lines.join('\n')).toContain('--home');
+    expect(result.status).toBe('done'); // RAN under --home (the old guard would have returned 'skipped')
+    expect(result.summary).not.toContain('HED-596'); // no honest-skip line
+    expect(seenAccounts).toBe(join(altHome, '.heddle', 'accounts.json')); // re-rooted under ctx.homeDir
   });
 
   it('plumbs an injected catalogRoot through to the rules step (not swallowed)', async () => {
