@@ -162,6 +162,17 @@ export interface DispatchOutcome extends WorkerResult {
     mandateOk: boolean | null;
     reviewerPick?: string;
   };
+  /**
+   * HED-601: a read-only dispatch whose worker VIOLATED the mandate (changed the worktree).
+   * The violation is a HARD failure (`ok` is false) and the worker output is QUARANTINED — WITHHELD from the
+   * trusted `output` field (which is emptied) and held HERE instead. The ledger row is the durable, logged
+   * quarantine record (ok=0, MANDATE-VIOLATION `error`, output persisted to `outputs/<id>.md`, and
+   * `reviews.mandate_ok=0` for review classes). Adopting anything from a quarantined run is a DELIBERATE act —
+   * read `quarantine.output` or the ledger record; nothing downstream may treat it as a trustworthy finding. A
+   * dedicated field, NOT `error` (same discipline as `escape`/`destroyed`): the withheld findings need a typed
+   * home and callers that key on a non-empty `error` as failure must not misread it.
+   */
+  quarantine?: { reason: 'mandate-violation'; note: string; output: string; ledgerId: number };
   /** HED-3 (`auto_assess: true` classes): assess_result on the worker's output — done | needs-rework | needs-human. */
   assessment?: ResultAssessment;
   /** Set on capability-denied refusals: which check failed (`unenforceable` means a fallback may fit). */

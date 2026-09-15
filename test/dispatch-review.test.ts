@@ -133,18 +133,61 @@ describe('adversarial review dispatch', () => {
     } finally { restore(); }
   });
 
-  it('surfaces and records a write mandate violation without discarding findings or reverting files', async () => {
+  it('HED-601: quarantines the findings and HARD-fails a write mandate violation without reverting files', async () => {
     const restore = reviewRouting(tempDir); const cwd = tempDir(); gitRepo(cwd); commitTrackedProbe(cwd); const ledger = tempLedger();
     let writerCalls = 0;
     const writer: WorkerAdapter = { name: 'writer', provider: 'codex', dispatch: async (_prompt, opts) => { writerCalls += 1; writeFileSync(join(opts.cwd, 'tracked-probe.txt'), 'after'); return { ok: true, output: 'done', exitCode: 0 }; } };
     try {
       const outcome = await dispatch({ taskClass: 'adversarial-review', authorProvider: 'claude', prompt: 'review', cwd, identity: unbound }, ledger, () => writer);
-      expect(readFileSync(join(cwd, 'tracked-probe.txt'), 'utf8')).toBe('after'); expect(outcome.review?.mandateOk).toBe(false); expect(ledger.getReview(outcome.ledgerId)?.mandate_ok).toBe(0); expect(outcome.error).toContain('MANDATE VIOLATION'); expect(outcome.output).toBe('done');
+      // nothing reverted; the violation is a HARD failure recorded on the review row
+      expect(readFileSync(join(cwd, 'tracked-probe.txt'), 'utf8')).toBe('after');
+      expect(outcome.ok).toBe(false);
+      expect(outcome.review?.mandateOk).toBe(false); expect(ledger.getReview(outcome.ledgerId)?.mandate_ok).toBe(0);
+      expect(outcome.error).toContain('MANDATE VIOLATION');
+      // the findings are WITHHELD from the trusted output channel and QUARANTINED instead
+      expect(outcome.output).toBe('');
+      expect(outcome.quarantine).toMatchObject({ reason: 'mandate-violation', output: 'done', ledgerId: outcome.ledgerId });
+      expect(outcome.quarantine?.note).toContain('QUARANTINED');
+      // the durable ledger record KEEPS the findings for deliberate adoption: the row is ok=0 and its
+      // output was persisted (output_path set) — quarantine withholds from the outcome, never from the record
+      const row = ledger.recent(1)[0];
+      expect(row.ok).toBe(0);
+      expect(row.output_path).toBeTruthy();
       // a violation is a POLICY failure of this reviewer, never retried on the class fallback —
       // the tree is already mutated, so a second reviewer would review tampered state
       expect(writerCalls).toBe(1);
       expect(ledger.recent()).toHaveLength(1);
     } finally { restore(); }
+  });
+
+  it('HED-601: quarantines a NON-review read-only violation and does not retry it on the class fallback', async () => {
+    // second-opinion is read_only with a glm fallback and NO reviewer_pool (so no review pair). Before
+    // HED-601 the no-retry guard keyed on review.mandateOk — undefined here — so a non-review violation
+    // would re-run in the already-mutated tree on the fallback. The quarantine-keyed guard closes that gap.
+    const restore = reviewRouting(tempDir); const cwd = tempDir(); gitRepo(cwd); commitTrackedProbe(cwd); const ledger = tempLedger();
+    let calls = 0;
+    const writer: WorkerAdapter = { name: 'w', provider: 'cursor', dispatch: async (_prompt, opts) => { calls += 1; writeFileSync(join(opts.cwd, 'tracked-probe.txt'), 'after'); return { ok: true, output: 'finding', exitCode: 0 }; } };
+    try {
+      const outcome = await dispatch({ taskClass: 'second-opinion', prompt: 'diagnose', cwd, identity: unbound }, ledger, () => writer);
+      expect(outcome.review).toBeUndefined(); // not a review class — no author→reviewer pair
+      expect(outcome.ok).toBe(false);
+      expect(outcome.quarantine).toMatchObject({ reason: 'mandate-violation', output: 'finding' });
+      expect(outcome.output).toBe('');
+      expect(calls).toBe(1); // the glm fallback was NOT tried
+      expect(ledger.recent()).toHaveLength(1);
+    } finally { restore(); }
+  });
+
+  it('HED-601: never auto-assesses a quarantined violation (a mandate-violating review is not graded)', async () => {
+    // SHIPPED routing (adversarial-review has auto_assess: true) — a quarantined violation must carry NO
+    // assessment: grading it would re-surface untrusted findings and spend a classifier on withheld output.
+    const cwd = tempDir(); gitRepo(cwd); commitTrackedProbe(cwd); const ledger = tempLedger();
+    const writer: WorkerAdapter = { name: 'w', provider: 'codex', dispatch: async (_prompt, opts) => { writeFileSync(join(opts.cwd, 'tracked-probe.txt'), 'after'); return { ok: true, output: 'finding text', exitCode: 0 }; } };
+    const outcome = await dispatch({ taskClass: 'adversarial-review', authorProvider: 'claude', prompt: 'review', cwd, identity: unbound }, ledger, () => writer);
+    expect(outcome.quarantine).toBeDefined();
+    expect(outcome.assessment).toBeUndefined();
+    // no classifier dispatch row was recorded for the quarantined output
+    expect(ledger.recent(20).some((r) => r.execution_mode === 'classification')).toBe(false);
   });
 
   it('catches a reviewer that edits the injected AGENTS.md — restore must not mask the violation', async () => {

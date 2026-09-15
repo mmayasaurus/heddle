@@ -313,7 +313,9 @@ export async function dispatch(
   }
   // A read-only MANDATE VIOLATION is a policy failure of the reviewer, not a provider failure — never
   // "retry" it on the fallback (that would re-run in an already-mutated tree and mask the violation).
-  if (primary.ok || primary.refusal || primary.review?.mandateOk === false) return primary;
+  // HED-601: keyed on `quarantine` (set for ANY read_only violation, review pair or not), so a non-review
+  // read-only violation is not retried on the fallback either.
+  if (primary.ok || primary.refusal || primary.quarantine) return primary;
   if (req.noFallback) {
     if ((target.provider === 'codex' || target.provider === 'cursor') && ctx.rotationAccount
         && classifyRotationRefusal(target.provider, primary) === 'rate-limit') {
@@ -348,7 +350,7 @@ export async function dispatch(
         retryOutcome = { ...retryOutcome, escape: { ...retryOutcome.escape, note: `${primary.escape.note}; then ${retryOutcome.escape.note}` } };
       }
       primary = retryOutcome;
-      if (primary.ok || primary.refusal || primary.review?.mandateOk === false || req.noFallback) return primary;
+      if (primary.ok || primary.refusal || primary.quarantine || req.noFallback) return primary;
       if (classifyRotationRefusal(target.provider, primary) === 'rate-limit') {
         cooling.lanes[`${target.provider}:${retry.id}`] = { cooledAt: req.nowS ?? Math.floor(Date.now() / 1000), reason: 'rate-limit', cooldownS: DEFAULT_COOLDOWN_S };
         writeCooling(coolingPath, cooling);
