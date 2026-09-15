@@ -1,51 +1,58 @@
-import { readdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
+const { mockExecFileSync } = vi.hoisted(() => ({ mockExecFileSync: vi.fn() }));
+vi.mock('node:child_process', () => ({ execFileSync: mockExecFileSync }));
+
 import { PROJECTS_SCHEMA_VERSION } from '../../src/projects.js';
-import { linearStep, type LinearRunner } from '../../src/wizard/linear-step.js';
+import { LinShLinearRunner, linearStep, type LinearRunner } from '../../src/wizard/linear-step.js';
 import { ScriptedPrompter } from '../../src/wizard/prompt.js';
 import type { WizardContext, WizardIO } from '../../src/wizard/step.js';
 import { useTempResources } from '../helpers.js';
 
-type StubState = {
-  available?: boolean;
-  credential?: boolean;
-  team?: boolean;
-  agents?: Record<string, boolean>;
-};
+type RunnerReply = { ok: boolean; identity?: string; name?: string; error?: string };
 
 class StubLinearRunner implements LinearRunner {
   readonly calls: string[] = [];
 
-  constructor(private readonly state: StubState = {}) {}
+  constructor(
+    private readonly state: {
+      installed?: boolean;
+      agents?: Record<string, RunnerReply>;
+      team?: RunnerReply;
+    } = {},
+  ) {}
 
-  available(): boolean {
-    this.calls.push('available');
-    return this.state.available ?? true;
+  installed(): boolean {
+    return this.state.installed ?? true;
   }
 
-  async whoami(agent?: string): Promise<{ ok: boolean; identity?: string; error?: string }> {
-    this.calls.push(`whoami:${agent ?? 'default'}`);
-    const ok = agent ? (this.state.agents?.[agent] ?? true) : (this.state.credential ?? true);
-    return ok ? { ok: true, identity: agent ? `synthetic-${agent}` : 'synthetic-operator' } : { ok: false, error: 'synthetic credential failure' };
+  async whoami(agent: string): Promise<{ ok: boolean; identity?: string; error?: string }> {
+    this.calls.push(`whoami:${agent}`);
+    const reply = this.state.agents?.[agent] ?? { ok: true, identity: `synthetic-${agent}` };
+    return { ok: reply.ok, identity: reply.identity, error: reply.error };
   }
 
-  async team(teamKey: string): Promise<{ ok: boolean; name?: string; error?: string }> {
-    this.calls.push(`team:${teamKey}`);
-    return this.state.team ?? true ? { ok: true, name: teamKey } : { ok: false, error: 'synthetic team failure' };
+  async team(teamKey: string, agent: string): Promise<{ ok: boolean; name?: string; error?: string }> {
+    this.calls.push(`team:${teamKey}:${agent}`);
+    const reply = this.state.team ?? { ok: true, name: teamKey };
+    return { ok: reply.ok, name: reply.name, error: reply.error };
   }
 }
 
-function context(targetDir: string, dryRun = false): WizardContext {
-  return { homeDir: '/unused', targetDir, dryRun, now: () => new Date(0), results: new Map() };
+function context(homeDir: string, targetDir: string, dryRun = false): WizardContext {
+  return { homeDir, targetDir, dryRun, now: () => new Date(0), results: new Map() };
 }
 
 function io(answers: unknown[], reports: string[] = []): WizardIO {
   return { prompter: new ScriptedPrompter(answers), report: (line) => reports.push(line) };
 }
 
-function registry(path: string, targetDir: string, agents = ['A', 'B'], team = 'TEST'): void {
-  writeFileSync(path, JSON.stringify({
+function writeRegistry(homeDir: string, targetDir: string, agents = ['A', 'B'], team = 'HED'): void {
+  const registryDir = join(homeDir, '.heddle');
+  mkdirSync(registryDir, { recursive: true });
+  writeFileSync(join(registryDir, 'projects.json'), JSON.stringify({
     schemaVersion: PROJECTS_SCHEMA_VERSION,
     projects: [{
       name: 'synthetic-project', workspaceRoots: [targetDir], agentIds: agents, linearTeam: team,
@@ -56,121 +63,176 @@ function registry(path: string, targetDir: string, agents = ['A', 'B'], team = '
 
 describe('linearStep', () => {
   const { tempDir } = useTempResources('hed645-linear-step-');
-  const originalProjects = process.env.HEDDLE_PROJECTS;
 
-  afterEach(() => {
-    if (originalProjects === undefined) delete process.env.HEDDLE_PROJECTS;
-    else process.env.HEDDLE_PROJECTS = originalProjects;
-  });
-
-  function registered(agents = ['A', 'B'], team = 'TEST'): { targetDir: string; runner: StubLinearRunner } {
+  function registered(agents = ['A', 'B'], team = 'HED'): { homeDir: string; targetDir: string } {
+    const homeDir = tempDir();
     const targetDir = tempDir();
-    const projects = join(tempDir(), 'projects.json');
-    registry(projects, targetDir, agents, team);
-    process.env.HEDDLE_PROJECTS = projects;
-    return { targetDir, runner: new StubLinearRunner() };
+    writeRegistry(homeDir, targetDir, agents, team);
+    return { homeDir, targetDir };
   }
 
-  it('skips explicitly without checking Linear or writing the target', async () => {
-    const { targetDir, runner } = registered();
+  it('skips explicitly without running the adapter or writing the target', async () => {
+    const { homeDir, targetDir } = registered();
+    const runner = new StubLinearRunner();
     const before = readdirSync(targetDir);
 
-    const result = await linearStep(runner).run(context(targetDir), io([false]));
+    const result = await linearStep(runner).run(context(homeDir, targetDir), io([false]));
 
-    expect(result).toMatchObject({ id: 'linear', status: 'skipped', summary: expect.stringContaining('wizard works without it') });
+    expect(result).toMatchObject({ id: 'linear', status: 'skipped', summary: expect.stringContaining('re-run `heddle setup` anytime') });
     expect(runner.calls).toEqual([]);
     expect(readdirSync(targetDir)).toEqual(before);
   });
 
-  it('guides when the fleet CLI is unavailable without writing', async () => {
-    const { targetDir } = registered();
-    const runner = new StubLinearRunner({ available: false });
-    const reports: string[] = [];
-    const before = readdirSync(targetDir);
+  it('guides installation without spawning when lin.sh is absent', async () => {
+    const { homeDir, targetDir } = registered();
+    const runner = new StubLinearRunner({ installed: false });
 
-    const result = await linearStep(runner).run(context(targetDir), io([true], reports));
+    const result = await linearStep(runner).run(context(homeDir, targetDir), io([true]));
 
     expect(result.status).toBe('skipped');
     expect(result.detail).toContain('heddle fleet install-bin');
-    expect(result.detail).toContain('lin.sh whoami');
-    expect(reports.join('\n')).toContain('Provision Linear OAuth agent credentials');
-    expect(runner.calls).toEqual(['available']);
-    expect(readdirSync(targetDir)).toEqual(before);
+    expect(runner.calls).toEqual([]);
   });
 
-  it('reports verified credential, team, and roster', async () => {
-    const { targetDir, runner } = registered(['A', 'B'], 'TEST');
-
-    const result = await linearStep(runner).run(context(targetDir), io([true]));
-
-    expect(result.status).toBe('done');
-    expect(result.summary).toContain('credential');
-    expect(result.summary).toContain('team TEST');
-    expect(result.summary).toContain('roster A, B');
-    expect(result.detail).toContain('VERIFIED: credential');
-    expect(result.detail).toContain('VERIFIED: team TEST');
-    expect(result.detail).toContain('VERIFIED: roster A, B');
-  });
-
-  it('fails and gives the OAuth-app guide for an unprovisioned roster agent', async () => {
-    const { targetDir } = registered(['A', 'B']);
-    const runner = new StubLinearRunner({ agents: { A: true, B: false } });
-
-    const result = await linearStep(runner).run(context(targetDir), io([true]));
-
-    expect(result.status).toBe('failed');
-    expect(result.detail).toContain('Agent B has no Linear OAuth app');
-    expect(result.detail).toContain('agents[B]');
-    expect(result.detail).not.toContain('Agent A has no Linear OAuth app');
-  });
-
-  it('fails with a guide when the configured team is inaccessible', async () => {
-    const { targetDir } = registered(['A'], 'TEST');
-    const runner = new StubLinearRunner({ team: false });
-
-    const result = await linearStep(runner).run(context(targetDir), io([true]));
-
-    expect(result.status).toBe('failed');
-    expect(result.detail).toContain('Linear team TEST could not be reached');
-    expect(result.detail).toContain('Confirm the team key and access');
-  });
-
-  it('runs the same read-only checks in dry-run mode', async () => {
-    const { targetDir } = registered(['A'], 'TEST');
-    const normal = new StubLinearRunner();
-    const dry = new StubLinearRunner();
-    const before = readdirSync(targetDir);
-
-    const normalResult = await linearStep(normal).run(context(targetDir), io([true]));
-    const dryResult = await linearStep(dry).run(context(targetDir, true), io([true]));
-
-    expect(dryResult).toEqual(normalResult);
-    expect(dry.calls).toEqual(normal.calls);
-    expect(readdirSync(targetDir)).toEqual(before);
-  });
-
-  it('prompts for a team and roster when the target is unregistered', async () => {
-    const targetDir = tempDir();
-    const projects = join(tempDir(), 'empty-projects.json');
-    writeFileSync(projects, JSON.stringify({ schemaVersion: PROJECTS_SCHEMA_VERSION, projects: [] }));
-    process.env.HEDDLE_PROJECTS = projects;
+  it('verifies every roster agent in order before checking the team with a verified identity', async () => {
+    const { homeDir, targetDir } = registered(['A', 'B'], 'HED');
     const runner = new StubLinearRunner();
 
-    const result = await linearStep(runner).run(context(targetDir), io([true, 'SYN', 'C, D']));
+    const result = await linearStep(runner).run(context(homeDir, targetDir), io([true]));
 
     expect(result.status).toBe('done');
-    expect(result.summary).toContain('team SYN');
-    expect(result.summary).toContain('roster C, D');
-    expect(runner.calls).toEqual(['available', 'whoami:default', 'team:SYN', 'whoami:C', 'whoami:D']);
+    expect(runner.calls).toEqual(['whoami:A', 'whoami:B', 'team:HED:A']);
+    expect(result.detail).toContain('VERIFIED: agents A, B');
+    expect(result.detail).toContain('VERIFIED: team HED');
+    expect(result.detail).toContain('STILL MANUAL: export LIN_TEAM=HED');
+  });
+
+  it('stops at a missing credential store and provides provisioning guidance', async () => {
+    const { homeDir, targetDir } = registered(['A', 'B']);
+    const runner = new StubLinearRunner({ agents: { A: { ok: false, error: 'credentials not set up' } } });
+
+    const result = await linearStep(runner).run(context(homeDir, targetDir), io([true]));
+
+    expect(result.status).toBe('skipped');
+    expect(result.detail).toContain('Provision Linear OAuth agent credentials');
+    expect(runner.calls).toEqual(['whoami:A']);
+  });
+
+  it('continues past an unknown agent key and guides only that agent', async () => {
+    const { homeDir, targetDir } = registered(['A', 'B', 'C']);
+    const runner = new StubLinearRunner({ agents: { B: { ok: false, error: 'unknown agent key B' } } });
+
+    const result = await linearStep(runner).run(context(homeDir, targetDir), io([true]));
+
+    expect(result.status).toBe('failed');
+    expect(runner.calls).toEqual(['whoami:A', 'whoami:B', 'whoami:C', 'team:HED:A']);
+    expect(result.detail).toContain('Agent B has no Linear OAuth app');
+    expect(result.detail).not.toContain('Agent A has no Linear OAuth app');
+    expect(result.detail).not.toContain('Agent C has no Linear OAuth app');
+  });
+
+  it('surfaces an agent timeout without misclassifying it as missing OAuth', async () => {
+    const { homeDir, targetDir } = registered(['A', 'B']);
+    const runner = new StubLinearRunner({ agents: { B: { ok: false, error: 'request timed out (401)' } } });
+
+    const result = await linearStep(runner).run(context(homeDir, targetDir), io([true]));
+
+    expect(result.status).toBe('failed');
+    expect(result.detail).toContain('request timed out (401)');
+    expect(result.detail).not.toContain('Agent B has no Linear OAuth app');
+  });
+
+  it('carries the real inaccessible-team error in its guide', async () => {
+    const { homeDir, targetDir } = registered(['A'], 'HED');
+    const runner = new StubLinearRunner({ team: { ok: false, error: 'team endpoint returned 403' } });
+
+    const result = await linearStep(runner).run(context(homeDir, targetDir), io([true]));
+
+    expect(result.status).toBe('failed');
+    expect(result.detail).toContain('team endpoint returned 403');
+    expect(runner.calls).toEqual(['whoami:A', 'team:HED:A']);
+  });
+
+  it('does not spawn lin.sh in dry-run after resolving the target-local registry', async () => {
+    const targetDir = tempDir();
+    const homeDir = targetDir;
+    writeRegistry(homeDir, targetDir, ['A'], 'HED');
+    const runner = new StubLinearRunner();
+    const before = readdirSync(targetDir);
+
+    const result = await linearStep(runner).run(context(homeDir, targetDir, true), io([true]));
+
+    expect(result).toMatchObject({ status: 'skipped', summary: expect.stringContaining('dry-run — would verify credential/team/roster for team HED, agents A') });
+    expect(runner.calls).toEqual([]);
+    expect(readdirSync(targetDir)).toEqual(before);
+  });
+
+  it('re-prompts an unregistered target once for a blank team then fails with a guide', async () => {
+    const homeDir = tempDir();
+    const targetDir = tempDir();
+    const runner = new StubLinearRunner();
+
+    const result = await linearStep(runner).run(context(homeDir, targetDir), io([true, '  ', '']));
+
+    expect(result.status).toBe('failed');
+    expect(result.detail).toContain('team key must not be blank');
+    expect(runner.calls).toEqual([]);
+  });
+
+  it('prompts an unregistered target for its team and roster', async () => {
+    const homeDir = tempDir();
+    const targetDir = tempDir();
+    const runner = new StubLinearRunner();
+
+    const result = await linearStep(runner).run(context(homeDir, targetDir), io([true, 'HED', 'C, D']));
+
+    expect(result.status).toBe('done');
+    expect(runner.calls).toEqual(['whoami:C', 'whoami:D', 'team:HED:C']);
+  });
+
+  it('guides an empty roster without a bare whoami fallback', async () => {
+    const homeDir = tempDir();
+    const targetDir = tempDir();
+    const runner = new StubLinearRunner();
+
+    const result = await linearStep(runner).run(context(homeDir, targetDir), io([true, 'HED', '']));
+
+    expect(result.status).toBe('failed');
+    expect(result.detail).toContain('provide at least one agent to verify Linear');
+    expect(runner.calls).toEqual([]);
   });
 
   it('returns a JSON-serializable WizardStepResult shape', async () => {
-    const { targetDir, runner } = registered(['A']);
+    const { homeDir, targetDir } = registered(['A']);
+    const result = await linearStep(new StubLinearRunner()).run(context(homeDir, targetDir), io([true]));
 
-    const result = await linearStep(runner).run(context(targetDir), io([true]));
     const json = JSON.parse(JSON.stringify(result));
-
     expect(Object.keys(json).sort()).toEqual(['detail', 'id', 'status', 'summary']);
     expect(json).toMatchObject({ id: 'linear', status: 'done' });
+  });
+});
+
+describe('LinShLinearRunner', () => {
+  afterEach(() => mockExecFileSync.mockReset());
+
+  it('uses scoped argv and LIN_TEAM only for the team probe', async () => {
+    mockExecFileSync.mockReturnValue('identity  : synthetic\n');
+    const runner = new LinShLinearRunner('/synthetic-home');
+
+    await runner.whoami('A');
+    await runner.team('HED', 'A');
+
+    expect(mockExecFileSync).toHaveBeenNthCalledWith(1, join('/synthetic-home', '.heddle', 'fleet', 'bin', 'lin.sh'), ['--agent', 'A', 'whoami'], expect.objectContaining({ timeout: 15_000, encoding: 'utf8' }));
+    expect(mockExecFileSync).toHaveBeenNthCalledWith(2, join('/synthetic-home', '.heddle', 'fleet', 'bin', 'lin.sh'), ['--agent', 'A', 'list', '--limit', '1'], expect.objectContaining({ env: expect.objectContaining({ LIN_TEAM: 'HED' }), timeout: 15_000, encoding: 'utf8' }));
+  });
+
+  it('refuses unsafe agents and blank teams without spawning', async () => {
+    const runner = new LinShLinearRunner('/synthetic-home');
+
+    await expect(runner.whoami(' ')).rejects.toThrow('agent key');
+    await expect(runner.whoami('-A')).rejects.toThrow('agent key');
+    await expect(runner.team('  ', 'A')).rejects.toThrow('team key');
+    await expect(runner.team('HED', '-A')).rejects.toThrow('agent key');
+    expect(mockExecFileSync).not.toHaveBeenCalled();
   });
 });

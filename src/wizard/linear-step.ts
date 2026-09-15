@@ -1,63 +1,59 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { DEFAULT_PROJECTS_PATH, loadProjectRegistry, projectForCwd, type Project } from '../projects.js';
+import { loadProjectRegistry, projectForCwd, type Project } from '../projects.js';
 import type { WizardIO, WizardStep, WizardStepResult } from './step.js';
 
-/** Read-only seam around the installed fleet Linear CLI. */
+/** A narrow seam around the installed Linear command. */
 export interface LinearRunner {
-  available(): boolean;
-  whoami(agent?: string): Promise<{ ok: boolean; identity?: string; error?: string }>;
-  team(teamKey: string): Promise<{ ok: boolean; name?: string; error?: string }>;
+  installed(): boolean;
+  whoami(agent: string): Promise<{ ok: boolean; identity?: string; error?: string }>;
+  team(teamKey: string, agent: string): Promise<{ ok: boolean; name?: string; error?: string }>;
+}
+
+class InvalidLinearProbeInputError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'InvalidLinearProbeInputError';
+  }
 }
 
 type CommandResult = { ok: boolean; output: string; error?: string };
 
-/**
- * Production adapter for the fleet-owned `lin.sh` command. It deliberately delegates credential
- * discovery to that command: its credential store is fleet-owned and must not be duplicated here.
- */
+/** Production adapter for the fleet-owned Linear command. */
 export class LinShLinearRunner implements LinearRunner {
   private readonly script: string;
 
-  constructor(home = homedir()) {
-    // Keep this in sync with the fleet-bin resolver used by upgrade tests: fleet commands are
-    // installed below the operator's heddle home, not vendored from a project checkout.
-    this.script = join(home, '.heddle', 'fleet', 'bin', 'lin.sh');
+  constructor(homeDir: string) {
+    this.script = join(homeDir, '.heddle', 'fleet', 'bin', 'lin.sh');
   }
 
-  available(): boolean {
-    if (!existsSync(this.script)) return false;
-    const probe = this.run(['whoami']);
-    // A missing credential setup makes the command unavailable to this onboarding step. Other
-    // failures (such as a transient network error) still leave the CLI installed, so run() can
-    // report their actionable error rather than incorrectly asking for installation.
-    return !/credentials?\s+(?:not\s+set\s+up|missing)|missing\s+[—-]\s*Linear\s+agent\s+credentials/i.test(probe.error ?? probe.output);
+  installed(): boolean {
+    return existsSync(this.script);
   }
 
-  async whoami(agent?: string): Promise<{ ok: boolean; identity?: string; error?: string }> {
-    const result = this.run(agent ? ['--agent', agent, 'whoami'] : ['whoami']);
+  async whoami(agent: string): Promise<{ ok: boolean; identity?: string; error?: string }> {
+    validateAgent(agent);
+    const result = this.run(['--agent', agent, 'whoami']);
     if (!result.ok) return { ok: false, error: result.error ?? 'lin.sh whoami failed' };
     const identity = /^identity\s*:\s*(.+)$/mi.exec(result.output)?.[1]?.trim();
     return { ok: true, identity: identity || undefined };
   }
 
-  async team(teamKey: string): Promise<{ ok: boolean; name?: string; error?: string }> {
-    // `list` reads the configured team but does not mutate Linear. A successful empty result is
-    // still a reachable team, so retain the requested key as the useful report name.
-    const result = this.run(['list'], { LIN_TEAM: teamKey });
+  async team(teamKey: string, agent: string): Promise<{ ok: boolean; name?: string; error?: string }> {
+    validateTeam(teamKey);
+    validateAgent(agent);
+    const result = this.run(['--agent', agent, 'list', '--limit', '1'], { LIN_TEAM: teamKey.trim() });
     return result.ok
-      ? { ok: true, name: teamKey }
-      : { ok: false, error: result.error ?? `could not reach Linear team ${teamKey}` };
+      ? { ok: true, name: teamKey.trim() }
+      : { ok: false, error: result.error ?? `could not reach Linear team ${teamKey.trim()}` };
   }
 
-  private run(args: string[], overrides: NodeJS.ProcessEnv = {}): CommandResult {
+  private run(args: string[], env: NodeJS.ProcessEnv = {}): CommandResult {
     try {
       const output = execFileSync(this.script, args, {
         encoding: 'utf8',
-        stdio: ['ignore', 'pipe', 'pipe'],
-        env: { ...process.env, ...overrides },
+        env: { ...process.env, ...env },
         timeout: 15_000,
       });
       return { ok: true, output };
@@ -72,26 +68,58 @@ export class LinShLinearRunner implements LinearRunner {
   }
 }
 
-const unavailableGuide = [
-  'GUIDE: Linear checks need the fleet CLI and an operator-provisioned OAuth app.',
-  '1. Install the fleet CLI: heddle fleet install-bin',
-  '2. Provision Linear OAuth agent credentials, then run lin.sh whoami to see the exact credentials path it expects.',
-].join('\n');
+function validateAgent(agent: string): void {
+  if (!agent.trim() || agent.trim().startsWith('-')) {
+    throw new InvalidLinearProbeInputError('Linear agent key must be non-blank and must not begin with "-"');
+  }
+}
+
+function validateTeam(teamKey: string): void {
+  if (!teamKey.trim()) throw new InvalidLinearProbeInputError('Linear team key must not be blank');
+}
+
+function registryPath(homeDir: string): string {
+  return join(homeDir, '.heddle', 'projects.json');
+}
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function provisionGuide(): string {
+  return 'GUIDE: Provision Linear OAuth agent credentials, then re-run `heddle setup`.';
+}
 
 function oauthGuide(agent: string): string {
-  return `GUIDE: Agent ${agent} has no Linear OAuth app — in Linear → Settings → API → OAuth applications create an app (scopes read, write, issues:create, comments:create, app:assignable, app:mentionable) and add its client_id/client_secret under agents[${agent}] in the credentials file lin.sh reports (a Linear-workspace-admin step this wizard cannot automate).`;
+  return `GUIDE: Agent ${agent} has no Linear OAuth app. A Linear workspace admin must provision an OAuth app for that agent, then re-run \`heddle setup\`.`;
 }
 
-function registryPath(): string {
-  return process.env.HEDDLE_PROJECTS?.trim() || DEFAULT_PROJECTS_PATH;
+function manualSteps(teamKey: string): string {
+  return `STILL MANUAL: export LIN_TEAM=${teamKey} in the launcher.`;
 }
 
-function enteredProject(linearTeam: string, agentIds: string[]): Pick<Project, 'linearTeam' | 'agentIds'> {
-  return { linearTeam, agentIds };
+function isMissingCredentialStore(error: string): boolean {
+  return /credentials?\s+not\s+set\s+up|missing .* credentials|linear-agents\.json/i.test(error);
 }
 
-/** A project-scoped, verification-only onboarding step; it never writes files or Linear data. */
-export function linearStep(runner: LinearRunner = new LinShLinearRunner()): WizardStep {
+function isUnknownAgent(error: string): boolean {
+  return /unknown agent key/i.test(error);
+}
+
+type LinearProject = Pick<Project, 'linearTeam' | 'agentIds'>;
+
+async function enteredProject(io: WizardIO): Promise<LinearProject | null> {
+  let teamKey = (await io.prompter.text('Linear team key for this project')).trim();
+  if (!teamKey) teamKey = (await io.prompter.text('Linear team key must not be blank; enter it again')).trim();
+  if (!teamKey) return null;
+
+  const enteredRoster = await io.prompter.text('Comma-separated Linear agent roster for this project');
+  const agentIds = enteredRoster.trim() ? enteredRoster.split(',').map((agent) => agent.trim()) : [];
+  return { linearTeam: teamKey, agentIds };
+}
+
+/** A project-scoped, verification-only onboarding step; it never writes project or credential data. */
+export function linearStep(injectedRunner?: LinearRunner): WizardStep {
   return {
     id: 'linear',
     title: 'Linear onboarding',
@@ -99,87 +127,122 @@ export function linearStep(runner: LinearRunner = new LinShLinearRunner()): Wiza
     async run(ctx, io): Promise<WizardStepResult> {
       const skip = (summary: string, detail?: string): WizardStepResult => ({ id: 'linear', status: 'skipped', summary, ...(detail ? { detail } : {}) });
       const fail = (summary: string, detail: string): WizardStepResult => ({ id: 'linear', status: 'failed', summary, detail });
-
-      const proceed = await io.prompter.confirm('Set up / verify Linear for this project now?');
-      if (!proceed) return skip('Linear setup skipped — the wizard works without it; re-run heddle setup --only linear anytime.');
-
-      let project: Pick<Project, 'linearTeam' | 'agentIds'>;
-      try {
-        const registered = projectForCwd(loadProjectRegistry(registryPath()), ctx.targetDir!);
-        if (registered) {
-          project = registered;
-        } else {
-          const linearTeam = (await io.prompter.text('Linear team key for this project')).trim();
-          const roster = await io.prompter.text('Comma-separated Linear agent roster for this project');
-          project = enteredProject(linearTeam, roster.split(',').map((agent) => agent.trim()).filter(Boolean));
+      const report = (result: WizardStepResult): WizardStepResult => {
+        if (result.detail) {
+          try {
+            io.report(result.detail);
+          } catch {
+            // Reporting is observational; it must never change the verification result.
+          }
         }
+        return result;
+      };
+
+      let proceed: boolean;
+      try {
+        proceed = await io.prompter.confirm('Set up / verify Linear for this project now?');
       } catch (error) {
-        const detail = `GUIDE: Could not resolve this project's Linear registry entry: ${error instanceof Error ? error.message : String(error)}`;
-        io.report(detail);
-        return fail('Linear project configuration could not be resolved', detail);
+        return report(fail('Linear setup could not be confirmed', `GUIDE: Linear confirmation failed: ${errorText(error)}`));
+      }
+      if (!proceed) return skip('Linear setup skipped — re-run `heddle setup` anytime.');
+
+      const runner = injectedRunner ?? new LinShLinearRunner(ctx.homeDir);
+      let installed: boolean;
+      try {
+        installed = runner.installed();
+      } catch (error) {
+        const detail = `${provisionGuide()}\nGUIDE: Could not inspect the Linear command: ${errorText(error)}`;
+        return report(skip('Linear tooling is unavailable; setup remains optional', detail));
+      }
+      if (!installed) {
+        const detail = 'GUIDE: Install the fleet CLI with `heddle fleet install-bin`, then re-run `heddle setup`.';
+        return report(skip('Linear tooling is unavailable; setup remains optional', detail));
       }
 
-      let available: boolean;
+      let project: LinearProject | null;
       try {
-        available = runner.available();
+        const registered = ctx.targetDir ? projectForCwd(loadProjectRegistry(registryPath(ctx.homeDir)), ctx.targetDir) : null;
+        project = registered ?? await enteredProject(io);
       } catch (error) {
-        const detail = `${unavailableGuide}\nGUIDE: lin.sh availability check failed: ${error instanceof Error ? error.message : String(error)}`;
-        io.report(detail);
-        return skip('Linear tooling is unavailable; setup remains optional', detail);
+        return report(fail('Linear project configuration could not be resolved', `GUIDE: Could not resolve this project's Linear registry entry: ${errorText(error)}`));
       }
-      if (!available) {
-        io.report(unavailableGuide);
-        return skip('Linear tooling is unavailable; setup remains optional', unavailableGuide);
+      if (!project) {
+        return report(fail('Linear project configuration needs attention', 'GUIDE: Linear team key must not be blank; re-run `heddle setup` and provide a team key.'));
+      }
+
+      try {
+        validateTeam(project.linearTeam);
+        for (const agent of project.agentIds) validateAgent(agent);
+      } catch (error) {
+        return report(fail('Linear project configuration needs attention', `GUIDE: ${errorText(error)}`));
+      }
+
+      if (ctx.dryRun) {
+        return skip(`dry-run — would verify credential/team/roster for team ${project.linearTeam}, agents ${project.agentIds.join(', ') || 'none'}`);
+      }
+
+      if (project.agentIds.length === 0) {
+        return report(fail('Linear project configuration needs attention', 'GUIDE: provide at least one agent to verify Linear.'));
       }
 
       const detail: string[] = [];
-      let credentialOk = false;
-      try {
-        const credential = await runner.whoami();
-        if (credential.ok) {
-          credentialOk = true;
-          io.report(`Linear credential OK: ${credential.identity ?? 'verified identity'}`);
-          detail.push(`VERIFIED: credential${credential.identity ? ` (${credential.identity})` : ''}`);
-        } else {
-          detail.push(`GUIDE: Linear credential check failed${credential.error ? `: ${credential.error}` : ''}. Run lin.sh whoami for the exact credentials path it expects.`);
+      const verifiedAgents: string[] = [];
+      let missingStore = false;
+      let agentFailure = false;
+
+      for (const agent of project.agentIds) {
+        let check: { ok: boolean; identity?: string; error?: string };
+        try {
+          check = await runner.whoami(agent);
+        } catch (error) {
+          check = { ok: false, error: errorText(error) };
         }
-      } catch (error) {
-        detail.push(`GUIDE: Linear credential check failed: ${error instanceof Error ? error.message : String(error)}. Run lin.sh whoami for the exact credentials path it expects.`);
+        if (check.ok) {
+          verifiedAgents.push(agent);
+          continue;
+        }
+        const message = check.error ?? 'lin.sh whoami failed';
+        if (isMissingCredentialStore(message)) {
+          missingStore = true;
+          detail.push(provisionGuide());
+          break;
+        }
+        agentFailure = true;
+        detail.push(isUnknownAgent(message) ? oauthGuide(agent) : `GUIDE: Linear check for agent ${agent} failed: ${message}`);
       }
 
+      if (missingStore) {
+        detail.push(manualSteps(project.linearTeam));
+        return report(skip('Linear credentials need provisioning', detail.join('\n')));
+      }
+
+      if (verifiedAgents.length > 0) detail.unshift(`VERIFIED: agents ${verifiedAgents.join(', ')}`);
       let teamOk = false;
-      try {
-        const team = await runner.team(project.linearTeam);
+      if (verifiedAgents.length > 0) {
+        let team: { ok: boolean; name?: string; error?: string };
+        try {
+          team = await runner.team(project.linearTeam, verifiedAgents[0]);
+        } catch (error) {
+          team = { ok: false, error: errorText(error) };
+        }
         if (team.ok) {
           teamOk = true;
           detail.push(`VERIFIED: team ${team.name ?? project.linearTeam}`);
         } else {
-          detail.push(`GUIDE: Linear team ${project.linearTeam} could not be reached${team.error ? `: ${team.error}` : ''}. Confirm the team key and access, then re-run.`);
+          agentFailure = true;
+          detail.push(`GUIDE: Linear team ${project.linearTeam} could not be verified: ${team.error ?? 'lin.sh list failed'}`);
         }
-      } catch (error) {
-        detail.push(`GUIDE: Linear team ${project.linearTeam} could not be reached: ${error instanceof Error ? error.message : String(error)}. Confirm the team key and access, then re-run.`);
+      } else {
+        agentFailure = true;
+        detail.push('GUIDE: No roster agent verified, so the Linear team could not be checked.');
       }
 
-      const verifiedAgents: string[] = [];
-      const unprovisioned: string[] = [];
-      for (const agent of project.agentIds) {
-        try {
-          const check = await runner.whoami(agent);
-          if (check.ok) verifiedAgents.push(agent);
-          else { unprovisioned.push(agent); detail.push(oauthGuide(agent)); }
-        } catch {
-          unprovisioned.push(agent);
-          detail.push(oauthGuide(agent));
-        }
-      }
-      if (verifiedAgents.length) detail.push(`VERIFIED: roster ${verifiedAgents.join(', ')}`);
-
-      detail.push('STILL MANUAL: export LIN_TEAM=' + project.linearTeam + ' in your launcher — this wizard does not auto-wire it.');
-      const allVerified = credentialOk && teamOk && unprovisioned.length === 0;
+      detail.push(manualSteps(project.linearTeam));
+      const allVerified = !agentFailure && teamOk && verifiedAgents.length === project.agentIds.length;
       const summary = allVerified
-        ? `Linear verified: credential, team ${project.linearTeam}, roster ${project.agentIds.length ? project.agentIds.join(', ') : 'empty'}`
-        : `Linear verification incomplete: credential ${credentialOk ? 'verified' : 'needs attention'}; team ${teamOk ? 'verified' : 'needs attention'}; roster ${verifiedAgents.length}/${project.agentIds.length} verified`;
-      return allVerified ? { id: 'linear', status: 'done', summary, detail: detail.join('\n') } : fail(summary, detail.join('\n'));
+        ? `Linear verified: team ${project.linearTeam}, agents ${verifiedAgents.join(', ')}`
+        : `Linear verification incomplete: ${verifiedAgents.length}/${project.agentIds.length} agents verified; team ${teamOk ? 'verified' : 'needs attention'}`;
+      return report(allVerified ? { id: 'linear', status: 'done', summary, detail: detail.join('\n') } : fail(summary, detail.join('\n')));
     },
   };
 }
