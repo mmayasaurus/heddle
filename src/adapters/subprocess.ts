@@ -74,6 +74,76 @@ function capAppend(acc: string, accBytes: number, chunk: string, cap: number):
   return { acc: acc + taken, accBytes: used, hit: true };
 }
 
+/** Local diagnostic subprocess with explicit environment and stdin; never use for billed workers. */
+export function spawnProbe(
+  bin: string,
+  args: string[],
+  opts: { cwd: string; env: NodeJS.ProcessEnv; stdin: string; timeoutMs: number; maxStreamBytes?: number },
+): Promise<{ stdout: string; stderr: string; exitCode: number | null; timedOut: boolean }> {
+  return new Promise((resolve) => {
+    const child = spawn(bin, args, {
+      cwd: opts.cwd,
+      env: opts.env,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      detached: true,
+    });
+    installExitHandlers();
+    if (child.pid !== undefined) liveChildren.add(child);
+    child.stdin.on('error', () => {});
+    child.stdin.end(opts.stdin);
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+
+    const cap = opts.maxStreamBytes ?? 1_024 * 1_024;
+    let stdout = '';
+    let stderr = '';
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    let settled = false;
+    let timedOut = false;
+    let graceTimer: NodeJS.Timeout | undefined;
+    const finish = (exitCode: number | null, didTimeout: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (graceTimer) clearTimeout(graceTimer);
+      resolve({ stdout, stderr, exitCode, timedOut: didTimeout });
+    };
+    const timer = setTimeout(() => {
+      if (settled) return;
+      timedOut = true;
+      try {
+        killGroupOrChild(child);
+      } finally {
+        graceTimer = setTimeout(() => {
+          if (settled) return;
+          child.unref();
+          child.stdout.destroy();
+          child.stderr.destroy();
+          finish(null, true);
+        }, GRACE_MS);
+      }
+    }, opts.timeoutMs);
+
+    child.stdout.on('data', (chunk: string) => {
+      const capped = capAppend(stdout, stdoutBytes, chunk, cap);
+      stdout = capped.acc;
+      stdoutBytes = capped.accBytes;
+    });
+    child.stderr.on('data', (chunk: string) => {
+      const capped = capAppend(stderr, stderrBytes, chunk, cap);
+      stderr = capped.acc;
+      stderrBytes = capped.accBytes;
+    });
+    child.on('exit', () => liveChildren.delete(child));
+    child.on('close', (code) => finish(code, timedOut));
+    child.on('error', (error) => {
+      stderr = `${stderr}\nspawn error: ${String(error)}`;
+      if (!timedOut) finish(null, false);
+    });
+  });
+}
+
 export function run(bin: string, args: string[], cwd: string, timeoutMs: number,
                     envOverrides?: Record<string, string>, envUnset?: string[],
                     maxStreamBytes = DEFAULT_MAX_STREAM_BYTES, idleTimeoutMs?: number,

@@ -39,6 +39,7 @@ export interface DoctorBudgets {
   loginMs: number;
   catalogMs: number;
   graceMs: number;
+  hooksMs: number;
 }
 
 export type LanesLoad = { ok: true; value: LanesConfig } | { ok: false; error: string };

@@ -21,6 +21,7 @@ import {
   type LanesLoad,
 } from './health/checks.js';
 import {
+  defaultExecHook,
   defaultExecFile,
   defaultGitBehindOriginMain,
   defaultReadFileBytes,
@@ -30,6 +31,7 @@ import {
   type CheckResult,
   type DoctorDeps,
 } from './health/probe.js';
+import { hooksChecks } from './health/hooks.js';
 import { defaultLanesPath, loadLanes } from './lanes.js';
 import { DEFAULT_PROJECTS_PATH } from './projects.js';
 import { defaultRoutingPath } from './routing.js';
@@ -75,7 +77,7 @@ function loadLanesResult(lanesPath: string): LanesLoad {
 }
 
 function buildContext(
-  opts: { provider?: string },
+  opts: { provider?: string; probeHooks?: boolean },
   partial: Partial<DoctorDeps>,
 ): {
   deps: DoctorDeps;
@@ -97,6 +99,7 @@ function buildContext(
   const deps: DoctorDeps = {
     env: partial.env ?? process.env,
     execFile: partial.execFile ?? defaultExecFile,
+    execHook: partial.execHook ?? defaultExecHook,
     readFileBytes: partial.readFileBytes ?? defaultReadFileBytes,
     sha256: partial.sha256 ?? defaultSha256,
     gitBehindOriginMain: partial.gitBehindOriginMain ?? defaultGitBehindOriginMain,
@@ -112,6 +115,7 @@ function buildContext(
       loginMs: partial.timeouts?.loginMs ?? 15_000,
       catalogMs: partial.timeouts?.catalogMs ?? 20_000,
       graceMs: partial.timeouts?.graceMs ?? 2_000,
+      hooksMs: partial.timeouts?.hooksMs ?? 180_000,
     },
     routingPath,
     // doctor.ts compiles to dist/doctor.js (rootDir src, outDir dist), so .. is the repo root;
@@ -125,14 +129,17 @@ function buildContext(
   return { deps, ctx, accountsPath, projectsPath, commsPath, operatorTokenPath };
 }
 
-function assembleChecks(
-  opts: { provider?: string },
+async function assembleChecks(
+  opts: { provider?: string; probeHooks?: boolean },
   ctx: DoctorContext,
   accountsPath: string,
   projectsPath: string,
   commsPath: string,
   operatorTokenPath: string,
-): Definition[] {
+): Promise<Definition[]> {
+  if (opts.probeHooks) {
+    return hooksChecks(ctx, ctx.deps.paths.project ?? process.cwd());
+  }
   const selected = new Set(
     harnesses
       .filter((harness) => !opts.provider || harness.provider === opts.provider)
@@ -162,11 +169,11 @@ function assembleChecks(
 }
 
 export async function runDoctor(
-  opts: { provider?: string },
+  opts: { provider?: string; probeHooks?: boolean },
   partial: Partial<DoctorDeps> = {},
 ): Promise<DoctorReport> {
   const { ctx, accountsPath, projectsPath, commsPath, operatorTokenPath } = buildContext(opts, partial);
-  const definitions = assembleChecks(
+  const definitions = await assembleChecks(
     opts, ctx, accountsPath, projectsPath, commsPath, operatorTokenPath,
   );
   const checks: CheckResult[] = [];

@@ -175,6 +175,11 @@ Gemini model can work before its catalog lists it (see `docs/MODELS.md`). It exi
 fails; exit 0 means no failures (including timed-out, unverified probes, which warn), and exit 2 is a
 usage error.
 
+`heddle doctor --hooks` is a separate, opt-in diagnostic: it executes every configured Claude Code
+hook with a synthetic stdin payload to report latency and hook health. It can trigger the hook's normal
+external effects; it is never included in the default read-only doctor sweep. `--hooks` ignores
+`--provider` and exits 1 for broken, missing, or permanently timed-out hooks.
+
 Framework-layer config lives under `~/.heddle/` (it spans projects, never a single repo):
 `accounts.json` (Claude accounts), `ledger.db` (dispatch/review ledger), `comms.db` (broker), and
 `packs/` (operator skill packs, searched after `HEDDLE_PACKS` and before built-ins).
