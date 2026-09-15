@@ -4,6 +4,11 @@ import { basename, join } from 'node:path';
 import { result, sanitize, type CheckResult, type ProbeResult } from './probe.js';
 import type { Definition, DoctorContext } from './checks.js';
 
+// The shortest interactive-event timeout Claude Code uses (UserPromptSubmit = 30s). A hook that cannot
+// return within that window is broken for interactive use whatever its declared ceiling, so a budget-capped
+// probe that got at least this long is reported as hung (fail), not merely unverified.
+const HUNG_FLOOR_MS = 30_000;
+
 type HookEntry = { type?: unknown; command?: unknown; args?: unknown; timeout?: unknown };
 type HookGroup = { hooks?: unknown; matcher?: unknown };
 
@@ -25,9 +30,10 @@ function sessionId(): string {
 
 function toolNameForMatcher(matcher: string | undefined): string {
   if (!matcher || matcher === '*' || matcher === '.*') return 'Bash';
-  const first = matcher.split('|')[0]?.trim() ?? '';
+  const first = (matcher.split('|')[0]?.trim() ?? '').replace(/\[([A-Za-z0-9_])[^\]]*\]/g, '$1');
   if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(first)) return first;
-  const collapsed = first.replace(/\.\*|\.\+/g, 'probe').replace(/[^A-Za-z0-9_]/g, '');
+  // Best-effort — a synthetic probe cannot satisfy every possible matcher regex; this derives a representative concrete tool name.
+  const collapsed = first.replace(/\.\*|\.\+/g, 'probe').replace(/[^A-Za-z0-9_-]/g, '');
   return collapsed || 'Bash';
 }
 
@@ -58,8 +64,9 @@ function synthPayload(event: string, projectDir: string, id: string, matcher?: s
   return JSON.stringify(payload);
 }
 
-function settingsFailure(id: string, detail: string): Definition {
-  return { id, kind: 'hooks', run: async () => result('fail', `unparseable settings: ${detail}`) };
+function settingsFailure(id: string, detail: string, kind: 'unreadable' | 'unparseable'): Definition {
+  const label = kind === 'unreadable' ? 'unreadable settings' : 'unparseable settings';
+  return { id, kind: 'hooks', run: async () => result('fail', `${label}: ${detail}`) };
 }
 
 function readHooks(bytes: Uint8Array): Record<string, HookGroup[]> | undefined {
@@ -83,20 +90,20 @@ function classifyHookProbe(
   probe: ProbeResult,
   ctx: {
     elapsed: number; timeoutMs: number; timeoutSeconds: number; name: string; command: string;
-    budgetBound: boolean; timeoutNote: string;
+    budgetBound: boolean; deadlineMs: number; timeoutNote: string;
   },
 ): Omit<CheckResult, 'id' | 'kind' | 'provider'> {
   const withTimeoutNote = (detail: string) => `${detail}${ctx.timeoutNote}`;
   const slow = ctx.elapsed > ctx.timeoutMs * 0.75;
   if (probe.timedOut) {
-    if (ctx.budgetBound) {
-      return result(
-        'warn',
-        `sweep budget reached — ${ctx.name} latency unverified (declared ${ctx.timeoutSeconds}s)`,
-        'raise --hooks budget or profile this hook in isolation',
-      );
+    if (!ctx.budgetBound) {
+      return result('fail', `perma-timeout: no exit within ${ctx.timeoutSeconds}s (${ctx.name})`, 'hook never returned — likely the cause of prompt/turn stalls');
     }
-    return result('fail', `perma-timeout: no exit within ${ctx.timeoutSeconds}s (${ctx.name})`, 'hook never returned — likely the cause of prompt/turn stalls');
+    const windowSec = Math.round(ctx.deadlineMs / 1_000);
+    if (ctx.deadlineMs >= HUNG_FLOOR_MS) {
+      return result('fail', `hung: no exit within the ${windowSec}s sweep window (declared ${ctx.timeoutSeconds}s) (${ctx.name})`, `hook did not return in ${windowSec}s — re-run with --hooks-budget ${ctx.timeoutSeconds} to verify against its full timeout`);
+    }
+    return result('warn', `only ${windowSec}s of sweep budget remained — latency unverified (declared ${ctx.timeoutSeconds}s) (${ctx.name})`, 'raise --hooks-budget to give this hook room to run');
   }
   if (probe.exitCode === 0) {
     return slow
@@ -169,6 +176,7 @@ function hookDefinition(
         name: commandName(entry.command),
         command: entry.command,
         budgetBound,
+        deadlineMs,
         timeoutNote,
       });
     },
@@ -191,7 +199,7 @@ export async function hooksChecks(ctx: DoctorContext, projectDir: string): Promi
     try {
       bytes = await read(path);
     } catch (error) {
-      definitions.push(settingsFailure(`hooks:${label}:settings`, error instanceof Error ? error.message : String(error)));
+      definitions.push(settingsFailure(`hooks:${label}:settings`, error instanceof Error ? error.message : String(error), 'unreadable'));
       continue;
     }
     if (!bytes) continue;
@@ -199,7 +207,7 @@ export async function hooksChecks(ctx: DoctorContext, projectDir: string): Promi
     try {
       hooks = readHooks(bytes);
     } catch (error) {
-      definitions.push(settingsFailure(`hooks:${label}:settings`, error instanceof Error ? error.message : String(error)));
+      definitions.push(settingsFailure(`hooks:${label}:settings`, error instanceof Error ? error.message : String(error), 'unparseable'));
       continue;
     }
     if (!hooks) continue;

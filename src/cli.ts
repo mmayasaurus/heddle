@@ -110,8 +110,8 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
   heddle init-project <dir> [--canonical <path>] [--name <n>] [--team <KEY>] [--agents A,B,…] [--room <#room>] [--launcher <script>] [--preset <tier>] [--hook-rules <a,b>] [--enforce <a,b>] [--answers <file>] [--enforce-memtrace] [--dry-run] [--json] [--show-content]
   heddle whoami [--json]         this process's bound identity (HEDDLE_AGENT / FLEET_AGENT / .fleet-agent) + worker context
   heddle doctor [--json] [--provider <p>]   verify harnesses/accounts/config; --provider runs only that provider's checks plus global config checks (exit 1 on any fail)
-  heddle doctor --hooks [--json]            probe configured hooks' latency — EXECUTES each configured hook
-                                            with a synthetic payload; probes the current directory's .claude settings — run from the project root; ignores --provider; flags slow/perma-timeout/missing (exit 1 on fail)
+  heddle doctor --hooks [--hooks-budget <seconds>] [--json]  probe configured hooks' latency — EXECUTES each configured hook
+                                            with a synthetic payload; probes the current directory's .claude settings — run from the project root; ignores --provider; runs under a default 180s total sweep budget, overridable with --hooks-budget <seconds>; a hook which doesn't return within its share of the budget fails as hung (exit 1); flags slow/perma-timeout/missing
   heddle release --standalone <outDir> [--source-ref <git ref>] [--init-git] [--verify] [--json]
       requires a clean checkout at main's HEAD — headless-first invariant (HED-507)
   heddle workers [--stale <hours>] [--json]   dispatches still in flight (--stale: only orphans older than N hours)
@@ -547,6 +547,8 @@ try {
     case 'doctor': {
       const provider = arg('--provider');
       const probeHooks = has('--hooks');
+      const budgetArg = arg('--hooks-budget');
+      let hooksBudgetMs: number | undefined;
       const usageError = (message: string): void => {
         if (json) {
           process.stdout.write(
@@ -568,7 +570,18 @@ try {
           break;
         }
       }
-      const report = await runDoctor({ provider: probeHooks ? undefined : provider, probeHooks });
+      if (budgetArg !== undefined) {
+        const secs = Number(budgetArg);
+        if (!Number.isFinite(secs) || secs <= 0) {
+          usageError('doctor: --hooks-budget needs a positive number of seconds');
+          break;
+        }
+        hooksBudgetMs = secs * 1_000;
+      }
+      const report = await runDoctor(
+        { provider: probeHooks ? undefined : provider, probeHooks },
+        hooksBudgetMs !== undefined ? { timeouts: { hooksMs: hooksBudgetMs } } : undefined,
+      );
       const text = json ? JSON.stringify(report, null, 2) : formatDoctorReport(report);
       // Exit only after stdout drains so timed-out probes cannot keep the command alive after its report.
       process.stdout.write(text + '\n', () => process.exit(report.exitCode));

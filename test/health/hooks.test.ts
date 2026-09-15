@@ -86,6 +86,29 @@ describe('hooksChecks', () => {
     expect(entry).toMatchObject({ outcome: 'fail', detail: expect.stringContaining('perma-timeout') });
   });
 
+  test('fails a budget-capped default-timeout hook as hung after the interactive floor', async () => {
+    const clock = { value: 0 };
+    let timeoutMs = 0;
+    const ctx = context({ [userSettings]: settings('PreToolUse', { type: 'command', command: 'hook' }) }, clock, async (_c, _a, opts) => {
+      timeoutMs = opts.timeoutMs;
+      clock.value += 180_000;
+      return { stdout: '', stderr: '', exitCode: null, timedOut: true };
+    });
+    const [entry] = await run(await hooksChecks(ctx, projectDir));
+    expect(timeoutMs).toBe(180_000);
+    expect(entry).toMatchObject({ outcome: 'fail', detail: expect.stringContaining('hung') });
+  });
+
+  test('leaves a budget-capped default-timeout hook unverified below the interactive floor', async () => {
+    const clock = { value: 0 };
+    const ctx = context({ [userSettings]: settings('PreToolUse', { type: 'command', command: 'hook' }) }, clock, async () => {
+      clock.value += 20_000;
+      return { stdout: '', stderr: '', exitCode: null, timedOut: true };
+    }, 20_000);
+    const [entry] = await run(await hooksChecks(ctx, projectDir));
+    expect(entry).toMatchObject({ outcome: 'warn', detail: expect.stringContaining('unverified') });
+  });
+
   test('treats blocking feedback as an engaged hook', async () => {
     const entry = await one({ type: 'command', command: 'hook' }, { stdout: '', stderr: '', exitCode: 2, timedOut: false });
     expect(entry).toMatchObject({ outcome: 'ok', detail: expect.stringContaining('blocking decision') });
@@ -211,6 +234,8 @@ describe('hooksChecks', () => {
   test.each([
     ['Grep|Glob', 'Grep'],
     ['mcp__memtrace__.*', 'mcp__memtrace__probe'],
+    ['[Ww]rite', 'Write'],
+    ['mcp__x__list-tools', 'mcp__x__list-tools'],
   ])('uses the first matcher alternative as the PreToolUse tool name', async (matcher, toolName) => {
     const clock = { value: 0 };
     let stdin = '';
@@ -238,6 +263,37 @@ describe('hooksChecks', () => {
     }));
     expect(report.checks).toHaveLength(1);
     expect(report.checks[0]).toMatchObject({ id: 'hooks:user:PreToolUse:0.0', kind: 'hooks', outcome: 'ok' });
+  });
+
+  test('uses a supplied hooks budget for the hook probe deadline', async () => {
+    const paths = config();
+    let timeoutMs = 0;
+    const report = await runDoctor({ probeHooks: true }, {
+      ...fakeDeps({ ...paths, project: projectDir }, {
+        env: { CLAUDE_CONFIG_DIR: configDir },
+        readSettingsBytes: async (path) => path === userSettings
+          ? settings('PreToolUse', { type: 'command', command: 'hook' })
+          : undefined,
+        execHook: async (_command, _args, opts) => {
+          timeoutMs = opts.timeoutMs;
+          return { stdout: '', stderr: '', exitCode: 0, timedOut: false };
+        },
+      }),
+      timeouts: { hooksMs: 700_000 },
+    });
+    expect(timeoutMs).toBe(600_000);
+    expect(report.checks[0]).not.toMatchObject({ outcome: 'warn' });
+  });
+
+  test('reports unreadable hook settings distinctly', async () => {
+    const paths = config();
+    const report = await runDoctor({ probeHooks: true }, fakeDeps({ ...paths, project: projectDir }, {
+      env: { CLAUDE_CONFIG_DIR: configDir },
+      readFileBytes: async () => undefined,
+      readSettingsBytes: async () => { throw new Error('EACCES: permission denied'); },
+    }));
+    expect(report.checks.some((entry) => entry.outcome === 'fail' && entry.detail.includes('unreadable'))).toBe(true);
+    expect(report.checks.some((entry) => entry.detail.includes('unparseable'))).toBe(false);
   });
 });
 
