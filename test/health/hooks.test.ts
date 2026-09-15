@@ -119,6 +119,11 @@ describe('hooksChecks', () => {
     expect(entry).toMatchObject({ outcome: 'fail', detail: expect.stringContaining('missing') });
   });
 
+  test('flags exit 126 as not executable', async () => {
+    const entry = await one({ type: 'command', command: 'not-exec' }, { stdout: '', stderr: '', exitCode: 126, timedOut: false });
+    expect(entry).toMatchObject({ outcome: 'fail', detail: expect.stringContaining('not executable') });
+  });
+
   test('warns on other nonzero exits with stderr', async () => {
     const entry = await one({ type: 'command', command: 'hook' }, { stdout: '', stderr: 'boom', exitCode: 1, timedOut: false });
     expect(entry).toMatchObject({ outcome: 'warn', detail: expect.stringContaining('errored (exit 1)') });
@@ -238,6 +243,28 @@ describe('hooksChecks', () => {
     expect(received).toEqual([['x'], undefined]);
   });
 
+  test('resolves the ${CLAUDE_PROJECT_DIR} placeholder in the command before probing', async () => {
+    const clock = { value: 0 };
+    let command = '';
+    const ctx = context({ [userSettings]: settings('PreToolUse', { type: 'command', command: '${CLAUDE_PROJECT_DIR}/.claude/hooks/x.sh' }) }, clock, async (received) => {
+      command = received;
+      return { stdout: '', stderr: '', exitCode: 0, timedOut: false };
+    });
+    await run(await hooksChecks(ctx, projectDir));
+    expect(command).toBe(`${projectDir}/.claude/hooks/x.sh`);
+  });
+
+  test('resolves the ${CLAUDE_PROJECT_DIR} placeholder in every args element before probing', async () => {
+    const clock = { value: 0 };
+    let received: string[] | undefined;
+    const ctx = context({ [userSettings]: settings('PreToolUse', { type: 'command', command: 'hook', args: ['--config', '${CLAUDE_PROJECT_DIR}/cfg.json'] }) }, clock, async (_command, args) => {
+      received = args;
+      return { stdout: '', stderr: '', exitCode: 0, timedOut: false };
+    });
+    await run(await hooksChecks(ctx, projectDir));
+    expect(received).toEqual(['--config', `${projectDir}/cfg.json`]);
+  });
+
   test('passes the probe marker environment', async () => {
     const clock = { value: 0 };
     let seen: { env: NodeJS.ProcessEnv; stdin: string } | undefined;
@@ -248,6 +275,7 @@ describe('hooksChecks', () => {
     await run(await hooksChecks(ctx, projectDir));
     expect(seen?.env.HEDDLE_DOCTOR_PROBE).toBe('1');
     expect(seen?.env.HEDDLE_DOCTOR_PROBE_SESSION).toMatch(/^heddle-doctor-probe-[0-9a-f]{8}$/);
+    expect(seen?.env.CLAUDE_PROJECT_DIR).toBe(projectDir);
   });
 
   test('sends a synthetic event payload with a nonexistent transcript', async () => {

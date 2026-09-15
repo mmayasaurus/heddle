@@ -4,7 +4,8 @@ import { basename, join } from 'node:path';
 import { result, sanitize, type CheckResult, type ProbeResult } from './probe.js';
 import type { Definition, DoctorContext } from './checks.js';
 
-// 30s is UserPromptSubmit's default timeout, used here as a conservative "hung" floor: when the sweep
+// 30s is the UserPromptSubmit / PreModelSwitch / PostModelSwitch default timeout, used here as a
+// conservative "hung" floor: when the sweep
 // budget caps a probe below its declared timeout and the probe still times out, we report it hung (fail)
 // only if it ran at least this long, else merely unverified (warn). A hook that cannot return within 30s
 // is broken for interactive use whatever its declared ceiling. (Some events default lower — MessageDisplay
@@ -120,7 +121,14 @@ function classifyHookProbe(
       ? result('warn', withTimeoutNote(`slow: blocking decision (hook engaged) — ${ctx.elapsed}ms (${ctx.name})`), 'hook exceeds 75% of its timeout budget — profile it')
       : result('ok', withTimeoutNote(`blocking decision (hook engaged) — ${ctx.elapsed}ms (${ctx.name})`));
   }
-  if (probe.exitCode === 127) return result('fail', `missing: command not found (exit 127) — ${ctx.command.trim().split(/\s+/)[0]}`);
+  if (probe.exitCode === 127 || probe.exitCode === 126) {
+    // 127 = command not found; 126 = found but not executable (shell form). Both mean the hook cannot
+    // run, so both fail. (In exec form a non-executable binary fails earlier via the spawn EACCES path.)
+    const token = ctx.command.trim().split(/\s+/)[0];
+    return probe.exitCode === 127
+      ? result('fail', `missing: command not found (exit 127) — ${token}`)
+      : result('fail', `not executable: permission denied or not a program (exit 126) — ${token}`);
+  }
   if (probe.exitCode !== null) {
     const tail = sanitize(probe.stderr.slice(-120)) || 'no stderr';
     return result('warn', withTimeoutNote(`errored (exit ${probe.exitCode}) — ${ctx.elapsed}ms (${ctx.name}): ${tail}`));
@@ -149,6 +157,15 @@ function hookDefinition(
       const args = Array.isArray(entry.args) && entry.args.every((arg) => typeof arg === 'string')
         ? entry.args as string[]
         : undefined;
+      // Claude Code substitutes the ${CLAUDE_PROJECT_DIR} path placeholder into the command and every
+      // args element ITSELF before spawning (a plain-string replace, not shell expansion) and also exports
+      // it as an env var (https://code.claude.com/docs/en/hooks). Mirror both so a healthy project hook
+      // written as "${CLAUDE_PROJECT_DIR}/.claude/hooks/x.sh" resolves instead of false-failing 127. Only
+      // this placeholder is in scope: ${CLAUDE_PLUGIN_ROOT}/${CLAUDE_PLUGIN_DATA} appear solely in
+      // plugin-manifest hooks, never the settings files probed here.
+      const resolvePlaceholders = (value: string): string => value.split('${CLAUDE_PROJECT_DIR}').join(projectDir);
+      const command = resolvePlaceholders(entry.command);
+      const resolvedArgs = args?.map(resolvePlaceholders);
       const declared = entry.timeout;
       const declaredValid = typeof declared === 'number' && Number.isFinite(declared)
         && declared > 0 && declared * 1_000 <= 2_147_483_647;
@@ -162,9 +179,14 @@ function hookDefinition(
       const execHook = ctx.deps.execHook;
       if (!execHook) return result('fail', 'could not execute: hook probe unavailable');
       const start = ctx.deps.now().getTime();
-      const probe = await execHook(entry.command, args, {
+      const probe = await execHook(command, resolvedArgs, {
         cwd: projectDir,
-        env: { ...ctx.deps.env, HEDDLE_DOCTOR_PROBE: '1', HEDDLE_DOCTOR_PROBE_SESSION: idForPayload },
+        env: {
+          ...ctx.deps.env,
+          CLAUDE_PROJECT_DIR: projectDir,
+          HEDDLE_DOCTOR_PROBE: '1',
+          HEDDLE_DOCTOR_PROBE_SESSION: idForPayload,
+        },
         stdin: synthPayload(event, projectDir, idForPayload, matcher),
         timeoutMs: deadlineMs,
       });
@@ -178,8 +200,8 @@ function hookDefinition(
         elapsed,
         timeoutMs,
         timeoutSeconds,
-        name: commandName(entry.command),
-        command: entry.command,
+        name: commandName(command),
+        command,
         budgetBound,
         deadlineMs,
         timeoutNote,
