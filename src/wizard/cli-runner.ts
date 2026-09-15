@@ -18,7 +18,10 @@ export class NativeCliRunner implements CliRunner {
   login(provider: NativeProvider, env: NodeJS.ProcessEnv): void {
     const command = commands[provider];
     // Interactive (browser/device) login — a generous cap so a truly hung login still aborts.
-    const result = spawnSync(command.command, command.login, { env, stdio: 'inherit', timeout: 300_000 });
+    // Route the child's STDOUT to our stderr (fd 2) so a machine-readable stdout — e.g. `heddle setup
+    // --json` — stays clean of vendor login banners; stdin + stderr stay inherited so the interactive
+    // login still shows its prompt/URL and can read the pasted token.
+    const result = spawnSync(command.command, command.login, { env, stdio: ['inherit', 2, 'inherit'], timeout: 300_000 });
     if (result.error || result.status !== 0) throw result.error ?? new Error(`${command.command} login exited ${result.status}`);
   }
 
