@@ -6,6 +6,11 @@
 //
 // The enabled rules come from .codacy/codacy.config.json; this file supplies only
 // the parser, the globals and the ignores ESLint needs to run at all.
+//
+// SCOPE (PR #187 review): this config binds ONLY inside Verity's own gate runner.
+// Codacy cloud/CLI analysis (codacy-analysis, configSource "codacy") does NOT read it —
+// exclusions that must bind there live in the repo-root .codacy.yaml, which is where
+// .claude/skills/** and .codacy/** are excluded from Codacy routing.
 import js from "@eslint/js";
 import globals from "globals";
 import tseslint from "typescript-eslint";

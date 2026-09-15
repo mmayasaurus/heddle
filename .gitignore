@@ -24,4 +24,3 @@ dist/
 # it puts generated notes in every diff and pull request.
 .verity/*
 !.verity/standard.yaml
-.claude/settings.local.json

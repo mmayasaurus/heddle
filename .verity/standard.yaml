@@ -136,6 +136,11 @@ process_constraints:
     - __pycache__
     - .next
     - coverage
+    # fleet/ is dark-vendored byte-parity tooling (findings there must be fixed in the
+    # workspace canon and re-vendored, never patched here — HED-96 doctrine) and
+    # .worktrees/ holds sibling agents' checkouts — neither is heddle source (PR #187 review).
+    - fleet
+    - .worktrees
 tool_configuration:
   ESLint9:
     enabled: true

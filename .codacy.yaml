@@ -18,3 +18,11 @@
 # to preserve. (HED-578)
 exclude_paths:
   - "fleet/**"
+  # Gate tooling, not app source (PR #187 Codex review, 2026-09-15): Codacy's own analysis
+  # runs ESLint with configSource "codacy" and never applies .codacy/tools-configs/eslint.config.mjs
+  # (that file binds only inside Verity's runner), so Node scripts under .claude/skills/ produced
+  # 51 false no-undef findings (process/console/Buffer) and .codacy/ itself was routed for
+  # analysis. Exclude both at the routing level here — the config Codacy actually reads.
+  # Verity's gate still lints the skill scripts with proper Node globals via its own config.
+  - ".claude/skills/**"
+  - ".codacy/**"
