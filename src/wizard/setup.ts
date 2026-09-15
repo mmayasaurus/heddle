@@ -2,14 +2,15 @@
 // into ONE ordered walkthrough and is the SINGLE writer of step composition — step modules stay on
 // disjoint files, never import each other, and never edit this file. Owners land their step module
 // (model-economy HED-473, spread HED-474, meters HED-475, rules HED-544, doctor HED-476) and it is
-// wired here as a one-line addition to `buildSteps`; today accounts, spread, meters, rules, and the
-// doctor finish-gate are wired — only model-economy (HED-473) is still to come.
+// wired here as a one-line addition to `buildSteps`; accounts, model-economy, spread, meters, rules,
+// and the doctor finish-gate are all wired.
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 import type { WizardContext, WizardIO, WizardStep, WizardStepResult, WizardStepStatus } from './step.js';
 import type { CliRunner } from './cli-runner.js';
 import { runAccountsAdd, type AccountsAddSummary } from './accounts-add.js';
 import { doctorStep } from './doctor.js';
+import { modelEconomyStep } from './model-economy-step.js';
 import { spreadStep } from './spread-policy.js';
 import { metersStep } from './meters-step.js';
 import { rulesStep } from './rules-step.js';
@@ -145,10 +146,10 @@ function skipDoctorUnderAltHome(step: WizardStep): WizardStep {
 /**
  * Build the ordered built-in step set, in walkthrough order:
  * accounts → model-economy → spread → meters → rules → doctor (last). Each self-contained step module
- * is registered here as one line by its owner as it lands (HED-564 protocol); only model-economy
- * (HED-473) is still to come. spread/meters/rules each write UNDER `ctx.homeDir` and self-handle
- * --dry-run inside their own module, so they need no wrapper here. `rulesStep` is the one step taking a
- * construction dep — the rule catalog — defaulted to the bundled catalog (`resolveCatalogRoot()`) so
+ * is registered here as one line by its owner as it lands (HED-564 protocol). model-economy, spread,
+ * meters, and rules each write UNDER `ctx.homeDir` and self-handle --dry-run inside their own module,
+ * so they need no wrapper here. `rulesStep` is the one step taking a construction dep — the rule catalog
+ * — defaulted to the bundled catalog (`resolveCatalogRoot()`) so
  * `buildSteps({ runner })` stays the caller contract. Doctor is the read-only finish gate, composed
  * with two guards: `skipDoctorUnderAltHome` (skip when --home diverges — it would otherwise verify a
  * different install than setup wrote, HED-596) and, OUTSIDE that, `dryRunGate` (a --dry-run preview
@@ -157,7 +158,7 @@ function skipDoctorUnderAltHome(step: WizardStep): WizardStep {
 export function buildSteps(deps: SetupDeps): WizardStep[] {
   return [
     accountsStep(deps.runner),
-    // model-economy (HED-473) wires in here, after accounts, when its module lands.
+    modelEconomyStep,
     spreadStep,
     metersStep,
     rulesStep(deps.catalogRoot ?? resolveCatalogRoot()),
