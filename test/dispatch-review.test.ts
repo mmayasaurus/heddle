@@ -195,6 +195,25 @@ describe('adversarial review dispatch', () => {
     } finally { vi.useRealTimers(); restore(); }
   });
 
+  it('HED-609: hard-fails a linked-worktree write when the only same-cwd peer is a SWEPT orphan', async () => {
+    const restore = reviewRouting(tempDir); const { worktree: cwd } = linkedWorktree(tempDir); const ledger = tempLedger();
+    const staleAfterMs = structuralCaps(loadRouting()).staleAfterMs;
+    const peerId = ledger.start({ orchestrator: null, taskClass: 'peer', provider: 'cursor', model: 'm', skills: null, issue: null, pr: null, cwd, promptPreview: 'peer', sessionId: null, fellBackFrom: null });
+    // Sweep the orphan DURING the review (after the subject row started) so its stamped finished_at is
+    // >= the subject's started_at — the swept-orphan case round-2's finished branch would have MASKED
+    // (finished_at >= self.started_at → counted as a peer → warning). The fix excludes it via
+    // outcome='orphaned', so this must still HARD-fail. Closing it before dispatch would instead be
+    // excluded by the timing check on BOTH the old and new query, proving nothing.
+    const writer: WorkerAdapter = { name: 'writer', provider: 'codex', dispatch: async (_prompt, opts) => { writeFileSync(join(opts.cwd, 'tracked-probe.txt'), 'after'); ledger.closeIfInFlight(peerId, 'orphan sweep: owner gone', { outcome: 'orphaned' }); return { ok: true, output: 'done', exitCode: 0 }; } };
+    try {
+      const outcome = await dispatch({ taskClass: 'adversarial-review', authorProvider: 'claude', prompt: 'review', cwd, identity: unbound }, ledger, () => writer);
+      expect(staleAfterMs).toBeGreaterThan(0);
+      expect(outcome.ok).toBe(false);
+      expect(outcome.review?.mandateOk).toBe(false); expect(ledger.getReview(outcome.ledgerId)?.mandate_ok).toBe(0);
+      expect(outcome.quarantine).toMatchObject({ reason: 'mandate-violation', output: 'done', ledgerId: outcome.ledgerId });
+    } finally { restore(); }
+  });
+
   it('HED-601: quarantines the findings and HARD-fails an exclusive linked-worktree write mandate violation without reverting files', async () => {
     const restore = reviewRouting(tempDir); const { worktree: cwd } = linkedWorktree(tempDir); const ledger = tempLedger();
     let writerCalls = 0;

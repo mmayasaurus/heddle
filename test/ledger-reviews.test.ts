@@ -1,4 +1,5 @@
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Ledger } from '../src/ledger.js';
 import { useTempResources } from './helpers.js';
@@ -83,6 +84,52 @@ describe('ledger adversarial reviews', () => {
     db.recordClassification({ orchestrator: null, identitySource: null, kind: 'auto-effort', provider: 'codex', model: 'm', cwd, promptPreview: 'p', ok: true });
     vi.setSystemTime(new Date('2026-01-01T00:00:01.000Z'));
     expect(db.overlappingByCwd(cwd, subject, { windowEnd: '2026-01-01T00:00:01.000Z', staleAfterMs: STALE })).toBe(false);
+  });
+
+  it('excludes a recently-started swept orphan (outcome set)', () => {
+    const db = ledger();
+    vi.useFakeTimers();
+    const STALE = 3 * 60 * 60 * 1000;
+    const cwd = '/tmp/shared';
+    vi.setSystemTime(new Date('2026-01-01T10:00:00.000Z'));
+    const subject = db.start({ orchestrator: null, taskClass: 'worker', provider: 'cursor', model: 'm', skills: null, issue: null, pr: null, cwd, promptPreview: 'p', sessionId: null, fellBackFrom: null });
+    vi.setSystemTime(new Date('2026-01-01T09:57:00.000Z'));
+    const peer = db.start({ orchestrator: null, taskClass: 'worker', provider: 'cursor', model: 'm', skills: null, issue: null, pr: null, cwd, promptPreview: 'p', sessionId: null, fellBackFrom: null });
+    db.closeIfInFlight(peer, 'orphan sweep: owner gone', { outcome: 'orphaned', now: new Date('2026-01-01T10:00:00.500Z') });
+    vi.setSystemTime(new Date('2026-01-01T10:00:01.000Z'));
+    expect(db.overlappingByCwd(cwd, subject, { windowEnd: '2026-01-01T10:00:01.000Z', staleAfterMs: STALE })).toBe(false);
+  });
+
+  it('counts a legacy NULL-execution_mode worker', () => {
+    const path = join(tempDir(), 'ledger.db');
+    const db = trackLedger(new Ledger(path));
+    vi.useFakeTimers();
+    const STALE = 3 * 60 * 60 * 1000;
+    const cwd = '/tmp/shared';
+    vi.setSystemTime(new Date('2026-01-01T00:00:02.000Z'));
+    const subject = db.start({ orchestrator: null, taskClass: 'worker', provider: 'cursor', model: 'm', skills: null, issue: null, pr: null, cwd, promptPreview: 'p', sessionId: null, fellBackFrom: null });
+    vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
+    const peer = db.start({ orchestrator: null, taskClass: 'worker', provider: 'cursor', model: 'm', skills: null, issue: null, pr: null, cwd, promptPreview: 'p', sessionId: null, fellBackFrom: null });
+    vi.setSystemTime(new Date('2026-01-01T00:00:03.000Z')); db.finish(peer, { ok: true });
+    const raw = new DatabaseSync(path);
+    raw.prepare('UPDATE dispatches SET execution_mode = NULL WHERE id = ?').run(peer);
+    raw.close();
+    vi.setSystemTime(new Date('2026-01-01T00:00:04.000Z'));
+    expect(db.overlappingByCwd(cwd, subject, { windowEnd: '2026-01-01T00:00:04.000Z', staleAfterMs: STALE })).toBe(true);
+  });
+
+  it('counts a genuine ok=0 finished peer', () => {
+    const db = ledger();
+    vi.useFakeTimers();
+    const STALE = 3 * 60 * 60 * 1000;
+    const cwd = '/tmp/shared';
+    vi.setSystemTime(new Date('2026-01-01T00:00:02.000Z'));
+    const subject = db.start({ orchestrator: null, taskClass: 'worker', provider: 'cursor', model: 'm', skills: null, issue: null, pr: null, cwd, promptPreview: 'p', sessionId: null, fellBackFrom: null });
+    vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
+    const peer = db.start({ orchestrator: null, taskClass: 'worker', provider: 'cursor', model: 'm', skills: null, issue: null, pr: null, cwd, promptPreview: 'p', sessionId: null, fellBackFrom: null });
+    vi.setSystemTime(new Date('2026-01-01T00:00:03.000Z')); db.finish(peer, { ok: false });
+    vi.setSystemTime(new Date('2026-01-01T00:00:04.000Z'));
+    expect(db.overlappingByCwd(cwd, subject, { windowEnd: '2026-01-01T00:00:04.000Z', staleAfterMs: STALE })).toBe(true);
   });
 
   it('upserts reviewer identity without erasing the existing mandate or scored outcome', () => {
