@@ -391,7 +391,7 @@ export async function runTarget(
       // The findings are WITHHELD from the trusted `output` channel (emptied in the returned outcome below)
       // and moved to `quarantine`; the ledger row keeps them (output persisted to outputs/<id>.md, ok=0) as
       // the durable record, so adopting any finding is a deliberate act on it. Nothing is reverted.
-      const note = `MANDATE VIOLATION: the read-only worker changed the worktree (content digest of HEAD + tracked/untracked files + stash differs from before the run) — nothing was reverted; the worker output is QUARANTINED (dispatch ok=0), never auto-trusted. Inspect \`git status\`/\`git diff\`, then adopt any finding only as a deliberate act on the ledger record (heddle recent / outputs/${ledgerId}.md).`;
+      const note = `MANDATE VIOLATION: the read-only worker changed the worktree (content digest of HEAD + tracked/untracked files + stash differs from before the run) — nothing was reverted; the worker output is QUARANTINED (dispatch ok=0), never auto-trusted. The violation is durably recorded on the ledger row (ok=0 + this error + mandate_ok); the findings ride this outcome's quarantine.output and are best-effort-persisted to the ledger output store (outputs/${ledgerId}.md when the write succeeds). Inspect \`git status\`/\`git diff\`, then adopt any finding only as a deliberate act on that quarantine record.`;
       process.stderr.write(`heddle: ${note}\n`);
       result.ok = false;
       result.error = result.error ? `${result.error}; ${note}` : note;

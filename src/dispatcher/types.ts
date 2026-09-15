@@ -165,9 +165,11 @@ export interface DispatchOutcome extends WorkerResult {
   /**
    * HED-601: a read-only dispatch whose worker VIOLATED the mandate (changed the worktree).
    * The violation is a HARD failure (`ok` is false) and the worker output is QUARANTINED — WITHHELD from the
-   * trusted `output` field (which is emptied) and held HERE instead. The ledger row is the durable, logged
-   * quarantine record (ok=0, MANDATE-VIOLATION `error`, output persisted to `outputs/<id>.md`, and
-   * `reviews.mandate_ok=0` for review classes). Adopting anything from a quarantined run is a DELIBERATE act —
+   * trusted `output` field (which is emptied) and held HERE instead (`quarantine.output` always carries the
+   * findings in the returned outcome). The VIOLATION is durably recorded on the ledger row (ok=0,
+   * MANDATE-VIOLATION `error`, and `reviews.mandate_ok=0` for review classes); the findings TEXT is
+   * best-effort-persisted to the ledger output store (`outputs/<id>.md`, exactly as any worker output — a
+   * persist failure is logged, not fatal). Adopting anything from a quarantined run is a DELIBERATE act —
    * read `quarantine.output` or the ledger record; nothing downstream may treat it as a trustworthy finding. A
    * dedicated field, NOT `error` (same discipline as `escape`/`destroyed`): the withheld findings need a typed
    * home and callers that key on a non-empty `error` as failure must not misread it.
