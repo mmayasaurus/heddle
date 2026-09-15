@@ -1,8 +1,8 @@
-# Deterministic Review — the NON-AI reviewer tier (ported from Spinventory's
-# deterministic-review.yml, Maya-approved there 2026-07-13; heddle port is HED-11).
+# Deterministic Review — the NON-AI reviewer tier (ported from the first consumer
+# project's deterministic-review.yml, operator-approved there 2026-07-13; heddle port is HED-11).
 #
 # Zero-flake scanners that catch what a rule engine catches every single time,
-# complementing whatever AI reviewers Maya enables (HED-13):
+# complementing whatever AI reviewers the operator enables (HED-13):
 #   semgrep   — registry rulesets __HEDDLE_RULESETS_DESCRIPTION__. DIFF-AWARE on PRs
 #               (--baseline-commit = the merge ref's first parent, i.e. the
 #               base tip actually merged: only findings this PR introduces —
@@ -21,7 +21,7 @@
 # Workflow hygiene (actionlint + zizmor) lives in actions-hygiene.yml, path-
 # filtered to .github/ changes.
 #
-# Where findings show up — DIFFERENT PLUMBING from Spinventory, SAME DISCIPLINE:
+# Where findings show up — DIFFERENT PLUMBING from the first consumer project, SAME DISCIPLINE:
 # instead of a hand-rolled, sanitized PR-comment poster, results are uploaded
 # as SARIF to GitHub code scanning (free on public repos): they render as the
 # "Code scanning results / <tool>" check + inline annotations on the PR and in
@@ -420,7 +420,7 @@ jobs:
         # ignored. Consequence: a suppression must land on __HEDDLE_DEFAULT_BRANCH__ first (its own
         # config-only PR, reviewed by a human) before a PR can benefit from it.
         # A PR that touches those files is additionally flagged in the summary
-        # (Spinventory det-tier finding, #2077).
+        # (a first-consumer-project det-tier finding).
         # Invoked via `sh` on purpose: the script sets its own `set -eu`, and
         # calling the interpreter explicitly means a lost exec bit (archive/checkout
         # quirks) cannot turn the security scan into a silent no-op (codacy).
