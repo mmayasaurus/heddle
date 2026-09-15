@@ -5,7 +5,7 @@
  */
 import { materializeAgentsMd, readPack, composePacks } from '../skillpacks.js';
 import { materializeWorkerMcp, validateWorkerMcp, codexMcpFlags, claudeMcpConfigFile, webCapable } from '../mcp.js';
-import { isInProcessHttpProvider, readSecretsEnvValue } from '../adapters/openai-compat.js';
+import { isInProcessHttpProvider, isOpenAICompatProvider, openAICompatInputTokenUpperBound, readSecretsEnvValue } from '../adapters/openai-compat.js';
 import { assessResult, type ResultAssessment } from '../classify.js';
 import { snapshotWorktree, sameSnapshot, diffInstruction, embeddedDiff, READ_ONLY_MANDATE } from '../review.js';
 import { parentCheckoutOf, checkoutFingerprint, escapedPaths, destroyedWork } from '../worktree.js';
@@ -15,13 +15,14 @@ import { decideCapabilities, capabilityPolicy } from '../capabilities.js';
 import { capAwarePolicy } from '../capaware.js';
 import { WORKER_ENV } from '../identity.js';
 import { providerExecution, type Route, type RouteTarget } from '../routing.js';
-import type { WorkerResult } from '../types.js';
+import type { WorkerAdapter, WorkerResult } from '../types.js';
 import { packsFor, requestedPacks } from './packs.js';
 import { baseRecord, refusalOutcome, refuseBilling, webRefusalReason } from './refusals.js';
 import { billingVerdict } from './billing.js';
 import { tierReadOnlyVerdict } from './tier-gate.js';
 import type { DispatchContext, DispatchRequest, DispatchOutcome, DispatchRefusal } from './types.js';
 import { validateEnvRepoint, type AccountEnvRepoint } from '../accounts.js';
+import { createBoundedReceipt, finalizeBoundedResult, normalizedBoundedUsage } from '../bounded-dispatch.js';
 
 export type EnvRepointResolution =
   | { kind: 'none' }
@@ -95,12 +96,16 @@ export async function runTarget(
   target: RouteTarget, req: DispatchRequest, ctx: DispatchContext, route: Route,
   fellBackFrom: string | null,
 ): Promise<DispatchOutcome> {
-  // Caller's explicit list REPLACES the table default; the mandatory governance pack(s) are unioned
+  // Caller's explicit list REPLACES the table default; bounded routes intentionally materialize no
+  // packs so their one HTTP request remains tool-free and byte-predictable.
+  // The mandatory governance pack(s) are unioned
   // into whichever applies (see skillpacks.ts) — the ledger records the result, so it is auditable.
   // Review classes: the class packs carry the find-only MANDATE — an explicit skills list may add
   // packs but can never drop them (same posture as the worker-role union). requestedPacks is the
   // single definition every dry-run/refusal path shares.
-  const skills = packsFor(target.provider, requestedPacks(route.reviewerPool, target.skills, req.skills), req.cwd);
+  const skills = route.bounds
+    ? []
+    : packsFor(target.provider, requestedPacks(route.reviewerPool, target.skills, req.skills), req.cwd);
   // mcp is a REQUIREMENT, not best-effort: validateWorkerMcp (below) THROWS if the resolved provider
   // has no attachment path. HED-249 reverses HED-205's graceful-degrade — an mcp-carrying class may
   // only resolve to mcp-attachable providers (a routing.v0.yaml CI invariant enforces this for
@@ -181,10 +186,12 @@ export async function runTarget(
   // written and nothing is left in flight.
   for (const p of skills) readPack(p);
   validateWorkerMcp(target.provider, mcp);
-  const adapter = ctx.adapterFor(target.provider);
+  // Bounded HTTP dispatches are structurally fenced: a tool-less single-response call cannot write,
+  // which is positive enforcement stronger than a mandate. Other routes retain HED-404's account gate.
   // HED-404: only a bound native account whose harness positively enforces read-only may be
   // recorded as fenced. Every resolution error or mismatch degrades to the explicit mandate.
   const fence = (() => {
+    if (route.readOnly && route.bounds && isInProcessHttpProvider(target.provider)) return 'fenced';
     if (!route.readOnly) return undefined;
     try {
       const account = ctx.account === null ? undefined
@@ -196,23 +203,96 @@ export async function runTarget(
   })();
   const mandateOnly = fence === 'mandate-only';
 
-  // max-children: count + insert in one transaction (see Ledger.startUnderCap).
-  const started = ctx.ledger.startUnderCap(
-    baseRecord(ctx, req, route.taskClass, target, skills, fellBackFrom, caps.granted, fence), ctx.caps,
-  );
+  const isHttp = isInProcessHttpProvider(target.provider);
+  const boundedReceipt = route.bounds
+    ? createBoundedReceipt(route, target, req, ctx.table, 'incomplete')
+    : undefined;
+  const boundedSystemPromptAppend = route.bounds && isHttp && skills.length ? composePacks(skills) : undefined;
+  const boundedPrompt = route.bounds
+    ? (req.diffBase ? embeddedDiff(req.cwd, req.diffBase, undefined, false) + req.prompt : req.prompt)
+    : undefined;
+  let started;
+  if (route.bounds && boundedReceipt && req.boundedAdmission && boundedPrompt !== undefined) {
+    if (!isOpenAICompatProvider(target.provider)) {
+      throw new Error(`bounded dispatch invariant: ${target.provider} passed preflight without OpenAI-compatible enforcement`);
+    }
+    const inputTokens = openAICompatInputTokenUpperBound(target.provider, boundedPrompt, {
+      model: target.model,
+      cwd: req.cwd,
+      systemPromptAppend: boundedSystemPromptAppend,
+      maxOutputTokens: route.bounds.maxGeneratedTokens,
+      maxModelRequests: route.bounds.maxModelRequests,
+      allowReasoningRetry: route.bounds.retry,
+      timeoutMs: Math.min(req.timeoutMs ?? route.bounds.timeoutMs, route.bounds.timeoutMs),
+    });
+    boundedReceipt.reservation = {
+      inputTokens,
+      generatedTokens: route.bounds.maxGeneratedTokens,
+      totalTokens: inputTokens + route.bounds.maxGeneratedTokens,
+    };
+    started = ctx.ledger.startBoundedUnderCap(
+      baseRecord(ctx, req, route.taskClass, target, skills, fellBackFrom, caps.granted, fence),
+      ctx.caps,
+      { ...req.boundedAdmission, inputTokens },
+      route.bounds,
+    );
+    if (!started.refused) boundedReceipt.times.admittedAt = started.admittedAt;
+  } else {
+    // Legacy max-children behavior is untouched when the route declares no resource envelope.
+    started = ctx.ledger.startUnderCap(
+      baseRecord(ctx, req, route.taskClass, target, skills, fellBackFrom, caps.granted, fence), ctx.caps,
+    );
+  }
   if (started.refused) {
+    const refusalCode = ('code' in started ? started.code : 'max-children') as DispatchRefusal['code'];
+    if (boundedReceipt) {
+      boundedReceipt.status = 'refused';
+      boundedReceipt.refusedDimensions = [
+        refusalCode === 'bounded-input-oversize' ? 'inputTokens' :
+          refusalCode === 'max-children' ? 'concurrency' :
+            refusalCode === 'bounded-duplicate-request' ? 'duplicateRequest' :
+              refusalCode === 'bounded-headroom-stale' ? 'accountHeadroom' : 'aggregateBudget',
+      ];
+      boundedReceipt.times.completedAt = new Date().toISOString();
+    }
     return refusalOutcome(ctx, req, route.taskClass, target, skills, {
-      code: 'max-children', reason: started.reason,
-      instruction: 'Wait for a worker to finish (check_workers), or close orphaned rows.',
-    }, { extra: { usedFallback: fellBackFrom !== null }, ledgerId: started.id });
+      code: refusalCode, reason: started.reason,
+      instruction: refusalCode === 'max-children'
+        ? 'Wait for a worker to finish (check_workers), or close orphaned rows.'
+        : 'Refresh quota headroom or start a new external session only when its declared cap permits the complete reservation.',
+    }, { extra: { usedFallback: fellBackFrom !== null, ...(boundedReceipt ? { boundedReceipt } : {}) }, ledgerId: started.id });
   }
   const ledgerId = started.id;
-  // HED-3: review rows carry the author→reviewer pair from the moment the row exists.
-  if (ctx.review) {
-    ctx.ledger.recordReview({
-      dispatchId: ledgerId, authorProvider: ctx.review.authorProvider, authorModel: ctx.review.authorModel,
-      authorDispatchId: ctx.review.authorDispatchId, reviewerProvider: target.provider, reviewerModel: target.model,
-    });
+  // Adapter construction stays BELOW admission on purpose: a bounded route must refuse
+  // (oversize input, exhausted headroom) before any provider factory runs (HED-570 invariant,
+  // proven by test/bounded-dispatch.test.ts). Nothing above this line uses the adapter.
+  let adapter: WorkerAdapter;
+  try {
+    adapter = ctx.adapterFor(target.provider);
+    // HED-3: review rows carry the author→reviewer pair from the moment the row exists.
+    if (ctx.review) {
+      ctx.ledger.recordReview({
+        dispatchId: ledgerId, authorProvider: ctx.review.authorProvider, authorModel: ctx.review.authorModel,
+        authorDispatchId: ctx.review.authorDispatchId, reviewerProvider: target.provider, reviewerModel: target.model,
+      });
+    }
+  } catch (err) {
+    const error = `post-admission failure: ${err instanceof Error ? err.message : String(err)}`;
+    if (route.bounds) {
+      try { ctx.ledger.settleBoundedReservation(ledgerId, { inputTokens: null, generatedTokens: null }); } catch { /* finish must still run */ }
+    }
+    try {
+      ctx.ledger.finish(ledgerId, { ok: false, error, output: '' });
+    } catch { /* the attempted finish must not rethrow past this admitted path */ }
+    return {
+      ok: false, output: '', exitCode: null, error,
+      taskClass: route.taskClass, provider: target.provider, model: target.model, skills,
+      capabilities: caps.granted, ledgerId, usedFallback: fellBackFrom !== null,
+      orchestrator: ctx.attribution.orchestrator, identitySource: ctx.attribution.identitySource,
+      execution: providerExecution(ctx.table, target.provider), routeReason: ctx.routeReason,
+      account: ctx.account ?? null,
+      ...(boundedReceipt ? { boundedReceipt } : {}),
+    };
   }
   // Codex needs its attached MCP servers' tools pre-approved per-invocation, or headless calls
   // cancel. This makes heddle self-contained — it works even if the user's global codex config
@@ -241,7 +321,6 @@ export async function runTarget(
   // --mcp-config file — nothing is written into the worktree — and run under the chosen account's
   // CLAUDE_CONFIG_DIR (unset for the default login).
   const isClaude = target.provider === 'claude';
-  const isHttp = isInProcessHttpProvider(target.provider);
   const acct = isClaude ? ctx.claudeAccount ?? null : null;
   const rotation = (target.provider === 'codex' || target.provider === 'cursor') ? ctx.rotationAccount ?? null : null;
   let restoreSkills: () => void = () => {};
@@ -275,7 +354,7 @@ export async function runTarget(
     } else if (isHttp) {
       // HTTP/in-process providers have no filesystem: embed packs as their system prompt. MCP is
       // empty here because validateWorkerMcp rejects every non-empty HTTP-provider attachment.
-      systemPromptAppend = skills.length ? composePacks(skills) : undefined;
+      systemPromptAppend = boundedSystemPromptAppend ?? (skills.length ? composePacks(skills) : undefined);
     } else {
       // Per-dispatch blocks + liveness GC (HED-56): concurrent dispatches into one cwd each own
       // their block/ref; blocks left by crashed dispatches are collected on the next dispatch.
@@ -298,9 +377,13 @@ export async function runTarget(
     // their tool set has no Bash. Tool-less HTTP prompts must not mention Read/Grep/Glob.
     const embedDiff = (isClaude && route.readOnly) || isHttp;
     const mandate = mandateOnly ? `${READ_ONLY_MANDATE}\n\n` : '';
-    const mandatedPrompt = req.diffBase
+    // Bounded routes use the admission-time prompt VERBATIM: it was diff-embedded and
+    // byte-counted for the input reservation upstream, and bounded targets are tool-less
+    // single-response HTTP where a read-only mandate has nothing to govern — any
+    // post-admission addition would silently break the reserved input bound.
+    const mandatedPrompt = boundedPrompt ?? (req.diffBase
       ? (embedDiff ? embeddedDiff(req.cwd, req.diffBase, undefined, !isHttp) : diffInstruction(req.diffBase)) + mandate + req.prompt
-      : mandate + req.prompt;
+      : mandate + req.prompt);
     // Best-effort PREVENTION to pair with the detection above: state the boundary explicitly, since
     // a worker that walks up to find "the project root" lands in the parent checkout and has no
     // other way to know it is inside a linked worktree.
@@ -315,7 +398,9 @@ export async function runTarget(
       cwd: req.cwd,
       effort: req.effort ?? target.effort,
       extraFlags,
-      timeoutMs: req.timeoutMs,
+      timeoutMs: route.bounds
+        ? Math.min(req.timeoutMs ?? route.bounds.timeoutMs, route.bounds.timeoutMs)
+        : req.timeoutMs,
       resume: req.resume,
       env: { ...req.env, ...acct?.env, ...rotation?.env, ...stamps },
       envRepoint: envRepoint && { ...envRepoint, authToken: envRepoint.authToken! },
@@ -326,6 +411,10 @@ export async function runTarget(
       readOnly: route.readOnly,
       skipPermissions: req.skipPermissions,
       mcpServers: isClaude ? mcp : undefined,
+      maxOutputTokens: route.bounds?.maxGeneratedTokens,
+      maxOutputBytes: route.bounds?.maxOutputBytes,
+      maxModelRequests: route.bounds?.maxModelRequests,
+      allowReasoningRetry: route.bounds ? route.bounds.retry : undefined,
     });
   } catch (err) {
     result = { ok: false, output: '', exitCode: null, error: err instanceof Error ? err.message : String(err) };
@@ -420,7 +509,25 @@ export async function runTarget(
     }
   }
 
-  ctx.ledger.finish(ledgerId, {
+  try {
+    if (route.bounds && boundedReceipt) {
+      result = finalizeBoundedResult(result, boundedReceipt, route.bounds);
+      const normalized = normalizedBoundedUsage(result.usage);
+      ctx.ledger.settleBoundedReservation(ledgerId, {
+        inputTokens: normalized.inputTokens,
+        generatedTokens: normalized.generatedTokens,
+      });
+    }
+  } catch (err) {
+    // Only the settlement machinery failed — keep the provider's retained output/usage on the outcome
+    // and the finish row rather than discarding a completed analysis over a ledger UPDATE error.
+    result = { ...result, ok: false, error: `post-admission failure: ${err instanceof Error ? err.message : String(err)}` };
+    if (route.bounds) {
+      try { ctx.ledger.settleBoundedReservation(ledgerId, { inputTokens: null, generatedTokens: null }); } catch { /* finish must still run */ }
+    }
+  }
+
+  try { ctx.ledger.finish(ledgerId, {
     ok: result.ok,
     // The escape note is appended to the LEDGER's error column so the row is durably self-describing
     // (the outcome keeps it in its own `escape` field, so callers never mistake it for a failure). The
@@ -433,7 +540,10 @@ export async function runTarget(
     outputTokens: result.usage?.outputTokens,
     reasoningTokens: result.usage?.reasoningOutputTokens,
     output: result.output,
-  });
+  }); } catch (err) {
+    // The row could not be finished; surface the failure but keep the worker's output with it.
+    result = { ...result, ok: false, error: `post-admission failure: ${err instanceof Error ? err.message : String(err)}` };
+  }
 
   return {
     ...result,
@@ -456,6 +566,7 @@ export async function runTarget(
     ...(escapeReport ? { escape: escapeReport } : {}),
     ...(destroyedReport ? { destroyed: destroyedReport } : {}),
     ...(billingDegraded ? { billingDegraded } : {}),
+    ...(boundedReceipt ? { boundedReceipt } : {}),
     ...(ctx.review ? { review: { authorProvider: ctx.review.authorProvider, reviewerProvider: target.provider, reviewerModel: target.model, mandateOk, reviewerPick: ctx.review.reviewerPick } } : {}),
     ...(assessment ? { assessment } : {}),
     ...(quarantine ? { quarantine } : {}),

@@ -17,9 +17,12 @@ describe('routing.v0.yaml — shipped dispatch guidance', () => {
 
   it('declares a skills array for every class and worker-role for every delegated class', () => {
     for (const taskClass of classes) {
-      const skills = (table.taskClasses[taskClass] as { skills?: unknown }).skills;
-      expect(Array.isArray(skills), taskClass).toBe(true);
-      if (taskClass !== 'orchestration') expect(skills).toContain('worker-role');
+      const node = table.taskClasses[taskClass] as { skills?: unknown; bounds?: unknown };
+      expect(Array.isArray(node.skills), taskClass).toBe(true);
+      // orchestration is in-session, and a bounded envelope class (HED-570) is a tool-less
+      // single-response call whose prompt bytes are reserved at admission — neither takes the
+      // worker-role pack. Every other delegated class must carry it.
+      if (taskClass !== 'orchestration' && node.bounds === undefined) expect(node.skills).toContain('worker-role');
     }
   });
 

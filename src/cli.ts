@@ -47,6 +47,8 @@ import { runSetup, buildSteps, selectSteps, type SetupContext } from './wizard/s
 import { getProvider } from './provider-matrix.js';
 import { releaseStandalone } from './release/standalone.js';
 import { assembleTop, renderTopText } from './top.js';
+import type { BoundedAdmission } from './dispatcher/types.js';
+import { readBoundedAdmissionFile } from './bounded-admission.js';
 
 /**
  * heddle CLI — the surface orchestrators (and later the dashboard) drive.
@@ -69,6 +71,7 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
       --auto-effort        classify the task's difficulty (cheap model) and pin effort automatically
       --resume <id>        continue a prior worker session
       --timeout <ms>       wall-clock budget (default 600000)
+      --bounded-admission <path> JSON object: requestId, sessionId, account, remainingTokens, observedAt
       --codex-home <path>  account selection for codex workers
       --opt-in             required for task classes that gate on it (and for exec-privileged)
       --override-reason <r> REQUIRED with --provider/--model when no --class: why this bypasses the
@@ -211,6 +214,14 @@ try {
         process.exit(2);
       }
       const env: Record<string, string> = {};
+      let boundedAdmission: BoundedAdmission | undefined;
+      const boundedAdmissionPath = arg('--bounded-admission');
+      if (boundedAdmissionPath) {
+        try { boundedAdmission = readBoundedAdmissionFile(boundedAdmissionPath); } catch (err) {
+          console.error(`dispatch: ${err instanceof Error ? err.message : String(err)}`);
+          process.exit(2);
+        }
+      }
       const codexHome = arg('--codex-home');
       if (codexHome) env.CODEX_HOME = codexHome;
 
@@ -239,6 +250,7 @@ try {
         authorProvider: arg('--author-provider'),
         authorDispatchId: arg('--author-dispatch') ? Number(arg('--author-dispatch')) : undefined,
         diffBase: arg('--diff-base'),
+        boundedAdmission,
       });
 
       const { raw, ...summary } = res;

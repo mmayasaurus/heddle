@@ -67,7 +67,7 @@ describe('ClaudeAdapter invocation and result contracts', () => {
 
   it('parses Claude success JSON into the normalized worker result and preserves the raw payload', () => {
     const raw = JSON.parse(result());
-    expect(parseClaudeResult(JSON.stringify(raw), 0)).toEqual({ ok: true, output: 'OK', sessionId: 's1', durationMs: 1103, usage: { inputTokens: 10, cachedInputTokens: 0, outputTokens: 38, reasoningOutputTokens: 31 }, exitCode: 0, error: undefined, raw });
+    expect(parseClaudeResult(JSON.stringify(raw), 0)).toEqual({ ok: true, output: 'OK', sessionId: 's1', durationMs: 1103, usage: { inputTokens: 10, cachedInputTokens: 0, cacheCreationInputTokens: 5, outputTokens: 38, reasoningOutputTokens: 31 }, exitCode: 0, error: undefined, raw });
   });
 
   it('rejects empty stdout, malformed output, error payloads, bad subtypes, bad exits, and empty results', () => {

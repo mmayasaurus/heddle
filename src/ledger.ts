@@ -3,6 +3,7 @@ import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node
 import { basename, dirname, isAbsolute, join } from 'node:path';
 import { homedir } from 'node:os';
 import { makePsProbe, type OwnerProbe } from './ledger-ps.js';
+import type { DispatchBounds } from './routing.js';
 
 // Re-exported so consumers/tests keep one import surface for ledger concerns.
 export { parsePsTable, ownerVerdict, type OwnerProbe, type PsEntry } from './ledger-ps.js';
@@ -152,11 +153,29 @@ CREATE TABLE IF NOT EXISTS reviews (
   created_at TEXT NOT NULL,
   outcome_at TEXT
 );
+CREATE TABLE IF NOT EXISTS bounded_reservations (
+  dispatch_id INTEGER PRIMARY KEY REFERENCES dispatches(id),
+  request_id TEXT NOT NULL UNIQUE,
+  session_id TEXT NOT NULL,
+  account TEXT NOT NULL,
+  headroom_observed_at TEXT NOT NULL,
+  headroom_remaining_tokens INTEGER NOT NULL,
+  reserved_input_tokens INTEGER NOT NULL,
+  reserved_generated_tokens INTEGER NOT NULL,
+  reserved_total_tokens INTEGER NOT NULL,
+  actual_input_tokens INTEGER,
+  actual_generated_tokens INTEGER,
+  actual_total_tokens INTEGER,
+  admitted_at TEXT NOT NULL,
+  settled_at TEXT
+);
 CREATE INDEX IF NOT EXISTS idx_reviews_pair ON reviews(author_provider, reviewer_provider);
 CREATE INDEX IF NOT EXISTS idx_dispatches_issue ON dispatches(issue);
 CREATE INDEX IF NOT EXISTS idx_dispatches_orch ON dispatches(orchestrator);
 CREATE INDEX IF NOT EXISTS idx_dispatches_started ON dispatches(started_at);
 CREATE INDEX IF NOT EXISTS idx_dispatches_finished ON dispatches(finished_at);
+CREATE INDEX IF NOT EXISTS idx_bounded_reservations_account_time ON bounded_reservations(account, admitted_at);
+CREATE INDEX IF NOT EXISTS idx_bounded_reservations_session ON bounded_reservations(session_id);
 `;
 
 /**
@@ -405,6 +424,139 @@ export class Ledger {
       try { this.db.exec('ROLLBACK'); } catch { /* not in a transaction */ }
       throw err;
     }
+  }
+
+  /**
+   * Atomically reserve one complete bounded provider path before it can be spawned. All external
+   * session/account caps share the same IMMEDIATE transaction as the dispatch row and concurrency
+   * slot, so concurrent heddle processes cannot both admit against the same remaining headroom.
+   */
+  startBoundedUnderCap(
+    r: DispatchStartRecord,
+    structuralCap: { max: number; staleAfterMs: number },
+    reservation: {
+      requestId: string; sessionId: string; account: string; remainingTokens: number;
+      observedAt: string; inputTokens: number;
+    },
+    bounds: DispatchBounds,
+  ): { id: number; refused: false; admittedAt: string; reservedTotalTokens: number }
+    | { id: number; refused: true; code: string; reason: string } {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const nowMs = Date.now();
+      const now = new Date(nowMs).toISOString();
+      const refuse = (code: string, reason: string) => {
+        const id = this.insertRefusal(r, code, reason, now);
+        this.db.exec('COMMIT');
+        return { id, refused: true as const, code, reason };
+      };
+      const observedMs = Date.parse(reservation.observedAt);
+      const headroomAgeMs = nowMs - observedMs;
+      if (!Number.isFinite(observedMs)) {
+        return refuse('bounded-headroom-unknown', 'account headroom timestamp is invalid');
+      }
+      const observedAtIso = new Date(observedMs).toISOString();
+      if (headroomAgeMs < 0 || headroomAgeMs > bounds.maxHeadroomAgeMs) {
+        return refuse('bounded-headroom-stale',
+          `account headroom became stale before reservation (age ${headroomAgeMs}ms; maximum ${bounds.maxHeadroomAgeMs}ms)`);
+      }
+      if (reservation.inputTokens > bounds.maxInputTokens) {
+        return refuse('bounded-input-oversize',
+          `assembled input conservative upper bound ${reservation.inputTokens} exceeds ${bounds.maxInputTokens} tokens`);
+      }
+      const reservedTotalTokens = reservation.inputTokens + bounds.maxGeneratedTokens;
+      if (reservedTotalTokens > bounds.maxTotalTokens) {
+        return refuse('bounded-input-oversize',
+          `complete-path reservation ${reservedTotalTokens} exceeds total cap ${bounds.maxTotalTokens}`);
+      }
+      const duplicate = this.db.prepare(
+        'SELECT dispatch_id FROM bounded_reservations WHERE request_id = ?',
+      ).get(reservation.requestId) as { dispatch_id: number } | undefined;
+      if (duplicate) {
+        return refuse('bounded-duplicate-request',
+          `bounded request id ${JSON.stringify(reservation.requestId)} was already reserved by dispatch #${duplicate.dispatch_id}`);
+      }
+      const inFlight = this.inFlightCount(r.orchestrator, structuralCap.staleAfterMs, nowMs);
+      if (inFlight >= structuralCap.max) {
+        return refuse('max-children',
+          `orchestrator ${r.orchestrator} already has ${inFlight} worker(s) in flight (cap ${structuralCap.max})`);
+      }
+      // A bounded dispatch cannot outlive bounds.timeoutMs. Orphaned reservations stop occupying
+      // concurrency after that window plus grace, but their tokens remain outstanding conservatively
+      // until manual settlement; recovery policy is a follow-up ticket.
+      const concurrencyCutoff = new Date(nowMs - (Math.max(structuralCap.staleAfterMs, bounds.timeoutMs) + 60_000)).toISOString();
+      const boundedInFlight = this.db.prepare(`
+        SELECT COUNT(*) AS n FROM bounded_reservations br JOIN dispatches d ON d.id = br.dispatch_id
+        WHERE br.account = ? AND d.finished_at IS NULL AND br.admitted_at >= ?
+      `).get(reservation.account, concurrencyCutoff) as { n: number };
+      if (Number(boundedInFlight.n) >= bounds.maxConcurrency) {
+        return refuse('bounded-aggregate-exhausted',
+          `account ${reservation.account} already has ${boundedInFlight.n} bounded dispatch(es) in flight (cap ${bounds.maxConcurrency})`);
+      }
+      const hourCutoff = new Date(nowMs - 60 * 60 * 1000).toISOString();
+      const hourly = this.db.prepare(
+        'SELECT COUNT(*) AS n FROM bounded_reservations WHERE account = ? AND admitted_at >= ?',
+      ).get(reservation.account, hourCutoff) as { n: number };
+      if (Number(hourly.n) >= bounds.maxDispatchesPerHour) {
+        return refuse('bounded-aggregate-exhausted',
+          `account ${reservation.account} has exhausted ${bounds.maxDispatchesPerHour} bounded dispatches/hour`);
+      }
+      const session = this.db.prepare(`
+        SELECT COUNT(*) AS n,
+          COALESCE(SUM(COALESCE(actual_total_tokens, reserved_total_tokens)), 0) AS tokens
+        FROM bounded_reservations WHERE session_id = ?
+      `).get(reservation.sessionId) as { n: number; tokens: number };
+      if (Number(session.n) >= bounds.maxDispatchesPerSession) {
+        return refuse('bounded-aggregate-exhausted',
+          `session ${reservation.sessionId} has exhausted ${bounds.maxDispatchesPerSession} dispatches`);
+      }
+      if (Number(session.tokens) + reservedTotalTokens > bounds.maxSessionTokens) {
+        return refuse('bounded-aggregate-exhausted',
+          `session ${reservation.sessionId} cannot reserve ${reservedTotalTokens} tokens: ` +
+          `${session.tokens} already committed of ${bounds.maxSessionTokens}`);
+      }
+      // An in-flight reservation admitted before the snapshot is deliberately double-counted: the
+      // fail-safe over-reservation is preferable to trusting headroom that might not include it.
+      const outstanding = this.db.prepare(`
+        SELECT COALESCE(SUM(COALESCE(br.actual_total_tokens, br.reserved_total_tokens)), 0) AS tokens
+        FROM bounded_reservations br JOIN dispatches d ON d.id = br.dispatch_id
+        WHERE br.account = ? AND (d.finished_at IS NULL OR br.admitted_at >= ?)
+      `).get(reservation.account, observedAtIso) as { tokens: number };
+      if (Number(outstanding.tokens) + reservedTotalTokens > reservation.remainingTokens) {
+        return refuse('bounded-aggregate-exhausted',
+          `account ${reservation.account} cannot reserve ${reservedTotalTokens} tokens: snapshot has ` +
+          `${reservation.remainingTokens} remaining and ${outstanding.tokens} are already outstanding`);
+      }
+
+      const id = this.insertStart(r, now);
+      this.db.prepare(`
+        INSERT INTO bounded_reservations
+          (dispatch_id, request_id, session_id, account, headroom_observed_at,
+           headroom_remaining_tokens, reserved_input_tokens, reserved_generated_tokens,
+           reserved_total_tokens, admitted_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id, reservation.requestId, reservation.sessionId, reservation.account, observedAtIso,
+        reservation.remainingTokens, reservation.inputTokens, bounds.maxGeneratedTokens,
+        reservedTotalTokens, now,
+      );
+      this.db.exec('COMMIT');
+      return { id, refused: false, admittedAt: now, reservedTotalTokens };
+    } catch (err) {
+      try { this.db.exec('ROLLBACK'); } catch { /* not in a transaction */ }
+      throw err;
+    }
+  }
+
+  /** Replace a worst-case reservation with observed normalized usage; unknown usage stays reserved. */
+  settleBoundedReservation(id: number, usage: { inputTokens: number | null; generatedTokens: number | null }): void {
+    const total = usage.inputTokens === null || usage.generatedTokens === null
+      ? null
+      : usage.inputTokens + usage.generatedTokens;
+    this.db.prepare(`
+      UPDATE bounded_reservations SET actual_input_tokens = ?, actual_generated_tokens = ?,
+        actual_total_tokens = ?, settled_at = ? WHERE dispatch_id = ?
+    `).run(usage.inputTokens, usage.generatedTokens, total, new Date().toISOString(), id);
   }
 
   /**
