@@ -1,6 +1,7 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { secureReadFile } from '../secure-fs.js';
+import { escapeControlChars } from '../control-escape.js';
 import type { DispatchOptions, TokenUsage, WorkerAdapter, WorkerResult } from '../types.js';
 
 export const DEFAULT_SECRETS_PATH = join(homedir(), '.heddle', 'secrets.env');
@@ -14,7 +15,12 @@ export class InsecureCredentialFileError extends Error {
   readonly file: string;
 
   constructor(file: string, cause: unknown) {
-    super(`refusing to read credential file ${file}: ${cause instanceof Error ? cause.message : String(cause)}`, { cause });
+    // The cause (secure-fs) message already names the file and the specific reason ("refusing to read
+    // secret file <path>: <reason>"), so this wrapper does NOT re-prefix the path — duplicating it only
+    // bloats the message and can push the reason past a downstream detail-length cap (probe.ts's sanitize
+    // slices doctor/freshness details to 240 chars, and two absolute temp paths overrun it). The path
+    // stays available programmatically via `this.file`.
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
     this.name = 'InsecureCredentialFileError';
     this.file = file;
   }
@@ -173,9 +179,18 @@ export class OpenAICompatAdapter implements WorkerAdapter {
       const securityRefusal = err instanceof InsecureCredentialFileError
         ? { code: 'insecure-credential-file' as const, file: err.file }
         : undefined;
+      // InsecureCredentialFileError.message is the secure-fs reason itself ("refusing to read secret file
+      // <path>: <reason>"), which already names the file — so for that typed case the provider tag alone is
+      // enough and the "refusing to use ~/.heddle/secrets.env" preamble would just repeat it (codacy #239 LOW).
+      // Other errors keep the explicit preamble. Both branches run through escapeControlChars so a control
+      // char in the (HOME-derived) path or reason cannot inject into the returned outcome, the ledger, or a
+      // terminal (qodo #239 log-injection HIGH); escaping at this source keeps every downstream sink clean.
+      const detail = err instanceof InsecureCredentialFileError
+        ? `${this.provider}: ${err.message}`
+        : `${this.provider}: refusing to use ~/.heddle/secrets.env — ${err instanceof Error ? err.message : String(err)}`;
       return completed({
         ok: false, output: '', exitCode: null,
-        error: `${this.provider}: refusing to use ~/.heddle/secrets.env — ${err instanceof Error ? err.message : String(err)}`,
+        error: escapeControlChars(detail),
         ...(securityRefusal ? { securityRefusal } : {}),
       });
     }

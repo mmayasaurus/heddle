@@ -17,6 +17,7 @@ import { planDispatch, resolveRotationAccount, hasNoDispatchableClaudeAccount, n
 import { runTarget } from './dispatcher/run.js';
 import { boundedPreflight } from './bounded-dispatch.js';
 import { checkoutFingerprint, fallbackBarrier } from './worktree.js';
+import { escapeControlChars } from './control-escape.js';
 import type { AdapterFactory, DispatchContext, DispatchRequest, DispatchOutcome } from './dispatcher/types.js';
 
 // Public surface — exactly what src/dispatch.ts exported before the HED-282 split (nothing widened).
@@ -305,9 +306,13 @@ export async function dispatch(
   // ledger error, while retaining the primary's already-finished failed outcome.
   const suppressFallbackForInsecureCredential = (outcome: DispatchOutcome): DispatchOutcome | null => {
     if (!outcome.securityRefusal) return null;
-    const note = `WARNING: insecure credential file ${outcome.securityRefusal.file}; fallback suppressed for safety.`;
+    // The credential file path is HOME-derived, so neutralize terminal/log-injection control chars before
+    // the warning reaches stderr, the returned outcome.error, or the durable ledger (qodo #239 HIGH).
+    const note = escapeControlChars(`WARNING: insecure credential file ${outcome.securityRefusal.file}; fallback suppressed for safety.`);
     process.stderr.write(`heddle: ${note}\n`);
-    outcome.error = outcome.error ? `${outcome.error}; ${note}` : note;
+    // Escape the COMBINED error at this emission boundary too: the inherited outcome.error carries the
+    // adapter's refusal (already escaped at its source), and escapeControlChars is idempotent on that.
+    outcome.error = escapeControlChars(outcome.error ? `${outcome.error}; ${note}` : note);
     try {
       ledger.annotateError(outcome.ledgerId, note);
     } catch {
