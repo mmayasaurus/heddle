@@ -1,8 +1,10 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { atomicWriteFile } from './persist.js';
+import { gitRepositoryFor } from '../worktree.js';
 import type { WizardContext, WizardIO, WizardStep, WizardStepResult } from './step.js';
 
 export interface RenderOptions {
@@ -144,7 +146,8 @@ function gateBuildSteps(options: RenderOptions): string {
 
 // A git branch ref may legally contain characters that are hostile in the YAML and shell contexts the
 // templates interpolate the branch into: `git check-ref-format` permits `"`, `$`, backtick, `,` and more —
-// only a bare space (and a few structural sequences) are rejected. Constrain any branch that reaches a
+// it rejects space, `~`, `^`, `:`, `?`, `*`, `[`, backslash and control chars (plus structural sequences),
+// yet the permitted set is still hostile here. Constrain any branch that reaches a
 // template to a conservative charset. detectDefaultBranch treats a name that fails this as undetectable
 // (it falls through to the conventional-name lookup); renderWorkflow throws, so no caller — including the
 // exported render helpers — can smuggle an unvetted value into a workflow (qodo/codeant, HED-616).
@@ -257,26 +260,87 @@ function scaffoldWorkflows(
   return { written, existing };
 }
 
+// Expand a leading `~` / `~/` in an operator-entered path to the home directory before it reaches
+// gitRepositoryFor — git runs relative to a real cwd and would treat a literal `~` as a directory name
+// (path.resolve does not expand it either). HED-624 offer-to-add-repo.
+function expandHome(input: string): string {
+  if (input === '~') return homedir();
+  if (input.startsWith('~/')) return join(homedir(), input.slice(2));
+  return input;
+}
+
+/**
+ * HED-624 offer-to-add-repo: when the wizard reaches PR automation with no project directory (setup ran
+ * outside a repo, or an empty --target), offer to enter a git repository path — the operator's ask to "add a
+ * repo if they haven't already, in case they started the wizard in the wrong place". Returns the resolved
+ * repository toplevel, or a `skip` summary the caller turns into a skipped step result: dry-run discloses and
+ * skips; a blank entry or three bad paths skip. Nothing is written either way.
+ */
+async function resolveTargetByOffer(ctx: WizardContext, io: WizardIO): Promise<{ dir: string } | { skip: string }> {
+  if (ctx.dryRun) {
+    io.report('dry-run — PR automation: no project repository selected; a real run would offer to enter a git repository path, then confirm before scaffolding CI review workflows. Nothing was prompted or written.');
+    return { skip: 'dry-run — PR automation: no repository; a real run would offer a path, then confirm' };
+  }
+  // Validate each entry as a git repository with the SAME fail-safe helper cli.ts uses to auto-derive, so a
+  // typed path is accepted identically to a detected one (and normalized to the repo toplevel, so .github/
+  // lands at the root even if a subdirectory was entered; a leading ~ is expanded first). Re-prompt on a bad
+  // path, capped at three attempts; a blank entry — or exhausting the cap — skips with nothing written.
+  let entered = '';
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const question = attempt === 0
+      ? 'No project repository selected. Enter a path to the git repository to set up PR automation in (press Enter to skip):'
+      : `Not a git repository: ${entered}. Enter a path to an existing git repository (Enter to skip):`;
+    entered = (await io.prompter.text(question, '')).trim();
+    if (!entered) return { skip: 'PR automation: no repository provided' };
+    const resolved = gitRepositoryFor(expandHome(entered))?.topLevel;
+    if (resolved) return { dir: resolved };
+  }
+  return { skip: 'PR automation: no git repository entered' };
+}
+
 export function prAutomationStep(): WizardStep {
   return {
     id: 'pr-automation',
     title: 'PR automation (CI review workflows)',
-    applies: (ctx: WizardContext): boolean => !!ctx.targetDir && existsSync(join(ctx.targetDir, '.git')),
+    // HED-624: with a target, apply only when it is a git repo — an explicit --target to a NON-repo dir
+    // stays not-applicable (never scaffold into a directory the operator named that isn't a repo). With NO
+    // target (undefined, or an empty --target), apply anyway so run() can OFFER to enter a repo path.
+    applies: (ctx: WizardContext): boolean => !ctx.targetDir || existsSync(join(ctx.targetDir, '.git')),
     async run(ctx: WizardContext, io: WizardIO): Promise<WizardStepResult> {
-      if (!ctx.targetDir) {
-        io.report('PR automation skipped: no target project directory was selected.');
-        return { id: 'pr-automation', status: 'skipped', summary: 'PR automation: no target directory' };
+      const skip = (summary: string): WizardStepResult => ({ id: 'pr-automation', status: 'skipped', summary });
+      // needsConfirm keys on the ORIGINAL context, before the offer loop can set a target below: an explicit
+      // --target (a real, non-derived targetDir) is the silent opt-in; a DERIVED target or one entered at the
+      // offer prompt both confirm before writing (the operator's Option B — "detection or manual entry, the
+      // confirm still gates the write"). A non-repo explicit --target never reaches run() (applies() filters it).
+      const explicit = !!ctx.targetDir && !ctx.targetDirDerived;
+
+      let targetDir = ctx.targetDir;
+      if (!targetDir) {
+        // HED-624 (offer-to-add-repo): reached with no project directory (setup ran outside a repo, or an
+        // empty --target). resolveTargetByOffer owns that whole interaction — dry-run disclosure or the capped
+        // path prompt — returning either a skip summary (flows straight out, nothing written) or the resolved
+        // repo toplevel, which continues into the same confirm + scaffold path below.
+        const offered = await resolveTargetByOffer(ctx, io);
+        if ('skip' in offered) return skip(offered.skip);
+        targetDir = offered.dir;
       }
 
-      const paths = targetPaths(ctx.targetDir);
-      const defaultBranch = detectDefaultBranch(ctx.targetDir);
+      const paths = targetPaths(targetDir);
+      const defaultBranch = detectDefaultBranch(targetDir);
       if (ctx.dryRun) {
-        io.report(`dry-run — PR automation: a real run would write ${paths.workflow}, ${paths.gate}, and ${paths.gitleaks} using the TS/Node preset; detected default branch: ${defaultBranch}; nothing was prompted or written.`);
-        return {
-          id: 'pr-automation',
-          status: 'skipped',
-          summary: `dry-run — PR automation: TS/Node preset; detected default branch ${defaultBranch}; workflow, gate, and script write skipped`,
-        };
+        const detectedNote = ctx.targetDirDerived ? ' (auto-detected repository — a real run would confirm before writing)' : '';
+        io.report(`dry-run — PR automation: a real run would write ${paths.workflow}, ${paths.gate}, and ${paths.gitleaks} using the TS/Node preset; detected default branch: ${defaultBranch}${detectedNote}; nothing was prompted or written.`);
+        return skip(`dry-run — PR automation: TS/Node preset; detected default branch ${defaultBranch}; workflow, gate, and script write skipped${ctx.targetDirDerived ? ' (auto-detected repo, would confirm first)' : ''}`);
+      }
+
+      // HED-624 Option B: confirm before scaffolding into a target the operator did not explicitly name —
+      // a repo we auto-detected OR one entered at the offer prompt. An explicit --target is the opt-in and
+      // skips this; decline → nothing written. The detection disclosure is derived-only (a typed path needs
+      // no "we found this" line — the operator just typed it).
+      if (!explicit) {
+        if (ctx.targetDirDerived) io.report(`Detected a git repository at ${targetDir}.`);
+        const proceed = await io.prompter.confirm(`Set up PR automation (CI review workflows) in ${targetDir}/.github/?`, false);
+        if (!proceed) return skip('PR automation: declined');
       }
 
       const preset = presetFor(await io.prompter.select('Language preset', presetChoices));

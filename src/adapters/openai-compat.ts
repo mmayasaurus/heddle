@@ -1,24 +1,28 @@
-import * as fs from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { secureReadFile } from '../secure-fs.js';
 import type { DispatchOptions, TokenUsage, WorkerAdapter, WorkerResult } from '../types.js';
 
 export const DEFAULT_SECRETS_PATH = join(homedir(), '.heddle', 'secrets.env');
 
 /** Read one key from heddle’s secrets file; adapter credentials never come from process.env. */
 export function readSecretsEnvValue(keyEnv: string, path = DEFAULT_SECRETS_PATH): string | undefined {
+  let contents: string;
   try {
-    const contents = fs.readFileSync(path, 'utf8');
-    for (const line of contents.split(/\r?\n/)) {
-      const match = line.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/);
-      if (match?.[1] === keyEnv && match[2]) {
-        const raw = match[2];
-        const quoted = raw.match(/^(['"])(.*?)\1/);
-        const value = quoted ? quoted[2] : raw.replace(/\s+#.*$/, '').trim();
-        return value || undefined;
-      }
+    contents = secureReadFile(path);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return undefined; // absent file → key not configured (benign)
+    throw err; // symlink / foreign-owned / loose-perm violation → fail closed, surface to the caller
+  }
+  for (const line of contents.split(/\r?\n/)) {
+    const match = line.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/);
+    if (match?.[1] === keyEnv && match[2]) {
+      const raw = match[2];
+      const quoted = raw.match(/^(['"])(.*?)\1/);
+      const value = quoted ? quoted[2] : raw.replace(/\s+#.*$/, '').trim();
+      return value || undefined;
     }
-  } catch { /* The caller returns its deliberate non-secret missing-key result. */ }
+  }
   return undefined;
 }
 
@@ -109,7 +113,15 @@ export class OpenAICompatAdapter implements WorkerAdapter {
     const started = Date.now();
     const deadline = Date.now() + (opts.timeoutMs ?? 600_000);
     const completed = (result: WorkerResult): WorkerResult => ({ ...result, durationMs: Date.now() - started });
-    const apiKey = this.loadKey();
+    let apiKey: string | undefined;
+    try {
+      apiKey = this.loadKey();
+    } catch (err) {
+      return completed({
+        ok: false, output: '', exitCode: null,
+        error: `${this.provider}: refusing to use ~/.heddle/secrets.env — ${err instanceof Error ? err.message : String(err)}`,
+      });
+    }
     if (!apiKey) return completed(this.keyMissingResult());
 
     const first = await this.request(prompt, opts, apiKey, this.config.maxTokensDefault, deadline);

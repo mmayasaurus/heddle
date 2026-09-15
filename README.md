@@ -264,6 +264,8 @@ heddle doctor --provider codex --json
 
 Doctor checks configured harness binaries, login state, live catalogs where supported, routing and lane configuration, project and Claude-account registries, comms readiness, installed-artifact drift, and provider-verification freshness. `--provider <name>` runs that provider’s checks plus the global configuration checks. Exit 0 means no failures (warnings and skipped checks may still be present); exit 1 means at least one failure; CLI usage errors exit 2.
 
+`heddle doctor --hooks` is a separate, opt-in diagnostic that is never part of the default read-only sweep: it executes every configured Claude Code hook from the current directory’s `.claude` settings with a synthetic stdin payload to report latency and health, which can trigger a hook’s normal external effects. It ignores `--provider`, runs under a default 180-second sweep budget (`--hooks-budget <seconds>` to raise it), and exits 1 for broken, missing, or permanently-timed-out hooks; a hook truncated by the budget is flagged hung if it ran past the interactive floor, or unverified (warning) when little budget remained.
+
 The project’s CI gate is behavioral: tests assert observable results rather than merely a toggle changing. The standard commands are:
 
 ```shell

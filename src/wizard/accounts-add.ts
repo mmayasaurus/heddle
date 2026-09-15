@@ -1,7 +1,8 @@
-import { chmodSync, existsSync, mkdirSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { loadAccountRegistry, upsertAccount, writeAccountRegistry, type Account, type AccountTier, type BillingClass } from '../accounts.js';
+import { ensureSecureDir } from '../secure-fs.js';
 import { loginStatus, loginIdentity } from '../health/parse.js';
 import type { CliRunner, NativeProvider } from './cli-runner.js';
 import type { Prompter } from './prompt.js';
@@ -57,9 +58,17 @@ function validateBaseUrl(value: string): void {
 
 function createIsolatedConfigDir(provider: 'claude' | 'codex', id: string, home: string = homedir()): string {
   const configPath = pathFor(provider, id, home);
+  // Freshness is a security property for env-repoint (a stale login must not survive) — refuse an existing
+  // dir rather than reuse it; ensureSecureDir then creates it 0700-from-outset and validates the whole
+  // created tree (rejecting a symlink / foreign-owned / group-or-other-writable path) — F8/HED-590.
   if (existsSync(configPath)) throw new Error(`isolated config directory already exists for ${provider} ${id}`);
-  mkdirSync(configPath, { recursive: true });
-  chmodSync(configPath, 0o700);
+  ensureSecureDir(configPath, { mode: 0o700 });
+  // Defense-in-depth for the check-then-create window between existsSync and ensureSecureDir: ensureSecureDir
+  // ACCEPTS (never chmods) an existing safe dir, so a same-uid dir raced in after the existsSync could carry a
+  // stale .credentials.json. A cross-uid or symlinked race is already rejected by ensureSecureDir; refusing a
+  // raced-in NON-empty dir collapses the residual to a harmless empty dir. The runtime backstop stays the
+  // harness-side hard-fail-on-empty-token (see below); this is setup-time freshness hardening (F8/HED-590).
+  if (readdirSync(configPath).length !== 0) throw new Error(`isolated config directory is not fresh (non-empty) for ${provider} ${id}`);
   return configPath;
 }
 
@@ -112,11 +121,17 @@ async function addOne(provider: NativeProvider, deps: AccountsAddDeps, ordinal: 
   const configPath = provider === 'cursor' ? null : pathFor(provider, id, home);
   const env = accountEnv(provider, configPath);
   if (configPath) {
-    // 0700: `claude auth login` now persists .credentials.json here, so lock the dir to the owner on
-    // shared machines — mirrors createIsolatedConfigDir (the env-repoint path). recursive mkdir is
-    // idempotent so a native re-run is fine; the chmod re-asserts perms on an existing dir too.
-    mkdirSync(configPath, { recursive: true });
-    chmodSync(configPath, 0o700);
+    // `claude auth login` persists .credentials.json here, so create it 0700-from-outset (or re-validate an
+    // existing owner-only dir) via the shared secure-fs primitive — rejecting a symlink / foreign-owned /
+    // group-or-other-writable path rather than trusting it (F8/HED-590). Refuse-closed on an unsafe path
+    // fails just THIS account (like the env-repoint path), never aborts the whole wizard.
+    try {
+      ensureSecureDir(configPath, { mode: 0o700 });
+    } catch (error) {
+      summary.failed.push(id);
+      deps.report?.(`FAIL ${provider} ${id} (config dir: ${error instanceof Error ? error.message : String(error)})`);
+      return;
+    }
   }
   try {
     deps.runner.login(provider, env);
@@ -139,7 +154,18 @@ async function addOne(provider: NativeProvider, deps: AccountsAddDeps, ordinal: 
   // as not-logged-in (not a redundant boolean compare — Codacy 1cc5654).
   const loggedIn = probe.exitCode === 0 && loginStatus(probe.stdout, probe.stderr) === true;
   registry = upsertAccount(registry, { ...account, loggedIn, lastVerified: (deps.now ?? (() => new Date()))().toISOString() });
-  writeAccountRegistry(registry, registryPath);
+  // secureWriteFile fails CLOSED on an unsafe registry parent/target (a group-or-other-writable ~/.heddle, or
+  // a symlinked/foreign accounts.json). The config-dir precheck validates the config dir and its ancestors but
+  // NOT accounts.json itself, and cursor has no config-dir precheck at all — so this refusal can reach here
+  // after a successful login. Record a per-account FAIL rather than aborting the whole wizard, matching the
+  // config-dir and login handlers above (F8/HED-590).
+  try {
+    writeAccountRegistry(registry, registryPath);
+  } catch (error) {
+    summary.failed.push(id);
+    deps.report?.(`FAIL ${provider} ${id} (registry: ${error instanceof Error ? error.message : String(error)})`);
+    return;
+  }
   // Surface the signed-in identity so the operator can confirm the browser step landed on the intended
   // account (claude only — from the verified `auth status --json` identity schema; HED-585).
   const identity = loggedIn && provider === 'claude' ? loginIdentity(probe.stdout) : undefined;
@@ -371,6 +397,21 @@ export async function runAccountsAdd(
     while (await deps.prompter.confirm(`Any other ${entry.displayName} accounts to cycle through?`, false));
   }
   if (opts.provider === 'custom' || !opts.provider && await deps.prompter.confirm('Any provider/key/model not listed?', false)) await addCustomProvider(deps, registryPath, summary, home);
-  if (!loadAccountRegistry(registryPath).accounts.length) writeAccountRegistry({ schemaVersion: 2, accounts: [] }, registryPath);
+  // Write a valid empty registry when nothing was recorded (all declined, or every attempt failed). This
+  // write can hit the same unsafe-~/.heddle refusal as the per-account writes — report it rather than let an
+  // uncaught throw abort the wizard after the per-account failures were already handled gracefully (F8/HED-590).
+  if (!loadAccountRegistry(registryPath).accounts.length) {
+    try {
+      writeAccountRegistry({ schemaVersion: 2, accounts: [] }, registryPath);
+    } catch (error) {
+      // [P2] Only when the summary is otherwise empty (added=0 AND failed=0) would summarizeAccounts read
+      // this run as 'skipped'. Record a 'registry' failure sentinel in exactly that case so a fail-closed
+      // empty-registry write (same unsafe-parent refusal as the per-account writes) surfaces as 'failed'
+      // instead of an acceptable no-op. If accounts were attempted and failed, the run already reads as
+      // 'failed' — a second sentinel would just double-count (the report line below still fires either way).
+      if (!summary.added.length && !summary.failed.length) summary.failed.push('registry');
+      deps.report?.(`FAIL (registry: ${error instanceof Error ? error.message : String(error)})`);
+    }
+  }
   return summary;
 }
