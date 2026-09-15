@@ -554,6 +554,18 @@ describe('secure filesystem primitives', () => {
     expect(() => ensureSecureDir(leaf)).toThrow(/writable/i);
   });
 
+  it('ensureSecureDir rejects a safe existing target reached through a symlinked parent (fast path)', () => {
+    const realParent = join(tempDir(), 'real-parent');
+    mkdirSync(realParent, { mode: 0o700 });
+    mkdirSync(join(realParent, 'creds'), { mode: 0o700 });
+    const linkParent = join(tempDir(), 'link-parent');
+    symlinkSync(realParent, linkParent);
+
+    // The leaf reached via the symlinked parent lstats as a real dir (the symlink is an ANCESTOR, not the
+    // leaf), so only the fast-path parent check catches it — the immediate-parent analog of the create climb.
+    expect(() => ensureSecureDir(join(linkParent, 'creds'))).toThrow(/symlink/i);
+  });
+
   it('assertSecureDir accepts a safe existing directory and bubbles ENOENT for an absent one', () => {
     const dir = join(tempDir(), 'present');
     mkdirSync(dir, { mode: 0o700 });
