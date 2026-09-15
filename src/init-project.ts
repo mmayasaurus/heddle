@@ -533,7 +533,20 @@ export function applyInstall(plan: InstallPlan, dryRun = false): InstallReport {
     }
   }
   for (const step of plan.steps) {
-    if (skipWrites || !step.content || step.action === 'ok' || step.action === 'skip') continue;
+    if (skipWrites || !step.content) continue;
+    if (step.action === 'ok') {
+      // Content already matches, so no rewrite — but re-apply an explicit mode if it has drifted: a
+      // launcher whose bytes are intact yet lost its execute bit (an external chmod, or a fresh clone
+      // that dropped +x) is otherwise never repaired by a re-run, because stepFor keys 'ok' on content
+      // alone and cannot see the mode (HED-671, qodo correctness finding). Best-effort; a mode-less 'ok'
+      // (e.g. canonicalStep) is left untouched.
+      if (step.mode !== undefined) {
+        try { if ((statSync(step.path).mode & 0o7777) !== step.mode) chmodSync(step.path, step.mode); }
+        catch { /* mode repair is best-effort; never fail the install over it */ }
+      }
+      continue;
+    }
+    if (step.action === 'skip') continue;
     mkdirSync(dirname(step.path), { recursive: true });
     atomicWriteFile(step.path, step.content, step.mode);
   }

@@ -766,7 +766,7 @@ describe('init-project', () => {
     });
   });
 
-  describe('HED-671 — launcher-seam enablers (resolveProjectEntry, InstallStep.mode, derived launcher)', () => {
+  describe('HED-671 — resolveProjectEntry + InstallStep.mode', () => {
     it('resolveProjectEntry builds a NEW entry from parsed details (single source for registry + launcher-gen)', () => {
       const dir = join(tempDir(), 'ws');
       const entry = resolveProjectEntry({ name: 'toy', prior: undefined, rawPrior: undefined, team: 'NEW', room: '#toy', launcher: '/h/.heddle/launch-toy.sh', parsedAgents: ['X', 'Y'] }, dir);
@@ -808,6 +808,25 @@ describe('init-project', () => {
       expect(existsSync(target)).toBe(false);
     });
 
+    it('re-applies an explicit mode on a content-identical (ok) re-run — repairs a launcher that lost +x', () => {
+      const base = tempDir();
+      const target = join(base, 'launch-toy.sh');
+      writeFileSync(target, '#!/bin/sh\necho hi\n');
+      chmodSync(target, 0o644); // execute bit dropped by an external chmod or a fresh clone
+      const plan = { options: { dir: base, canonical: base, name: 'toy', homeDir: base }, steps: [{ step: 'launcher', path: target, action: 'ok' as const, content: '#!/bin/sh\necho hi\n', mode: 0o755 }] };
+      applyInstall(plan);
+      expect(statSync(target).mode & 0o777).toBe(0o755);
+    });
+
+    it('tolerates a mode-bearing (ok) step whose file is gone — best-effort mode repair never throws', () => {
+      const base = tempDir();
+      const target = join(base, 'launch-gone.sh');
+      const plan = { options: { dir: base, canonical: base, name: 'toy', homeDir: base }, steps: [{ step: 'launcher', path: target, action: 'ok' as const, content: 'x', mode: 0o755 }] };
+      expect(() => applyInstall(plan)).not.toThrow();
+    });
+  });
+
+  describe('HED-671 — derived launcher default', () => {
     it('derives ~/.heddle/launch-<name>.sh when --launcher is omitted on first registration', () => {
       const opts = options(tempDir());
       const { launcher, ...noLauncher } = opts;
