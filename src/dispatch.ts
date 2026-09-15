@@ -168,13 +168,22 @@ export async function dispatch(
   if (plan.billingRefusal && !plan.capabilityFitRebinds) {
     return refuseBilling(ctx, req, route.taskClass, target, skillsForRefusal, plan.billingRefusal);
   }
+  // HED-404: structural tier read-only gate — same plan-level placement + F1 `!capabilityFitRebinds`
+  // skip as the billing pre-gate above. It fires BEFORE the in-session return below AND the auto-effort
+  // classifier, so a positively-T0 account asking for a non-read-only class is refused without spending a
+  // classifier (restoring REV-1 for the tier case); the skip lets a rebinding primary reach runTarget,
+  // which gates the REBOUND account. refuseBilling is the shared refusal path runTarget already routes the
+  // tier veto through (run.ts). Fail-open: plan.tierRefusal is undefined unless positively T0 + non-read-only.
+  if (plan.tierRefusal && !plan.capabilityFitRebinds) {
+    return refuseBilling(ctx, req, route.taskClass, target, skillsForRefusal, plan.tierRefusal);
+  }
 
   // ---- Claude-primary → structured, ledgered in-session refusal (HED-18) ----------------------
   if (plan.execution === 'in-session-subagent') {
     // The class's declared fallback rides along even on the explicit path — the instruction can still
     // name a subprocess route (class = policy). Account advice (HED-68) is appended.
     return refuseInSession(
-      { ...target, taskClass: route.taskClass, dispatchable: route.dispatchable, fallback: route.fallback, reviewerPool: route.reviewerPool },
+      { ...target, taskClass: route.taskClass, dispatchable: route.dispatchable, fallback: route.fallback, reviewerPool: route.reviewerPool, readOnly: route.readOnly },
       req, ctx, plan.execution, origin, plan.decision.routedAwayForCap ? `${route.provider}/${route.model}` : null,
       plan.accountAdvice,
     );
@@ -358,7 +367,7 @@ export async function dispatch(
     : providerExecution(table, fallback.provider);
   if (fbExecution === 'in-session-subagent') {
     return refuseInSession(
-      { ...fallback, taskClass: route.taskClass, dispatchable: route.dispatchable, fallback: undefined, reviewerPool: route.reviewerPool },
+      { ...fallback, taskClass: route.taskClass, dispatchable: route.dispatchable, fallback: undefined, reviewerPool: route.reviewerPool, readOnly: route.readOnly },
       req, ctx, fbExecution, 'fallback', `${route.provider}/${route.model}`, plan.accountAdvice,
     );
   }

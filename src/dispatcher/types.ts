@@ -112,7 +112,7 @@ export interface DispatchRequest {
  * `refusal` column.
  */
 export interface DispatchRefusal {
-  code: 'claude-in-session' | 'no-dispatchable-account' | 'not-dispatchable' | 'depth-1' | 'max-children' | 'capability-denied' | 'metered-pool-exhausted' | 'same-provider-review' | 'override-reason-required' | 'fleet-paused' | 'billing.pay-per-token' | 'billing.open-billing-at-cap' | 'billing.prepaid-exhausted' | 'headless-claude-review-unreliable' | 'env-repoint.missing-token' | 'env-repoint.invalid-config';
+  code: 'claude-in-session' | 'no-dispatchable-account' | 'not-dispatchable' | 'depth-1' | 'max-children' | 'capability-denied' | 'tier-read-only' | 'metered-pool-exhausted' | 'same-provider-review' | 'override-reason-required' | 'fleet-paused' | 'billing.pay-per-token' | 'billing.open-billing-at-cap' | 'billing.prepaid-exhausted' | 'headless-claude-review-unreliable' | 'env-repoint.missing-token' | 'env-repoint.invalid-config';
   reason: string;
   /** What to do instead, when there is a clear alternative. */
   instruction?: string;
@@ -236,6 +236,9 @@ export interface DispatchPlan {
   accountAdvice?: AccountAdvice;
   /** Money-safety refusal for the selected rich-registry account. */
   billingRefusal?: DispatchRefusal;
+  /** HED-404: structural tier read-only refusal for the selected account — the plan-level mirror of
+   *  billingRefusal (undefined for in-session previews; the in-session tier gate is HED-573). */
+  tierRefusal?: DispatchRefusal;
   /** Env-repoint refusal for the selected Claude account, shared with runTarget. */
   envRepointRefusal?: DispatchRefusal;
   /** Non-blocking bounded-prepaid warning when dispatch will consume the prepaid buffer. */

@@ -6,13 +6,22 @@
         "hooks": [
           {
             "type": "command",
-            "command": "if [ -f \"/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/agent-identity.py\" ]; then python3 \"/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/agent-identity.py\"; else echo \"heddle: discipline hook agent-identity.py MISSING at the Spinventory canonical \u2014 running WITHOUT it (HED-107; vendoring deferred to HED-96)\" >&2; exit 1; fi",
+            "command": "if [ -f \"/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/agent-identity.py\" ]; then python3 \"/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/agent-identity.py\"; else echo \"heddle: discipline hook agent-identity.py MISSING at the Spinventory canonical — running WITHOUT it (HED-107; vendoring deferred to HED-96)\" >&2; exit 1; fi",
             "timeout": 15
           },
           {
             "type": "command",
             "command": "if [ -f \"/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/agent-preflight.py\" ]; then python3 \"/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/agent-preflight.py\"; else echo \"heddle: discipline hook agent-preflight.py MISSING at the Spinventory canonical -- running WITHOUT it (HED-241)\" >&2; exit 1; fi",
             "timeout": 5
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if command -v verity >/dev/null 2>&1; then verity baseline capture; else echo \"heddle: verity CLI not installed — skipping baseline capture (quality gate inactive on this machine)\" >&2; fi",
+            "timeout": 60
           }
         ]
       }
@@ -23,8 +32,17 @@
         "hooks": [
           {
             "type": "command",
-            "command": "if [ -f \"/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/remind-owned-prs.py\" ]; then python3 \"/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/remind-owned-prs.py\"; else echo \"heddle: discipline hook remind-owned-prs.py MISSING at the Spinventory canonical \u2014 running WITHOUT it (HED-107; vendoring deferred to HED-96)\" >&2; exit 1; fi",
+            "command": "if [ -f \"/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/remind-owned-prs.py\" ]; then python3 \"/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/remind-owned-prs.py\"; else echo \"heddle: discipline hook remind-owned-prs.py MISSING at the Spinventory canonical — running WITHOUT it (HED-107; vendoring deferred to HED-96)\" >&2; exit 1; fi",
             "timeout": 8
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if command -v verity >/dev/null 2>&1; then verity intent capture; else echo \"heddle: verity CLI not installed — skipping intent capture (quality gate inactive on this machine)\" >&2; fi",
+            "timeout": 30
           }
         ]
       }
@@ -35,12 +53,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "if [ -f \"/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-memtrace-first.py\" ]; then python3 \"/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-memtrace-first.py\" deny-recursive-search; else echo \"heddle: discipline hook require-memtrace-first.py MISSING at the Spinventory canonical \u2014 running WITHOUT it (HED-107; vendoring deferred to HED-96)\" >&2; exit 1; fi",
+            "command": "if [ -f \"/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-memtrace-first.py\" ]; then python3 \"/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-memtrace-first.py\" deny-recursive-search; else echo \"heddle: discipline hook require-memtrace-first.py MISSING at the Spinventory canonical — running WITHOUT it (HED-107; vendoring deferred to HED-96)\" >&2; exit 1; fi",
             "timeout": 5
           },
           {
             "type": "command",
-            "command": "if [ -f \"/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-memtrace-first.py\" ]; then python3 \"/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-memtrace-first.py\" enforce-query; else echo \"heddle: discipline hook require-memtrace-first.py MISSING at the Spinventory canonical \u2014 running WITHOUT it (HED-107; vendoring deferred to HED-96)\" >&2; exit 1; fi",
+            "command": "if [ -f \"/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-memtrace-first.py\" ]; then python3 \"/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-memtrace-first.py\" enforce-query; else echo \"heddle: discipline hook require-memtrace-first.py MISSING at the Spinventory canonical — running WITHOUT it (HED-107; vendoring deferred to HED-96)\" >&2; exit 1; fi",
             "timeout": 5
           }
         ]
@@ -50,7 +68,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "if [ -f \"/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-memtrace-first.py\" ]; then python3 \"/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-memtrace-first.py\" enforce-query; else echo \"heddle: discipline hook require-memtrace-first.py MISSING at the Spinventory canonical \u2014 running WITHOUT it (HED-107; vendoring deferred to HED-96)\" >&2; exit 1; fi",
+            "command": "if [ -f \"/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-memtrace-first.py\" ]; then python3 \"/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-memtrace-first.py\" enforce-query; else echo \"heddle: discipline hook require-memtrace-first.py MISSING at the Spinventory canonical — running WITHOUT it (HED-107; vendoring deferred to HED-96)\" >&2; exit 1; fi",
             "timeout": 5
           }
         ]
@@ -60,7 +78,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "if [ -f \"/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/delegation-nudge.py\" ]; then python3 \"/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/delegation-nudge.py\"; else echo \"heddle: discipline hook delegation-nudge.py MISSING at the Spinventory canonical \u2014 running WITHOUT it (HED-107; vendoring deferred to HED-96)\" >&2; exit 1; fi",
+            "command": "if [ -f \"/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/delegation-nudge.py\" ]; then python3 \"/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/delegation-nudge.py\"; else echo \"heddle: discipline hook delegation-nudge.py MISSING at the Spinventory canonical — running WITHOUT it (HED-107; vendoring deferred to HED-96)\" >&2; exit 1; fi",
             "timeout": 5
           }
         ]
@@ -72,12 +90,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "if [ -f \"/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-memtrace-first.py\" ]; then python3 \"/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-memtrace-first.py\" record; else echo \"heddle: discipline hook require-memtrace-first.py MISSING at the Spinventory canonical \u2014 running WITHOUT it (HED-107; vendoring deferred to HED-96)\" >&2; exit 1; fi",
+            "command": "if [ -f \"/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-memtrace-first.py\" ]; then python3 \"/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-memtrace-first.py\" record; else echo \"heddle: discipline hook require-memtrace-first.py MISSING at the Spinventory canonical — running WITHOUT it (HED-107; vendoring deferred to HED-96)\" >&2; exit 1; fi",
             "timeout": 5
           },
           {
             "type": "command",
-            "command": "if [ -f \"/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-pr-sweep.py\" ]; then python3 \"/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-pr-sweep.py\" record; else echo \"heddle: discipline hook require-pr-sweep.py MISSING at the Spinventory canonical \u2014 running WITHOUT it (HED-107; vendoring deferred to HED-96)\" >&2; exit 1; fi",
+            "command": "if [ -f \"/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-pr-sweep.py\" ]; then python3 \"/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-pr-sweep.py\" record; else echo \"heddle: discipline hook require-pr-sweep.py MISSING at the Spinventory canonical — running WITHOUT it (HED-107; vendoring deferred to HED-96)\" >&2; exit 1; fi",
             "timeout": 5
           }
         ]
@@ -87,7 +105,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "if [ -f \"/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-memtrace-first.py\" ]; then python3 \"/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-memtrace-first.py\" record; else echo \"heddle: discipline hook require-memtrace-first.py MISSING at the Spinventory canonical \u2014 running WITHOUT it (HED-107; vendoring deferred to HED-96)\" >&2; exit 1; fi",
+            "command": "if [ -f \"/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-memtrace-first.py\" ]; then python3 \"/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-memtrace-first.py\" record; else echo \"heddle: discipline hook require-memtrace-first.py MISSING at the Spinventory canonical — running WITHOUT it (HED-107; vendoring deferred to HED-96)\" >&2; exit 1; fi",
             "timeout": 5
           }
         ]
@@ -97,7 +115,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "if [ -f \"/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-memtrace-first.py\" ]; then python3 \"/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-memtrace-first.py\" record; else echo \"heddle: discipline hook require-memtrace-first.py MISSING at the Spinventory canonical \u2014 running WITHOUT it (HED-107; vendoring deferred to HED-96)\" >&2; exit 1; fi",
+            "command": "if [ -f \"/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-memtrace-first.py\" ]; then python3 \"/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-memtrace-first.py\" record; else echo \"heddle: discipline hook require-memtrace-first.py MISSING at the Spinventory canonical — running WITHOUT it (HED-107; vendoring deferred to HED-96)\" >&2; exit 1; fi",
             "timeout": 5
           }
         ]
@@ -109,13 +127,23 @@
         "hooks": [
           {
             "type": "command",
-            "command": "if [ -f \"/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-memtrace-first.py\" ]; then python3 \"/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-memtrace-first.py\" stop; else echo \"heddle: discipline hook require-memtrace-first.py MISSING at the Spinventory canonical \u2014 running WITHOUT it (HED-107; vendoring deferred to HED-96)\" >&2; exit 1; fi",
+            "command": "if [ -f \"/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-memtrace-first.py\" ]; then python3 \"/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-memtrace-first.py\" stop; else echo \"heddle: discipline hook require-memtrace-first.py MISSING at the Spinventory canonical — running WITHOUT it (HED-107; vendoring deferred to HED-96)\" >&2; exit 1; fi",
             "timeout": 5
           },
           {
             "type": "command",
-            "command": "if [ -f \"/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-pr-sweep.py\" ]; then python3 \"/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-pr-sweep.py\" enforce-stop; else echo \"heddle: discipline hook require-pr-sweep.py MISSING at the Spinventory canonical \u2014 running WITHOUT it (HED-107; vendoring deferred to HED-96)\" >&2; exit 1; fi",
+            "command": "if [ -f \"/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-pr-sweep.py\" ]; then python3 \"/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-pr-sweep.py\" enforce-stop; else echo \"heddle: discipline hook require-pr-sweep.py MISSING at the Spinventory canonical — running WITHOUT it (HED-107; vendoring deferred to HED-96)\" >&2; exit 1; fi",
             "timeout": 10
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if command -v verity >/dev/null 2>&1; then verity analyze; else echo \"heddle: verity CLI not installed — skipping analysis (quality gate inactive on this machine)\" >&2; fi",
+            "timeout": 120,
+            "statusMessage": "Running Verity analysis"
           }
         ]
       }
@@ -126,8 +154,30 @@
         "hooks": [
           {
             "type": "command",
-            "command": "if [ -f \"/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-memtrace-first.py\" ]; then python3 \"/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-memtrace-first.py\" stop; else echo \"heddle: discipline hook require-memtrace-first.py MISSING at the Spinventory canonical \u2014 running WITHOUT it (HED-107; vendoring deferred to HED-96)\" >&2; exit 1; fi",
+            "command": "if [ -f \"/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-memtrace-first.py\" ]; then python3 \"/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/hooks/require-memtrace-first.py\" stop; else echo \"heddle: discipline hook require-memtrace-first.py MISSING at the Spinventory canonical — running WITHOUT it (HED-107; vendoring deferred to HED-96)\" >&2; exit 1; fi",
             "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if command -v verity >/dev/null 2>&1; then verity compact; else echo \"heddle: verity CLI not installed — skipping compact hook (quality gate inactive on this machine)\" >&2; fi",
+            "timeout": 60
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if command -v verity >/dev/null 2>&1; then verity session end; else echo \"heddle: verity CLI not installed — skipping session-end hook (quality gate inactive on this machine)\" >&2; fi",
+            "timeout": 60
           }
         ]
       }
