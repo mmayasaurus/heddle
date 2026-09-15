@@ -7,6 +7,7 @@ import { loadLanes } from '../src/lanes.js';
 import { resolveTierTarget } from '../src/tier-resolve.js';
 import { planDispatch } from '../src/dispatcher/plan.js';
 import type { Account } from '../src/accounts.js';
+import type { Route } from '../src/routing.js';
 
 const table = loadRouting(new URL('../routing/routing.v0.yaml', import.meta.url).pathname);
 const lanes = loadLanes(new URL('../routing/lanes.yaml', import.meta.url).pathname);
@@ -30,6 +31,9 @@ const proCodex = [account('claude', 'T2'), account('codex', 'T1')];
 const resolve = (taskClass: string, accounts: Account[]) => resolveTierTarget(
   resolveRoute(table, taskClass), accounts, {}, { lanes, laneDefaults: table.laneDefaults ?? {} },
 );
+const syntheticRoute = (overrides: Partial<Route>): Route => ({
+  ...resolveRoute(table, 'implementation'), mcp: [], capabilities: [], ...overrides,
+});
 
 describe('tier-symbol routing', () => {
   it('keeps every shipped class on its static-table primary with full account coverage', () => {
@@ -87,6 +91,37 @@ describe('tier-symbol routing', () => {
     const narration = res.walk.join(' | ');
     expect(narration).toMatch(/fable.*skipped/i);
     expect(narration).toMatch(/opus.*chosen/i);
+  });
+});
+
+describe('tier-symbol ladder eligibility', () => {
+  it('skips a non-web-capable tier lane and uses the declared fallback', () => {
+    const route = syntheticRoute({
+      taskClass: 'web-tier', provider: 'cursor', model: 'cursor-tier', prefer: [{ tier: 'T1' }],
+      fallback: { provider: 'gemini', model: 'gemini-fallback' }, requiresWeb: true, editsCode: false,
+    });
+    const result = resolveTierTarget(route, [], {}, {
+      lanes: { ...lanes, tiers: { ...lanes.tiers, 'T1-workhorse': ['cursor-only'] } },
+      laneDefaults: { 'cursor-only': { provider: 'cursor', model: 'cursor-tier' } },
+    });
+
+    expect(result).toMatchObject({ provider: 'gemini', model: 'gemini-fallback' });
+    expect(result.walk).toContain('T1 skipped (no concrete lane target)');
+  });
+
+  it('filters a T0 lane for an edits-code tier route', () => {
+    const route = syntheticRoute({
+      taskClass: 'editing-tier', provider: 'groq', model: 't0-tier', prefer: [{ tier: 'T0' }],
+      fallback: { provider: 'codex', model: 'codex-fallback' }, requiresWeb: false, editsCode: true,
+    });
+    const result = resolveTierTarget(route, [], {}, {
+      lanes: { ...lanes, tiers: { ...lanes.tiers, 'T0-menial': ['groq-only'] } },
+      laneDefaults: { 'groq-only': { provider: 'groq', model: 't0-tier' } },
+    });
+
+    expect(result).toMatchObject({ provider: 'codex', model: 'codex-fallback' });
+    expect(result.walk).toContain('T0 skipped (no concrete lane target)');
+    expect(result.walk.join(' | ')).not.toMatch(/groq\/t0-tier chosen/);
   });
 });
 

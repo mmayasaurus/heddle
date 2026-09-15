@@ -1,5 +1,6 @@
 import { isAccountModeledProvider, type Account } from './accounts.js';
 import { buildLadder, tierOfProvider } from './ladder.js';
+import { ladderEligible } from './ladder-eligibility.js';
 import type { LanesConfig } from './lanes.js';
 import { DEFAULT_MIN_TIER, type Route, type RoutePreference, type RouteTarget, type TargetTier, type Tier } from './routing.js';
 import type { CapsByProvider } from './usage.js';
@@ -69,6 +70,10 @@ function enrichLiteral(route: Route, target: RouteTarget): RouteTarget {
 }
 
 function tierCandidates(symbol: TargetTier, route: Route, context: TierResolveContext): Array<{ target: RouteTarget; label: string }> {
+  const eligibility = {
+    mcp: route.mcp ?? [], requiresWeb: route.requiresWeb, grantedCapabilities: route.capabilities ?? [],
+    editsCode: route.editsCode, excluded: new Set<string>(),
+  };
   if (symbol === 'T3') {
     // fable intentionally has no lane_default, so it can never auto-join HED-106. A requested T3
     // symbol is explicit policy and may target it, then descend through the existing T2→T0 ladder.
@@ -78,23 +83,33 @@ function tierCandidates(symbol: TargetTier, route: Route, context: TierResolveCo
     const direct = t3Lanes.includes('fable')
       ? [{ target: enrich(route, { provider: 'claude', model: 'fable' }), label: 'T3:fable' }]
       : [];
-    const descended = buildLadder('T2', 'T0', 'T2', context.lanes, context.laneDefaults, () => true)
+    const descended = buildLadder(
+      'T2', 'T0', 'T2', context.lanes, context.laneDefaults,
+      (target, tier) => ladderEligible(target, tier, eligibility),
+    )
       .map((candidate) => ({ target: enrich(route, candidate.target), label: `T3→${candidate.tier}` }));
     return [...direct, ...descended];
   }
   const tier = symbol as Tier;
-  return buildLadder(tier, tier, tier, context.lanes, context.laneDefaults, () => true)
+  return buildLadder(
+    tier, tier, tier, context.lanes, context.laneDefaults,
+    (target, candidateTier) => ladderEligible(target, candidateTier, eligibility),
+  )
     .map((candidate) => ({ target: enrich(route, candidate.target), label: symbol }));
 }
 
 function fallbackCandidates(route: Route, context: TierResolveContext): Array<{ target: RouteTarget; label: string }> {
   const candidates: Array<{ target: RouteTarget; label: string }> = [];
   if (route.fallback) candidates.push({ target: route.fallback, label: 'declared-fallback' });
-  const excluded = new Set([route.provider, route.fallback?.provider].filter(Boolean));
+  const excluded = new Set<string>([route.provider, route.fallback?.provider].filter((provider): provider is string => Boolean(provider)));
+  const eligibility = {
+    mcp: route.mcp ?? [], requiresWeb: route.requiresWeb, grantedCapabilities: route.capabilities ?? [],
+    editsCode: route.editsCode, excluded,
+  };
   const maxTier = route.maxTier ?? tierOfProvider(route.provider, context.lanes, context.laneDefaults) ?? DEFAULT_MIN_TIER;
   for (const candidate of buildLadder(
     tierOfProvider(route.provider, context.lanes, context.laneDefaults), route.minTier ?? DEFAULT_MIN_TIER, maxTier,
-    context.lanes, context.laneDefaults, (target) => !excluded.has(target.provider),
+    context.lanes, context.laneDefaults, (target, tier) => ladderEligible(target, tier, eligibility),
   )) candidates.push({ target: enrich(route, candidate.target), label: `ladder:${candidate.tier}` });
   return candidates;
 }
