@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { atomicWriteFile, policyPath } from './persist.js';
-import type { WizardStep } from './step.js';
+import type { WizardIO, WizardStep } from './step.js';
 
 export const permissionCategories = [
   'file-deletion',
@@ -114,6 +114,35 @@ export function computePermissionsPolicy(
   } as PermissionsPolicy;
 }
 
+/** Prompt every profile × category posture: preset-prefilled (prior file wins), unattended coerces ask→block with an echoed reason, every final choice echoed. */
+async function collectPostureChoices(
+  prior: Record<string, unknown>,
+  preset: PermissionPreset,
+  io: WizardIO,
+): Promise<Record<PermissionProfile, Record<PermissionCategory, PermissionPosture>>> {
+  const choices = {
+    interactive: {} as Record<PermissionCategory, PermissionPosture>,
+    unattended: {} as Record<PermissionCategory, PermissionPosture>,
+  };
+  for (const profile of permissionProfiles) {
+    for (const category of permissionCategories) {
+      const presetDefault = presetPosture(preset, category);
+      const coercedDefault = profile === 'unattended' && presetDefault === 'ask' ? 'block' : presetDefault;
+      const defaultPosture = priorPosture(prior, profile, category) ?? coercedDefault;
+      const selected = await io.prompter.select(`${profile}: ${category}`, promptChoices(defaultPosture)) as PermissionPosture;
+      const posture = profile === 'unattended' && selected === 'ask' ? 'block' : selected;
+      if (selected !== posture) {
+        io.report(`${profile}: ${category}: ask was coerced to block because nothing may wait on an absent human.`);
+      } else if (profile === 'unattended' && presetDefault === 'ask' && priorPosture(prior, profile, category) === undefined && selected === 'block') {
+        io.report(`${profile}: ${category}: preset ask is pre-filled as block because nothing may wait on an absent human.`);
+      }
+      choices[profile][category] = posture;
+      io.report(`${profile}: ${category}: ${posture}`);
+    }
+  }
+  return choices;
+}
+
 export function permissionsStep(): WizardStep {
   return {
     id: 'permissions',
@@ -128,11 +157,15 @@ export function permissionsStep(): WizardStep {
       let prior: Record<string, unknown>;
       try {
         prior = readPriorPolicy(policyFile);
-      } catch {
+      } catch (error) {
+        // Carry the real failure and the REAL path: "corrupt" was wrong advice for a
+        // permission-denied / IO error, and a hardcoded ~ path was wrong under a custom
+        // home (PR #203 review — qodo/codacy).
+        const message = error instanceof Error ? error.message : String(error);
         return {
           id: 'permissions',
           status: 'failed',
-          summary: 'existing permissions policy is corrupt — fix or remove ~/.heddle/policy/permissions.json',
+          summary: `could not read the existing permissions policy at ${policyFile}: ${message} — fix or remove it`,
         };
       }
 
@@ -140,26 +173,7 @@ export function permissionsStep(): WizardStep {
       const preset = await io.prompter.select('Safety preset', permissionPresets) as PermissionPreset;
       io.report(`${preset} preset selected; every choice below is editable.`);
 
-      const choices = {
-        interactive: {} as Record<PermissionCategory, PermissionPosture>,
-        unattended: {} as Record<PermissionCategory, PermissionPosture>,
-      };
-      for (const profile of permissionProfiles) {
-        for (const category of permissionCategories) {
-          const presetDefault = presetPosture(preset, category);
-          const coercedDefault = profile === 'unattended' && presetDefault === 'ask' ? 'block' : presetDefault;
-          const defaultPosture = priorPosture(prior, profile, category) ?? coercedDefault;
-          const selected = await io.prompter.select(`${profile}: ${category}`, promptChoices(defaultPosture)) as PermissionPosture;
-          const posture = profile === 'unattended' && selected === 'ask' ? 'block' : selected;
-          if (selected !== posture) {
-            io.report(`${profile}: ${category}: ask was coerced to block because nothing may wait on an absent human.`);
-          } else if (profile === 'unattended' && presetDefault === 'ask' && priorPosture(prior, profile, category) === undefined && selected === 'block') {
-            io.report(`${profile}: ${category}: preset ask is pre-filled as block because nothing may wait on an absent human.`);
-          }
-          choices[profile][category] = posture;
-          io.report(`${profile}: ${category}: ${posture}`);
-        }
-      }
+      const choices = await collectPostureChoices(prior, preset, io);
 
       try {
         atomicWriteFile(policyFile, `${JSON.stringify(computePermissionsPolicy(choices, prior), null, 2)}\n`);

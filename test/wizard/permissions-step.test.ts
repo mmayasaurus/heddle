@@ -132,7 +132,8 @@ describe('permissionsStep', () => {
     const result = await permissionsStep().run(context(home), io(new CapturingPrompter([]), []));
 
     expect(result).toMatchObject({ id: 'permissions', status: 'failed' });
-    expect(result.summary).toMatch(/corrupt/i);
+    expect(result.summary).toMatch(/could not read/i);
+    expect(result.summary).toContain(file); // the REAL path, honoring ctx.homeDir — never a hardcoded ~
     expect(readFileSync(file, 'utf8')).toBe('{ bad json');
   });
 
@@ -179,7 +180,8 @@ describe('permissionsStep', () => {
     const result = await permissionsStep().run(context(home), io(new CapturingPrompter([]), []));
 
     expect(result).toMatchObject({ id: 'permissions', status: 'failed' });
-    expect(result.summary).toMatch(/corrupt/i);
+    expect(result.summary).toMatch(/could not read/i);
+    expect(result.summary).toMatch(/invalid posture/i); // the underlying shape error is surfaced, not a generic label
     expect(readFileSync(file, 'utf8')).toBe(raw);
   });
 });
