@@ -400,7 +400,10 @@ export function autoWipCommit(
     try {
       gitWithEnv(cwd, ['update-ref', 'HEAD', commitSha, oldHead]);
     } catch (err) {
-      return { committed: false, reason: `HEAD advanced during auto-WIP; refused to overwrite it: ${gitErrorMessage(err)}` };
+      // The CAS update-ref failed — HEAD advanced past oldHead, or a ref-lock/permission error. Either
+      // way update-ref is atomic, so HEAD was NOT moved; report only that certain invariant, not a
+      // guess at the cause (the raw git error carries the detail).
+      return { committed: false, reason: `could not update HEAD to the auto-WIP commit (HEAD left unmoved): ${gitErrorMessage(err)}` };
     }
 
     // Reconcile ONLY the committed paths into the REAL index (codex finding 3). update-ref moved HEAD
@@ -432,10 +435,11 @@ export function autoWipCommit(
         gitWithEnv(cwd, ['update-ref', 'HEAD', oldHead, commitSha]);
         return { committed: false, reason: `could not reconcile the real index; rolled HEAD back to the tree as found: ${resetErr}` };
       } catch (rollbackErr) {
-        // The CAS rollback failed because HEAD is no longer our commit — another process advanced it,
-        // so HEAD holds THAT commit, not necessarily ours (codex pass-3 accuracy nit). Do not claim
-        // which commit HEAD holds; point to manual resolution.
-        return { committed: false, reason: `could not reconcile the real index and could not roll back — HEAD advanced past the auto-WIP commit ${commitSha.slice(0, 8)} concurrently; resolve manually: ${resetErr}; rollback: ${gitErrorMessage(rollbackErr)}` };
+        // Both the reconcile AND the rollback failed. HEAD's state is uncertain: the rollback CAS fails
+        // if HEAD is no longer our commit (moved by another process, in any direction) OR on a ref-lock
+        // error while HEAD still holds our commit. State only what is certain — the commit MAY still be
+        // on HEAD, the index is unreconciled — and defer to a human (codex accuracy nits).
+        return { committed: false, reason: `could not reconcile the real index, and the HEAD rollback also failed — the auto-WIP commit ${commitSha.slice(0, 8)} may still be on HEAD with the index unreconciled; resolve manually: ${resetErr}; rollback: ${gitErrorMessage(rollbackErr)}` };
       }
     }
 
