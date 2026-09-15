@@ -541,6 +541,19 @@ describe('secure filesystem primitives', () => {
     expect(() => ensureSecureDir(dir, { euid: foreignEuid })).toThrow(/owner|owned/i);
   });
 
+  it('ensureSecureDir rejects a safe existing target under a group/other-writable parent (fast path validates the parent)', () => {
+    const parent = join(tempDir(), 'loose-parent');
+    mkdirSync(parent, { mode: 0o700 });
+    const leaf = join(parent, 'creds');
+    mkdirSync(leaf, { mode: 0o700 });
+    chmodSync(leaf, 0o700); // the leaf itself is safe and euid-owned …
+    chmodSync(parent, 0o777); // … but its immediate parent is group/other-writable
+
+    // Without the fast-path parent check this pre-existing safe leaf would be accepted on a re-run, even
+    // though the create path (first run) would have refused it under the loose ancestor — so refuse here too.
+    expect(() => ensureSecureDir(leaf)).toThrow(/writable/i);
+  });
+
   it('assertSecureDir accepts a safe existing directory and bubbles ENOENT for an absent one', () => {
     const dir = join(tempDir(), 'present');
     mkdirSync(dir, { mode: 0o700 });
