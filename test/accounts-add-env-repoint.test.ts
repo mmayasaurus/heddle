@@ -210,22 +210,75 @@ describe('accounts add env-repoint wizard', () => {
     expect(report.join('\n')).toContain('FAIL glm glm-1');
   });
 
-  it('does not offer local-runtime providers in the default wizard (never crashes envRepointHarness)', async () => {
+  it('onboards Ollama without requiring a key and records its default local endpoint', async () => {
+    const path = join(tempDir(), 'ollama.json');
+    const home = tempDir();
+    withHome(home);
+    vi.stubEnv('OPENAI_API_KEY', undefined);
+
+    const summary = await runAccountsAdd({ provider: 'ollama', registryPath: path, homeDir: home }, {
+      prompter: new ScriptedPrompter([true, '', '', false]), runner: fakeRunner,
+    });
+
+    const account = loadAccountRegistry(path).accounts[0]!;
+    expect(summary.added).toEqual(['ollama-1']);
+    expect(account).toMatchObject({
+      id: 'ollama-1', provider: 'codex', harness: 'codex-cli', billingClass: 'free-tier', tier: 'T0',
+      credentialRef: `codex:ollama:${account.codexHome}`,
+      envRepoint: { baseUrl: 'http://localhost:11434/v1', authTokenRef: 'OPENAI_API_KEY', service: 'ollama' },
+    });
+    expect(account.trainsOnInputs).toBeUndefined();
+  });
+
+  it('records an overridden LM Studio local endpoint', async () => {
+    const path = join(tempDir(), 'lmstudio.json');
+    withHome(tempDir());
+    const baseUrl = 'http://127.0.0.1:4567/v1';
+
+    const summary = await runAccountsAdd({ provider: 'lmstudio', registryPath: path }, {
+      prompter: new ScriptedPrompter([true, '', baseUrl, false]), runner: fakeRunner,
+    });
+
+    expect(summary.added).toEqual(['lmstudio-1']);
+    expect(loadAccountRegistry(path).accounts[0]).toMatchObject({
+      envRepoint: { baseUrl, authTokenRef: 'OPENAI_API_KEY', service: 'lmstudio' },
+      billingClass: 'free-tier', tier: 'T0',
+    });
+  });
+
+  it('fails a local-runtime id collision without replacing the existing codex account', async () => {
+    const path = join(tempDir(), 'ollama-collision.json');
+    withHome(tempDir());
+    writeFileSync(path, JSON.stringify({
+      schemaVersion: 2,
+      codex: [{ id: 'shared', codexHome: '/tmp/native-codex', billingClass: 'subscription-quota', tier: 'T1', loggedIn: true }],
+    }));
+    const report: string[] = [];
+
+    const prompter = new RecordingPrompter(new ScriptedPrompter([true, 'shared', false]));
+    const summary = await runAccountsAdd({ provider: 'ollama', registryPath: path }, {
+      prompter, runner: fakeRunner, report: (line) => report.push(line),
+    });
+
+    expect(summary).toMatchObject({ added: [], failed: ['shared'] });
+    expect(loadAccountRegistry(path).accounts).toMatchObject([{ id: 'shared', provider: 'codex', loggedIn: true }]);
+    expect(report.join('\n')).toContain('already used by an existing codex account');
+    expect(prompter.questions).toContain('Any other Ollama accounts to cycle through?');
+  });
+
+  it('offers local-runtime providers in the default wizard', async () => {
     const path = join(tempDir(), 'localruntime.json');
     withHome(tempDir());
     const prompter = new RecordingPrompter(new ScriptedPrompter(Array.from({ length: 16 }, () => false)));
     const summary = await runAccountsAdd({ registryPath: path }, { prompter, runner: fakeRunner });
-    expect(prompter.questions).not.toContain('Do you have a Ollama account?');
-    expect(prompter.questions).not.toContain('Do you have a LM Studio account?');
+    expect(prompter.questions).toContain('Do you have a Ollama account?');
+    expect(prompter.questions).toContain('Do you have a LM Studio account?');
     expect(summary.added).toEqual([]);
   });
 
-  it('refuses deferred provider surfaces (local-runtime, browser-oauth) via --provider', async () => {
+  it('refuses deferred browser-oauth provider surfaces via --provider', async () => {
     const path = join(tempDir(), 'deferred.json');
     withHome(tempDir());
-    await expect(runAccountsAdd({ provider: 'ollama', registryPath: path }, {
-      prompter: new ScriptedPrompter([]), runner: fakeRunner,
-    })).rejects.toThrow(/does not yet support/i);
     await expect(runAccountsAdd({ provider: 'gemini', registryPath: path }, {
       prompter: new ScriptedPrompter([]), runner: fakeRunner,
     })).rejects.toThrow(/does not yet support/i);
