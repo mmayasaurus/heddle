@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -18,39 +19,39 @@ export interface RenderOptions {
   sourceGuaranteed: boolean;
 }
 
-export const TS_NODE: RenderOptions = {
+export const TS_NODE: Omit<RenderOptions, 'defaultBranch'> = {
   rulesets: ['p/typescript', 'p/nodejs'],
   inLangExtensions: ['ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs'],
   excludes: ['node_modules', 'dist'],
-  defaultBranch: 'main',
   sourceGuaranteed: true,
 };
 
-export const GENERIC: RenderOptions = {
+export const GENERIC: Omit<RenderOptions, 'defaultBranch'> = {
   rulesets: ['p/default'],
   inLangExtensions: [],
   excludes: ['node_modules', 'dist'],
-  defaultBranch: 'main',
   sourceGuaranteed: false,
 };
 
 export interface PrAutomationAssets {
   readonly workflowTemplate: string;
+  readonly gateTemplate: string;
   readonly gitleaksRangeScan: string;
 }
 
 // Single source of truth: the choice label IS the preset key, so `presetChoices` (shown to the operator)
 // and `presetFor` (used to render) can never drift apart — renaming a label here updates both at once.
-const PRESETS: Record<string, RenderOptions> = { 'TS/Node': TS_NODE, 'Generic': GENERIC };
+const PRESETS: Record<string, Omit<RenderOptions, 'defaultBranch'>> = { 'TS/Node': TS_NODE, 'Generic': GENERIC };
 const presetChoices = Object.keys(PRESETS);
 const nextSteps = [
   'What’s next:',
   '1. These scanners run on every PR automatically. To ENFORCE them as merge-blocking, add a repository ruleset requiring the `semgrep` and `gitleaks` check contexts — that’s a GitHub *settings* change (Settings → Rules), not a file this wizard can write.',
   '2. On a public repo, SARIF findings upload to GitHub code scanning automatically. On a private repo without GitHub Advanced Security that upload is skipped — expected, not an error; the scan findings still appear in each PR run’s job log and summary.',
-  '3. Full CI review out-of-the-box; external AI reviewer apps (Codacy, CodeFactor, Cursor Bugbot, …) are a separate guided step.',
+  '3. To make CI merge-blocking, require the `gate` status check in a repository ruleset (Settings → Rules). With the Generic preset, edit its intentionally failing placeholder build job before requiring `gate`.',
+  '4. Full CI review out-of-the-box; external AI reviewer apps (Codacy, CodeFactor, Cursor Bugbot, …) are a separate guided step.',
 ].join('\n');
 
-// The two templates under assets/pr-automation are VENDORED from heddle's own CI. `gitleaks-range-scan.sh`
+// The templates under assets/pr-automation are VENDORED from heddle's own CI. `gitleaks-range-scan.sh`
 // is `.github/scripts/gitleaks-range-scan.sh` copied BYTE-FOR-BYTE (a security artifact — do NOT hand-edit;
 // re-sync from canonical; a test asserts byte-identity, so any drift reds). `deterministic-review.yml.tmpl`
 // is `.github/workflows/deterministic-review.yml` with its language-coupled sites tokenized (`__HEDDLE_*__`)
@@ -69,14 +70,16 @@ export function resolvePrAutomationAssets(): PrAutomationAssets {
   const root = bundledAssetsRoot();
   return {
     workflowTemplate: join(root, 'deterministic-review.yml.tmpl'),
+    gateTemplate: join(root, 'gate.yml.tmpl'),
     gitleaksRangeScan: join(root, 'gitleaks-range-scan.sh'),
   };
 }
 
-export function readPrAutomationTemplates(): { readonly workflowTemplate: string; readonly gitleaksRangeScan: string } {
+export function readPrAutomationTemplates(): { readonly workflowTemplate: string; readonly gateTemplate: string; readonly gitleaksRangeScan: string } {
   const assets = resolvePrAutomationAssets();
   return {
     workflowTemplate: readFileSync(assets.workflowTemplate, 'utf8'),
+    gateTemplate: readFileSync(assets.gateTemplate, 'utf8'),
     gitleaksRangeScan: readFileSync(assets.gitleaksRangeScan, 'utf8'),
   };
 }
@@ -93,6 +96,41 @@ function excludePathRegex(excludes: readonly string[]): string {
   return excludes.length === 0 ? 'a^' : `(^|/)(${excludes.map(escapeRegex).join('|')})/`;
 }
 
+function gateBuildSteps(options: RenderOptions): string {
+  if (!options.sourceGuaranteed) {
+    return [
+      '      - name: Configure this build job',
+      '        run: |',
+      '          echo "::error::Configure the build job — edit .github/workflows/gate.yml to run your project\'s typecheck / test / build."',
+      '          exit 1',
+    ].join('\n');
+  }
+  return [
+    '      - name: Checkout',
+    '        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1',
+    '        with:',
+    '          persist-credentials: false',
+    '',
+    '      - name: Setup Node.js',
+    '        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0',
+    '        with:',
+    '          node-version: 22',
+    '          cache: npm',
+    '',
+    '      - name: Install dependencies',
+    '        run: npm ci',
+    '',
+    '      - name: Type check',
+    '        run: npm run typecheck',
+    '',
+    '      - name: Test',
+    '        run: npm test',
+    '',
+    '      - name: Build',
+    '        run: npm run build',
+  ].join('\n');
+}
+
 function renderWorkflow(template: string, options: RenderOptions): string {
   const replacements: Record<string, string> = {
     '__HEDDLE_RULESETS__': options.rulesets.map((ruleset) => `--config ${ruleset}`).join(' '),
@@ -106,6 +144,7 @@ function renderWorkflow(template: string, options: RenderOptions): string {
     '__HEDDLE_EXCLUDES_PATH_REGEX__': excludePathRegex(options.excludes),
     '__HEDDLE_DEFAULT_BRANCH__': options.defaultBranch,
     '__HEDDLE_SOURCE_GUARANTEED__': options.sourceGuaranteed ? 'yes' : '',
+    '__HEDDLE_GATE_BUILD_STEPS__': gateBuildSteps(options),
   };
   // Replace longer tokens FIRST: today no token is a substring of another (the `__` terminators keep
   // e.g. `__HEDDLE_RULESETS__` out of `__HEDDLE_RULESETS_DESCRIPTION__`), but sorting length-descending
@@ -114,34 +153,63 @@ function renderWorkflow(template: string, options: RenderOptions): string {
   const rendered = Object.entries(replacements)
     .sort(([a], [b]) => b.length - a.length)
     .reduce((current, [token, replacement]) => current.split(token).join(replacement), template);
-  if (rendered.includes('__HEDDLE_')) throw new Error('deterministic-review template contains an unresolved placeholder');
+  if (rendered.includes('__HEDDLE_')) throw new Error('workflow template contains an unresolved placeholder');
   return rendered;
 }
 
-export function renderDeterministicReview(options: RenderOptions = TS_NODE): string {
-  return renderWorkflow(readPrAutomationTemplates().workflowTemplate, options);
+type RenderPresetOptions = Omit<RenderOptions, 'defaultBranch'> & Partial<Pick<RenderOptions, 'defaultBranch'>>;
+
+function withDefaultBranch(options: RenderPresetOptions): RenderOptions {
+  return { ...options, defaultBranch: options.defaultBranch ?? 'main' };
 }
 
-function presetFor(choice: string): { readonly label: string; readonly options: RenderOptions } {
+export function renderDeterministicReview(options: RenderPresetOptions = TS_NODE): string {
+  return renderWorkflow(readPrAutomationTemplates().workflowTemplate, withDefaultBranch(options));
+}
+
+export function renderGate(options: RenderPresetOptions = TS_NODE): string {
+  return renderWorkflow(readPrAutomationTemplates().gateTemplate, withDefaultBranch(options));
+}
+
+export function detectDefaultBranch(targetDir: string): string {
+  try {
+    const remoteHead = execFileSync('git', ['-C', targetDir, 'symbolic-ref', '--short', 'refs/remotes/origin/HEAD'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    if (remoteHead.startsWith('origin/')) return remoteHead.slice('origin/'.length);
+  } catch {
+    // Try local conventional names below; a feature branch is deliberately not a fallback.
+  }
+  for (const branch of ['main', 'master']) {
+    try {
+      execFileSync('git', ['-C', targetDir, 'show-ref', '--verify', '--quiet', `refs/heads/${branch}`], { stdio: 'ignore' });
+      return branch;
+    } catch {
+      // Check the next conventional branch name.
+    }
+  }
+  return 'main';
+}
+
+function presetFor(choice: string): { readonly label: string; readonly options: Omit<RenderOptions, 'defaultBranch'> } {
   // Keyed on PRESETS so a label rename cannot misroute. Fall back to the first choice if the prompter ever
   // returns an unknown label (defensive — the shipped prompters only return a member of `presetChoices`).
   const label = choice in PRESETS ? choice : presetChoices[0];
   return { label, options: PRESETS[label] };
 }
 
-function targetPaths(targetDir: string): { readonly workflow: string; readonly gitleaks: string } {
+function targetPaths(targetDir: string): { readonly workflow: string; readonly gate: string; readonly gitleaks: string } {
   return {
     workflow: join(targetDir, '.github', 'workflows', 'deterministic-review.yml'),
+    gate: join(targetDir, '.github', 'workflows', 'gate.yml'),
     gitleaks: join(targetDir, '.github', 'scripts', 'gitleaks-range-scan.sh'),
   };
 }
 
 /**
- * Write both scaffold files into the target `.github/`, skipping (merge-preserving) any that already
+ * Write all scaffold files into the target `.github/`, skipping (merge-preserving) any that already
  * exist. Returns which paths were written vs left unchanged so the caller can report and summarize.
  */
 function scaffoldWorkflows(
-  paths: { readonly workflow: string; readonly gitleaks: string },
+  paths: { readonly workflow: string; readonly gate: string; readonly gitleaks: string },
   options: RenderOptions,
   io: WizardIO,
 ): { written: string[]; existing: string[] } {
@@ -159,6 +227,7 @@ function scaffoldWorkflows(
     }
   };
   writeIfAbsent(paths.workflow, renderWorkflow(templates.workflowTemplate, options));
+  writeIfAbsent(paths.gate, renderWorkflow(templates.gateTemplate, options));
   writeIfAbsent(paths.gitleaks, templates.gitleaksRangeScan);
   return { written, existing };
 }
@@ -175,12 +244,13 @@ export function prAutomationStep(): WizardStep {
       }
 
       const paths = targetPaths(ctx.targetDir);
+      const defaultBranch = detectDefaultBranch(ctx.targetDir);
       if (ctx.dryRun) {
-        io.report(`dry-run — PR automation: a real run would write ${paths.workflow} and ${paths.gitleaks} using the TS/Node preset; nothing was prompted or written.`);
+        io.report(`dry-run — PR automation: a real run would write ${paths.workflow}, ${paths.gate}, and ${paths.gitleaks} using the TS/Node preset; detected default branch: ${defaultBranch}; nothing was prompted or written.`);
         return {
           id: 'pr-automation',
           status: 'skipped',
-          summary: 'dry-run — PR automation: TS/Node preset; workflow and script write skipped',
+          summary: `dry-run — PR automation: TS/Node preset; detected default branch ${defaultBranch}; workflow, gate, and script write skipped`,
         };
       }
 
@@ -188,7 +258,7 @@ export function prAutomationStep(): WizardStep {
       io.report(`PR automation language preset: ${preset.label}`);
 
       try {
-        const { written, existing } = scaffoldWorkflows(paths, preset.options, io);
+        const { written, existing } = scaffoldWorkflows(paths, { ...preset.options, defaultBranch }, io);
         if (written.length > 0) io.report(nextSteps);
         const changes = [
           written.length > 0 ? `wrote ${written.join(', ')}` : '',
