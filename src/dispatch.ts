@@ -10,13 +10,13 @@ import { readClaudeAccounts, pickClaudeAccount, capAwarePolicy, hardRefusal } fr
 import { classifyRotationRefusal, DEFAULT_COOLDOWN_S, DEFAULT_COOLING_PATH, readCooling, readRotationAccounts, writeCooling } from './rotation.js';
 import { basename } from 'node:path';
 import { defaultAdapterFor } from './dispatcher/adapters.js';
-import { refusalOutcome, refuseDepth1, refuseNotDispatchable, refuseInSession, refuseBilling } from './dispatcher/refusals.js';
+import { refusalOutcome, refuseDepth1, refuseNotDispatchable, refuseInSession, refuseBilling, dirtyTreeInstruction } from './dispatcher/refusals.js';
 import { overrideReasonGate } from './dispatcher/override-gate.js';
 import { monocultureNote, formatMonocultureWarning } from './dispatcher/monoculture.js';
 import { planDispatch, resolveRotationAccount, hasNoDispatchableClaudeAccount, noDispatchableClaudeAccountReason, capabilityFitFallbackEligible } from './dispatcher/plan.js';
 import { runTarget } from './dispatcher/run.js';
 import { boundedPreflight } from './bounded-dispatch.js';
-import { checkoutFingerprint, fallbackBarrier } from './worktree.js';
+import { checkoutFingerprint, fallbackBarrier, autoWipCommit } from './worktree.js';
 import type { AdapterFactory, DispatchContext, DispatchRequest, DispatchOutcome } from './dispatcher/types.js';
 
 // Public surface — exactly what src/dispatch.ts exported before the HED-282 split (nothing widened).
@@ -273,19 +273,39 @@ export async function dispatch(
   // prior rate-limit that may already have reset), and a preemptive jump to the class fallback bypassed
   // both that fallback's own account selection and the HED-261 floor. Run the primary as usual — a real
   // rate-limit then cools + fails over (below), and a genuinely dead pool reaches the normal fallback path.
-  const preFp = checkoutFingerprint(req.cwd);
+  let preFp = checkoutFingerprint(req.cwd);
   // One barrier for both fallback re-dispatch points (account-failover + class fallback): if the
   // failed leg left the parent checkout dirty since `preFp`, refuse rather than let the next leg
   // inherit it (HED-487). `failedLeg` is whichever leg just failed — the primary, or the reassigned
   // account-failover outcome. Returns the refusal outcome to return, or null to proceed. Auto-WIP
-  // recovery was cut before merge; its design constraints live in HED-622.
+  // of isolable new paths is opt-in via req.fallbackWipCommit (HED-622); default remains refuse-only.
   const dirtBarrier = (routeTarget: RouteTarget, failedLeg: DispatchOutcome): DispatchOutcome | null => {
     const barrier = fallbackBarrier(req.cwd, preFp);
     if (!barrier.blocked) return null;
+    if (req.fallbackWipCommit) {
+      const result = autoWipCommit(req.cwd, preFp, checkoutFingerprint(req.cwd));
+      if (result.committed) {
+        preFp = result.newFp;
+        return null;
+      }
+      const refusal = {
+        code: 'fallback-blocked-dirty-tree' as const,
+        reason: `failed leg ${failedLeg.provider}/${failedLeg.model} (dispatch #${failedLeg.ledgerId}) left checkout dirt: ${(barrier.dirt ?? []).join(', ')}; auto-WIP could not isolate the leg's dirt (${result.reason})`,
+        instruction: dirtyTreeInstruction(req.cwd),
+      };
+      return refusalOutcome(ctx, req, route.taskClass, routeTarget, skillsForRefusal, refusal, {
+        fellBackFrom: failedLeg.provider,
+        extra: {
+          usedFallback: true,
+          ...(failedLeg.destroyed ? { destroyed: failedLeg.destroyed } : {}),
+          ...(failedLeg.escape ? { escape: failedLeg.escape } : {}),
+        },
+      });
+    }
     const refusal = {
       code: 'fallback-blocked-dirty-tree' as const,
       reason: `failed leg ${failedLeg.provider}/${failedLeg.model} (dispatch #${failedLeg.ledgerId}) left checkout dirt: ${(barrier.dirt ?? []).join(', ')}`,
-      instruction: `Commit or discard the changes in ${req.cwd}, then re-dispatch.`,
+      instruction: dirtyTreeInstruction(req.cwd),
     };
     return refusalOutcome(ctx, req, route.taskClass, routeTarget, skillsForRefusal, refusal, {
       fellBackFrom: failedLeg.provider,

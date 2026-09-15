@@ -118,12 +118,31 @@ describe('accounts add env-repoint wizard', () => {
 
   it('refuses a no-default-baseUrl provider when the operator supplies no URL', async () => {
     const path = join(tempDir(), 'grok-nourl.json');
+    const report: string[] = [];
     withHome(tempDir());
     vi.stubEnv('XAI_API_KEY', 'FAKE_XAI_SENTINEL');
-    await expect(runAccountsAdd({ provider: 'grok', registryPath: path }, {
-      prompter: new ScriptedPrompter([true, '', '']), runner: fakeRunner,
-    })).rejects.toThrow(/http\(s\) URL/i);
-    expect(existsSync(path)).toBe(false);
+    const summary = await runAccountsAdd({ provider: 'grok', registryPath: path }, {
+      prompter: new ScriptedPrompter([true, '', '', false]), runner: fakeRunner, report: (line) => report.push(line),
+    });
+    expect(summary).toMatchObject({ added: [], failed: ['grok-1'] });
+    expect(loadAccountRegistry(path).accounts).toEqual([]);
+    expect(report.join('\n')).toMatch(/http\(s\) URL/i);
+  });
+
+  it('fails only the account when an env-repoint base URL is remote plaintext HTTP', async () => {
+    const path = join(tempDir(), 'grok-plaintext.json');
+    const report: string[] = [];
+    withHome(tempDir());
+    vi.stubEnv('XAI_API_KEY', 'FAKE_XAI_SENTINEL');
+
+    const summary = await runAccountsAdd({ provider: 'grok', registryPath: path }, {
+      prompter: new ScriptedPrompter([true, '', 'http://api.example.test/v1', false]),
+      runner: fakeRunner, report: (line) => report.push(line),
+    });
+
+    expect(summary).toMatchObject({ added: [], failed: ['grok-1'] });
+    expect(loadAccountRegistry(path).accounts).toEqual([]);
+    expect(report.join('\n')).toMatch(/must use https:\/\/ for a remote endpoint.*loopback.*refusing to send credentials over plaintext http/i);
   });
 
   it('rejects a credential-shaped fake literal as an environment-variable name', async () => {
@@ -327,5 +346,23 @@ describe('accounts add env-repoint wizard', () => {
     await expect(runAccountsAdd({ provider: 'custom', registryPath: path }, {
       prompter: new ScriptedPrompter(['GLM', 'openai-compatible']), runner: fakeRunner,
     })).rejects.toThrow(/collides with matrix provider key/i);
+  });
+
+  it('fails only the account when a CUSTOM provider base URL is remote plaintext HTTP', async () => {
+    // A custom provider builds the same credential-bearing envRepoint shape, so it must clear the shared
+    // TLS-or-loopback validator too — a remote plaintext endpoint here would otherwise report ADDED and
+    // then poison the registry (the strict loader refuses it on the next read).
+    const path = join(tempDir(), 'custom-plaintext.json');
+    const report: string[] = [];
+    withHome(tempDir());
+
+    const summary = await runAccountsAdd({ provider: 'custom', registryPath: path }, {
+      prompter: new ScriptedPrompter(['Contoso', 'openai-compatible', 'http://api.example.test/v1']),
+      runner: fakeRunner, report: (line) => report.push(line),
+    });
+
+    expect(summary).toMatchObject({ added: [], failed: ['contoso'] });
+    expect(loadAccountRegistry(path).accounts).toEqual([]);
+    expect(report.join('\n')).toMatch(/must use https:\/\/ for a remote endpoint.*loopback.*refusing to send credentials over plaintext http/i);
   });
 });

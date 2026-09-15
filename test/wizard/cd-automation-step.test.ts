@@ -21,20 +21,28 @@ function targetRepo(tempDir: () => string): string {
   return targetDir;
 }
 
-describe('cdAutomationStep', () => {
-  const { tempDir } = useTempResources('hed603-cd-automation-');
+const workflows = [
+  { templateKey: 'releaseTemplate', templateName: 'release-on-tag.yml.tmpl', fileName: 'release-on-tag.yml', jobName: 'release', environment: 'release' },
+  { templateKey: 'publishTemplate', templateName: 'publish.yml.tmpl', fileName: 'publish.yml', jobName: 'publish', environment: 'publish' },
+  { templateKey: 'deployTemplate', templateName: 'deploy.yml.tmpl', fileName: 'deploy.yml', jobName: 'deploy', environment: 'production' },
+] as const;
 
-  it('reports the release path and writes nothing during dry-run', async () => {
+describe('cdAutomationStep', () => {
+  const { tempDir } = useTempResources('hed647-cd-automation-');
+
+  it('reports all workflow paths and writes nothing during dry-run', async () => {
     const targetDir = targetRepo(tempDir);
     const lines: string[] = [];
     const result = await cdAutomationStep().run(context(targetDir, true), io([], lines));
-    const releasePath = join(targetDir, '.github', 'workflows', 'release-on-tag.yml');
 
     expect(result.status).toBe('skipped');
-    expect(existsSync(releasePath)).toBe(false);
     expect(result.summary).toContain('dry-run');
-    expect(lines.join('\n')).toContain(releasePath);
     expect(lines.join('\n')).toContain('workflow_dispatch');
+    for (const workflow of workflows) {
+      const path = join(targetDir, '.github', 'workflows', workflow.fileName);
+      expect(lines.join('\n')).toContain(path);
+      expect(existsSync(path)).toBe(false);
+    }
   });
 
   it('skips when no target directory was selected', async () => {
@@ -44,107 +52,84 @@ describe('cdAutomationStep', () => {
     expect(result.summary).toContain('no target directory');
   });
 
-  it('leaves the target unchanged when the operator declines', async () => {
+  it('leaves every workflow absent when the gate is declined', async () => {
     const targetDir = targetRepo(tempDir);
     const result = await cdAutomationStep().run(context(targetDir), io([false]));
-    const releasePath = join(targetDir, '.github', 'workflows', 'release-on-tag.yml');
 
     expect(result.status).toBe('skipped');
-    expect(existsSync(releasePath)).toBe(false);
+    for (const workflow of workflows) {
+      expect(existsSync(join(targetDir, '.github', 'workflows', workflow.fileName))).toBe(false);
+    }
   });
 
-  it('writes the manual release workflow after opt-in', async () => {
+  it('writes all selected workflows byte-identically', async () => {
     const targetDir = targetRepo(tempDir);
-    const result = await cdAutomationStep().run(context(targetDir), io([true]));
-    const releasePath = join(targetDir, '.github', 'workflows', 'release-on-tag.yml');
+    const assets = resolveCdAutomationAssets();
+    const result = await cdAutomationStep().run(context(targetDir), io([true, true, true, true]));
 
     expect(result.status).toBe('done');
-    expect(readFileSync(releasePath, 'utf8')).toBe(readCdTemplate());
+    for (const workflow of workflows) {
+      const path = join(targetDir, '.github', 'workflows', workflow.fileName);
+      expect(readFileSync(path, 'utf8')).toBe(readCdTemplate(assets[workflow.templateKey]));
+    }
   });
 
-  it('preserves an existing release workflow and reports it', async () => {
+  it('honors declining every workflow after accepting the gate', async () => {
+    const targetDir = targetRepo(tempDir);
+    const result = await cdAutomationStep().run(context(targetDir), io([true, false, false, false]));
+
+    expect(result.status).toBe('done');
+    expect(result.summary).toContain('declined');
+    for (const workflow of workflows) {
+      expect(existsSync(join(targetDir, '.github', 'workflows', workflow.fileName))).toBe(false);
+    }
+  });
+
+  it('writes only the release workflow when it is the sole opt-in', async () => {
+    const targetDir = targetRepo(tempDir);
+    const result = await cdAutomationStep().run(context(targetDir), io([true, true, false, false]));
+
+    expect(result.status).toBe('done');
+    expect(existsSync(join(targetDir, '.github', 'workflows', 'release-on-tag.yml'))).toBe(true);
+    expect(existsSync(join(targetDir, '.github', 'workflows', 'publish.yml'))).toBe(false);
+    expect(existsSync(join(targetDir, '.github', 'workflows', 'deploy.yml'))).toBe(false);
+  });
+
+  it('preserves an existing selected workflow and writes the other selected workflows', async () => {
     const targetDir = targetRepo(tempDir);
     const releasePath = join(targetDir, '.github', 'workflows', 'release-on-tag.yml');
     mkdirSync(join(targetDir, '.github', 'workflows'), { recursive: true });
     writeFileSync(releasePath, 'operator workflow\n');
     const lines: string[] = [];
 
-    const result = await cdAutomationStep().run(context(targetDir), io([true], lines));
+    const result = await cdAutomationStep().run(context(targetDir), io([true, true, true, true], lines));
 
     expect(result.status).toBe('done');
     expect(readFileSync(releasePath, 'utf8')).toBe('operator workflow\n');
-    expect(lines.some((line) => line.includes(`already present — left unchanged: ${releasePath}`))).toBe(true);
+    expect(lines).toContain(`CD automation: already present — left unchanged: ${releasePath}`);
+    expect(existsSync(join(targetDir, '.github', 'workflows', 'publish.yml'))).toBe(true);
+    expect(existsSync(join(targetDir, '.github', 'workflows', 'deploy.yml'))).toBe(true);
   });
 
-  it('release template is valid YAML: manual-dispatch-only, fail-closed, injection-safe, token-free (drift guard)', () => {
-    const template = readCdTemplate();
-    // Written verbatim — no __HEDDLE_ substitution. If a token is ever added this reddens; wire the
-    // write through renderWorkflow (pr-automation-step.ts) at that point.
-    expect(template).not.toContain('__HEDDLE_');
+  it('does not make scaffold safety claims about an existing unread workflow', async () => {
+    const targetDir = targetRepo(tempDir);
+    const deployPath = join(targetDir, '.github', 'workflows', 'deploy.yml');
+    const unsafeWorkflow = 'on: {push: {branches: [main]}}\njobs: {x: {runs-on: ubuntu-latest, steps: []}}\n';
+    mkdirSync(join(targetDir, '.github', 'workflows'), { recursive: true });
+    writeFileSync(deployPath, unsafeWorkflow);
+    const lines: string[] = [];
 
-    // Parse with the same yaml@2 lib pr-automation-step.test uses. This catches invalid YAML (a workflow
-    // that would not load on GitHub) AND lets us assert the safety shape structurally, not by substring.
-    const doc = parse(template) as {
-      on?: Record<string, unknown>;
-      jobs?: {
-        release?: {
-          'runs-on'?: unknown;
-          steps?: Array<{ name?: string; run?: string; uses?: string; with?: { ref?: unknown }; if?: unknown; 'continue-on-error'?: unknown }>;
-        };
-      };
-    };
+    const result = await cdAutomationStep().run(context(targetDir), io([true, false, false, true], lines));
 
-    // Manual-dispatch ONLY — no push / tags / schedule / release / pull_request / repository_dispatch /
-    // workflow_run trigger can ever ship a release unattended.
-    expect(Object.keys(doc.on ?? {})).toEqual(['workflow_dispatch']);
-
-    // Runner pinned to a fixed image (matches the sibling gate/deterministic-review templates) — a rarely
-    // run release job must not silently change when GitHub retargets `-latest`.
-    expect(doc.jobs?.release?.['runs-on']).toBe('ubuntu-24.04');
-
-    const steps = doc.jobs?.release?.steps ?? [];
-    // Binds the fail-closed SHAPE of the shipped template — NOT a proof that no conceivable drift could
-    // ever create a release (a negative-proof test can't be exhaustive; e.g. a release-creating step
-    // inserted BEFORE the placeholder is out of scope here). Each property below reddens on the drift named:
-    //  • exactly one job (`release`) — a second release-capable job (e.g. a `publish:` job) would run on
-    //    dispatch alongside it, with no placeholder to fail first;
-    //  • the placeholder is a real `exit 1` LINE (`/^\s*exit 1\s*$/m` rejects a defanged `echo "exit 1"`),
-    //    neither skippable (`if:`) nor swallowed (`continue-on-error:`);
-    //  • every step AFTER the placeholder is unconditional, so once the placeholder fails the release
-    //    step's implicit `if: success()` is false (covers a reorder or a trailing `if: always()` step);
-    //  • the release `run:` routes the tag through env: (no `${{` interpolation) and carries `--verify-tag`;
-    //  • checkout pins `refs/tags/…` (asserted after this block) so a branch / SHA / nonexistent input fails.
-    expect(Object.keys(doc.jobs ?? {})).toEqual(['release']);
-    const placeholderIdx = steps.findIndex((step) => typeof step.run === 'string' && /^\s*exit 1\s*$/m.test(step.run));
-    const releaseIdx = steps.findIndex((step) => typeof step.run === 'string' && step.run.includes('gh release create'));
-    expect(placeholderIdx).toBeGreaterThanOrEqual(0);
-    expect(releaseIdx).toBeGreaterThanOrEqual(0);
-    expect(placeholderIdx).toBeLessThan(releaseIdx);
-    // The placeholder itself cannot be skipped or swallowed.
-    expect(steps[placeholderIdx]?.if).toBeUndefined();
-    expect(steps[placeholderIdx]?.['continue-on-error']).toBeUndefined();
-    // Every step after the failing placeholder is unconditional — this subsumes the release step's own
-    // if:/continue-on-error, and also reddens on a trailing `if: always()` release step or any swallowed failure.
-    steps.slice(placeholderIdx + 1).forEach((step) => {
-      expect(step?.if).toBeUndefined();
-      expect(step?.['continue-on-error']).toBeUndefined();
-    });
-
-    const releaseStep = steps[releaseIdx];
-    // Injection-safe: the dispatch input is routed through env:, never interpolated into the run: shell.
-    expect(releaseStep?.run).not.toContain('${{');
-    // --verify-tag: gh fails if the tag does not already exist, so a release can never be created at the
-    // default-branch tip from a non-tag/nonexistent ref (qodo HIGH + cursor "wrong commit").
-    expect(releaseStep?.run).toContain('--verify-tag');
-
-    // Checkout pins the TAG ref (refs/tags/…), so a branch name / commit SHA / nonexistent input fails at
-    // checkout — the release can only ever build the commit the named tag points at (an unqualified ref
-    // resolves a same-named branch first, diverging the built commit from the released one).
-    const checkoutStep = steps.find((step) => typeof step.uses === 'string' && step.uses.includes('actions/checkout'));
-    expect(checkoutStep?.with?.ref).toBe('refs/tags/${{ inputs.tag }}');
+    expect(result.status).toBe('done');
+    expect(readFileSync(deployPath, 'utf8')).toBe(unsafeWorkflow);
+    expect(lines.join('\n')).not.toContain('manual-dispatch-only');
+    expect(lines.join('\n')).not.toContain('production');
+    expect(lines.join('\n')).toContain('did not read or validate');
+    expect(lines.join('\n')).toContain(deployPath);
   });
 
-  it('only applies to a target repository root and resolves its bundled template', () => {
+  it('only applies to a target repository root and resolves all bundled templates', () => {
     const targetDir = tempDir();
     const assets = resolveCdAutomationAssets();
 
@@ -152,6 +137,60 @@ describe('cdAutomationStep', () => {
     expect(cdAutomationStep().applies?.(context(targetDir))).toBe(false);
     mkdirSync(join(targetDir, '.git'));
     expect(cdAutomationStep().applies?.(context(targetDir))).toBe(true);
-    expect(existsSync(assets.releaseTemplate)).toBe(true);
+    for (const workflow of workflows) {
+      expect(existsSync(assets[workflow.templateKey])).toBe(true);
+    }
+  });
+});
+
+describe.each(workflows)('$templateName template drift guard', ({ templateKey, jobName }) => {
+  it('retains the shipped manual, fail-closed, injection-safe workflow shape', () => {
+    const template = readCdTemplate(resolveCdAutomationAssets()[templateKey]);
+    const doc = parse(template) as {
+      on?: Record<string, unknown>;
+      jobs?: Record<string, { 'runs-on'?: unknown; steps?: Array<{ run?: string; uses?: string; with?: Record<string, unknown>; if?: unknown; 'continue-on-error'?: unknown }> }>;
+    };
+
+    // This guard binds exactly the token-free, manual-only trigger, one-job runner, pinned tag checkout,
+    // real unconditional fail-closed placeholder, unconditional later steps, and interpolation-free runs.
+    // It is not exhaustive proof against every conceivable unsafe drift: for example, a release-capable
+    // step inserted before the placeholder is outside this guard's scope.
+    expect(template).not.toContain('__HEDDLE_');
+    expect(Object.keys(doc.on ?? {})).toEqual(['workflow_dispatch']);
+    expect(Object.keys(doc.jobs ?? {})).toEqual([jobName]);
+
+    const job = doc.jobs?.[jobName];
+    expect(job?.['runs-on']).toBe('ubuntu-24.04');
+    const steps = job?.steps ?? [];
+    const checkout = steps.find((step) => typeof step.uses === 'string' && step.uses.includes('actions/checkout'));
+    expect(checkout?.with?.ref).toBe('refs/tags/${{ inputs.tag }}');
+    expect(checkout?.with?.['persist-credentials']).toBe(false);
+    expect(checkout?.uses).toBe('actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1');
+    expect(template).toContain('uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1');
+
+    const placeholderIdx = steps.findIndex((step) => typeof step.run === 'string' && /^\s*exit 1\s*$/m.test(step.run));
+    expect(placeholderIdx).toBeGreaterThanOrEqual(0);
+    expect(steps[placeholderIdx]?.if).toBeUndefined();
+    expect(steps[placeholderIdx]?.['continue-on-error']).toBeUndefined();
+    steps.slice(placeholderIdx + 1).forEach((step) => {
+      expect(step.if).toBeUndefined();
+      expect(step['continue-on-error']).toBeUndefined();
+    });
+    steps.filter((step) => typeof step.run === 'string').forEach((step) => expect(step.run).not.toContain('${{'));
+  });
+});
+
+describe('release-on-tag.yml.tmpl release-only drift guard', () => {
+  it('keeps the verified tag release after the placeholder', () => {
+    const template = readCdTemplate(resolveCdAutomationAssets().releaseTemplate);
+    const doc = parse(template) as { jobs?: { release?: { steps?: Array<{ run?: string }> } } };
+    const steps = doc.jobs?.release?.steps ?? [];
+    const placeholderIdx = steps.findIndex((step) => typeof step.run === 'string' && /^\s*exit 1\s*$/m.test(step.run));
+    const releaseIdx = steps.findIndex((step) => typeof step.run === 'string' && step.run.includes('gh release create'));
+
+    expect(releaseIdx).toBeGreaterThanOrEqual(0);
+    expect(placeholderIdx).toBeLessThan(releaseIdx);
+    expect(steps[releaseIdx]?.run).toContain('--verify-tag');
+    expect(steps[releaseIdx]?.run).not.toContain('${{');
   });
 });

@@ -1,7 +1,7 @@
 import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
-import { loadAccountRegistry, upsertAccount, writeAccountRegistry, type Account, type AccountTier, type BillingClass } from '../accounts.js';
+import { loadAccountRegistry, upsertAccount, validateEnvRepointBaseUrl, writeAccountRegistry, type Account, type AccountTier, type BillingClass } from '../accounts.js';
 import { ensureSecureDir } from '../secure-fs.js';
 import { loginStatus, loginIdentity } from '../health/parse.js';
 import type { CliRunner, NativeProvider } from './cli-runner.js';
@@ -47,22 +47,13 @@ function validateEnvVarName(value: string): void {
   }
 }
 
-function validateBaseUrl(value: string): void {
-  try {
-    const url = new URL(value);
-    if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new Error('unsupported protocol');
-  } catch {
-    throw new Error('base URL must be an http(s) URL');
-  }
-}
-
 function createIsolatedConfigDir(provider: 'claude' | 'codex', id: string, home: string = homedir()): string {
   const configPath = pathFor(provider, id, home);
   // Freshness is a security property for env-repoint (a stale login must not survive) — refuse an existing
   // dir rather than reuse it; ensureSecureDir then creates it 0700-from-outset and validates the whole
   // created tree (rejecting a symlink / foreign-owned / group-or-other-writable path) — F8/HED-590.
   if (existsSync(configPath)) throw new Error(`isolated config directory already exists for ${provider} ${id}`);
-  ensureSecureDir(configPath, { mode: 0o700 });
+  ensureSecureDir(configPath, { mode: 0o700, boundary: home });
   // Defense-in-depth for the check-then-create window between existsSync and ensureSecureDir: ensureSecureDir
   // ACCEPTS (never chmods) an existing safe dir, so a same-uid dir raced in after the existsSync could carry a
   // stale .credentials.json. A cross-uid or symlinked race is already rejected by ensureSecureDir; refusing a
@@ -126,7 +117,7 @@ async function addOne(provider: NativeProvider, deps: AccountsAddDeps, ordinal: 
     // group-or-other-writable path rather than trusting it (F8/HED-590). Refuse-closed on an unsafe path
     // fails just THIS account (like the env-repoint path), never aborts the whole wizard.
     try {
-      ensureSecureDir(configPath, { mode: 0o700 });
+      ensureSecureDir(configPath, { mode: 0o700, boundary: home });
     } catch (error) {
       summary.failed.push(id);
       deps.report?.(`FAIL ${provider} ${id} (config dir: ${error instanceof Error ? error.message : String(error)})`);
@@ -185,7 +176,9 @@ async function envRepointBaseUrl(entry: ProviderMatrixEntry, deps: AccountsAddDe
   // endpoint can disagree (codeant #128). For a non-global region the operator must supply the URL.
   const urlDefault = region && region !== 'global' ? undefined : entry.baseUrl;
   const baseUrl = await deps.prompter.text(`${entry.displayName} base URL`, urlDefault);
-  validateBaseUrl(baseUrl);
+  // Validation is the CALLER's job (addEnvRepointOne), in a narrow try/catch — so a bad URL fails just
+  // that account while a prompter cancellation still propagates and aborts the wizard, matching
+  // addLocalRuntimeOne / addCustomProvider (qodo #241: don't record a prompter exception as a failed account).
   return { baseUrl, ...(region === undefined ? {} : { region }) };
 }
 
@@ -206,6 +199,13 @@ export async function addEnvRepointOne(
     return;
   }
   const { baseUrl, region } = await envRepointBaseUrl(entry, deps);
+  try {
+    validateEnvRepointBaseUrl(baseUrl, `${entry.displayName} base URL`);
+  } catch (error) {
+    summary.failed.push(id);
+    deps.report?.(`FAIL ${entry.key} ${id} (${error instanceof Error ? error.message : String(error)})`);
+    return;
+  }
   const authTokenRef = await deps.prompter.text(
     `Which environment variable holds your ${entry.displayName} key? (a NAME you have exported, e.g. ZAI_API_KEY — not the key itself)`,
   );
@@ -266,7 +266,13 @@ export async function addLocalRuntimeOne(
     return;
   }
   const baseUrl = await deps.prompter.text(`${entry.displayName} base URL`, entry.baseUrl);
-  validateBaseUrl(baseUrl);
+  try {
+    validateEnvRepointBaseUrl(baseUrl, `${entry.displayName} base URL`);
+  } catch (error) {
+    summary.failed.push(id);
+    deps.report?.(`FAIL ${entry.key} ${id} (${error instanceof Error ? error.message : String(error)})`);
+    return;
+  }
   let configPath: string;
   try {
     configPath = createIsolatedConfigDir(provider, id, home);
@@ -301,7 +307,17 @@ async function addCustomProvider(deps: AccountsAddDeps, registryPath: string, su
   const service = customService(displayName);
   const style = await deps.prompter.select('Custom provider API style', ['openai-compatible', 'anthropic-compatible', 'custom']);
   const baseUrl = await deps.prompter.text('Custom provider base URL');
-  validateBaseUrl(baseUrl);
+  // A custom provider is a credential-bearing env-repoint account too (envRepoint below), so its base URL
+  // must clear the same TLS-or-loopback + no-userinfo bar as the matrix env-repoint and local-runtime paths
+  // — otherwise a remote plaintext endpoint would slip through here and then poison the registry, since the
+  // now-strict loader (validateEnvRepoint) refuses to load it on the next read. Fail only this account.
+  try {
+    validateEnvRepointBaseUrl(baseUrl, `${displayName} base URL`);
+  } catch (error) {
+    summary.failed.push(service);
+    deps.report?.(`FAIL ${service} (${error instanceof Error ? error.message : String(error)})`);
+    return;
+  }
   const authTokenRef = await deps.prompter.text('Which environment variable holds your custom provider key? (a NAME you have exported, not the key itself)');
   validateEnvVarName(authTokenRef);
   const modelIds = await deps.prompter.text('Custom provider model IDs');

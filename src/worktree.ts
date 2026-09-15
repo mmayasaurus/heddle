@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { lstatSync, readFileSync, readlinkSync } from 'node:fs';
+import { lstatSync, mkdtempSync, readFileSync, readlinkSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { isToolRuntimePath } from './tool-runtime.js';
 
@@ -61,6 +62,38 @@ function git(cwd: string, args: string[]): string {
     cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], env: gitEnv(),
     timeout: 30_000, maxBuffer: 64 * 1024 * 1024,
   });
+}
+
+/** Like `git`, but merges extra env AFTER the inherited-override strip (so a temp GIT_INDEX_FILE can be set) and keeps stderr for error reasons. */
+function gitWithEnv(cwd: string, args: string[], extraEnv: NodeJS.ProcessEnv = {}): string {
+  return execFileSync('git', args, {
+    cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: { ...gitEnv(), ...extraEnv },
+    timeout: 30_000, maxBuffer: 64 * 1024 * 1024,
+  });
+}
+
+function gitErrorMessage(err: unknown): string {
+  if (err && typeof err === 'object') {
+    const e = err as { stderr?: unknown; message?: unknown };
+    if (typeof e.stderr === 'string' && e.stderr.trim()) return e.stderr.trim();
+    if (typeof e.message === 'string' && e.message.trim()) return e.message.trim();
+  }
+  return String(err);
+}
+
+function pathStillExists(cwd: string, rel: string): boolean {
+  try { lstatSync(join(cwd, rel)); return true; }
+  catch { return false; }
+}
+
+/** The repo top level for `cwd`. `git status` emits paths relative to it, so root-relative status
+ * paths must be joined against this, never a (possibly nested) cwd. Falls back to `cwd` when the top
+ * level cannot be resolved (e.g. a bare repo); a genuinely broken repo then fails at the first git op.
+ * Strips ONLY git's terminating newline, not arbitrary whitespace — a repo directory name may legitimately
+ * end in a space, and `.trim()` would remove it and leave a nonexistent path (codex re-convergence P3). */
+function repoTopLevel(cwd: string): string {
+  try { return git(cwd, ['rev-parse', '--show-toplevel']).replace(/\r?\n$/, '') || cwd; }
+  catch { return cwd; }
 }
 
 /** Git repository identity for cwd-based policy decisions; null outside a readable Git repository. */
@@ -157,6 +190,10 @@ export function checkoutFingerprint(root: string): CheckoutFingerprint | null {
   try {
     let head = '(no HEAD)';
     try { head = git(root, ['rev-parse', 'HEAD']).trim(); } catch { /* fresh repo, no commits */ }
+    // git status emits REPO-ROOT-relative paths regardless of the directory it runs in, so join them
+    // back onto the repo top level, NOT `root` (which may be a nested cwd) — else a nested-cwd
+    // fingerprint hashes the wrong path and every digest degrades to '<missing>' (codex P2 review).
+    const base = repoTopLevel(root);
     // -z: NUL-separated records, so paths with spaces/newlines/quotes parse correctly.
     // -uall lists untracked FILES individually. Without it git collapses an untracked directory to
     // a single `dir/` entry, so deleting one file inside pre-existing untracked work would leave the
@@ -191,7 +228,7 @@ export function checkoutFingerprint(root: string): CheckoutFingerprint | null {
         // spike memory. lstat (not stat) so a symlink is classified here, never followed to whatever it
         // points at. Each marker still CHANGES when the underlying dirt does, so escapedPaths keeps
         // detecting a retargeted symlink or a rewritten large file at an already-dirty path.
-        const fullPath = join(root, path);
+        const fullPath = join(base, path);
         const st = lstatSync(fullPath);
         if (st.isSymbolicLink()) {
           // Hash the link TARGET TEXT — readlink reads the link itself (never opens/follows the
@@ -246,10 +283,10 @@ export function escapedPaths(
  * (postFp null with a non-null preFp — e.g. the leg destroyed `.git`) is the ultimate dirt and
  * blocks: `escapedPaths` reports that as "undecidable" (null), which must never pass a wrecked tree.
  *
- * Refuse-with-report ONLY. The opt-in that auto-committed the leg's dirt so the fallback could
- * proceed was cut before merge: git add/commit cannot isolate one leg's contribution at path
- * granularity, so it risks sweeping in the orchestrator's own uncommitted work (four independent
- * reviewers converged on six defects, PR #206). That designed feature is HED-622.
+ * Refuse-with-report by default. Opt-in recovery that auto-commits isolable new paths lives in
+ * `autoWipCommit` (HED-622): a naive git add/commit cannot isolate one leg's contribution at path
+ * granularity, so recovery is membership-guarded and temp-index-only; when isolation is undecidable
+ * this barrier still refuses.
  */
 export function fallbackBarrier(
   cwd: string, preFp: CheckoutFingerprint | null,
@@ -261,6 +298,203 @@ export function fallbackBarrier(
   const dirt = escapedPaths(preFp, postFp);
   if (dirt === null || dirt.length === 0) return { blocked: false, dirt };
   return { blocked: true, dirt };
+}
+
+const AUTO_WIP_MESSAGE = 'heddle auto-wip: isolate failed-leg new paths';
+
+/**
+ * Decide which of a failed leg's paths are safe to auto-commit (HED-622). Pure — no git calls or I/O,
+ * so it is unit-testable in isolation and keeps autoWipCommit's git-mutation sequence readable. Safe
+ * requires HEAD unchanged, every pre-existing dirty path byte-identical, and the only paths new since
+ * preFp being newly-created UNTRACKED files ('??'). A leg that touched an established TRACKED file
+ * (modify/delete/rename — codex finding 2: checkoutFingerprint omits CLEAN tracked files, so such a
+ * change also lands in postFp minus preFp), a moved HEAD, a changed/cleared pre-existing path, or an
+ * empty safe set all REFUSE.
+ */
+function classifyIsolableSet(
+  preFp: CheckoutFingerprint, postFp: CheckoutFingerprint,
+): { safeSet: string[] } | { refuse: string } {
+  const unsafe: string[] = [];
+  if (postFp.head !== preFp.head) {
+    unsafe.push(`HEAD moved ${preFp.head.slice(0, 8)} → ${postFp.head.slice(0, 8)}`);
+  }
+  const changed: string[] = [];
+  const cleared: string[] = [];
+  for (const [path, state] of preFp.entries) {
+    const now = postFp.entries.get(path);
+    if (now === undefined) cleared.push(path);
+    else if (now !== state) changed.push(path);
+  }
+  if (changed.length) unsafe.push(`pre-existing dirty path changed: ${changed.join(', ')}`);
+  if (cleared.length) unsafe.push(`pre-existing dirty path cleared: ${cleared.join(', ')}`);
+  if (unsafe.length) return { refuse: unsafe.join('; ') };
+
+  // A path absent from preFp is safe ONLY if it is a newly-created UNTRACKED file ('??'); a tracked
+  // file the leg modified/deleted/renamed is a change to established project content and makes the
+  // whole operation unsafe (refuse), never merely skipped — the tree cannot be isolated at path
+  // granularity once it is entangled with real project changes.
+  const safeSet: string[] = [];
+  const trackedTouched: string[] = [];
+  for (const [path, marker] of postFp.entries) {
+    if (preFp.entries.has(path)) continue;
+    if (marker.startsWith('??')) safeSet.push(path);
+    else trackedTouched.push(`${marker.slice(0, 2).trim() || '??'} ${path}`);
+  }
+  if (trackedTouched.length) {
+    return { refuse: `leg changed pre-existing tracked path(s): ${trackedTouched.join(', ')}` };
+  }
+  if (safeSet.length === 0) {
+    return { refuse: 'no isolable new paths (safeSet empty)' };
+  }
+  return { safeSet };
+}
+
+/**
+ * Opt-in path-scoped auto-WIP of a failed leg's newly-created paths (HED-622).
+ *
+ * Commits ONLY paths present in `postFp` and absent from `preFp` that are newly-created UNTRACKED
+ * files ('??'), and only when HEAD is unchanged and every pre-existing dirty path is byte-identical.
+ * A leg that touched an established TRACKED file (modify/delete/rename) makes the whole operation
+ * unsafe → refuse (codex finding 2: checkoutFingerprint omits clean tracked files, so such a change
+ * ALSO lands in postFp∖preFp — and committing a change to project content is exactly what this
+ * barrier must never do). Staging is isolated in a temporary index; the real `.git/index` is written
+ * only once, and only to reconcile the leg's OWN committed paths to the new HEAD so they are not left
+ * staged-for-deletion (codex finding 3) — orchestrator index entries are never touched. HEAD is
+ * pinned to a captured value and moved via compare-and-swap, so a concurrent HEAD advance refuses
+ * instead of being reverted (codex finding 1). Any doubt — missing fingerprints, mixed dirt, a moved
+ * HEAD, vanished-all, or any git failure — refuses.
+ */
+export function autoWipCommit(
+  cwd: string, preFp: CheckoutFingerprint | null, postFp: CheckoutFingerprint | null,
+): { committed: true; newFp: CheckoutFingerprint } | { committed: false; reason: string } {
+  if (preFp === null || postFp === null) {
+    return { committed: false, reason: 'undecidable: missing pre or post fingerprint' };
+  }
+  const classified = classifyIsolableSet(preFp, postFp);
+  if ('refuse' in classified) return { committed: false, reason: classified.refuse };
+  const { safeSet } = classified;
+
+  // git status --porcelain emits REPO-ROOT-relative paths regardless of the directory it runs in
+  // (verified), so under a nested cwd `pathStillExists` and the `git add`/`reset` pathspecs would
+  // resolve each path against the wrong base (cwd/<root-rel-path>) and silently drop every safe path
+  // as "vanished" — the opt-in then fails to rescue exactly the safe new-file-only case it exists for
+  // (codex P2 review). Run all path-based git ops and existence checks against the repo top level; the
+  // final newFp stays at `cwd` so it matches the caller's preFp/postFp basis.
+  const base = repoTopLevel(cwd);
+
+  // Pin every HEAD reference to one captured value (codex finding 1). commit-tree re-resolving HEAD
+  // plus an unconditional update-ref would clobber a HEAD that advanced concurrently: the new tree is
+  // built from oldHead but the ref would move regardless, reverting whatever landed in between. Capture
+  // oldHead, parent and read-tree on it, and move HEAD via compare-and-swap. The pre-check closes the
+  // window between the caller's postFp and here; the CAS closes the window between here and update-ref.
+  let oldHead: string;
+  try {
+    oldHead = gitWithEnv(base, ['rev-parse', 'HEAD']).trim();
+  } catch (err) {
+    return { committed: false, reason: `no HEAD to commit onto: ${gitErrorMessage(err)}` };
+  }
+  if (oldHead !== postFp.head) {
+    return { committed: false, reason: `HEAD moved after fingerprint (${postFp.head.slice(0, 8)} → ${oldHead.slice(0, 8)})` };
+  }
+
+  let tmpDir: string | undefined;
+  try {
+    tmpDir = mkdtempSync(join(tmpdir(), 'heddle-autowip-'));
+    const indexFile = join(tmpDir, 'index');
+    const pathspecFile = join(tmpDir, 'pathspec');
+    const indexEnv: NodeJS.ProcessEnv = {
+      GIT_INDEX_FILE: indexFile,
+      GIT_LITERAL_PATHSPECS: '1',
+    };
+
+    gitWithEnv(base, ['read-tree', oldHead], indexEnv);
+
+    const existing = safeSet.filter((p) => pathStillExists(base, p));
+    if (existing.length === 0) {
+      return { committed: false, reason: 'all isolable paths vanished before staging' };
+    }
+
+    writeFileSync(pathspecFile, existing.join('\0') + '\0');
+    gitWithEnv(base, [
+      'add', '--ignore-errors',
+      `--pathspec-from-file=${pathspecFile}`,
+      '--pathspec-file-nul',
+    ], indexEnv);
+
+    const tree = gitWithEnv(base, ['write-tree'], indexEnv).trim();
+    let headTree: string;
+    try {
+      headTree = gitWithEnv(base, ['rev-parse', `${oldHead}^{tree}`]).trim();
+    } catch (err) {
+      return { committed: false, reason: `could not resolve HEAD tree: ${gitErrorMessage(err)}` };
+    }
+    if (tree === headTree) {
+      return { committed: false, reason: 'all isolable paths vanished before staging' };
+    }
+
+    const commitSha = gitWithEnv(base, ['commit-tree', tree, '-p', oldHead, '-m', AUTO_WIP_MESSAGE]).trim();
+    // Compare-and-swap: refuse (leaving a dangling, GC-safe commit) if HEAD advanced past oldHead.
+    try {
+      gitWithEnv(base, ['update-ref', 'HEAD', commitSha, oldHead]);
+    } catch (err) {
+      // The CAS update-ref failed — HEAD advanced past oldHead, or a ref-lock/permission error. Either
+      // way update-ref is atomic, so HEAD was NOT moved; report only that certain invariant, not a
+      // guess at the cause (the raw git error carries the detail).
+      return { committed: false, reason: `could not update HEAD to the auto-WIP commit (HEAD left unmoved): ${gitErrorMessage(err)}` };
+    }
+
+    // Reconcile ONLY the committed paths into the REAL index (codex finding 3). update-ref moved HEAD
+    // while the real index stayed seeded from oldHead, so those paths now read as staged-for-deletion
+    // against the new HEAD — a later real-index commit would delete the just-committed work, and the
+    // phantom deletion even hides under a '??' in the fingerprint we return (git lists the path both
+    // ways; the Map keeps the last). `git reset -- <paths>` copies the new HEAD's entries for EXACTLY
+    // those paths; the orchestrator's own index entries stay put. This is a deliberate, minimal
+    // departure from the temp-index-only route (R's amendment #1): the real index is written, but only
+    // to reconcile the leg's OWN committed paths, never an orchestrator entry. GIT_LITERAL_PATHSPECS
+    // only — NOT indexEnv — so this hits the real .git/index, not the (now-deleted) temp index.
+    try {
+      gitWithEnv(base, [
+        'reset', '-q',
+        `--pathspec-from-file=${pathspecFile}`,
+        '--pathspec-file-nul',
+      ], { GIT_LITERAL_PATHSPECS: '1' });
+    } catch (err) {
+      // The reset failed AFTER update-ref moved HEAD — most reachably because another process holds
+      // .git/index.lock (memtrace watchers / Verity hooks touch the index in this fleet). A failed
+      // reset writes nothing (git takes index.lock then renames; a lock-acquire failure leaves the
+      // real index untouched), so roll HEAD back to oldHead via compare-and-swap: the tree is then
+      // EXACTLY as found and committed:false is fully honest — the caller refuses the fallback and the
+      // worktree is unchanged. update-ref does not take index.lock, so the rollback succeeds precisely
+      // when the reset failed for that reason (codex round-2 finding B). A rollback that itself fails
+      // (HEAD moved past our commit) leaves the auto-WIP commit on HEAD and says so.
+      const resetErr = gitErrorMessage(err);
+      try {
+        gitWithEnv(base, ['update-ref', 'HEAD', oldHead, commitSha]);
+        return { committed: false, reason: `could not reconcile the real index; rolled HEAD back to the tree as found: ${resetErr}` };
+      } catch (rollbackErr) {
+        // Both the reconcile AND the rollback failed. HEAD's state is uncertain: the rollback CAS fails
+        // if HEAD is no longer our commit (moved by another process, in any direction) OR on a ref-lock
+        // error while HEAD still holds our commit. State only what is certain — the commit MAY still be
+        // on HEAD, the index is unreconciled — and defer to a human (codex accuracy nits).
+        return { committed: false, reason: `could not reconcile the real index, and the HEAD rollback also failed — the auto-WIP commit ${commitSha.slice(0, 8)} may still be on HEAD with the index unreconciled; resolve manually: ${resetErr}; rollback: ${gitErrorMessage(rollbackErr)}` };
+      }
+    }
+
+    // A fingerprint that is unreadable HERE (after a SUCCESSFUL reset) leaves a good tree we simply
+    // cannot read — do NOT roll back; refuse honestly (codex round-2 finding B, B2 half).
+    const newFp = checkoutFingerprint(cwd);
+    if (newFp === null) {
+      return { committed: false, reason: 'auto-WIP updated HEAD and reconciled the index, but the checkout fingerprint is now unreadable' };
+    }
+    return { committed: true, newFp };
+  } catch (err) {
+    return { committed: false, reason: gitErrorMessage(err) };
+  } finally {
+    if (tmpDir !== undefined) {
+      try { rmSync(tmpDir, { recursive: true, force: true }); }
+      catch { /* temp cleanup is best-effort; only the leg's own committed paths were written to the real index */ }
+    }
+  }
 }
 
 /**

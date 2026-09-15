@@ -59,6 +59,13 @@ export function refusalOutcome(
   };
 }
 
+/** Instruction on fallback-blocked-dirty-tree refusals — advertises the opt-in now that it is wired.
+ * Names the PUBLIC opt-in forms (CLI flag / MCP field), never the internal request property, so a
+ * caller following the refusal can actually enable the recovery path (qodo #10 / codacy). */
+export function dirtyTreeInstruction(cwd: string): string {
+  return `Commit or discard the changes in ${cwd}, then re-dispatch. Or re-dispatch with the CLI flag --fallback-wip-commit (MCP tool: fallback_wip_commit) to auto-commit the failed leg's own new files (a tree with pre-existing local changes is never auto-committed).`;
+}
+
 export function refuseBilling(
   ctx: DispatchContext, req: DispatchRequest, taskClass: string, target: RouteTarget,
   skills: string[], refusal: DispatchRefusal, fellBackFrom: string | null = null,
