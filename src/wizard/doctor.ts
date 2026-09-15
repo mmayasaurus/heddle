@@ -28,9 +28,20 @@ import { DEFAULT_PROJECTS_PATH } from '../projects.js';
 import { DEFAULT_COMMS_PATH } from '../comms/log.js';
 import { OPERATOR_TOKEN_PATH } from '../comms/server.js';
 
+// The reference home the DEFAULT_* path constants were built from, captured ONCE at module load.
+// Each DEFAULT_* is `join(homedir(), '.heddle', <name>)` frozen at ITS module's import — so relocation
+// must relativize against the home in effect THEN, not a live homedir() read. A test harness that
+// overrides process.env.HOME AFTER import (e.g. setup-dryrun.test.ts's per-test temp HOME) would
+// otherwise make homedir() diverge from the frozen constants: relative(tempHome, real-home-default)
+// escapes with `../..`, join() climbs back out, and the fail-closed guard would wrongly throw on a
+// perfectly valid `home`. Snapshotting keeps relocation faithful to the constants regardless of any
+// later HOME override, while the guard still catches a genuine non-home default. Do NOT replace this
+// with a live homedir() call. (heddle CLI processes never change HOME mid-run, so this is exact.)
+const PROCESS_HOME = homedir();
+
 /** Re-root a process-home default beneath `home`, failing closed if that default could escape. */
 export function relocateHomePath(home: string, defaultPath: string): string {
-  const relativePath = relative(homedir(), defaultPath);
+  const relativePath = relative(PROCESS_HOME, defaultPath);
   const relocated = join(home, relativePath);
   const resolvedHome = resolve(home);
   const resolvedRelocated = resolve(relocated);
@@ -42,7 +53,7 @@ export function relocateHomePath(home: string, defaultPath: string): string {
     || relativeToHome === '..'
     || relativeToHome.startsWith(`..${sep}`)
   ) {
-    throw new Error(`Cannot relocate default path "${defaultPath}": expected it to be under "${homedir()}"`);
+    throw new Error(`Cannot relocate default path "${defaultPath}": expected it to be under "${PROCESS_HOME}"`);
   }
   return relocated;
 }

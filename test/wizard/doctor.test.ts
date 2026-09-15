@@ -60,6 +60,23 @@ describe('homePaths', () => {
     const outsideDefault = resolve(homedir(), '..', 'outside-default.json');
     expect(() => relocateHomePath(tempDir(), outsideDefault)).toThrow(outsideDefault);
   });
+
+  it('stays valid when process.env.HOME is overridden AFTER module load (HED-596/HED-599 regression)', () => {
+    // The setup-dryrun harness (W, HED-599) sets process.env.HOME to a per-test temp dir in beforeEach
+    // — AFTER this module and the DEFAULT_* constants were imported. relocateHomePath relativizes
+    // against the frozen module-load home (PROCESS_HOME), NOT the live overridden homedir(); a live
+    // read would make relative()/join() escape the real-home default and the fail-closed guard would
+    // wrongly throw on a valid home, mapping a canned-green doctor finish to 'failed'. Create the temp
+    // dirs BEFORE the stub so tempDir() is unaffected, then prove homePaths neither throws nor drifts.
+    const target = tempDir();
+    const overriddenHome = tempDir();
+    vi.stubEnv('HOME', overriddenHome); // homedir() now returns overriddenHome, not the module-load home
+    const paths = homePaths(target); // must NOT throw despite the override
+    expect(paths.accounts).toBe(join(target, '.heddle', 'accounts.json'));
+    for (const path of Object.values(paths)) {
+      expect(resolve(path!).startsWith(resolve(target))).toBe(true); // still strictly under target
+    }
+  });
 });
 
 describe('createDoctorStep (HED-476 wizard finish = read-only `heddle doctor`)', () => {
