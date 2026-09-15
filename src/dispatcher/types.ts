@@ -63,6 +63,8 @@ export interface DispatchRequest {
   optIn?: boolean;
   /** Skip the routing table's fallback on failure. */
   noFallback?: boolean;
+  /** Opt in to committing failed-leg checkout dirt before a fallback is dispatched. */
+  fallbackWipCommit?: boolean;
   /**
    * Per-dispatch request to keep the worker CLI's own interactive permission prompts. Undefined =
    * the adapter's constructed default (heddle's headless workers keep skipping, so the fleet is
@@ -112,7 +114,7 @@ export interface DispatchRequest {
  * `refusal` column.
  */
 export interface DispatchRefusal {
-  code: 'claude-in-session' | 'no-dispatchable-account' | 'not-dispatchable' | 'depth-1' | 'max-children' | 'capability-denied' | 'tier-read-only' | 'metered-pool-exhausted' | 'same-provider-review' | 'override-reason-required' | 'fleet-paused' | 'billing.pay-per-token' | 'billing.open-billing-at-cap' | 'billing.prepaid-exhausted' | 'headless-claude-review-unreliable' | 'env-repoint.missing-token' | 'env-repoint.invalid-config';
+  code: 'claude-in-session' | 'no-dispatchable-account' | 'not-dispatchable' | 'depth-1' | 'max-children' | 'capability-denied' | 'tier-read-only' | 'metered-pool-exhausted' | 'same-provider-review' | 'override-reason-required' | 'fleet-paused' | 'fallback-blocked-dirty-tree' | 'billing.pay-per-token' | 'billing.open-billing-at-cap' | 'billing.prepaid-exhausted' | 'headless-claude-review-unreliable' | 'env-repoint.missing-token' | 'env-repoint.invalid-config';
   reason: string;
   /** What to do instead, when there is a clear alternative. */
   instruction?: string;

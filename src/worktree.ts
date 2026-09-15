@@ -206,6 +206,37 @@ export function escapedPaths(
   return out.sort();
 }
 
+/** Block a fallback from inheriting checkout dirt created by a failed dispatch leg. */
+export function fallbackBarrier(
+  cwd: string, preFp: CheckoutFingerprint | null,
+  opts: { wip: boolean; failedLegId: number | null; label: string },
+): { blocked: boolean; dirt: string[] | null; wipCommit?: string } {
+  const postFp = checkoutFingerprint(cwd);
+  const humanDirt = escapedPaths(preFp, postFp);
+  if (humanDirt === null || humanDirt.length === 0) return { blocked: false, dirt: humanDirt };
+  if (preFp === null || postFp === null) return { blocked: false, dirt: humanDirt };
+
+  const legPaths: string[] = [];
+  for (const [path, state] of postFp.entries) {
+    if (preFp.entries.get(path) !== state) legPaths.push(path);
+  }
+  for (const path of preFp.entries.keys()) {
+    if (!postFp.entries.has(path)) legPaths.push(path);
+  }
+  legPaths.sort();
+
+  if (preFp.head !== postFp.head || !opts.wip) return { blocked: true, dirt: humanDirt };
+  const msg = 'heddle: WIP — auto-committed before fallback re-dispatch (failed leg dispatch #'
+    + opts.failedLegId + ': ' + opts.label + '); paths: ' + legPaths.join(', ');
+  try {
+    git(cwd, ['add', '--', ...legPaths]);
+    git(cwd, ['commit', '--no-verify', '-m', msg]);
+    return { blocked: false, dirt: humanDirt, wipCommit: git(cwd, ['rev-parse', 'HEAD']).trim() };
+  } catch {
+    return { blocked: true, dirt: humanDirt };
+  }
+}
+
 /**
  * Work that EXISTED in the worker's own cwd before the dispatch and is GONE afterwards (HED-127).
  *
