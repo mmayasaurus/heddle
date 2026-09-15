@@ -12,9 +12,13 @@ const configDir = '/home/probe/.claude';
 const userSettings = `${configDir}/settings.json`;
 type Clock = { value: number };
 
-function settings(event: string, hooks: Record<string, unknown> | Record<string, unknown>[]): Uint8Array {
+function settings(
+  event: string,
+  hooks: Record<string, unknown> | Record<string, unknown>[],
+  matcher?: string,
+): Uint8Array {
   const list = Array.isArray(hooks) ? hooks : [hooks];
-  return Buffer.from(JSON.stringify({ hooks: { [event]: [{ hooks: list }] } }));
+  return Buffer.from(JSON.stringify({ hooks: { [event]: [{ hooks: list, ...(matcher === undefined ? {} : { matcher }) }] } }));
 }
 
 function context(
@@ -65,6 +69,16 @@ describe('hooksChecks', () => {
   test('flags slow command hooks', async () => {
     const entry = await one({ type: 'command', command: 'hook', timeout: 5 }, { stdout: '', stderr: '', exitCode: 0, timedOut: false }, 4_600);
     expect(entry).toMatchObject({ outcome: 'warn', detail: expect.stringContaining('slow') });
+  });
+
+  test('marks just-over 75% of a hook timeout as slow', async () => {
+    const entry = await one({ type: 'command', command: 'hook', timeout: 4 }, { stdout: '', stderr: '', exitCode: 0, timedOut: false }, 3_100);
+    expect(entry).toMatchObject({ outcome: 'warn', detail: expect.stringContaining('slow') });
+  });
+
+  test('keeps just-under 75% of a hook timeout ok', async () => {
+    const entry = await one({ type: 'command', command: 'hook', timeout: 4 }, { stdout: '', stderr: '', exitCode: 0, timedOut: false }, 2_900);
+    expect(entry).toMatchObject({ outcome: 'ok', detail: expect.not.stringContaining('slow') });
   });
 
   test('flags perma-timeout hooks', async () => {
@@ -118,10 +132,44 @@ describe('hooksChecks', () => {
 
   test('skips remaining hooks when the total budget is exhausted', async () => {
     const clock = { value: 0 };
-    const ctx = context({ [userSettings]: settings('PreToolUse', [{ type: 'command', command: 'one' }, { type: 'command', command: 'two' }]) }, clock, response(clock, { stdout: '', stderr: '', exitCode: 0, timedOut: false }, 10), 5);
+    let calls = 0;
+    const ctx = context({ [userSettings]: settings('PreToolUse', [{ type: 'command', command: 'one' }, { type: 'command', command: 'two' }]) }, clock, async () => {
+      calls += 1;
+      clock.value += 10;
+      return { stdout: '', stderr: '', exitCode: 0, timedOut: false };
+    }, 5);
     const entries = await run(await hooksChecks(ctx, projectDir));
     expect(entries[0]).toMatchObject({ outcome: 'ok' });
     expect(entries[1]).toMatchObject({ outcome: 'skipped', detail: expect.stringContaining('budget exhausted after 1 hooks') });
+    expect(calls).toBe(1);
+  });
+
+  test('caps a timed-out hook at the remaining sweep budget and leaves it unverified', async () => {
+    const clock = { value: 0 };
+    let timeoutMs = 0;
+    const ctx = context({ [userSettings]: settings('PreToolUse', { type: 'command', command: 'hook', timeout: 600 }) }, clock, async (_c, _a, opts) => {
+      timeoutMs = opts.timeoutMs;
+      clock.value += 50;
+      return { stdout: '', stderr: '', exitCode: null, timedOut: true };
+    }, 50);
+    const [entry] = await run(await hooksChecks(ctx, projectDir));
+    expect(timeoutMs).toBe(50);
+    expect(entry).toMatchObject({ outcome: 'warn', detail: expect.stringContaining('budget') });
+    expect(entry.detail).toContain('unverified');
+    expect(entry.detail).not.toContain('perma-timeout');
+  });
+
+  test.each([0, -5])('substitutes the default timeout for invalid declared timeout %s', async (declaredTimeout) => {
+    const clock = { value: 0 };
+    let timeoutMs = 0;
+    const ctx = context({ [userSettings]: settings('PreToolUse', { type: 'command', command: 'hook', timeout: declaredTimeout }) }, clock, async (_c, _a, opts) => {
+      timeoutMs = opts.timeoutMs;
+      return { stdout: '', stderr: '', exitCode: 0, timedOut: false };
+    }, 700_000);
+    const [entry] = await run(await hooksChecks(ctx, projectDir));
+    expect(timeoutMs).toBe(600_000);
+    expect(entry).toMatchObject({ outcome: 'ok', detail: expect.stringContaining('declared timeout') });
+    expect(entry.detail).toContain('invalid');
   });
 
   test('passes args through only when declared', async () => {
@@ -158,6 +206,20 @@ describe('hooksChecks', () => {
     const payload = JSON.parse(stdin) as Record<string, unknown>;
     expect(payload).toMatchObject({ hook_event_name: 'PreToolUse', cwd: projectDir, tool_name: 'Bash' });
     expect(existsSync(payload.transcript_path as string)).toBe(false);
+  });
+
+  test.each([
+    ['Grep|Glob', 'Grep'],
+    ['mcp__memtrace__.*', 'mcp__memtrace__probe'],
+  ])('uses the first matcher alternative as the PreToolUse tool name', async (matcher, toolName) => {
+    const clock = { value: 0 };
+    let stdin = '';
+    const ctx = context({ [userSettings]: settings('PreToolUse', { type: 'command', command: 'hook' }, matcher) }, clock, async (_c, _a, opts) => {
+      stdin = opts.stdin;
+      return { stdout: '', stderr: '', exitCode: 0, timedOut: false };
+    });
+    await run(await hooksChecks(ctx, projectDir));
+    expect((JSON.parse(stdin) as { tool_name?: string }).tool_name).toBe(toolName);
   });
 
   test('returns no rows when all settings files are absent', async () => {

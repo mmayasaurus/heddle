@@ -111,7 +111,7 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
   heddle whoami [--json]         this process's bound identity (HEDDLE_AGENT / FLEET_AGENT / .fleet-agent) + worker context
   heddle doctor [--json] [--provider <p>]   verify harnesses/accounts/config; --provider runs only that provider's checks plus global config checks (exit 1 on any fail)
   heddle doctor --hooks [--json]            probe configured hooks' latency — EXECUTES each configured hook
-                                            with a synthetic payload; ignores --provider; flags slow/perma-timeout/missing (exit 1 on fail)
+                                            with a synthetic payload; probes the current directory's .claude settings — run from the project root; ignores --provider; flags slow/perma-timeout/missing (exit 1 on fail)
   heddle release --standalone <outDir> [--source-ref <git ref>] [--init-git] [--verify] [--json]
       requires a clean checkout at main's HEAD — headless-first invariant (HED-507)
   heddle workers [--stale <hours>] [--json]   dispatches still in flight (--stale: only orphans older than N hours)
@@ -546,7 +546,7 @@ try {
 
     case 'doctor': {
       const provider = arg('--provider');
-      const probeHooks = process.argv.includes('--hooks');
+      const probeHooks = has('--hooks');
       const usageError = (message: string): void => {
         if (json) {
           process.stdout.write(
@@ -558,15 +558,17 @@ try {
           process.exit(2);
         }
       };
-      if (process.argv.includes('--provider') && (!provider || provider.startsWith('--'))) {
-        usageError(`doctor: --provider needs a provider name (known: ${DOCTOR_PROVIDERS.join(', ')})`);
-        break;
+      if (!probeHooks) {
+        if (process.argv.includes('--provider') && (!provider || provider.startsWith('--'))) {
+          usageError(`doctor: --provider needs a provider name (known: ${DOCTOR_PROVIDERS.join(', ')})`);
+          break;
+        }
+        if (provider && !DOCTOR_PROVIDERS.includes(provider as typeof DOCTOR_PROVIDERS[number])) {
+          usageError(`doctor: unknown --provider "${provider}" (known: ${DOCTOR_PROVIDERS.join(', ')})`);
+          break;
+        }
       }
-      if (provider && !DOCTOR_PROVIDERS.includes(provider as typeof DOCTOR_PROVIDERS[number])) {
-        usageError(`doctor: unknown --provider "${provider}" (known: ${DOCTOR_PROVIDERS.join(', ')})`);
-        break;
-      }
-      const report = await runDoctor({ provider, probeHooks });
+      const report = await runDoctor({ provider: probeHooks ? undefined : provider, probeHooks });
       const text = json ? JSON.stringify(report, null, 2) : formatDoctorReport(report);
       // Exit only after stdout drains so timed-out probes cannot keep the command alive after its report.
       process.stdout.write(text + '\n', () => process.exit(report.exitCode));

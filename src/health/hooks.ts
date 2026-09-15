@@ -1,10 +1,11 @@
+import { randomBytes } from 'node:crypto';
 import { homedir, tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
-import { result, sanitize, type CheckResult } from './probe.js';
+import { result, sanitize, type CheckResult, type ProbeResult } from './probe.js';
 import type { Definition, DoctorContext } from './checks.js';
 
 type HookEntry = { type?: unknown; command?: unknown; args?: unknown; timeout?: unknown };
-type HookGroup = { hooks?: unknown };
+type HookGroup = { hooks?: unknown; matcher?: unknown };
 
 const defaultTimeoutSeconds = (event: string): number => {
   if (event === 'UserPromptSubmit') return 30;
@@ -19,10 +20,18 @@ function commandName(command: string): string {
 }
 
 function sessionId(): string {
-  return `heddle-doctor-probe-${Math.floor(Math.random() * 0x1_0000_0000).toString(16).padStart(8, '0')}`;
+  return `heddle-doctor-probe-${randomBytes(4).toString('hex')}`;
 }
 
-function synthPayload(event: string, projectDir: string, id: string): string {
+function toolNameForMatcher(matcher: string | undefined): string {
+  if (!matcher || matcher === '*' || matcher === '.*') return 'Bash';
+  const first = matcher.split('|')[0]?.trim() ?? '';
+  if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(first)) return first;
+  const collapsed = first.replace(/\.\*|\.\+/g, 'probe').replace(/[^A-Za-z0-9_]/g, '');
+  return collapsed || 'Bash';
+}
+
+function synthPayload(event: string, projectDir: string, id: string, matcher?: string): string {
   const payload: Record<string, unknown> = {
     session_id: id,
     cwd: projectDir,
@@ -31,10 +40,10 @@ function synthPayload(event: string, projectDir: string, id: string): string {
     permission_mode: 'default',
   };
   if (event === 'PreToolUse' || event === 'PermissionRequest') {
-    Object.assign(payload, { tool_name: 'Bash', tool_input: { command: 'true' }, tool_use_id: 'toolu_probe' });
+    Object.assign(payload, { tool_name: toolNameForMatcher(matcher), tool_input: { command: 'true' }, tool_use_id: 'toolu_probe' });
   } else if (event === 'PostToolUse') {
     Object.assign(payload, {
-      tool_name: 'Bash', tool_input: { command: 'true' }, tool_use_id: 'toolu_probe',
+      tool_name: toolNameForMatcher(matcher), tool_input: { command: 'true' }, tool_use_id: 'toolu_probe',
       tool_response: { stdout: '', exit_code: 0 },
     });
   } else if (event === 'UserPromptSubmit') {
@@ -70,12 +79,50 @@ function readHooks(bytes: Uint8Array): Record<string, HookGroup[]> | undefined {
   return hooks as Record<string, HookGroup[]>;
 }
 
+function classifyHookProbe(
+  probe: ProbeResult,
+  ctx: {
+    elapsed: number; timeoutMs: number; timeoutSeconds: number; name: string; command: string;
+    budgetBound: boolean; timeoutNote: string;
+  },
+): Omit<CheckResult, 'id' | 'kind' | 'provider'> {
+  const withTimeoutNote = (detail: string) => `${detail}${ctx.timeoutNote}`;
+  const slow = ctx.elapsed > ctx.timeoutMs * 0.75;
+  if (probe.timedOut) {
+    if (ctx.budgetBound) {
+      return result(
+        'warn',
+        `sweep budget reached — ${ctx.name} latency unverified (declared ${ctx.timeoutSeconds}s)`,
+        'raise --hooks budget or profile this hook in isolation',
+      );
+    }
+    return result('fail', `perma-timeout: no exit within ${ctx.timeoutSeconds}s (${ctx.name})`, 'hook never returned — likely the cause of prompt/turn stalls');
+  }
+  if (probe.exitCode === 0) {
+    return slow
+      ? result('warn', withTimeoutNote(`slow: ${ctx.elapsed}ms — >75% of the ${ctx.timeoutSeconds}s budget (${ctx.name})`), 'hook exceeds 75% of its timeout budget — profile it')
+      : result('ok', withTimeoutNote(`${ctx.elapsed}ms (${ctx.name})`));
+  }
+  if (probe.exitCode === 2) {
+    return slow
+      ? result('warn', withTimeoutNote(`slow: blocking decision (hook engaged) — ${ctx.elapsed}ms (${ctx.name})`), 'hook exceeds 75% of its timeout budget — profile it')
+      : result('ok', withTimeoutNote(`blocking decision (hook engaged) — ${ctx.elapsed}ms (${ctx.name})`));
+  }
+  if (probe.exitCode === 127) return result('fail', `missing: command not found (exit 127) — ${ctx.command.trim().split(/\s+/)[0]}`);
+  if (probe.exitCode !== null) {
+    const tail = sanitize(probe.stderr.slice(-120)) || 'no stderr';
+    return result('warn', withTimeoutNote(`errored (exit ${probe.exitCode}) — ${ctx.elapsed}ms (${ctx.name}): ${tail}`));
+  }
+  return result('fail', `could not execute: ${sanitize(probe.stderr) || 'spawn error'} (${ctx.name})`);
+}
+
 function hookDefinition(
   ctx: DoctorContext,
   projectDir: string,
   id: string,
   event: string,
   entry: HookEntry,
+  matcher: string | undefined,
   state: { elapsedTotal: number; completed: number },
 ): Definition {
   return {
@@ -90,9 +137,15 @@ function hookDefinition(
       const args = Array.isArray(entry.args) && entry.args.every((arg) => typeof arg === 'string')
         ? entry.args as string[]
         : undefined;
-      const timeoutSeconds = typeof entry.timeout === 'number' && Number.isFinite(entry.timeout)
-        ? entry.timeout : defaultTimeoutSeconds(event);
+      const declared = entry.timeout;
+      const declaredValid = typeof declared === 'number' && Number.isFinite(declared)
+        && declared > 0 && declared * 1_000 <= 2_147_483_647;
+      const timeoutSeconds = declaredValid ? declared : defaultTimeoutSeconds(event);
+      const timeoutSubstituted = declared !== undefined && !declaredValid;
       const timeoutMs = timeoutSeconds * 1_000;
+      const remaining = ctx.budgets.hooksMs - state.elapsedTotal;
+      const deadlineMs = Math.min(timeoutMs, remaining);
+      const budgetBound = remaining < timeoutMs;
       const idForPayload = sessionId();
       const execHook = ctx.deps.execHook;
       if (!execHook) return result('fail', 'could not execute: hook probe unavailable');
@@ -100,31 +153,24 @@ function hookDefinition(
       const probe = await execHook(entry.command, args, {
         cwd: projectDir,
         env: { ...ctx.deps.env, HEDDLE_DOCTOR_PROBE: '1', HEDDLE_DOCTOR_PROBE_SESSION: idForPayload },
-        stdin: synthPayload(event, projectDir, idForPayload),
-        timeoutMs,
+        stdin: synthPayload(event, projectDir, idForPayload, matcher),
+        timeoutMs: deadlineMs,
       });
       const elapsed = ctx.deps.now().getTime() - start;
       state.elapsedTotal += elapsed;
       state.completed += 1;
-      const name = commandName(entry.command);
-      const slow = elapsed > timeoutMs * 0.75;
-      if (probe.timedOut) return result('fail', `perma-timeout: no exit within ${timeoutSeconds}s (${name})`, 'hook never returned — likely the cause of prompt/turn stalls');
-      if (probe.exitCode === 0) {
-        return slow
-          ? result('warn', `slow: ${elapsed}ms — >75% of the ${timeoutSeconds}s budget (${name})`, 'hook exceeds 75% of its timeout budget — profile it')
-          : result('ok', `${elapsed}ms (${name})`);
-      }
-      if (probe.exitCode === 2) {
-        return slow
-          ? result('warn', `slow: blocking decision (hook engaged) — ${elapsed}ms (${name})`, 'hook exceeds 75% of its timeout budget — profile it')
-          : result('ok', `blocking decision (hook engaged) — ${elapsed}ms (${name})`);
-      }
-      if (probe.exitCode === 127) return result('fail', `missing: command not found (exit 127) — ${entry.command.trim().split(/\s+/)[0]}`);
-      if (probe.exitCode !== null) {
-        const tail = sanitize(probe.stderr.slice(-120)) || 'no stderr';
-        return result('warn', `errored (exit ${probe.exitCode}) — ${elapsed}ms (${name}): ${tail}`);
-      }
-      return result('fail', `could not execute: ${sanitize(probe.stderr) || 'spawn error'} (${name})`);
+      const timeoutNote = timeoutSubstituted
+        ? ` [declared timeout ${String(declared)} invalid — used ${timeoutSeconds}s default]`
+        : '';
+      return classifyHookProbe(probe, {
+        elapsed,
+        timeoutMs,
+        timeoutSeconds,
+        name: commandName(entry.command),
+        command: entry.command,
+        budgetBound,
+        timeoutNote,
+      });
     },
   };
 }
@@ -139,10 +185,11 @@ export async function hooksChecks(ctx: DoctorContext, projectDir: string): Promi
   ] as const;
   const definitions: Definition[] = [];
   const state = { elapsedTotal: 0, completed: 0 };
+  const read = ctx.deps.readSettingsBytes ?? ctx.deps.readFileBytes;
   for (const [label, path] of sources) {
     let bytes: Uint8Array | undefined;
     try {
-      bytes = await ctx.deps.readFileBytes(path);
+      bytes = await read(path);
     } catch (error) {
       definitions.push(settingsFailure(`hooks:${label}:settings`, error instanceof Error ? error.message : String(error)));
       continue;
@@ -160,7 +207,8 @@ export async function hooksChecks(ctx: DoctorContext, projectDir: string): Promi
       groups.forEach((group, groupIndex) => {
         (group.hooks as unknown[]).forEach((entry, hookIndex) => {
           const hook = entry && typeof entry === 'object' ? entry as HookEntry : {};
-          definitions.push(hookDefinition(ctx, projectDir, `hooks:${label}:${event}:${groupIndex}.${hookIndex}`, event, hook, state));
+          const matcher = typeof group.matcher === 'string' ? group.matcher : undefined;
+          definitions.push(hookDefinition(ctx, projectDir, `hooks:${label}:${event}:${groupIndex}.${hookIndex}`, event, hook, matcher, state));
         });
       });
     }

@@ -100,28 +100,34 @@ export function spawnProbe(
     let stdoutBytes = 0;
     let stderrBytes = 0;
     let settled = false;
-    let timedOut = false;
+    let killReason: 'deadline' | null = null;
+    let childExited = false;
     let graceTimer: NodeJS.Timeout | undefined;
+    let drainTimer: NodeJS.Timeout | undefined;
     const finish = (exitCode: number | null, didTimeout: boolean) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      if (graceTimer) clearTimeout(graceTimer);
+      if (graceTimer !== undefined) clearTimeout(graceTimer);
+      if (drainTimer !== undefined) clearTimeout(drainTimer);
       resolve({ stdout, stderr, exitCode, timedOut: didTimeout });
     };
+    const armGrace = () => {
+      graceTimer = setTimeout(() => {
+        if (settled) return;
+        child.unref();
+        child.stdout.destroy();
+        child.stderr.destroy();
+        finish(null, killReason === 'deadline');
+      }, GRACE_MS);
+    };
     const timer = setTimeout(() => {
-      if (settled) return;
-      timedOut = true;
+      if (settled || killReason !== null) return;
+      killReason = 'deadline';
       try {
         killGroupOrChild(child);
       } finally {
-        graceTimer = setTimeout(() => {
-          if (settled) return;
-          child.unref();
-          child.stdout.destroy();
-          child.stderr.destroy();
-          finish(null, true);
-        }, GRACE_MS);
+        armGrace();
       }
     }, opts.timeoutMs);
 
@@ -135,11 +141,26 @@ export function spawnProbe(
       stderr = capped.acc;
       stderrBytes = capped.accBytes;
     });
-    child.on('exit', () => liveChildren.delete(child));
-    child.on('close', (code) => finish(code, timedOut));
-    child.on('error', (error) => {
-      stderr = `${stderr}\nspawn error: ${String(error)}`;
-      if (!timedOut) finish(null, false);
+    child.on('exit', (code) => {
+      liveChildren.delete(child);
+      if (killReason !== null || settled || childExited) return;
+      childExited = true;
+      clearTimeout(timer);
+      drainTimer = setTimeout(() => {
+        if (settled) return;
+        child.stdout.destroy();
+        child.stderr.destroy();
+        finish(code, false);
+      }, GRACE_MS);
+    });
+    child.on('close', (code, signal) => finish(code, killReason === 'deadline' && signal === 'SIGKILL'));
+    child.on('error', (err) => {
+      if (killReason !== null) {
+        stderr = `${stderr}\nkill error: ${String(err)}`;
+        return;
+      }
+      stderr = `${stderr}\nspawn error: ${String(err)}`;
+      finish(null, false);
     });
   });
 }

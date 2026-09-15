@@ -27,6 +27,7 @@ export interface DoctorDeps {
     cwd: string; env: NodeJS.ProcessEnv; stdin: string; timeoutMs: number;
   }) => Promise<ProbeResult>;
   readFileBytes: (path: string) => Promise<Uint8Array | undefined>;
+  readSettingsBytes?: (path: string) => Promise<Uint8Array | undefined>;
   sha256: (bytes: Uint8Array) => string;
   gitBehindOriginMain: (repoPath: string) => Promise<number | undefined>;
   now: () => Date;
@@ -58,6 +59,18 @@ export async function defaultReadFileBytes(path: string): Promise<Uint8Array | u
     // This intentionally collapses unreadable paths and ENOENT to absent; the doctor check reports
     // an informational missing-artifact/source note rather than treating a read failure as drift.
     return undefined;
+  }
+}
+
+export async function defaultReadHookSettings(path: string): Promise<Uint8Array | undefined> {
+  try {
+    return await readFile(path);
+  } catch (error) {
+    // Absent (ENOENT) is "no such settings layer" — skip it. Any OTHER read failure (EACCES on a
+    // chmod-000 settings.json, EISDIR, …) means the file EXISTS but we could not read it: surface it so
+    // `hooksChecks` can isolate it as a fail row instead of silently dropping live config.
+    if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return undefined;
+    throw error;
   }
 }
 
