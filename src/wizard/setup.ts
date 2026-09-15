@@ -15,6 +15,7 @@ import { metersStep } from './meters-step.js';
 import { rulesStep } from './rules-step.js';
 import { permissionsStep } from './permissions-step.js';
 import { prAutomationStep } from './pr-automation-step.js';
+import { canonicalStep } from './canonical-step.js';
 import { resolveCatalogRoot } from '../rules/lifecycle.js';
 
 /**
@@ -132,6 +133,9 @@ export function dryRunGate(step: WizardStep, would: string): WizardStep {
  */
 export function buildSteps(deps: SetupDeps): WizardStep[] {
   return [
+    // canonical (HED-640) is ALWAYS first — it records ~/.heddle/canonical.json and materializes the
+    // discipline hooks the doctor finish-gate and a later flag-free `init-project` both depend on.
+    canonicalStep,
     accountsStep(deps.runner),
     modelEconomyStep,
     spreadStep,
