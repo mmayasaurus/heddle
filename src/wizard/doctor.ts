@@ -7,21 +7,53 @@
 // (dashboard source vs installed), and provider catalog freshness. It does NOT check hook rules or
 // skill packs — those wizard steps carry their own results.
 //
-// It verifies the REAL resolved environment, exactly as `heddle doctor` does: it passes NO path
-// overrides, so each path resolves through runDoctor's own resolution — the HEDDLE_* env var where
-// one exists, otherwise runDoctor's built-in default (routing/lanes under the repo; accounts/comms/
-// operator-token under ~/.heddle). Relocating only some paths under ctx.homeDir would split the view
-// (drift under one root, accounts under another); relocating all of them would diverge from what
-// `heddle doctor` reports and clobber the operator's HEDDLE_* env. A hermetic test relocates the
-// whole tree via injected doctorDeps.
+// WHEN THIS STEP RUNS, it re-roots the ONE config path the sweep verifies that `heddle setup` also
+// writes — the account registry — under ctx.homeDir, honoring HEDDLE_ACCOUNTS first exactly as
+// accountsStep does (see homePaths), so it checks the registry setup wrote under --home. Every other
+// doctor path keeps its standard env→homedir resolution: comms.db / operator token / projects are not
+// written by `heddle setup` (they come from `heddle comms init` / `heddle init-project`) and their
+// runtime consumers are homedir- or env-fixed — the operator token especially is a fixed trust root the
+// comms server only reads at ~/.heddle/operator.token, so re-rooting it would verify a token the server
+// can never read. Routing and lanes are repo-scoped config-as-code and are never re-rooted.
+//
+// SCOPE (HED-596): this PR lands the doctor MODULE's home-awareness ONLY. In the composed `heddle
+// setup`, PR #191's `skipDoctorUnderAltHome` guard (src/wizard/setup.ts) STILL skips this gate under an
+// alternate `--home`, so `heddle setup --home <dir>` does not run it there YET; that guard is dropped as
+// a follow-up by the setup.ts owner (Agent Y), coordinated with W's HED-599 dry-run harness which pins
+// the current skip. At the DEFAULT home the gate runs today (homePaths reproduces the standard
+// resolution — a near no-op there). Standalone `heddle doctor` (the CLI, not this step) is unchanged.
 //
 // This is HED-564's read-only step: it makes NO config changes of its own. runDoctor is a read-only
 // probe with one incidental exception — opening an EXISTING older comms.db applies the standard
 // schema migration on construction (idempotent; a current-version db is a no-op; an absent db is not
 // created). Because the sweep changes no config, re-running `heddle setup` (or `heddle doctor`)
 // always reflects current truth rather than a one-time claim.
+import { join } from 'node:path';
 import type { WizardStep, WizardContext, WizardIO, WizardStepResult, WizardStepStatus } from './step.js';
 import { runDoctor as realRunDoctor, formatDoctorReport, type DoctorReport, type DoctorDeps } from '../doctor.js';
+
+/**
+ * The home-scoped doctor path override for the composed setup wizard's finish gate.
+ *
+ * Of everything `heddle setup` writes, the account registry is the ONLY path the doctor sweep also
+ * verifies: comms.db + operator.token come from `heddle comms init`, projects.json from
+ * `heddle init-project`, and the policy/*.json files aren't checked by doctor at all. accountsStep —
+ * and the spread/meters readers — resolve that registry as
+ * `HEDDLE_ACCOUNTS ?? join(<homeDir>, '.heddle', 'accounts.json')` (src/wizard/accounts-add.ts
+ * registryPath), so the gate — WHEN IT RUNS — mirrors that EXACT resolution and checks the registry
+ * setup wrote under `--home`. (The composed `heddle setup --home` flow still SKIPS this gate until the
+ * setup.ts `skipDoctorUnderAltHome` guard is dropped — see the module header.) Every OTHER doctor path
+ * keeps its standard env→homedir resolution
+ * (resolveDoctorPaths): re-rooting them would make doctor check a path the runtime never reads — the
+ * operator token especially is a FIXED trust root the comms server only reads at OPERATOR_TOKEN_PATH.
+ * `env` is passed in (never read from process.env here) so it always matches the doctor's own
+ * `deps.env`, which resolveDoctorPaths reads for the same var.
+ */
+export function homePaths(home: string, env: NodeJS.ProcessEnv): Partial<DoctorDeps['paths']> {
+  // Mirror accounts-add.ts registryPath verbatim: `??` (so an empty HEDDLE_ACCOUNTS resolves the same
+  // path the writer used, not the default) over a literal join with no dependence on the process home.
+  return { accounts: env.HEDDLE_ACCOUNTS ?? join(home, '.heddle', 'accounts.json') };
+}
 
 /**
  * WizardStep.run carries `ctx.now` but NOT doctor's execFile/gitBehindOriginMain/paths seams, so a
@@ -33,11 +65,11 @@ export interface DoctorStepDeps {
   /** Override the doctor runner (tests return a canned report; default = the real runDoctor). */
   runDoctor?: (opts: { provider?: string }, partial: Partial<DoctorDeps>) => Promise<DoctorReport>;
   /**
-   * DoctorDeps overrides for a HERMETIC integration test — relocate the WHOLE config tree
-   * (paths.{routing,lanes,projects,accounts,comms,operatorToken,heddle,repoRoot}) plus
-   * execFile/readFileBytes/gitBehindOriginMain, so no real ~/.heddle is read and no binary is
-   * spawned. The step imposes NO paths of its own; ctx.now still wins over any injected `now`
-   * (the wizard owns the run clock).
+   * DoctorDeps overrides for a HERMETIC integration test. Injected paths win over the composed step's
+   * home-scoped base paths — but a key set to `undefined` is treated as NOT provided (it does not
+   * clobber the base, which would otherwise let resolveDoctorPaths fall through to the process-home
+   * DEFAULT rather than ctx.homeDir); ctx.now still wins over any injected `now` (the wizard owns the
+   * run clock).
    */
   doctorDeps?: Partial<DoctorDeps>;
 }
@@ -49,18 +81,32 @@ export function createDoctorStep(injected: DoctorStepDeps = {}): WizardStep {
     id: 'doctor',
     title: 'Verify setup',
     // No `applies` — doctor is the finish gate, so it always runs. targetDir is unused (global sweep),
-    // and homeDir is intentionally NOT used to relocate config (see the header): the step verifies the
-    // real resolved environment like `heddle doctor`.
+    // while homeDir re-roots only the account registry the sweep verifies (see the header).
     async run(ctx: WizardContext, io: WizardIO): Promise<WizardStepResult> {
       // The verification itself is the ONLY failure that means "could not verify", so its catch is
       // scoped to just the runDoctor call — a later progress-reporting error must never be
       // misattributed as a verification failure (a real report would then be silently swallowed).
       let report: DoctorReport;
       try {
-        // Verify the real resolved config: pass no path overrides (like `heddle doctor`). A hermetic
-        // test threads the whole tree through doctorDeps; ctx.now stays authoritative (wizard clock),
-        // spread AFTER doctorDeps so an injected `now` can never override the wizard's run clock.
-        report = await run({}, { ...injected.doctorDeps, now: () => ctx.now() });
+        // Verify the account registry the composed wizard wrote under ctx.homeDir. homePaths reads the
+        // SAME env the doctor resolves against (deps.env defaults to process.env — src/doctor.ts), so
+        // its HEDDLE_ACCOUNTS-first resolution matches accountsStep's. ctx.now remains authoritative
+        // for the wizard's run clock.
+        const env = injected.doctorDeps?.env ?? process.env;
+        // Hermetic injected paths OVERRIDE the home-scoped base, but a key explicitly set to `undefined`
+        // must NOT clobber it: resolveDoctorPaths would then fall through to the process-home DEFAULT
+        // (real ~/.heddle), NOT ctx.homeDir. So a provided-undefined is treated as "not provided",
+        // letting callers pass `{ ...base.paths, accounts: maybeUnset }` safely. (Production doctorStep
+        // injects no paths; this hardens the test seam — #204 review.)
+        const paths: DoctorDeps['paths'] = { ...homePaths(ctx.homeDir, env) };
+        for (const [key, value] of Object.entries(injected.doctorDeps?.paths ?? {})) {
+          if (value !== undefined) paths[key as keyof DoctorDeps['paths']] = value;
+        }
+        report = await run({}, {
+          ...injected.doctorDeps,
+          paths,
+          now: () => ctx.now(),
+        });
       } catch (error) {
         // A thrown doctor run must not abort the wizard — report it as a failed verification instead.
         // Stringify defensively: a non-Error throwable (a null-prototype object, a Symbol) can make
