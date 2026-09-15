@@ -86,12 +86,16 @@ describe('cdAutomationStep', () => {
     // that would not load on GitHub) AND lets us assert the safety shape structurally, not by substring.
     const doc = parse(template) as {
       on?: Record<string, unknown>;
-      jobs?: { release?: { steps?: Array<{ run?: string; if?: unknown; 'continue-on-error'?: unknown }> } };
+      jobs?: { release?: { 'runs-on'?: unknown; steps?: Array<{ run?: string; if?: unknown; 'continue-on-error'?: unknown }> } };
     };
 
     // Manual-dispatch ONLY — no push / tags / schedule / release / pull_request / repository_dispatch /
     // workflow_run trigger can ever ship a release unattended.
     expect(Object.keys(doc.on ?? {})).toEqual(['workflow_dispatch']);
+
+    // Runner pinned to a fixed image (matches the sibling gate/deterministic-review templates) — a rarely
+    // run release job must not silently change when GitHub retargets `-latest`.
+    expect(doc.jobs?.release?.['runs-on']).toBe('ubuntu-24.04');
 
     const steps = doc.jobs?.release?.steps ?? [];
     // Fail-closed: a placeholder build step exits non-zero (operator must configure it) and the release
@@ -104,6 +108,9 @@ describe('cdAutomationStep', () => {
     expect(releaseStep?.['continue-on-error']).toBeUndefined();
     // Injection-safe: the dispatch input is routed through env:, never interpolated into the run: shell.
     expect(releaseStep?.run).not.toContain('${{');
+    // --verify-tag: gh fails if the tag does not already exist, so a release can never be created at the
+    // default-branch tip from a non-tag/nonexistent ref (qodo HIGH + cursor "wrong commit").
+    expect(releaseStep?.run).toContain('--verify-tag');
   });
 
   it('only applies to a target repository root and resolves its bundled template', () => {

@@ -12,7 +12,7 @@ on:
 
 jobs:
   release:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment: release
     permissions:
       contents: write
@@ -30,8 +30,10 @@ jobs:
 
       - name: Create GitHub Release
         # inputs.tag is routed through an env var (not interpolated into the shell) to avoid script
-        # injection — the same pattern gate.yml.tmpl uses for every ${{ }} value.
+        # injection — the same pattern gate.yml.tmpl uses for every ${{ }} value. --verify-tag makes gh
+        # fail if the tag does not already exist, so a release is never created at the default-branch tip
+        # from a non-tag / nonexistent ref: it must be an existing tag (the one checked out and built).
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ inputs.tag }}
-        run: gh release create "$TAG" --generate-notes
+        run: gh release create "$TAG" --generate-notes --verify-tag
