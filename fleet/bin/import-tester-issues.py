@@ -26,6 +26,9 @@ Usage:
 """
 import argparse, csv, hashlib, io, json, os, re, sys, time, urllib.parse, urllib.request
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _linear_token_cache
+
 FLEET = os.path.expanduser("~/.claude/spinventory-fleet")
 STATE_PATH = os.path.join(FLEET, "tester-import-state.json")
 
@@ -52,34 +55,21 @@ def token():
     """Return a valid Linear access token for Agent A, re-minting on expiry so the
     unattended poller stays alive past the 30-day token cache. Mirrors lin.sh's
     get_token exactly (client_credentials grant from linear-agents.json); memoized
-    per run. Falls back to any cached token if a re-mint attempt fails."""
+    per run."""
     global _TOKEN
     if _TOKEN is not None:
         return _TOKEN
-    cache = os.path.join(FLEET, f"token-{AGENT_KEY}.json")
-    cached = None
-    if os.path.exists(cache):
-        cached = json.load(open(cache))
-        age = time.time() - os.stat(cache).st_mtime
-        if age < cached.get("expires_in", 0) - 86400:  # not within a day of expiry
-            _TOKEN = cached["access_token"]
-            return _TOKEN
-    try:
+
+    def mint():
         creds = json.load(open(CREDS_PATH))["agents"][AGENT_KEY]
         body = urllib.parse.urlencode({
             "grant_type": "client_credentials", "client_id": creds["client_id"],
             "client_secret": creds["client_secret"], "scope": SCOPE}).encode()
         req = urllib.request.Request("https://api.linear.app/oauth/token", data=body,
             headers={"Content-Type": "application/x-www-form-urlencoded"})
-        tok = json.load(urllib.request.urlopen(req))
-        with open(cache, "w") as f:
-            json.dump(tok, f)
-        os.chmod(cache, 0o600)
-        _TOKEN = tok["access_token"]
-    except Exception:
-        if not cached:
-            raise
-        _TOKEN = cached["access_token"]  # expired-ish but better than nothing
+        return json.load(urllib.request.urlopen(req))
+
+    _TOKEN = _linear_token_cache.get_or_mint_token(FLEET, AGENT_KEY, mint)
     return _TOKEN
 
 def gql(query, variables=None, retries=3):

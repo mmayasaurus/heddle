@@ -38,6 +38,9 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _linear_token_cache
+
 FLEET = pathlib.Path(os.path.expanduser("~/.claude/spinventory-fleet"))
 # State is per-repo: the default Spinventory repo keeps the legacy filename; other repos get
 # pr-sync-state.<repo-basename>.<hash>.json. The basename alone is NOT unique — two different repos
@@ -143,24 +146,25 @@ def actor_id(state, key):
     if key in ids:
         return ids[key]
     try:
-        creds = json.load(open(FLEET / "linear-agents.json"))["agents"]
-        if key not in creds:
+        agents = json.load(open(FLEET / "linear-agents.json"))["agents"]
+        if key not in agents:
             return None
-        a = creds[key]
-        body = urllib.parse.urlencode({
-            "grant_type": "client_credentials", "client_id": a["client_id"],
-            "client_secret": a["client_secret"],
-            "scope": "read,write,issues:create,comments:create,app:assignable,app:mentionable",
-        }).encode()
-        req = urllib.request.Request("https://api.linear.app/oauth/token", data=body,
-                                     headers={"Content-Type": "application/x-www-form-urlencoded"})
-        tok = json.load(urllib.request.urlopen(req))
-        cache = FLEET / f"token-{key}.json"
-        cache.write_text(json.dumps(tok))
-        os.chmod(cache, 0o600)
+
+        def mint():
+            a = agents[key]
+            body = urllib.parse.urlencode({
+                "grant_type": "client_credentials", "client_id": a["client_id"],
+                "client_secret": a["client_secret"],
+                "scope": "read,write,issues:create,comments:create,app:assignable,app:mentionable",
+            }).encode()
+            req = urllib.request.Request("https://api.linear.app/oauth/token", data=body,
+                                         headers={"Content-Type": "application/x-www-form-urlencoded"})
+            return json.load(urllib.request.urlopen(req))
+
+        access_token = _linear_token_cache.get_or_mint_token(FLEET, key, mint)
         q = json.dumps({"query": "{ viewer { id } }"}).encode()
         r = urllib.request.Request("https://api.linear.app/graphql", data=q, headers={
-            "Authorization": f"Bearer {tok['access_token']}",
+            "Authorization": f"Bearer {access_token}",
             "Content-Type": "application/json"})
         ids[key] = json.load(urllib.request.urlopen(r))["data"]["viewer"]["id"]
         return ids[key]
@@ -169,9 +173,7 @@ def actor_id(state, key):
 
 
 def token():
-    cache = FLEET / f"token-{TOKEN_KEY}.json"
-    tok = json.load(open(cache))
-    if (time.time() - cache.stat().st_mtime) > tok.get("expires_in", 0) - 86400:
+    def mint():
         creds = json.load(open(FLEET / "linear-agents.json"))["agents"][TOKEN_KEY]
         body = urllib.parse.urlencode({
             "grant_type": "client_credentials", "client_id": creds["client_id"],
@@ -180,10 +182,9 @@ def token():
         }).encode()
         req = urllib.request.Request("https://api.linear.app/oauth/token", data=body,
                                      headers={"Content-Type": "application/x-www-form-urlencoded"})
-        tok = json.load(urllib.request.urlopen(req))
-        cache.write_text(json.dumps(tok))
-        os.chmod(cache, 0o600)
-    return tok["access_token"]
+        return json.load(urllib.request.urlopen(req))
+
+    return _linear_token_cache.get_or_mint_token(FLEET, TOKEN_KEY, mint)
 
 
 TOK = None
