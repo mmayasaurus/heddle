@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadAccountRegistry } from '../accounts.js';
 import { atomicWriteFile, policyPath } from './persist.js';
@@ -8,11 +9,50 @@ export interface MetersPolicy {
   accounts: Record<string, { meters: boolean }>;
 }
 
-export function computeMetersPolicy(decisions: { accountId: string; meters: boolean }[]): MetersPolicy {
-  return {
-    version: 1,
-    accounts: Object.fromEntries(decisions.map(({ accountId, meters }) => [accountId, { meters }])),
-  };
+/**
+ * Merge this run's decisions into any prior policy. Merge-preserving per the WizardStep contract
+ * (step.ts: run() "Must be idempotent + merge-preserving"): an account not prompted this run — e.g.
+ * one that was configured before but is no longer in the registry — keeps its saved choice, unknown
+ * per-account and top-level fields carry through untouched, and only the prompted accounts change.
+ * `prior` is the parsed prior policy ({} on a first run).
+ */
+export function computeMetersPolicy(
+  decisions: { accountId: string; meters: boolean }[],
+  prior: Record<string, unknown> = {},
+): MetersPolicy {
+  const priorAccounts = readAccountsMap(prior);
+  const accounts: Record<string, { meters: boolean }> = { ...priorAccounts };
+  for (const { accountId, meters } of decisions) {
+    accounts[accountId] = { ...priorAccounts[accountId], meters };
+  }
+  return { ...prior, version: 1, accounts };
+}
+
+function readAccountsMap(policy: Record<string, unknown>): Record<string, { meters: boolean }> {
+  const { accounts } = policy;
+  return accounts && typeof accounts === 'object' && !Array.isArray(accounts)
+    ? (accounts as Record<string, { meters: boolean }>)
+    : {};
+}
+
+/**
+ * Read and parse an existing meters policy. Returns {} when the file is absent (a first run); throws
+ * on any other read/parse error or a non-object shape so the caller can fail loudly rather than
+ * silently overwrite a corrupt file (the ENOENT-vs-error discipline the fleet-canon reader uses).
+ */
+function readPriorPolicy(path: string): Record<string, unknown> {
+  let raw: string;
+  try {
+    raw = readFileSync(path, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return {};
+    throw error;
+  }
+  const parsed: unknown = JSON.parse(raw);
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('meters policy is not a JSON object');
+  }
+  return parsed as Record<string, unknown>;
 }
 
 export const metersStep: WizardStep = {
@@ -32,9 +72,13 @@ export const metersStep: WizardStep = {
       'A blank meter at the start of a session is normal, not a broken tab.',
     ].join('\n'));
 
+    // Resolve the registry exactly the way accountsStep does (accounts-add.ts): HEDDLE_ACCOUNTS wins
+    // over the per-home default, so meters reads the same file accounts were just written to. Reading
+    // from a hardcoded homeDir path instead would, with HEDDLE_ACCOUNTS set, meter a different (likely
+    // empty) registry than the one setup populated.
     let accounts;
     try {
-      accounts = loadAccountRegistry(join(ctx.homeDir, '.heddle', 'accounts.json')).accounts;
+      accounts = loadAccountRegistry(process.env.HEDDLE_ACCOUNTS ?? join(ctx.homeDir, '.heddle', 'accounts.json')).accounts;
     } catch {
       return { id: 'meters', status: 'failed', summary: 'could not read the account registry' };
     }
@@ -55,26 +99,44 @@ export const metersStep: WizardStep = {
       return { id: 'meters', status: 'skipped', summary: accounts.length ? 'no meterable accounts' : 'no accounts to configure' };
     }
 
+    // Read any existing policy up front so we can (a) offer each prior choice as the prompt default and
+    // (b) merge into it rather than replace it. A corrupt existing file fails loudly — never clobbered.
+    const policyFile = policyPath(ctx.homeDir, 'meters');
+    let prior: Record<string, unknown>;
+    try {
+      prior = readPriorPolicy(policyFile);
+    } catch {
+      return { id: 'meters', status: 'failed', summary: 'existing meters policy is corrupt — fix or remove ~/.heddle/policy/meters.json' };
+    }
+    const priorAccounts = readAccountsMap(prior);
+
     const decisions: { accountId: string; meters: boolean }[] = [];
+    const detailLines: string[] = [];
     for (const account of meterable) {
       const meters = await io.prompter.confirm(
         `show usage meters in the statusline for ${account.id} (${account.provider})?`,
-        true,
+        priorAccounts[account.id]?.meters ?? true,
       );
       decisions.push({ accountId: account.id, meters });
+      detailLines.push(`${account.id} (${account.provider}): ${meters ? 'on' : 'off'}`);
     }
 
-    const policy = computeMetersPolicy(decisions);
+    const policy = computeMetersPolicy(decisions, prior);
     // Own our write via the HED-564 persist seam: atomic (temp-in-dir + rename), parent-dir-creating,
     // mode-preserving. The dry-run guard at the top of run() means this only runs for a real setup.
-    atomicWriteFile(policyPath(ctx.homeDir, 'meters'), `${JSON.stringify(policy, null, 2)}\n`);
+    try {
+      atomicWriteFile(policyFile, `${JSON.stringify(policy, null, 2)}\n`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return { id: 'meters', status: 'failed', summary: `could not write the meters policy: ${message}` };
+    }
 
     const enabled = decisions.filter(({ meters }) => meters).length;
     return {
       id: 'meters',
       status: 'done',
       summary: `usage meters enabled for ${enabled} of ${meterable.length} account(s)`,
-      detail: meterable.map((account, index) => `${account.id} (${account.provider}): ${decisions[index]!.meters ? 'on' : 'off'}`).join('\n'),
+      detail: detailLines.join('\n'),
     };
   },
 };
