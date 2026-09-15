@@ -41,6 +41,7 @@ import { gitRepositoryFor } from './worktree.js';
 import { NativeCliRunner, type NativeProvider } from './wizard/cli-runner.js';
 import { ReadlinePrompter, ScriptedPrompter, type Prompter } from './wizard/prompt.js';
 import { runAccountsAdd } from './wizard/accounts-add.js';
+import { CLAUDE_AMBIENT_CRED_VARS } from './wizard/ambient-cred-vars.js';
 import { runHooksChoose, type HookRuleSelection } from './wizard/hooks-choose.js';
 import { PRESET_TIERS, resolvePreset, type SafetyPreset } from './wizard/presets.js';
 import { runSetup, buildSteps, selectSteps, type SetupContext } from './wizard/setup.js';
@@ -114,6 +115,7 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
                                  the pocket console and desktop app write the same file)
   heddle init-project <dir> [--canonical <path>] [--name <n>] [--team <KEY>] [--agents A,B,…] [--room <#room>] [--launcher <script>] [--preset <tier>] [--hook-rules <a,b>] [--enforce <a,b>] [--answers <file>] [--enforce-memtrace] [--dry-run] [--json] [--show-content]
   heddle whoami [--json]         this process's bound identity (HEDDLE_AGENT / FLEET_AGENT / .fleet-agent) + worker context
+  heddle ambient-cred-vars [--json]   canonical ambient Anthropic credential env-var names the harness strips when isolating a per-account login (single source of truth for launcher/keeper env scrubbing; HED-607)
   heddle doctor [--json] [--provider <p>]   verify harnesses/accounts/config; --provider runs only that provider's checks plus global config checks (exit 1 on any fail)
   heddle doctor --hooks [--hooks-budget <seconds>] [--json]  probe configured hooks' latency — EXECUTES each configured hook
                                             with a synthetic payload; probes the current directory's .claude settings — run from the project root; ignores --provider; runs under a default 180s sweep budget (--hooks-budget <seconds> to raise it); a budget-truncated hook is hung (exit 1) or unverified if little budget remained; exits 1 on broken/missing/perma-timeout; flags slow
@@ -194,7 +196,7 @@ const json = has('--json');
  * `--dry-run` preview especially must observe, not mutate.
  * Best-effort — a hygiene failure must never break the command the operator actually ran.
  */
-if (cmd !== 'mode' && cmd !== 'pr' && cmd !== 'comms' && cmd !== 'setup' && cmd !== 'fleet' && cmd !== 'top' && cmd !== 'upgrade' && cmd !== 'uninstall' && !(cmd === 'ledger' && (process.argv[3] === 'sweep' || process.argv[3] === 'finish')) && !(cmd === 'usage' && (process.argv[3] === 'poll-claude' || process.argv[3] === 'install-poll-launchd'))) {
+if (cmd !== 'mode' && cmd !== 'pr' && cmd !== 'comms' && cmd !== 'setup' && cmd !== 'fleet' && cmd !== 'top' && cmd !== 'upgrade' && cmd !== 'uninstall' && cmd !== 'ambient-cred-vars' && !(cmd === 'ledger' && (process.argv[3] === 'sweep' || process.argv[3] === 'finish')) && !(cmd === 'usage' && (process.argv[3] === 'poll-claude' || process.argv[3] === 'install-poll-launchd'))) {
   try {
     const { closed } = new Ledger().sweepOrphans();
     if (closed > 0) console.error(`heddle: closed ${closed} orphaned in-flight dispatch row${closed === 1 ? '' : 's'} (heddle ledger --json shows outcome='orphaned')`);
@@ -549,6 +551,11 @@ try {
     case 'packs': {
       const packs = listPacks();
       out(json, packs, () => packs.length ? packs.join('\n') : '(no skill packs yet)');
+      break;
+    }
+
+    case 'ambient-cred-vars': {
+      out(json, [...CLAUDE_AMBIENT_CRED_VARS], () => CLAUDE_AMBIENT_CRED_VARS.join('\n'));
       break;
     }
 
