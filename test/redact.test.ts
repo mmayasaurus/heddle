@@ -213,3 +213,61 @@ describe('redactSecrets — review-hardened cases', () => {
     expect(Date.now() - start).toBeLessThan(2000);
   });
 });
+
+// HED-651 qodo HIGH: shapes-only turns the opaque backstop OFF, so a recognized credential DECORATED
+// into a filename (backup_sk-…, notes_lin_api_…) slips the \b-anchored shared prefix rule and the _-
+// excluding GLM lookbehind. The supplementary embedded pass must catch it. Each fixture LEAKS on the
+// pre-fix HEAD and is load-bearing on the else branch. Split literals keep the shipped source free of
+// scannable credential shapes (public-scrub convention — same split points as scrub.ts / the cases above).
+describe('redactSecrets — shapes-only decorated credentials (HED-651)', () => {
+  const S = (t: string) => redactSecrets(t, { shapesOnly: true });
+
+  it('redacts a recognized credential decorated into a filename, across prefix arms and decorations', () => {
+    // Porcelain-prefixed exactly as escapedPaths()/destroyedWork() emit them ("<status> <path>").
+    const cases: [string, string][] = [
+      ['?? backup_' + 'sk-' + 'DEADBEEF1234567890', '?? backup_[redacted]'],   // sk-, underscore-decorated
+      ['?? v2' + 'sk-' + 'DEADBEEF1234567890', '?? v2[redacted]'],             // sk-, digit-decorated
+      ['?? backup_' + 'gh' + 'p_EXAMPLE000000000000000000000000', '?? backup_[redacted]'],
+      ['?? backup_' + 'github_' + 'pat_ABCDEFGHIJKL1234', '?? backup_[redacted]'],
+      ['M v2_' + 'g' + 'sk_ABCDEFGHIJKL1234', 'M v2_[redacted]'],
+      ['?? my_' + 'c' + 'sk-' + 'ABCDEFGHIJKL1234', '?? my_[redacted]'],
+      ['reverted-or-deleted notes_' + 'lin_' + 'api_ABCDEFGHIJKL1234', 'reverted-or-deleted notes_[redacted]'],
+      ['?? x_' + 'xox' + 'b-ABCDEFGHIJKL1234', '?? x_[redacted]'],
+      ['?? pre_' + 'AKIA' + 'IOSFODNN7EXAMPLE', '?? pre_[redacted]'],
+      // GLM <32>.<16> whose left run is _-decorated — the shared lookbehind excludes _ and misses it.
+      ['?? backup_abcdef0123456789abcdef0123456789.abcdef0123456789', '?? backup_[redacted]'],
+    ];
+    for (const [input, want] of cases) {
+      const out = S(input);
+      expect(out).toBe(want);
+      expect(out).not.toContain('DEADBEEF');
+      expect(out).not.toContain('ABCDEFGHIJKL');
+    }
+  });
+
+  it('preserves ordinary filenames whose names merely contain an sk-/dotted substring', () => {
+    // sk- is a common English substring; the (?<![A-Za-z]) guard keeps letter-preceded words intact.
+    for (const f of [
+      'task-force-release-20260915-build.md',
+      'disk-usage-report-2026.txt',
+      'risk-assessment-final.md',
+      'desk-setup-notes.md',
+      'ask-me-anything.md',
+      'config.production.json',
+      'notes.readme',
+    ]) expect(S('?? ' + f)).toBe('?? ' + f);
+  });
+
+  it('full mode is byte-identical: the opaque backstop, not a changed prefix rule, catches the decorated token', () => {
+    // The SHARED chain is untouched, so full mode redacts the WHOLE decorated run via the opaque rule →
+    // "[redacted]" (a changed shared prefix rule would instead give "backup_[redacted]"). This assertion
+    // fails if the shared chain drifts.
+    expect(redactSecrets('?? backup_' + 'sk-' + 'DEADBEEF1234567890')).toBe('?? [redacted]');
+    expect(redactSecrets('?? backup_' + 'gh' + 'p_EXAMPLE000000000000000000000000')).toBe('?? [redacted]');
+  });
+
+  it('accepts the documented residual: a LETTER-decorated recognized prefix (xsk-) reads as an ordinary word', () => {
+    const residual = '?? x' + 'sk-' + 'DEADBEEF1234567890';
+    expect(S(residual)).toBe(residual); // unchanged — same class as the prefix-less opaque residual
+  });
+});

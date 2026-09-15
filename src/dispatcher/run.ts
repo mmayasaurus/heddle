@@ -441,7 +441,10 @@ export async function runTarget(
   // would be its own harm — but the side effects are dangerous and must never be silent. Nothing is
   // reverted (the operator decides, same discipline as the read-only mandate). heddle cannot ATTRIBUTE
   // the change — another agent legitimately editing the canonical checkout looks identical — so the
-  // wording says what was observed, not who did it.
+  // wording says what was observed, not who did it. One shared options object for both scrubs, hoisted
+  // out of the per-path .map callbacks below (the escape/destroyed filename arrays are scrubbed
+  // shapes-only so a credential-shaped name does not leak, HED-651).
+  const shapesOnlyOpt = { shapesOnly: true } as const;
   if (wt) {
     const escaped = escapedPaths(parentBefore, checkoutFingerprint(wt.parentRoot));
     if (escaped === null) {
@@ -450,7 +453,7 @@ export async function runTarget(
       escapeReport = { available: false, parentRoot: wt.parentRoot, paths: [], note };
       process.stderr.write(`heddle: ${note}\n`);
     } else if (escaped.length) {
-      const safeEscaped = escaped.map((p) => redactSecrets(p, { shapesOnly: true }));
+      const safeEscaped = escaped.map((p) => redactSecrets(p, shapesOnlyOpt));
       const note = `escape-warning: the parent checkout ${wt.parentRoot} changed while this worker ran in ` +
         `${wt.worktreeRoot} — ${safeEscaped.length} change(s): ${safeEscaped.slice(0, 10).join(', ')}` +
         (safeEscaped.length > 10 ? `, +${safeEscaped.length - 10} more` : '') +
@@ -473,7 +476,7 @@ export async function runTarget(
     destroyedReport = { paths: [], note };
     process.stderr.write(`heddle: ${note}\n`);
   } else if (lost && lost.length) {
-    const safeLost = lost.map((p) => redactSecrets(p, { shapesOnly: true }));
+    const safeLost = lost.map((p) => redactSecrets(p, shapesOnlyOpt));
     const note = `destroyed-work-warning: uncommitted work present in ${req.cwd} before this dispatch is ` +
       `gone — ${safeLost.length} item(s): ${safeLost.slice(0, 10).join(', ')}` +
       (safeLost.length > 10 ? `, +${safeLost.length - 10} more` : '') +

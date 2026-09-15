@@ -1,3 +1,22 @@
+// The credential-PREFIX arms — the src/release/scrub.ts credentialPatterns set (sk-, gh[po]_,
+// github_pat_, gsk_, csk-, lin_api_/lin_oauth_, xox[baprs]-) plus the AWS access-key-id shape
+// (A[KS]IA + 16). SINGLE SOURCE OF TRUTH for both redaction modes, so a prefix added here is covered in
+// full mode AND shapes-only and the two can never drift apart. sk- alone is a common English substring
+// (ta[sk]-, di[sk]-, ri[sk]-), so it carries a LEFT BOUNDARY in both modes (\b in full mode,
+// (?<![A-Za-z]) in the shapes-only pass); every DISTINCTIVE arm appears in no ordinary filename, so the
+// shapes-only pass matches it with NO left boundary to catch a credential DECORATED into a filename
+// (backup_ghp_…) that full mode's opaque backstop would otherwise have swept up.
+const SK_PREFIX_ARM = 'sk-[A-Za-z0-9_-]+';
+const DISTINCTIVE_PREFIX_ARMS =
+  'gh[po]_[A-Za-z0-9_-]+|github_pat_[A-Za-z0-9_-]+|gsk_[A-Za-z0-9_-]+|csk-[A-Za-z0-9_-]+|lin_(?:api|oauth)_[A-Za-z0-9_-]+|xox[baprs]-[A-Za-z0-9_-]+|A[KS]IA[A-Z0-9]{16,}';
+// Full mode: the \b-anchored alternation (sk- + distinctive), assembled from the shared arms — its source
+// is character-identical to the prior inline literal (proven by the full-mode fixture suite + the
+// byte-identical snapshot test). Hoisted to module scope: String.replace resets a global regex's
+// lastIndex to 0 before matching, so reuse across calls is safe.
+const CREDENTIAL_PREFIX_RULE = new RegExp(`\\b(?:${SK_PREFIX_ARM}|${DISTINCTIVE_PREFIX_ARMS})`, 'g');
+// Shapes-only: the DISTINCTIVE arms only, with no left boundary (embedded-in-filename credential).
+const EMBEDDED_DISTINCTIVE_PREFIX_RULE = new RegExp(DISTINCTIVE_PREFIX_ARMS, 'g');
+
 /** Remove credential-shaped values from text that may be persisted or returned to callers. */
 export function redactSecrets(text: string, opts: { credential?: string; shapesOnly?: boolean } = {}): string {
   try {
@@ -29,7 +48,8 @@ export function redactSecrets(text: string, opts: { credential?: string; shapesO
       // literal, so matching stays linear. (AWS SECRET keys are 40-char base64: a slashless one is caught by
       // the opaque rule; a '/'-containing one is an ACCEPTED residual — a '/'-inclusive rule would redact
       // long real filesystem paths, breaking F6's path passthrough — same class as the prefix-less opaque.)
-      .replace(/\b(?:sk-[A-Za-z0-9_-]+|gh[po]_[A-Za-z0-9_-]+|github_pat_[A-Za-z0-9_-]+|gsk_[A-Za-z0-9_-]+|csk-[A-Za-z0-9_-]+|lin_(?:api|oauth)_[A-Za-z0-9_-]+|xox[baprs]-[A-Za-z0-9_-]+|A[KS]IA[A-Z0-9]{16,})/g, '[redacted]')
+      // The alternation is the shared CREDENTIAL_PREFIX_RULE const (single source with the shapes-only pass).
+      .replace(CREDENTIAL_PREFIX_RULE, '[redacted]')
       // key=value where the key NAME contains a sensitive word (ZAI_API_KEY=, aws_secret_access_key=,
       // "api_key": …). No \b so an embedded keyword matches; the {0,80}-bounded suffix stays ReDoS-safe
       // (an unbounded suffix is O(n^2) on a repeated-keyword run) and covers every realistic key name; any
@@ -46,11 +66,29 @@ export function redactSecrets(text: string, opts: { credential?: string; shapesO
     // shapes with no recognizable prefix (session tokens, JWT segments, Digest nonce/response). It cannot
     // tell a random token from a long filename, so it over-redacts long opaque names — the accepted
     // direction (under-redaction leaks; over-redaction only degrades debuggability). Real filesystem paths
-    // survive via the '/' lookbehind/lookahead. This backstop runs in full mode only (the vendor-error
-    // string); shapes-only mode, used for heddle-generated escape/destroyed notes per HED-651, skips it so
-    // an ordinary long filename survives while unmistakable credential SHAPES are still redacted.
+    // survive via the '/' lookbehind/lookahead. This backstop runs in FULL mode only (the vendor-error
+    // string).
     if (!opts.shapesOnly) {
       redacted = redacted.replace(/(?<![A-Za-z0-9_/-])(?=[A-Za-z0-9_-]*[0-9_-])[A-Za-z0-9_-]{24,}(?![A-Za-z0-9_/-])/g, '[redacted]');
+    } else {
+      // Shapes-only (heddle-generated escape/destroyed notes, HED-651): the opaque backstop is OFF so an
+      // ordinary long filename survives. But without it a recognized credential DECORATED into a filename
+      // (backup_ghp_…, notes_lin_api_…, backup_<32>.<16>) slips past the \b / [A-Za-z0-9_-] lookbehind
+      // anchors on the shared shape rules above — those anchors were relying on the backstop to sweep up
+      // the embedded case. Re-run the shapes that can match EMBEDDED with no false positives:
+      //   • DISTINCTIVE prefixes (every arm but sk-): no ordinary filename contains them → match with no
+      //     left boundary (EMBEDDED_DISTINCTIVE_PREFIX_RULE, built from the SAME arms as full mode's rule,
+      //     so the two cannot drift);
+      //   • sk-: a common English substring (ta[sk]-, di[sk]-, ri[sk]-), so guard only against a preceding
+      //     LETTER — _/digit/boundary-decorated (backup_sk-, v2sk-) are caught, the English words survive;
+      //   • the GLM-dotted pair with a letter/digit-only lookbehind (allows a leading _/-, still refuses a
+      //     mid-token match) — the shared rule's lookbehind excludes _ and misses backup_<32>.<16>.
+      // Residual (accepted, same class as the prefix-less opaque token this mode already preserves): a
+      // recognized prefix decorated with a LETTER (xsk-…) is indistinguishable from an ordinary word.
+      redacted = redacted
+        .replace(EMBEDDED_DISTINCTIVE_PREFIX_RULE, '[redacted]')
+        .replace(/(?<![A-Za-z])sk-[A-Za-z0-9_-]+/g, '[redacted]')
+        .replace(/(?<![A-Za-z0-9])[A-Za-z0-9]{20,64}\.[A-Za-z0-9]{12,64}(?![A-Za-z0-9])/g, '[redacted]');
     }
 
     return redacted;
