@@ -16,12 +16,12 @@
 // comms server only reads at ~/.heddle/operator.token, so re-rooting it would verify a token the server
 // can never read. Routing and lanes are repo-scoped config-as-code and are never re-rooted.
 //
-// SCOPE (HED-596): this PR lands the doctor MODULE's home-awareness ONLY. In the composed `heddle
-// setup`, PR #191's `skipDoctorUnderAltHome` guard (src/wizard/setup.ts) STILL skips this gate under an
-// alternate `--home`, so `heddle setup --home <dir>` does not run it there YET; that guard is dropped as
-// a follow-up by the setup.ts owner (Agent Y), coordinated with W's HED-599 dry-run harness which pins
-// the current skip. At the DEFAULT home the gate runs today (homePaths reproduces the standard
-// resolution — a near no-op there). Standalone `heddle doctor` (the CLI, not this step) is unchanged.
+// HED-596 (HED-564) landed in two halves: #204 gave this doctor MODULE its home-awareness (homePaths,
+// below), and #216 dropped PR #191's `skipDoctorUnderAltHome` guard from the composed wizard
+// (src/wizard/setup.ts). So `heddle setup --home <dir>` now RUNS this gate, honestly verifying the
+// account registry it wrote under that root; at the DEFAULT home homePaths reproduces the standard
+// resolution (a near no-op). W's HED-599 dry-run harness pins the composition. Standalone `heddle
+// doctor` (the CLI, not this step) is unchanged — it is not home-aware.
 //
 // This is HED-564's read-only step: it makes NO config changes of its own. runDoctor is a read-only
 // probe with one incidental exception — opening an EXISTING older comms.db applies the standard
@@ -41,8 +41,7 @@ import { runDoctor as realRunDoctor, formatDoctorReport, type DoctorReport, type
  * and the spread/meters readers — resolve that registry as
  * `HEDDLE_ACCOUNTS ?? join(<homeDir>, '.heddle', 'accounts.json')` (src/wizard/accounts-add.ts
  * registryPath), so the gate — WHEN IT RUNS — mirrors that EXACT resolution and checks the registry
- * setup wrote under `--home`. (The composed `heddle setup --home` flow still SKIPS this gate until the
- * setup.ts `skipDoctorUnderAltHome` guard is dropped — see the module header.) Every OTHER doctor path
+ * setup wrote under `--home`. Every OTHER doctor path
  * keeps its standard env→homedir resolution
  * (resolveDoctorPaths): re-rooting them would make doctor check a path the runtime never reads — the
  * operator token especially is a FIXED trust root the comms server only reads at OPERATOR_TOKEN_PATH.
