@@ -7,15 +7,21 @@
 // (dashboard source vs installed), and provider catalog freshness. It does NOT check hook rules or
 // skill packs — those wizard steps carry their own results.
 //
-// In the composed wizard flow, the finish step re-roots the ONE config path the sweep verifies that
-// setup also writes — the account registry — under ctx.homeDir, honoring HEDDLE_ACCOUNTS first exactly
-// as accountsStep does (see homePaths). That verifies the registry setup wrote under --home. Every
-// other doctor path keeps its standard env→homedir resolution: comms.db / operator token / projects
-// are not written by `heddle setup` (they come from `heddle comms init` / `heddle init-project`) and
-// their runtime consumers are homedir- or env-fixed — the operator token especially is a fixed trust
-// root the comms server only reads at ~/.heddle/operator.token, so re-rooting it would verify a token
-// the server can never read. Standalone `heddle doctor` (runDoctor via the CLI, not this step) is
-// unchanged. Routing and lanes are repo-scoped config-as-code and are never re-rooted.
+// WHEN THIS STEP RUNS, it re-roots the ONE config path the sweep verifies that `heddle setup` also
+// writes — the account registry — under ctx.homeDir, honoring HEDDLE_ACCOUNTS first exactly as
+// accountsStep does (see homePaths), so it checks the registry setup wrote under --home. Every other
+// doctor path keeps its standard env→homedir resolution: comms.db / operator token / projects are not
+// written by `heddle setup` (they come from `heddle comms init` / `heddle init-project`) and their
+// runtime consumers are homedir- or env-fixed — the operator token especially is a fixed trust root the
+// comms server only reads at ~/.heddle/operator.token, so re-rooting it would verify a token the server
+// can never read. Routing and lanes are repo-scoped config-as-code and are never re-rooted.
+//
+// SCOPE (HED-596): this PR lands the doctor MODULE's home-awareness ONLY. In the composed `heddle
+// setup`, PR #191's `skipDoctorUnderAltHome` guard (src/wizard/setup.ts) STILL skips this gate under an
+// alternate `--home`, so `heddle setup --home <dir>` does not run it there YET; that guard is dropped as
+// a follow-up by the setup.ts owner (Agent Y), coordinated with W's HED-599 dry-run harness which pins
+// the current skip. At the DEFAULT home the gate runs today (homePaths reproduces the standard
+// resolution — a near no-op there). Standalone `heddle doctor` (the CLI, not this step) is unchanged.
 //
 // This is HED-564's read-only step: it makes NO config changes of its own. runDoctor is a read-only
 // probe with one incidental exception — opening an EXISTING older comms.db applies the standard
@@ -34,8 +40,10 @@ import { runDoctor as realRunDoctor, formatDoctorReport, type DoctorReport, type
  * `heddle init-project`, and the policy/*.json files aren't checked by doctor at all. accountsStep —
  * and the spread/meters readers — resolve that registry as
  * `HEDDLE_ACCOUNTS ?? join(<homeDir>, '.heddle', 'accounts.json')` (src/wizard/accounts-add.ts
- * registryPath), so the gate mirrors that EXACT resolution and verifies the registry setup actually
- * wrote under `--home`. Every OTHER doctor path keeps its standard env→homedir resolution
+ * registryPath), so the gate — WHEN IT RUNS — mirrors that EXACT resolution and checks the registry
+ * setup wrote under `--home`. (The composed `heddle setup --home` flow still SKIPS this gate until the
+ * setup.ts `skipDoctorUnderAltHome` guard is dropped — see the module header.) Every OTHER doctor path
+ * keeps its standard env→homedir resolution
  * (resolveDoctorPaths): re-rooting them would make doctor check a path the runtime never reads — the
  * operator token especially is a FIXED trust root the comms server only reads at OPERATOR_TOKEN_PATH.
  * `env` is passed in (never read from process.env here) so it always matches the doctor's own

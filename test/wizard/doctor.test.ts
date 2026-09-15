@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -7,7 +7,7 @@ import { runDoctor as realRunDoctor, formatDoctorReport, type DoctorReport, type
 import { ScriptedPrompter } from '../../src/wizard/prompt.js';
 import type { WizardContext, WizardIO } from '../../src/wizard/step.js';
 import { useTempResources } from '../helpers.js';
-import { fakeDeps } from '../doctor-fixtures.js';
+import { fakeDeps, check } from '../doctor-fixtures.js';
 
 const FIXED = new Date('2026-09-14T00:00:00.000Z');
 
@@ -52,6 +52,15 @@ describe('homePaths', () => {
     expect(homePaths(home, { HEDDLE_ACCOUNTS: envAccounts } as NodeJS.ProcessEnv).accounts).toBe(envAccounts);
     // env is a PARAMETER, so the result never depends on the tester's real shell env.
     expect(homePaths(home, {}).accounts).toBe(join(home, '.heddle', 'accounts.json'));
+  });
+
+  it('resolves an EMPTY HEDDLE_ACCOUNTS to "" — the same broken path the writer used (`??`, not `||`)', () => {
+    const home = tempDir();
+    // accounts-add.ts registryPath uses `?? ` (nullish), not `||`: an empty-string HEDDLE_ACCOUNTS is a
+    // set-but-empty value, so `'' ?? join(...)` is `''`. The writer resolves it the same way, so doctor
+    // deliberately checks that same (broken, empty) path rather than silently falling back to the
+    // home default and verifying a DIFFERENT file than setup wrote. Locks in `??` against a `||` "fix".
+    expect(homePaths(home, { HEDDLE_ACCOUNTS: '' } as NodeJS.ProcessEnv).accounts).toBe('');
   });
 });
 
@@ -238,6 +247,40 @@ describe('createDoctorStep (HED-476 wizard finish = read-only `heddle doctor`)',
     expect(lines).toEqual(formatDoctorReport(rep!).split('\n'));
     expect(existsSync(commsPath)).toBe(false); // read-only sweep created no comms.db (no migration)
     expect(existsSync(secretsPath)).toBe(false); // read the relocated (absent) secrets, created none
+  });
+
+  it('the REAL sweep OPENS the home-scoped registry when no accounts path is injected (#204 MED)', async () => {
+    // The spy tests above prove homePaths is CALLED and its result threaded into runDoctor; this proves
+    // the REAL runDoctor actually OPENS the home-derived registry end-to-end. We inject fakeDeps' hermetic
+    // seams but OMIT paths.accounts, so createDoctorStep's homePaths(ctx.homeDir) is the sole supplier of
+    // that path — exactly the composed wiring. A valid registry is written at <home>/.heddle/accounts.json;
+    // config:claude-accounts must report it OK, NOT the "no Claude account registry" warn it would give for
+    // the absent fixture default. If homePaths (or the step's use of it) regressed, this flips to that warn.
+    const base = fakeDeps();
+    const home = tempDir();
+    mkdirSync(join(home, '.heddle'), { recursive: true });
+    writeFileSync(
+      join(home, '.heddle', 'accounts.json'),
+      JSON.stringify({ claude: [{ id: 'acct-home', configDir: null, loggedIn: true }] }),
+    );
+    // Drop accounts from the INJECTED paths (so homePaths supplies it — an injected `undefined` would
+    // instead override homePaths and fall through to the real ~/.heddle). Keep every other seam hermetic
+    // and set secrets to an absent temp path so freshnessCheck never reads the operator's real ~/.heddle.
+    const { accounts: _homeScoped, ...restPaths } = base.paths!;
+    const secretsPath = join(tempDir(), 'secrets.env');
+    const deps = { ...base, paths: { ...restPaths, secrets: secretsPath } };
+    let rep: DoctorReport | undefined;
+    const step = createDoctorStep({
+      runDoctor: async (o, p) => (rep = await realRunDoctor(o, p)),
+      doctorDeps: deps,
+    });
+    await step.run(makeCtx(home), makeIO().io);
+
+    expect(rep).toBeDefined();
+    const accountsCheck = check(rep!, 'config:claude-accounts');
+    expect(accountsCheck.outcome).toBe('ok'); // read the registry we wrote under <home>/.heddle …
+    expect(accountsCheck.detail).toContain('1 Claude account'); // … and counted its one account
+    expect(accountsCheck.detail).not.toContain('no Claude account registry'); // not the absent-default warn
   });
 
   it('returns failed (never throws) even when the runner rejects with a non-Error throwable', async () => {
