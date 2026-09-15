@@ -58,6 +58,32 @@ describe('metersStep', () => {
       id: 'meters', status: 'failed', summary: 'could not read the account registry',
     });
   });
+
+  it('prompts only for meterable (native Claude) accounts — skips codex and env-repoint', async () => {
+    const homeDir = homeWithAccounts({ schemaVersion: 2,
+      claude: [
+        { id: 'native-claude', configDir: null },
+        { id: 'glm-repoint', configDir: null, envRepoint: { baseUrl: 'https://glm.example', authTokenRef: 'GLM_TOKEN', service: 'glm' } },
+      ],
+      codex: [{ id: 'codex-1', codexHome: null }],
+    });
+    const captured: string[] = [];
+
+    // One scripted answer: a filter leak (codex-1 or the env-repoint claude) would prompt again and
+    // change the "of N" count / detail below.
+    const result = await metersStep.run(context(homeDir), io([true], captured));
+
+    expect(result).toMatchObject({ id: 'meters', status: 'done', summary: 'usage meters enabled for 1 of 1 account(s)' });
+    expect(result.detail).toBe('native-claude (claude): on');
+  });
+
+  it('skips when accounts exist but none are meterable', async () => {
+    const captured: string[] = [];
+    const result = await metersStep.run(context(homeWithAccounts({ schemaVersion: 2, codex: [{ id: 'codex-only', codexHome: null }] })), io([], captured));
+
+    expect(result).toEqual({ id: 'meters', status: 'skipped', summary: 'no meterable accounts' });
+    expect(captured).toContain('no accounts with a populated usage meter yet (native Claude only today)');
+  });
 });
 
 describe('computeMetersPolicy', () => {
