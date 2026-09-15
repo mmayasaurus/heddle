@@ -40,8 +40,11 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  for (const key of Object.keys(process.env)) delete process.env[key];
+  // Restore the snapshot FIRST (so PATH/etc. are never transiently absent), THEN drop only the keys
+  // the test ADDED that weren't in the snapshot. Restore-before-delete keeps process.env valid
+  // throughout the hook (amazon-q review). vitest's default forks pool already isolates per file.
   Object.assign(process.env, savedEnv);
+  for (const key of Object.keys(process.env)) if (!(key in savedEnv)) delete process.env[key];
   rmSync(tempHome, { recursive: true, force: true });
 });
 
@@ -49,9 +52,21 @@ afterEach(() => {
 const loggedIn = (): ProbeResult => ({ stdout: '{"loggedIn":true}', stderr: '', exitCode: 0, timedOut: false });
 const loggedOut = (): ProbeResult => ({ stdout: '{"loggedIn":false}', stderr: '', exitCode: 0, timedOut: false });
 
-/** A CliRunner whose status() is scripted and whose login() is a no-op (no real vendor login under test). */
-function fakeRunner(status: () => ProbeResult): CliRunner {
-  return { login() { /* no-op */ }, status() { return status(); } };
+/**
+ * A CliRunner whose status() is scripted and whose login() performs no real vendor login — but it
+ * RECORDS every login() and status() call by provider, so a scenario can assert the wizard actually
+ * drove a per-provider login, not merely that status happened to return logged-in (codeant/qodo review:
+ * an unobserved no-op login would let a regression that skips login still pass).
+ */
+function fakeRunner(status: () => ProbeResult): CliRunner & { logins: string[]; statuses: string[] } {
+  const logins: string[] = [];
+  const statuses: string[] = [];
+  return {
+    logins,
+    statuses,
+    login(provider) { logins.push(provider); },
+    status(provider) { statuses.push(provider); return status(); },
+  };
 }
 /** A CliRunner that throws if touched — proves a scenario performed no login or status probe. */
 function untouchableRunner(): CliRunner {
@@ -69,6 +84,7 @@ interface Plan {
   confirmTrue?: RegExp[];
   selects?: { pattern: RegExp; choice: string }[];
   texts?: { pattern: RegExp; value: string }[];
+  secrets?: { pattern: RegExp; value: string }[];
 }
 class PlanPrompter implements Prompter {
   readonly asked: string[] = [];
@@ -89,7 +105,11 @@ class PlanPrompter implements Prompter {
     this.asked.push(question);
     return this.plan.confirmTrue?.some((re) => re.test(question)) ?? false;
   }
-  async secret(question: string): Promise<string> { this.asked.push(question); return ''; }
+  async secret(question: string): Promise<string> {
+    this.asked.push(question);
+    const match = this.plan.secrets?.find((entry) => entry.pattern.test(question));
+    return match ? match.value : '';
+  }
   close(): void { /* no handle */ }
 }
 
@@ -122,7 +142,14 @@ describe('heddle setup — fresh-machine validation harness (HED-571)', () => {
     const prompter = new PlanPrompter({
       confirmTrue: [/Do you have a Claude account/, /Do you have a Codex account/, /Do you have a Cursor account/],
     });
-    const results = await runSetup(ctx(), makeIO(prompter), buildSteps({ runner: fakeRunner(loggedIn) }));
+    const runner = fakeRunner(loggedIn);
+    const results = await runSetup(ctx(), makeIO(prompter), buildSteps({ runner }));
+
+    // The wizard drove a login AND a status probe for EACH accepted native provider — not merely that
+    // status happened to return logged-in (runAccountsAdd calls runner.login then runner.status per
+    // accepted provider). An unobserved no-op login would let a regression that skips login still pass.
+    expect(runner.logins.sort()).toEqual(['claude', 'codex', 'cursor']);
+    expect(runner.statuses.sort()).toEqual(['claude', 'codex', 'cursor']);
 
     // Assert 'done' on a DELIBERATE known-id set — never a blanket `every step === 'done'` loop. The
     // read-only doctor step (HED-476) returns 'failed' on a bare temp HOME (no comms/routing/secrets to
@@ -183,7 +210,11 @@ describe('heddle setup — fresh-machine validation harness (HED-571)', () => {
     const accounts = results.find((result) => result.id === 'accounts');
     expect(accounts?.status).toBe('failed');
     expect(accounts?.summary).toMatch(/failed/);
-    expect(readRegistry().accounts[0]).toMatchObject({ provider: 'claude', loggedIn: false });
+    const registry = readRegistry();
+    // A failed login still RECORDS the account (loggedIn:false) — guard length first so a regression
+    // that writes nothing fails with a clear length assertion, not an undefined-access crash (amazon-q).
+    expect(registry.accounts).toHaveLength(1);
+    expect(registry.accounts[0]).toMatchObject({ provider: 'claude', loggedIn: false });
   });
 
   it('no secret leaks (HED-400 #1): a key referenced by env-var NAME never lands in the transcript or on disk', async () => {
