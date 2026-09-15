@@ -62,13 +62,14 @@ latest_marker_id() {
 field() { printf '%s' "$1" | grep -oE "$2=[^ ]+" | head -1 | cut -d= -f2; }
 
 # Parse latest marker → sets M_OWNER, M_SINCE, M_HB, M_AGE_H (hours, integer).
-# Returns: 0 marker parsed · 1 read OK but no marker · 2 the gh/API read FAILED (unreadable).
+# Returns: 0 parsed · 1 read OK, genuinely no marker · 2 gh/API read FAILED ·
+#          3 marker present but owner unparseable (corrupt/foreign — do NOT treat as no-marker).
 parse_marker() {
   local body rc; body=$(latest_marker_body "$1"); rc=$?
   [ "$rc" -ne 0 ] && return 2       # gh/API read FAILED — caller must NOT treat this as "no marker"
   [ -z "$body" ] && return 1        # read OK, genuinely no marker
   M_OWNER=$(field "$body" owner); M_SINCE=$(field "$body" since); M_HB=$(field "$body" heartbeat)
-  [ -z "$M_OWNER" ] && return 1
+  [ -z "$M_OWNER" ] && return 3
   local hb_e now_e; hb_e=$(iso_to_epoch "$M_HB"); now_e=$(date -u +%s)
   if [ -n "$hb_e" ]; then M_AGE_H=$(( (now_e - hb_e) / 3600 )); else M_AGE_H=9999; fi
   return 0
@@ -86,7 +87,10 @@ case "$cmd" in
 
   check)
     [ -n "$pr" ] || die_open "usage: pr-own.sh check <pr#>"
-    if ! parse_marker "$pr"; then echo "UNOWNED — PR #$pr has no owner. Claim it before you work it: pr-own.sh claim $pr"; exit 0; fi
+    parse_marker "$pr"; pm=$?
+    [ "$pm" -eq 2 ] && die_open "cannot read ownership marker for PR #$pr (gh/API)"
+    if [ "$pm" -eq 3 ]; then echo "UNPARSEABLE — PR #$pr has a PR-OWNER marker whose owner is unreadable (corrupt/foreign). NOT auto-claimable: inspect it (gh pr view $pr) and re-post a clean marker or coordinate with Maya."; exit 3; fi
+    if [ "$pm" -eq 1 ]; then echo "UNOWNED — PR #$pr has no owner. Claim it before you work it: pr-own.sh claim $pr"; exit 0; fi
     # A released marker means the prior owner handed off — adoptable immediately, regardless of
     # the release note's (fresh) heartbeat. Without this, release→adopt was impossible until the
     # stale window passed, stranding handed-off PRs for hours (SPI-529).
@@ -102,7 +106,10 @@ case "$cmd" in
   claim)
     [ -n "$pr" ] || die_open "usage: pr-own.sh claim <pr#>"
     now=$(now_iso); since="$now"
-    if parse_marker "$pr"; then
+    parse_marker "$pr"; pm=$?
+    [ "$pm" -eq 2 ] && die_open "cannot read ownership marker for PR #$pr (gh/API) — not claiming"
+    if [ "$pm" -eq 3 ]; then echo "REFUSED — PR #$pr has an unparseable ownership marker; not stomping it. Inspect (gh pr view $pr) and fix/re-post the marker, or coordinate with Maya." >&2; exit 3; fi
+    if [ "$pm" -eq 0 ]; then
       # 'released' is a handoff, not an owner — adoptable no matter how fresh the release note is (SPI-529).
       if [ "$M_OWNER" != "$me" ] && [ "$M_OWNER" != "released" ] && [ "$M_AGE_H" -lt "$STALE_HOURS" ]; then
         echo "REFUSED — PR #$pr is owned by '$M_OWNER' (fresh, ${M_AGE_H}h). STAND DOWN or coordinate with Maya." >&2; exit 3
@@ -135,6 +142,7 @@ case "$cmd" in
     # on a successfully-read marker owned, fresh, by someone else. Predicate mirrors `claim` above.
     parse_marker "$pr"; pm=$?
     [ "$pm" -eq 2 ] && die_open "cannot read ownership marker for PR #$pr (gh/API) — not releasing"
+    [ "$pm" -eq 3 ] && die_open "PR #$pr has an unparseable ownership marker — not releasing (would strip a possibly-active claim); inspect it (gh pr view $pr)."
     if [ "$pm" -eq 0 ] && [ "$M_OWNER" != "$me" ] && [ "$M_OWNER" != "released" ] && [ "$M_AGE_H" -lt "$STALE_HOURS" ]; then
       echo "REFUSED — PR #$pr is owned by '$M_OWNER' (fresh, heartbeat ${M_AGE_H}h ago) — not yours to release. STAND DOWN or coordinate with Maya." >&2; exit 3
     fi

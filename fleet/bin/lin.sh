@@ -34,6 +34,10 @@ Tokens auto-mint/refresh; nothing here needs Maya's login.
 GitHub tracker support: `tracker: github` requires both `githubRepo` and `linearTeam` in
 ~/.heddle/projects.json.
 """
+# PEP 604 annotations (str | None) appear in signatures below; launchd jobs run this under
+# the system python3 (3.9), where those evaluate eagerly at def-time — keep them lazy.
+from __future__ import annotations
+
 import argparse
 import json
 import os
@@ -121,7 +125,7 @@ class Tracker:
     def me(self):
         raise NotImplementedError
 
-    def issue(self, ident):
+    def issue(self, ident, last_comments=6):
         raise NotImplementedError
 
     def list_issues(self, *, mine: bool, area: str | None, me_id: str, limit: int) -> list[dict]:
@@ -216,14 +220,14 @@ class Lin:
             self._labels = d["issueLabels"]["nodes"]
         return self._labels
 
-    def issue(self, ident):
-        d = self.gql("""query($id: String!) { issue(id: $id) {
+    def issue(self, ident, last_comments=6):
+        d = self.gql("""query($id: String!, $lastComments: Int) { issue(id: $id) {
             id identifier title url branchName priority priorityLabel description
             team { id key } state { id name type } delegate { id name } assignee { id name }
             labels { nodes { id name } }
-            comments(last: 6) { nodes { body createdAt
+            comments(last: $lastComments) { nodes { body createdAt
                 user { name } botActor { name } externalUser { name } } }
-        } }""", {"id": ident})
+        } }""", {"id": ident, "lastComments": last_comments})
         if not d.get("issue"):
             sys.exit(f"lin.sh: issue {ident} not found")
         return d["issue"]
@@ -255,8 +259,8 @@ class LinearTracker(Tracker):
     def me(self):
         return self._linear.me
 
-    def issue(self, ident):
-        return self._linear.issue(ident)
+    def issue(self, ident, last_comments=6):
+        return self._linear.issue(ident, last_comments)
 
     def list_issues(self, *, mine: bool, area: str | None, me_id: str, limit: int) -> list[dict]:
         f = {"team": {"key": {"eq": TEAM_KEY}}}
@@ -431,7 +435,7 @@ class GitHubIssuesTracker(Tracker):
             state = state.get("name") or state.get("state")
         if str(state or "").upper() == "CLOSED":
             return {"id": "gh:completed", "name": "Done", "type": "completed"}
-        if any(label.get("name") == "status: in-progress" for label in labels):
+        if any(label.get("name", "").lower() == "status: in-progress" for label in labels):
             return {"id": "gh:started", "name": "In Progress", "type": "started"}
         return {"id": "gh:unstarted", "name": "Todo", "type": "unstarted"}
 
@@ -439,7 +443,7 @@ class GitHubIssuesTracker(Tracker):
         slug = re.sub(r"[^a-z0-9]+", "-", (title or "").lower()).strip("-")[:48]
         return f"agent{self._key}/{number}-{slug}"
 
-    def issue(self, ident):
+    def issue(self, ident, last_comments=6):
         number = self._num(ident)
         data = self._gh(["issue", "view", number, "--json",
                          "number,title,body,url,state,labels,assignees,comments"])
@@ -453,12 +457,12 @@ class GitHubIssuesTracker(Tracker):
         delegate = None
         for label in labels:
             name = label.get("name", "")
-            if name.startswith("delegate: "):
+            if name.lower().startswith("delegate: "):
                 agent_key = name[len("delegate: "):]
                 delegate = {"id": agent_key, "name": f"Agent {agent_key}"}
                 break
         priority = self._priority(labels)
-        comments_src = (data.get("comments") or [])[-6:]
+        comments_src = (data.get("comments") or [])[-last_comments:]
         return {
             "id": str(data["number"]),
             "identifier": f"#{data['number']}",
@@ -506,7 +510,7 @@ class GitHubIssuesTracker(Tracker):
     def _clear_status(self, number):
         for label in self._labels_for(number):
             name = label.get("name", "")
-            if name.startswith("status: "):
+            if name.lower().startswith("status: "):
                 self._gh(["issue", "edit", number, "--remove-label", name], parse_json=False)
 
     def _ensure_label(self, name):
@@ -528,7 +532,7 @@ class GitHubIssuesTracker(Tracker):
         # concurrent claim or a kill in the gap would otherwise see no owner).
         for label in self._labels_for(number):
             name = label.get("name", "")
-            if name.startswith("delegate: ") and name != except_name:
+            if name.lower().startswith("delegate: ") and name != except_name:
                 self._gh(["issue", "edit", number, "--remove-label", name], parse_json=False)
 
     def _set_status(self, number, status):
@@ -544,12 +548,15 @@ class GitHubIssuesTracker(Tracker):
         if "delegateId" in fields:
             delegate = fields["delegateId"]
             if delegate is None:
+                me_login = self._gh(["api", "user", "--jq", ".login"], repo=False,
+                                    parse_json=False).strip()
                 self._clear_delegate(number)
-                assignees = self._gh(["issue", "view", number, "--json", "assignees"]).get("assignees") or []
-                for assignee in assignees:
-                    login = assignee.get("login")
-                    if login:
-                        self._gh(["issue", "edit", number, "--remove-assignee", login], parse_json=False)
+                if me_login:
+                    assignees = self._gh(["issue", "view", number, "--json", "assignees"]).get("assignees") or []
+                    for assignee in assignees:
+                        login = assignee.get("login")
+                        if login and login.lower() == me_login.lower():
+                            self._gh(["issue", "edit", number, "--remove-assignee", login], parse_json=False)
             else:
                 # Resolve the canonical label casing first (add-label is case-sensitive), then spare
                 # exactly that name when clearing and add it verbatim.
@@ -602,12 +609,13 @@ class GitHubIssuesTracker(Tracker):
                 "area": next((label["name"][6:] for label in labels
                               if label.get("name", "").startswith("Area: ")), "-"),
                 "state_name": "In Progress" if any(
-                    label.get("name") == "status: in-progress" for label in labels) else "Todo",
+                    label.get("name", "").lower() == "status: in-progress"
+                    for label in labels) else "Todo",
                 # Identity is the delegate:<letter> label, not the (shared) gh assignee login
                 # (round-2 finding 2 — mine/list must show the fleet agent, not "mmayasaurus").
                 "delegate_name": next((f"Agent {label['name'][len('delegate: '):]}"
                                        for label in labels
-                                       if label.get("name", "").startswith("delegate: ")), None),
+                                       if label.get("name", "").lower().startswith("delegate: ")), None),
                 "_priority": priority,
             })
         rows.sort(key=lambda row: row["_priority"] if row["_priority"] > 0 else 99)
@@ -887,6 +895,18 @@ def cmd_view(lin, args):
             print(f"  [{c['createdAt'][:10]}] {author_of(c)}: {short(c['body'], 120)}")
 
 
+def cmd_comments(lin, args):
+    i = lin.issue(args.issue, last_comments=50)
+    cs = i["comments"]["nodes"]
+    for index, c in enumerate(cs):
+        if index:
+            print()
+        body_lines = c["body"].splitlines() or [""]
+        print(f"  [{c['createdAt'][:10]}] {author_of(c)}: {body_lines[0]}")
+        for line in body_lines[1:]:
+            print(f"    {line}")
+
+
 def cmd_list(lin, args):
     if is_heddle_fleet(lin.key) and TEAM_KEY.strip().upper() != "HED":
         print(f"⛔ {FLEET_SCOPE_RULE} (Maya, firsthand 2026-08-23): the heddle fleet works the HED "
@@ -1036,6 +1056,7 @@ def main():
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("whoami")
     v = sub.add_parser("view"); v.add_argument("issue")
+    co = sub.add_parser("comments"); co.add_argument("issue")
     ls = sub.add_parser("list")
     ls.add_argument("--area"); ls.add_argument("--mine", action="store_true")
     ls.add_argument("--limit", type=int, default=25)
@@ -1060,7 +1081,7 @@ def main():
         return
 
     lin = tracker_for_agent(resolve_agent(args.agent))
-    {"whoami": cmd_whoami, "view": cmd_view, "list": cmd_list, "areas": cmd_areas,
+    {"whoami": cmd_whoami, "view": cmd_view, "comments": cmd_comments, "list": cmd_list, "areas": cmd_areas,
      "claim": cmd_claim, "unclaim": cmd_unclaim, "mine": cmd_mine,
      "comment": cmd_comment, "resolve": cmd_resolve, "done": cmd_done,
      "create": cmd_create, "needs-maya": cmd_needs_maya}[args.cmd](lin, args)
