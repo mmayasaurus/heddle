@@ -271,7 +271,7 @@ describe('heddle setup — fresh-machine validation harness (HED-571)', () => {
 describe('heddle setup — doctor-green finish composition (HED-599)', () => {
   it('a passing doctor finish makes the walkthrough report end-to-end verification', async () => {
     const io = makeIO(new PlanPrompter({ confirmTrue: [/Do you have a Claude account/] }));
-    const steps = [accountsStep(fakeRunner(loggedIn)), createDoctorStep({ runDoctor: async () => cannedReport({ ok: 5 }) })];
+    const steps = [accountsStep(fakeRunner(loggedIn)), createDoctorStep({ runDoctor: async () => cannedReport() })];
     const results = await runSetup(ctx(), io, steps);
 
     expect(results.map((result) => result.id)).toEqual(['accounts', 'doctor']);
@@ -301,5 +301,33 @@ describe('heddle setup — doctor-green finish composition (HED-599)', () => {
     const transcript = io.lines.join('\n');
     expect(transcript).toMatch(/1 step failed/);
     expect(transcript).not.toContain('Setup verified end-to-end'); // never hollow green
+  });
+
+  it('production buildSteps keeps the doctor gate WIRED and guarded (what the canned-array scenarios cannot)', async () => {
+    // qodo/codeant: the canned-report scenarios above compose a custom array, so a regression that drops
+    // the doctor step from buildSteps or loses its guards would not surface there. Pin the PRODUCTION
+    // composition instead: extract the REAL guarded doctor step FROM buildSteps (proving it stays wired)
+    // and drive THAT step through its two skip paths — no real probe needed, and running it in isolation
+    // keeps this decoupled from the spread/meters/rules step grouping (no cross-PR collision).
+    const doctor = buildSteps({ runner: untouchableRunner() }).find((step) => step.id === 'doctor');
+    expect(doctor, 'buildSteps must keep the doctor finish-gate wired').toBeDefined();
+
+    // dryRunGate intact: under --dry-run the composed doctor is skipped, never running the real probe.
+    const dryDoctor = (await runSetup(ctx({ dryRun: true }), makeIO(new PlanPrompter({})), [doctor!]))
+      .find((result) => result.id === 'doctor');
+    expect(dryDoctor?.status).toBe('skipped');
+    expect(dryDoctor?.summary.toLowerCase()).toContain('dry-run');
+
+    // skipDoctorUnderAltHome intact: a --home install diverging from $HOME skips the gate (HED-596),
+    // so setup never verifies (green OR red) a different install than it wrote.
+    const altHome = mkdtempSync(join(tmpdir(), 'heddle-hed599-alt-'));
+    try {
+      const altDoctor = (await runSetup(ctx({ homeDir: altHome }), makeIO(new PlanPrompter({})), [doctor!]))
+        .find((result) => result.id === 'doctor');
+      expect(altDoctor?.status).toBe('skipped');
+      expect(altDoctor?.summary).toMatch(/HED-596/);
+    } finally {
+      rmSync(altHome, { recursive: true, force: true });
+    }
   });
 });
