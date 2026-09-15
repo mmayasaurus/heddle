@@ -16,6 +16,7 @@ import { loadProjectRegistry, DEFAULT_PROJECTS_PATH } from './projects.js';
 import { applyInstall, planInstall, redactReport } from './init-project.js';
 import { pickClaudeAccount, readClaudeAccounts } from './capaware.js';
 import { claudeAccountRows, pickClaudeAccountsBatch, usableClaudeCaps } from './account-pick.js';
+import { resolveLaunchSeat } from './launch-seat.js';
 import { bindingMeter, claudeFloorsFrom } from './floors.js';
 import { loadLanes } from './lanes.js';
 import { readSeatWeights, seatWeightsFrom, writeSeatWeightsMirror } from './seat-weights.js';
@@ -132,6 +133,7 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
   heddle usage install-poll-launchd [--start-interval <secs>] [--dry-run] [--json]  install + load the keeper-less launchd usage-poll producer (running this yourself is the activation step — the pack never loads it; refuses if the window-keeper is loaded)
   heddle top [--once] [--json]  one disk-only dashboard snapshot (watch mode is Slice 2)
   heddle account pick [--for <letter[,letter...]>] [--json] [--explain]   healthiest addressable Claude account for a fleet relaunch
+  heddle account seat <project> <agent>   resolve one project agent's CLAUDE_CONFIG_DIR seat (project-scoped spread); stdout = configDir on success, else non-zero + reason on stderr (never a fallback)
   heddle account seat-weights sync   atomically refresh ~/.heddle/seat-weights.json from routing/lanes.yaml
   heddle pr own <whoami|claim|check|release|mine> [<pr#>] [--json]       coordinate ownership of a GitHub PR
   heddle pr sweep <pr#> [--json]       sweep all GitHub PR review channels and report mechanical gates
@@ -318,8 +320,58 @@ try {
         writeSeatWeightsMirror(seatWeightsFrom(loadLanes()));
         break;
       }
+      if (process.argv[3] === 'seat') {
+        // Project-scoped launcher seat (HED-669): resolve the CLAUDE_CONFIG_DIR one project agent should
+        // launch on, by spreading the project's WHOLE agent set through the same weighted-LPT placement
+        // `account pick` uses, then reading off this agent's assignment. Distinct contract from `pick`:
+        // stdout carries ONLY the configDir (so a launcher can `CLAUDE_CONFIG_DIR=$(heddle account seat …)`)
+        // and it FAILS LOUD — no fallback, no default-login seat — when no explicit seat resolves.
+        const projectName = process.argv[4];
+        const agentId = process.argv[5];
+        if (!projectName || projectName.startsWith('-') || !agentId || agentId.startsWith('-')) {
+          console.error('usage: heddle account seat <project> <agent>');
+          process.exit(2);
+        }
+        try {
+          const accounts = readClaudeAccounts();
+          const capsGate = usableClaudeCaps(readProviderCaps().claude);
+          if (!capsGate.usable) {
+            console.error(`heddle: cannot resolve a Claude seat: caps are missing or stale (data age ${capsGate.age}) — refusing rather than guessing a seat`);
+            process.exit(2);
+          }
+          const lanes = loadLanes();
+          const seatWeights = seatWeightsFrom(lanes);
+          const result = resolveLaunchSeat({
+            registry: loadProjectRegistry(),
+            projectName,
+            agent: agentId,
+            caps: capsGate.caps,
+            accounts,
+            floors: claudeFloorsFrom(lanes),
+            // Empty census ON PURPOSE — this command is called once PER AGENT by a launcher, so a live
+            // census would double-count just-launched siblings and make each seat depend on call order
+            // (see src/launch-seat.ts). Weights still come from lanes so LPT ordering matches the fleet.
+            residentsByAccount: new Map(),
+            weightOf: (letter: string) => seatWeights.byAgent.get(letter) ?? seatWeights.default,
+          });
+          if (!result.ok) {
+            console.error(`heddle: ${result.reason}`);
+            process.exit(1);
+          }
+          // Success: the ONLY stdout is the configDir (one clean line); the human binding line is stderr;
+          // exit 0 falls out on `break` (Node flushes stdout on normal exit — no truncation risk).
+          console.error(`heddle: seat ${result.agent}@${projectName} → ${result.account} (${result.reason})`);
+          console.log(result.configDir);
+        } catch (err) {
+          // Any loader throw (lanes/projects/caps/accounts) must NOT reach the outer catch, which prints
+          // JSON to STDOUT under --json and would violate the nothing-on-stdout-on-failure contract.
+          console.error(`heddle: ${(err as Error).message}`);
+          process.exit(1);
+        }
+        break;
+      }
       if (process.argv[3] !== 'pick') {
-        console.error('usage: heddle account pick [--for <letter[,letter...]>] [--json] [--explain]\n       heddle account seat-weights sync');
+        console.error('usage: heddle account pick [--for <letter[,letter...]>] [--json] [--explain]\n       heddle account seat <project> <agent>\n       heddle account seat-weights sync');
         process.exit(2);
       }
       const accounts = readClaudeAccounts();
