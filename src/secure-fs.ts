@@ -18,7 +18,9 @@ import { basename, dirname, join } from 'node:path';
  *
  * They do NOT walk ancestors: Node exposes no per-component `O_NOFOLLOW`/`openat`/`RESOLVE_NO_SYMLINKS`
  * and this project takes zero native deps, so a symlink or a group/other-writable directory HIGHER in the
- * path (or, for the reader/lock, a foreign-owned immediate parent) is not detected here. That is acceptable
+ * path (or, for the reader/lock, a foreign-owned immediate parent) is not detected here (the one exception
+ * is `ensureSecureDir`, which walks to the deepest existing ancestor when CREATING and validates +
+ * force-modes each level it makes — see its own contract). That is acceptable
  * only because every path these guard is heddle-owned under `~/.heddle` or a user-owned profile dir — a
  * same-uid trust domain a cross-uid attacker cannot write to, and a same-uid process already holds the
  * credentials outright. Callers MUST pass paths whose ancestors are user-owned and not group/other-writable.
@@ -144,6 +146,100 @@ export function secureReadFile(path: string, opts: { euid?: number } = {}): stri
   } finally {
     closeSync(fd);
   }
+}
+
+/**
+ * Ensure a directory exists and is safe to hold credentials: accept an existing one only if it is a
+ * euid-owned real directory that is not a symlink and not group/other-writable, or CREATE it (and any
+ * missing ancestors) at exactly `mode` when absent. The directory analogue of `secureWriteFile` for the
+ * HED-586/590/591 F-cluster — e.g. the native account config directory the CLI later writes
+ * `.credentials.json` into — so all three adopt ONE validated create-or-validate path instead of each
+ * hand-rolling `lstat` checks.
+ *
+ * `mode` is validated first: a credential directory must be owner-rwx (so it can actually be entered and
+ * written) AND must NOT be group/other-writable, so a `mode` missing an owner bit (e.g. 0o600 — an
+ * un-enterable directory) or carrying 0o022 is rejected rather than silently honored.
+ *
+ * When the directory is ABSENT it is built by a per-level walk, NOT a single recursive `mkdir`: climb to
+ * the deepest existing ancestor (rejecting a symlinked / non-dir / group-or-other-writable ancestor along
+ * the way), then create each missing component top-down and, on that component's own
+ * `O_DIRECTORY | O_NOFOLLOW` fd, verify euid-ownership and force the mode to exactly `mode` BEFORE
+ * descending into it. This is required because `mkdir`'s mode argument is umask-masked: a single recursive
+ * create under a restrictive umask (one stripping owner-execute) would leave the FIRST new ancestor
+ * un-enterable, so creating the rest of the path fails EACCES and strands a partial tree. Forcing each
+ * level past umask on its fd as we go keeps every created ancestor enterable — so, unlike the file
+ * primitives' immediate-parent-only model, a directory this function CREATES is never a deep-ancestor
+ * residual; only a PRE-EXISTING ancestor above the deepest existing one stays out of scope (the module
+ * invariant), and you cannot create UNDER a foreign-owned ancestor anyway (`mkdir` fails EACCES unless it
+ * is group/other-writable, which the climb rejects). If a level's finalization fails (a symlink swapped in
+ * at the name, or the ownership check), that half-initialized level is removed so a later call recreates it
+ * rather than accepting a partial one. An EXISTING directory is validated but never chmodded (a legitimate
+ * 0755 profile dir is accepted, exactly as the writer accepts a 0755 parent). Each component is created
+ * NON-recursively, so a concurrent same-uid create of the same component surfaces EEXIST rather than being
+ * silently adopted unvalidated — callers that create the same tree concurrently serialize or retry.
+ */
+export function ensureSecureDir(dir: string, opts: { mode?: number; euid?: number } = {}): void {
+  const mode = opts.mode ?? 0o700;
+  if ((mode & 0o700) !== 0o700 || (mode & 0o022) !== 0) {
+    throw new Error(`refusing to create credential directory ${dir}: mode 0${mode.toString(8)} must be owner-rwx (0o700) and not group/other-writable`);
+  }
+  const euid = effectiveUid(opts.euid);
+
+  // Fast path: the target already exists and is a safe, euid-owned directory → accept as-is (never
+  // chmodded, exactly like an existing parent). Its natural ENOENT means "absent → create it" below.
+  try {
+    assertSafeExistingDir(dir, euid);
+    return;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+  }
+
+  // Climb to the deepest existing ancestor, collecting the missing components to create top-down. The
+  // climb requires only STRUCTURAL safety of existing ancestors (not a symlink / not a non-dir / not
+  // group-or-other-writable), not euid-ownership: you cannot `mkdir` under a foreign-owned ancestor unless
+  // it is group/other-writable, and that is exactly what assertSafeExistingDir rejects here — so a foreign
+  // ancestor either trips the rejection or fails the create with EACCES, never silently holds credentials.
+  const missing = [dir];
+  let cur = dirname(dir);
+  for (;;) {
+    try {
+      assertSafeExistingDir(cur);
+      break; // deepest existing ancestor found — everything in `missing` sits below it
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    }
+    if (dirname(cur) === cur) break; // reached the filesystem root without an existing ancestor (defensive)
+    missing.unshift(cur);
+    cur = dirname(cur);
+  }
+
+  // Create each missing component top-down. Each is created then immediately finalized on its own fd
+  // (euid-ownership verified, mode forced past umask); a level that fails finalization is rolled back so a
+  // retry recreates it rather than a later call accepting a partially-initialized directory as existing.
+  for (const component of missing) {
+    mkdirSync(component, { mode });
+    try {
+      finalizeCreatedDir(component, mode, euid);
+    } catch (err) {
+      try {
+        rmdirSync(component);
+      } catch {
+        // Best-effort rollback: a symlink swapped in at the name (ENOTDIR) or an already-removed dir —
+        // preserve the original finalization failure, which is the one worth surfacing.
+      }
+      throw err;
+    }
+  }
+}
+
+/**
+ * Validate that an EXISTING directory is safe to hold credentials, without creating anything: a euid-owned
+ * real directory, not a symlink, not group/other-writable. The validate-only companion to `ensureSecureDir`
+ * (e.g. to check a config directory a caller expects to already exist). An absent directory surfaces its
+ * natural ENOENT unchanged, so a caller can distinguish "absent" from "present but unsafe".
+ */
+export function assertSecureDir(dir: string, opts: { euid?: number } = {}): void {
+  assertSafeExistingDir(dir, effectiveUid(opts.euid));
 }
 
 /**
@@ -356,6 +452,27 @@ function assertSafeExistingDir(dir: string, euid?: number): void {
   if (!stats.isDirectory()) throw new Error(`refusing: ${dir} is not a directory`);
   if ((stats.mode & 0o022) !== 0) throw new Error(`refusing: directory ${dir} is group- or other-writable`);
   if (euid !== undefined && stats.uid !== euid) throw new Error(`refusing: directory ${dir} is not owned by effective uid ${euid}`);
+}
+
+/**
+ * Finalize a directory THIS module just created (one component of the `ensureSecureDir` walk), acting on an
+ * fd rather than the path: open it `O_DIRECTORY | O_NOFOLLOW` — never following a symlink swapped in at the
+ * name, and guaranteeing the fd is a directory — then verify the created inode is owned by `euid` and
+ * `fchmod` it to exactly `mode`. The ownership check runs BEFORE the chmod so the absent-create path
+ * enforces the same euid-ownership invariant `assertSafeExistingDir` enforces for an existing directory
+ * (mirroring how `secureWriteFile` fstat-checks its open fd). `mkdir`'s mode argument is umask-masked (a
+ * 0o700 request lands as 0o600 under a umask that strips owner-execute → an un-enterable credential dir),
+ * so this fd `fchmod` — which ignores umask and acts on the just-made inode — is what actually guarantees
+ * the mode, exactly as the file writer fchmods its temp fd.
+ */
+function finalizeCreatedDir(dir: string, mode: number, euid: number): void {
+  const fd = openSync(dir, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  try {
+    if (fstatSync(fd).uid !== euid) throw new Error(`refusing: created directory ${dir} is not owned by effective uid ${euid}`);
+    fchmodSync(fd, mode);
+  } finally {
+    closeSync(fd);
+  }
 }
 
 function effectiveUid(injected: number | undefined): number {

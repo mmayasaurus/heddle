@@ -3,6 +3,8 @@ import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   acquireCredentialLock,
+  assertSecureDir,
+  ensureSecureDir,
   releaseCredentialLock,
   secureReadFile,
   secureWriteFile,
@@ -429,5 +431,135 @@ describe('secure filesystem primitives', () => {
     releaseCredentialLock(path, 111);
 
     expect(readFileSync(path, 'utf8')).toBe('222'); // 222's lock is NOT stranded by our release
+  });
+
+  it('ensureSecureDir creates a missing directory (and ancestors) at 0700', () => {
+    const dir = join(tempDir(), 'a', 'b', 'configdir');
+
+    ensureSecureDir(dir);
+
+    expect(statSync(dir).isDirectory()).toBe(true);
+    expect(statSync(dir).mode & 0o777).toBe(0o700);
+  });
+
+  it('ensureSecureDir forces the created directory to exactly 0o700 despite a restrictive umask', () => {
+    const dir = join(tempDir(), 'forced'); // resolve tempDir BEFORE changing the umask
+    const prevUmask = process.umask(0o100); // masks owner-EXECUTE from newly created directories
+    try {
+      ensureSecureDir(dir, { mode: 0o700 });
+      // mkdir(0o700) under umask 0o100 lands as 0o600 — an un-enterable credential dir. finalizeCreatedDir
+      // fchmod()s the dir fd to exactly 0o700 regardless of umask (the fd-based technique the file writer
+      // uses). Without that fchmod this reads 0o600.
+      expect(statSync(dir).mode & 0o777).toBe(0o700);
+    } finally {
+      process.umask(prevUmask);
+    }
+  });
+
+  it('ensureSecureDir forces EVERY created level to 0o700 under an owner-execute-stripping umask (multi-level)', () => {
+    // The qodo HIGH: a single `mkdir -p` under umask 0o100 would create the first ancestor un-enterable
+    // (0o600, no owner-execute), so creating the rest of the path fails EACCES and strands a partial tree.
+    // The per-level walk force-modes each component past umask on its own fd BEFORE descending, so all
+    // three land at exactly 0o700 and the create succeeds. Resolve tempDir BEFORE changing the umask.
+    const root = tempDir();
+    const a = join(root, 'x');
+    const b = join(a, 'y');
+    const dir = join(b, 'z');
+    const prevUmask = process.umask(0o100);
+    try {
+      ensureSecureDir(dir);
+      for (const level of [a, b, dir]) {
+        expect(statSync(level).isDirectory()).toBe(true);
+        expect(statSync(level).mode & 0o777).toBe(0o700); // every created level enterable, not just the leaf
+      }
+    } finally {
+      process.umask(prevUmask);
+    }
+  });
+
+  it('ensureSecureDir rejects an owner-inaccessible mode (no owner-execute), creating nothing', () => {
+    // A directory mode must grant the owner rwx or the credential dir cannot be entered/used. 0o600 clears
+    // the group/other-writable guard but is still un-enterable — reject it at the door, before any create.
+    const dir = join(tempDir(), 'ownerlocked');
+
+    expect(() => ensureSecureDir(dir, { mode: 0o600 })).toThrow(/owner|rwx|mode/i);
+    expect(existsSync(dir)).toBe(false);
+  });
+
+  it('ensureSecureDir rejects a created inode whose owner is not euid, and rolls the level back', () => {
+    // finding iaci_/iacfd: the absent-create path must enforce the SAME euid-ownership invariant the
+    // existing-dir path enforces, and must not strand a half-initialized level. With an injected foreign
+    // euid the just-created inode (owned by the real euid) fails finalizeCreatedDir's ownership check; the
+    // level is then rmdir'd so nothing partial is left for a later call to accept as "existing".
+    const dir = join(tempDir(), 'wrongowner');
+
+    expect(() => ensureSecureDir(dir, { euid: foreignEuid })).toThrow(/owner|owned/i);
+    expect(existsSync(dir)).toBe(false); // rolled back — no partial-init directory left behind
+  });
+
+  it('ensureSecureDir accepts an existing 0755 directory without changing its mode', () => {
+    const dir = join(tempDir(), 'profile');
+    mkdirSync(dir);
+    chmodSync(dir, 0o755);
+
+    ensureSecureDir(dir);
+
+    // A legitimate group/other-READABLE (not writable) profile dir is accepted as-is and never chmodded,
+    // exactly as secureWriteFile accepts a 0755 parent — a secret's own 0600 protects it, not dir traversal.
+    expect(statSync(dir).mode & 0o777).toBe(0o755);
+  });
+
+  it('ensureSecureDir rejects a mode that would be group/other-writable, creating nothing', () => {
+    const dir = join(tempDir(), 'loosemode');
+
+    expect(() => ensureSecureDir(dir, { mode: 0o777 })).toThrow(/mode|writable/i);
+    expect(existsSync(dir)).toBe(false); // rejected at the door → not created
+  });
+
+  it('ensureSecureDir rejects an existing symlinked directory', () => {
+    const root = tempDir();
+    const realDir = join(root, 'realdir');
+    const linkDir = join(root, 'linkdir');
+    mkdirSync(realDir, { mode: 0o700 });
+    symlinkSync(realDir, linkDir);
+
+    expect(() => ensureSecureDir(linkDir)).toThrow(/symlink/i);
+  });
+
+  it('ensureSecureDir rejects an existing group/other-writable directory', () => {
+    const dir = join(tempDir(), 'worldwritable');
+    mkdirSync(dir);
+    chmodSync(dir, 0o777);
+
+    expect(() => ensureSecureDir(dir)).toThrow(/writable/i);
+  });
+
+  it('ensureSecureDir rejects a foreign-owned existing directory through the euid seam', () => {
+    const dir = join(tempDir(), 'foreign');
+    mkdirSync(dir, { mode: 0o700 });
+
+    expect(() => ensureSecureDir(dir, { euid: foreignEuid })).toThrow(/owner|owned/i);
+  });
+
+  it('assertSecureDir accepts a safe existing directory and bubbles ENOENT for an absent one', () => {
+    const dir = join(tempDir(), 'present');
+    mkdirSync(dir, { mode: 0o700 });
+    expect(() => assertSecureDir(dir)).not.toThrow();
+
+    const absent = join(tempDir(), 'missing');
+    let caught: NodeJS.ErrnoException | undefined;
+    try { assertSecureDir(absent); } catch (err) { caught = err as NodeJS.ErrnoException; }
+    expect(caught?.code).toBe('ENOENT'); // absent → natural not-found, so a caller can distinguish it
+  });
+
+  it('assertSecureDir rejects a symlinked or foreign-owned directory (validate-only, creates nothing)', () => {
+    const root = tempDir();
+    const realDir = join(root, 'realdir');
+    const linkDir = join(root, 'linkdir');
+    mkdirSync(realDir, { mode: 0o700 });
+    symlinkSync(realDir, linkDir);
+    expect(() => assertSecureDir(linkDir)).toThrow(/symlink/i);
+
+    expect(() => assertSecureDir(realDir, { euid: foreignEuid })).toThrow(/owner|owned/i);
   });
 });
