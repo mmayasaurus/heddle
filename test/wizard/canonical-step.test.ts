@@ -76,6 +76,20 @@ describe('canonicalStep', () => {
     expect(fleetMock.install).not.toHaveBeenCalled();
   });
 
+  it('rejects an invalid environment override before dry-run reporting', async () => {
+    const homeDir = home();
+    const partialCanonical = join(seedCanon(homeDir, hooks.slice(0, -1)), '..');
+    const reports: string[] = [];
+    vi.stubEnv('HEDDLE_CANONICAL', partialCanonical);
+
+    await expect(canonicalStep.run(context(homeDir, true), io([], reports))).resolves.toMatchObject({
+      status: 'failed', summary: expect.stringMatching(/missing required discipline hooks/),
+    });
+
+    expect(reports).toEqual([]);
+    expect(existsSync(join(homeDir, '.heddle', 'canonical.json'))).toBe(false);
+  });
+
   it('leaves canonical unrecorded for a fleetless pack', async () => {
     const homeDir = home();
     useSource(join(homeDir, 'no-fleet', 'hooks'));
