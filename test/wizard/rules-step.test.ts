@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { rulesStep } from '../../src/wizard/rules-step.js';
+import { rulesStep, loadExistingRulesPolicy } from '../../src/wizard/rules-step.js';
 import { resolvePreset } from '../../src/wizard/presets.js';
 import { policyPath } from '../../src/wizard/persist.js';
 import { ScriptedPrompter, type Prompter } from '../../src/wizard/prompt.js';
@@ -11,6 +11,13 @@ import { useTempResources } from '../helpers.js';
 function seedCatalog(root: string): void {
   mkdirSync(join(root, 'tests'), { recursive: true });
   writeFileSync(join(root, 'no-rm-recursive-force.yaml'), 'id: no-rm-recursive-force\nevent: PreToolUse\nmatch:\n  tool: Bash\naction: block\nenforce: false\nsubagent_aware: false\nmessage: Do not recursively force-remove files.\nfail_open: true\n');
+}
+
+function seedPolicy(homeDir: string, content: string): string {
+  const path = policyPath(homeDir, 'rules');
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, content);
+  return path;
 }
 
 function context(homeDir: string, dryRun = false): WizardContext {
@@ -126,5 +133,68 @@ describe('rulesStep', () => {
       rules: [{ id: 'no-rm-recursive-force', enforce: true }],
     });
     expect(result.status).toBe('done');
+  });
+
+  it('preserves unknown top-level fields on a rerun (merge-preserving contract)', async () => {
+    const catalogRoot = tempDir();
+    const homeDir = tempDir();
+    seedCatalog(catalogRoot);
+    // A prior write, plus fields a newer consumer/migration added that this step does not own.
+    seedPolicy(homeDir, JSON.stringify({
+      schemaVersion: 1,
+      rules: [{ id: 'stale-rule', enforce: true }],
+      lastReviewedAt: '2026-09-01T00:00:00Z',
+      meta: { source: 'migration-7' },
+    }) + '\n');
+
+    const result = await rulesStep(catalogRoot).run(context(homeDir), io(['minimal', true, true]));
+    const written = JSON.parse(readFileSync(policyPath(homeDir, 'rules'), 'utf8'));
+
+    expect(result.status).toBe('done');
+    // Owned fields are replaced with the new selection…
+    expect(written.rules).toEqual(resolvePreset('minimal', catalogRoot));
+    expect(written.schemaVersion).toBe(1);
+    // …while unknown top-level fields survive (not clobbered).
+    expect(written.lastReviewedAt).toBe('2026-09-01T00:00:00Z');
+    expect(written.meta).toEqual({ source: 'migration-7' });
+  });
+
+  it('refuses to clobber a malformed existing policy file', async () => {
+    const catalogRoot = tempDir();
+    const homeDir = tempDir();
+    seedCatalog(catalogRoot);
+    const path = seedPolicy(homeDir, '{ this is not valid json');
+
+    await expect(rulesStep(catalogRoot).run(context(homeDir), io(['minimal', true, true]))).rejects.toThrow(/not valid JSON/);
+    // The unparseable file is left exactly as-is, never overwritten.
+    expect(readFileSync(path, 'utf8')).toBe('{ this is not valid json');
+  });
+});
+
+describe('loadExistingRulesPolicy', () => {
+  const { tempDir } = useTempResources('hed544-load-');
+
+  it('returns {} when the file is absent (a fresh write)', () => {
+    expect(loadExistingRulesPolicy(policyPath(tempDir(), 'rules'))).toEqual({});
+  });
+
+  it('returns the parsed object, preserving extra fields', () => {
+    const path = seedPolicy(tempDir(), JSON.stringify({ schemaVersion: 1, rules: [], note: 'keep' }));
+    expect(loadExistingRulesPolicy(path)).toEqual({ schemaVersion: 1, rules: [], note: 'keep' });
+  });
+
+  it('throws on unparseable JSON rather than returning a default', () => {
+    const path = seedPolicy(tempDir(), 'not json');
+    expect(() => loadExistingRulesPolicy(path)).toThrow(/not valid JSON/);
+  });
+
+  it('throws when the top-level value is an array, not an object', () => {
+    const path = seedPolicy(tempDir(), '[1, 2, 3]');
+    expect(() => loadExistingRulesPolicy(path)).toThrow(/expected a JSON object, found an array/);
+  });
+
+  it('throws on a schemaVersion this writer does not own', () => {
+    const path = seedPolicy(tempDir(), JSON.stringify({ schemaVersion: 2, rules: [] }));
+    expect(() => loadExistingRulesPolicy(path)).toThrow(/schemaVersion/);
   });
 });
