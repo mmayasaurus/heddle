@@ -6,6 +6,7 @@
 import type { WizardContext, WizardIO, WizardStep, WizardStepResult, WizardStepStatus } from './step.js';
 import type { CliRunner } from './cli-runner.js';
 import { runAccountsAdd, type AccountsAddSummary } from './accounts-add.js';
+import { doctorStep } from './doctor.js';
 
 /**
  * Everything a step needs EXCEPT `results`: the orchestrator owns the results map and fills it as it
@@ -74,14 +75,49 @@ export function accountsStep(runner: CliRunner): WizardStep {
 }
 
 /**
+ * Wrap a step so it does NOT run under --dry-run: it reports what a real run WOULD do and returns
+ * 'skipped'. Only the doctor finish-gate needs this. In a preview every write-step above it skips, so
+ * the machine stays unchanged — running the real `heddle doctor` probe would then report failures the
+ * preview never caused (on a fresh box that alone would make `heddle setup --dry-run` exit non-zero,
+ * turning a preview into a false alarm). The doctor MODULE always runs by design — correct for
+ * `heddle doctor` standalone and for the real walkthrough (see doctor.ts); whether the walkthrough
+ * runs its finish gate in PREVIEW mode is a composition choice, so it lives here, not in doctor.ts.
+ * `would` is the preview line shown in place of the real run. Exported so the pass-through (a real run
+ * delegates to the wrapped step untouched) is unit-tested directly.
+ */
+export function dryRunGate(step: WizardStep, would: string): WizardStep {
+  return {
+    ...step,
+    async run(ctx: WizardContext, io: WizardIO): Promise<WizardStepResult> {
+      if (ctx.dryRun) {
+        io.report(would);
+        return {
+          id: step.id,
+          status: 'skipped',
+          summary: `dry-run — ${step.id} did not run (a preview makes no changes, so there is nothing to verify)`,
+        };
+      }
+      return step.run(ctx, io);
+    },
+  };
+}
+
+/**
  * Build the ordered built-in step set. Each new step module is added here as one line as its owner
  * lands it, in walkthrough order: accounts → model-economy → spread → meters → rules → doctor (last).
+ * Doctor is the read-only finish gate; it is wrapped in `dryRunGate` so a --dry-run preview skips it
+ * (see that helper). Every other step self-handles dry-run inside its own module.
  */
 export function buildSteps(deps: SetupDeps): WizardStep[] {
   return [
     accountsStep(deps.runner),
-    // model-economy (HED-473), spread (HED-474), meters (HED-475), rules (HED-544),
-    // doctor (HED-476 — always last) wire in here as their owners land the modules.
+    // model-economy (HED-473), spread (HED-474), meters (HED-475), rules (HED-544) wire in here as a
+    // one-line addition as their owners land the modules.
+    // doctor (HED-476) is ALWAYS last — the read-only finish gate that verifies setup end-to-end.
+    dryRunGate(
+      doctorStep,
+      'dry-run — doctor: a real setup would run `heddle doctor` to verify the configured environment end-to-end; nothing was verified.',
+    ),
   ];
 }
 

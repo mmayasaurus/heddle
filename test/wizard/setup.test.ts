@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { accountsStep, runSetup, buildSteps, selectSteps, summarizeAccounts, type SetupContext } from '../../src/wizard/setup.js';
+import { accountsStep, runSetup, buildSteps, dryRunGate, selectSteps, summarizeAccounts, type SetupContext } from '../../src/wizard/setup.js';
 import { policyPath } from '../../src/wizard/persist.js';
 import type { Prompter } from '../../src/wizard/prompt.js';
 import { ScriptedPrompter } from '../../src/wizard/prompt.js';
@@ -147,9 +147,12 @@ describe('accountsStep adapter', () => {
     expect(result.summary.toLowerCase()).toContain('dry-run');
   });
 
-  it('buildSteps wires the accounts step', () => {
+  it('buildSteps wires accounts first and the doctor finish-gate last', () => {
     const runner = {} as CliRunner;
-    expect(buildSteps({ runner }).map((s) => s.id)).toEqual(['accounts']);
+    const ids = buildSteps({ runner }).map((s) => s.id);
+    expect(ids).toEqual(['accounts', 'doctor']);
+    // Doctor is the finish gate — it must ALWAYS be last so it verifies AFTER every write-step ran.
+    expect(ids[ids.length - 1]).toBe('doctor');
   });
 });
 
@@ -161,8 +164,11 @@ describe('policyPath', () => {
 });
 
 describe('composed walkthrough (buildSteps -> runSetup)', () => {
-  it('runs the wired step set end-to-end under --dry-run with no prompts, logins, or writes', async () => {
-    // Throwing runner + exhausted prompter → any login or prompt fails the test.
+  it('runs the wired step set end-to-end under --dry-run with no prompts, logins, writes, or doctor probe', async () => {
+    // Throwing runner + exhausted prompter → any login or prompt fails the test. The doctor step is
+    // dry-run-gated in buildSteps, so real runDoctor is never reached under --dry-run — that is what
+    // keeps this composed test hermetic without injecting a canned doctor (no ~/.heddle read, no
+    // binary spawn). A fresh box previewing setup must NOT be reported as "failing verification".
     const runner: CliRunner = {
       login() { throw new Error('dry-run must not log in'); },
       status() { throw new Error('dry-run must not probe status'); },
@@ -170,8 +176,46 @@ describe('composed walkthrough (buildSteps -> runSetup)', () => {
     const lines: string[] = [];
     const io: WizardIO = { prompter: new ScriptedPrompter([]), report: (line) => { lines.push(line); } };
     const results = await runSetup(baseCtx({ dryRun: true }), io, buildSteps({ runner }));
-    expect(results).toEqual([{ id: 'accounts', status: 'skipped', summary: expect.stringContaining('dry-run') }]);
-    expect(lines.join('\n')).toContain('Setup complete');
+    expect(results).toEqual([
+      { id: 'accounts', status: 'skipped', summary: expect.stringContaining('dry-run') },
+      { id: 'doctor', status: 'skipped', summary: expect.stringContaining('dry-run') },
+    ]);
+    const text = lines.join('\n');
+    expect(text).toContain('Setup complete');
+    // The doctor preview line stands in for the real probe.
+    expect(text).toContain('a real setup would run');
+  });
+});
+
+describe('dryRunGate (doctor finish-gate composition)', () => {
+  it('when NOT dry-run, delegates to the wrapped step and returns its result unchanged', async () => {
+    // This is the guard that proves production runs the REAL step (the real doctor probe), not a stub.
+    let ran = false;
+    const inner = step('inner', { onRun: () => { ran = true; }, summary: 'inner did real work' });
+    const gated = dryRunGate(inner, 'WOULD (preview only)');
+    const io = makeIO();
+    const result = await gated.run({ ...baseCtx(), results: new Map() }, io);
+    expect(ran).toBe(true);
+    expect(result).toEqual({ id: 'inner', status: 'done', summary: 'inner did real work' });
+    expect(io.lines).not.toContain('WOULD (preview only)'); // the preview line is dry-run-only
+  });
+
+  it('under --dry-run, skips the wrapped step (run never fires) and reports the preview line', async () => {
+    let ran = false;
+    const inner = step('inner', { onRun: () => { ran = true; } });
+    const gated = dryRunGate(inner, 'WOULD verify the environment');
+    const io = makeIO();
+    const result = await gated.run({ ...baseCtx({ dryRun: true }), results: new Map() }, io);
+    expect(ran).toBe(false);
+    expect(result.id).toBe('inner');
+    expect(result.status).toBe('skipped');
+    expect(io.lines).toContain('WOULD verify the environment');
+  });
+
+  it('preserves the wrapped step id and title', () => {
+    const gated = dryRunGate(step('doctor'), 'x');
+    expect(gated.id).toBe('doctor');
+    expect(gated.title).toBe('DOCTOR');
   });
 });
 
