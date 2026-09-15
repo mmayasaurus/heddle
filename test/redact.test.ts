@@ -114,15 +114,48 @@ describe('redactSecrets — review-hardened cases', () => {
     expect(out).not.toContain('EXAMPLE11111111111111111111111111');
   });
 
-  // shapesOnly (the ledger escape/destroyed-note boundary): scrub unmistakable credential SHAPES but keep
-  // ordinary long filenames — a worker could name a parent-checkout file after its own credential.
-  it('shapesOnly redacts credential shapes yet preserves an ordinary long filename', () => {
-    const sk = 'sk-' + 'ant-EXAMPLE0123456789abcdefghijklmnop'; // split literal (scrub/gitleaks-safe)
-    const filename = 'release-20260915-build-artifact.txt';
-    const out = redactSecrets(`escape-warning: 2 change(s): ${sk}, ${filename}`, { shapesOnly: true });
-    expect(out).not.toContain(sk);       // credential shape scrubbed
-    expect(out).toContain(filename);     // ordinary long filename survives (opaque heuristic skipped)
-    // full mode (no flag) still redacts the opaque 24+ catch-all.
+  // Finding 2 (round-4, cursor/grok): the credential-PREFIX rule now matches scrub.ts's full
+  // credentialPatterns set, so a BARE heddle-provider token (no key=value context, too short/dot-free for
+  // the opaque rule) is redacted by shape alone. Split literals keep the shipped test file clear of
+  // scannable credentials (public-scrub + gitleaks convention — same split points scrub.ts uses).
+  it('redacts bare provider tokens for every scrub.ts credential prefix', () => {
+    const bare = [
+      'g' + 'sk_' + 'EXAMPLE0123456789abcdef',        // Groq
+      'c' + 'sk-' + 'EXAMPLE0123456789abcdef',        // Cerebras
+      'lin_' + 'api_' + 'EXAMPLE0123456789abcdef',    // Linear API
+      'lin_' + 'oauth_' + 'EXAMPLE0123456789abcdef',  // Linear OAuth
+      'github_' + 'pat_' + 'EXAMPLE0123456789abcdef', // GitHub fine-grained PAT
+    ];
+    for (const token of bare) {
+      const out = redactSecrets(`worker stderr tail: ${token}`);
+      expect(out).toBe('worker stderr tail: [redacted]');
+      expect(out).not.toContain(token);
+    }
+  });
+
+  // Finding 3 (round-4): the dotted-pair lookbehind excludes A-Za-z0-9_- but NOT '/', so a path/URL-nested
+  // GLM <32>.<16> key is caught (previously a leading '/' blocked BOTH the dotted and opaque rules).
+  it('redacts a path-nested dotted GLM key (a leading slash no longer shields it)', () => {
+    const glm = 'abcdef0123456789abcdef0123456789.abcdef0123456789'; // <32>.<16>, scrub/gitleaks-safe
+    const out = redactSecrets(`error loading src/${glm}`);
+    expect(out).toBe('error loading src/[redacted]');
+    expect(out).not.toContain('abcdef0123456789');
+  });
+
+  // Accepted tradeoff of finding 3's lookbehind relaxation: a long dotted hostname label (>=20 . >=12) now
+  // over-redacts. Over-redaction is the safe direction (R msg 2266); ordinary short-label hosts are unaffected.
+  it('over-redacts a long dotted hostname label — the accepted finding-3 direction', () => {
+    const out = redactSecrets('GET https://longsubdomainlabel123.exampledomainname/v1 -> 500');
+    expect(out).toContain('[redacted]');
+    expect(out).not.toContain('longsubdomainlabel123.exampledomainname');
+    // a normal short-label host is untouched (labels sit well under the 20/12 floors)
+    expect(redactSecrets('GET https://api.example.com/v1 -> 500')).toBe('GET https://api.example.com/v1 -> 500');
+  });
+
+  // Opaque backstop on the vendor-error path (full redaction, run.ts:337): a prefix-less 24+ token with a
+  // digit is scrubbed. This is the sole rule the reverted escape/destroyed-note handling never routes
+  // through (those notes are persisted verbatim; scrubbing them safely is HED-651).
+  it('redacts a prefix-less opaque token on the full-redaction path', () => {
     expect(redactSecrets('deadbeef0123456789abcdef01')).toBe('[redacted]');
   });
 
@@ -133,6 +166,7 @@ describe('redactSecrets — review-hardened cases', () => {
       'http://' + 'a'.repeat(300_000),                       // unbounded userinfo, no '@'
       'secret'.repeat(80_000),                               // repeated embedded keyword
       'x'.repeat(200_000) + '.' + 'y'.repeat(200_000),       // dotted pair
+      'g' + 'sk_' + 'a'.repeat(300_000),                     // credential-prefix arm, unbounded suffix
     ]) redactSecrets(s);
     expect(Date.now() - start).toBeLessThan(2000);
   });

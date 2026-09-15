@@ -1,5 +1,5 @@
 /** Remove credential-shaped values from text that may be persisted or returned to callers. */
-export function redactSecrets(text: string, opts: { credential?: string; shapesOnly?: boolean } = {}): string {
+export function redactSecrets(text: string, opts: { credential?: string } = {}): string {
   try {
     let redacted = text;
     if (opts.credential) redacted = redacted.split(opts.credential).join('[redacted]');
@@ -20,23 +20,32 @@ export function redactSecrets(text: string, opts: { credential?: string; shapesO
       // at the first comma; their sensitive params (nonce/response) are caught by the opaque rule below.
       .replace(/\bAuthorization\s*:\s*(?:[A-Za-z][A-Za-z0-9-]*\s+)?[^\s,;]+/gi, 'Authorization: [redacted]')
       .replace(/\bBearer\s+[^\s,;]+/gi, 'Bearer [redacted]')
-      .replace(/\b(?:sk-[A-Za-z0-9_-]+|gh[po]_[A-Za-z0-9_-]+|xox[baprs]-[A-Za-z0-9_-]+)/g, '[redacted]')
+      // Unmistakable credential-PREFIX shapes — the same set src/release/scrub.ts credentialPatterns
+      // enforces on shipped files: sk-* (Anthropic/OpenAI), gh[po]_ + github_pat_ (GitHub), gsk_ (Groq),
+      // csk- (Cerebras), lin_api_/lin_oauth_ (Linear), xox[baprs]- (Slack). Redacted by shape, so a BARE
+      // token (no key=value context, too short or dot-split for the opaque rule) is still caught. Each arm
+      // is prefix + one unbounded [A-Za-z0-9_-]+ with no trailing literal, so matching stays linear.
+      .replace(/\b(?:sk-[A-Za-z0-9_-]+|gh[po]_[A-Za-z0-9_-]+|github_pat_[A-Za-z0-9_-]+|gsk_[A-Za-z0-9_-]+|csk-[A-Za-z0-9_-]+|lin_(?:api|oauth)_[A-Za-z0-9_-]+|xox[baprs]-[A-Za-z0-9_-]+)/g, '[redacted]')
       // key=value where the key NAME contains a sensitive word (ZAI_API_KEY=, aws_secret_access_key=,
       // "api_key": …). No \b so an embedded keyword matches; the {0,80}-bounded suffix stays ReDoS-safe
       // (an unbounded suffix is O(n^2) on a repeated-keyword run) and covers every realistic key name; any
       // prefix (ZAI_, aws_) stays outside the match and is preserved. Optional quotes for JSON bodies.
       .replace(/["']?((?:token|secret|password|api[-_]?key|x-api-key)[\w-]{0,80})["']?\s*([:=])\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi, '$1$2[redacted]')
       // Dotted token pairs (e.g. the GLM <32>.<16> key) — redact as a unit BEFORE the opaque catch-all,
-      // which would otherwise split on the dot and leave the second half exposed.
-      .replace(/(?<![A-Za-z0-9_/-])[A-Za-z0-9]{20,64}\.[A-Za-z0-9]{12,64}(?![A-Za-z0-9])/g, '[redacted]');
+      // which would otherwise split on the dot and leave the second half exposed. The lookbehind excludes
+      // A-Za-z0-9_- but NOT '/', so a path/URL-nested key (src/<32>.<16>, //host-shaped) is still caught —
+      // the {20,64}.{12,64} floor sits far above ordinary path segments (run.ts, foo.json), so the only
+      // over-redaction this admits is a rare long dotted hostname label, which is the accepted direction.
+      .replace(/(?<![A-Za-z0-9_-])[A-Za-z0-9]{20,64}\.[A-Za-z0-9]{12,64}(?![A-Za-z0-9])/g, '[redacted]');
 
-    // Opaque tokens: 24+ chars with a digit/underscore/dash. This is a HEURISTIC — it cannot tell a random
-    // token from a long filename — so `shapesOnly` skips it. A caller redacting FILENAME-bearing text (the
-    // ledger's escape/destroyed-work notes) uses shapesOnly to scrub the unmistakable credential SHAPES
-    // above while preserving ordinary long filenames (real paths are already exempt via the '/' lookbehind).
-    if (!opts.shapesOnly) {
-      redacted = redacted.replace(/(?<![A-Za-z0-9_/-])(?=[A-Za-z0-9_-]*[0-9_-])[A-Za-z0-9_-]{24,}(?![A-Za-z0-9_/-])/g, '[redacted]');
-    }
+    // Opaque tokens: 24+ chars containing a digit/underscore/dash — a HEURISTIC backstop for credential
+    // shapes with no recognizable prefix (session tokens, JWT segments, Digest nonce/response). It cannot
+    // tell a random token from a long filename, so it over-redacts long opaque names — the accepted
+    // direction (under-redaction leaks; over-redaction only degrades debuggability). Real filesystem paths
+    // survive via the '/' lookbehind/lookahead. Applied to the vendor-error string only (run.ts:337);
+    // heddle-generated escape/destroyed notes carry checkout filenames and are persisted verbatim, never
+    // routed through this rule (scrubbing those safely, without eating ordinary filenames, is HED-651).
+    redacted = redacted.replace(/(?<![A-Za-z0-9_/-])(?=[A-Za-z0-9_-]*[0-9_-])[A-Za-z0-9_-]{24,}(?![A-Za-z0-9_/-])/g, '[redacted]');
 
     return redacted;
   } catch {
