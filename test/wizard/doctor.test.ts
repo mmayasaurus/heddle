@@ -143,17 +143,21 @@ describe('createDoctorStep (HED-476 wizard finish = read-only `heddle doctor`)',
     expect(treeSnapshot(home)).toEqual(before);
   });
 
-  it('maps a REAL runDoctor report end-to-end on hermetic deps, and does not create the comms.db it probes (F5)', async () => {
-    // Exercise the actual runDoctor (not a canned report) through the step, with the whole config
-    // tree + probes relocated via doctor-fixtures.fakeDeps() so nothing touches the real ~/.heddle
-    // and no binary is spawned. Capture the real report and assert the MAPPING against it (robust to
-    // check-count drift). For read-only-ness we pin the ONE write runDoctor could make — the comms.db
-    // schema-migration-on-open — by asserting the (absent) comms.db it probes is never created.
-    // (runDoctor's broader read-only-ness is doctor.ts's own contract, covered by its suite; the
-    // wrapper-adds-no-writes regression is the faked-runner test above.)
-    const deps = fakeDeps();
-    const commsPath = deps.paths!.comms!;
+  it('maps a REAL runDoctor report end-to-end on fully hermetic deps, touching no real ~/.heddle state (F5)', async () => {
+    // Exercise the actual runDoctor (not a canned report) through the step. fakeDeps() relocates the
+    // config tree and fakes execFile/readFileBytes/git, but leaves paths.secrets unset — so we set it
+    // too (cursor r4), or freshnessCheck would readFileSync the operator's real ~/.heddle/secrets.env.
+    // With that, the sweep touches no real ~/.heddle path and spawns no binary. Capture the real
+    // report and assert the MAPPING against it (robust to check-count drift); pin read-only-ness via
+    // the files runDoctor could otherwise create — the probed comms.db (schema-migration-on-open) and
+    // the secrets path — staying absent. (runDoctor's broader read-only-ness is doctor.ts's own
+    // contract, covered by its suite; the wrapper-adds-no-writes regression is the faked-runner test.)
+    const base = fakeDeps();
+    const secretsPath = join(tempDir(), 'secrets.env');
+    const deps = { ...base, paths: { ...base.paths, secrets: secretsPath } };
+    const commsPath = deps.paths.comms!;
     expect(existsSync(commsPath)).toBe(false); // precondition: fixtures point comms at an absent path
+    expect(existsSync(secretsPath)).toBe(false); // precondition: secrets relocated to an absent temp path
     let rep: DoctorReport | undefined;
     const step = createDoctorStep({
       runDoctor: async (o, p) => (rep = await realRunDoctor(o, p)),
@@ -170,7 +174,8 @@ describe('createDoctorStep (HED-476 wizard finish = read-only `heddle doctor`)',
     expect(result.status).toBe(fail > 0 || ran === 0 ? 'failed' : 'done');
     expect(result.detail).toBe(formatDoctorReport(rep!));
     expect(lines).toEqual(formatDoctorReport(rep!).split('\n'));
-    expect(existsSync(commsPath)).toBe(false); // the read-only sweep created no comms.db (no migration)
+    expect(existsSync(commsPath)).toBe(false); // read-only sweep created no comms.db (no migration)
+    expect(existsSync(secretsPath)).toBe(false); // read the relocated (absent) secrets, created none
   });
 
   it('returns failed (never throws) even when the runner rejects with a non-Error throwable', async () => {
