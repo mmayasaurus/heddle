@@ -78,10 +78,15 @@ export const metersStep: WizardStep = {
   id: 'meters',
   title: 'Usage meters',
   async run(ctx, io) {
+    // The resolved policy path, computed once (a pure path-join, no I/O) and reused in the dry-run
+    // preview, the corrupt/unreadable-policy messages, and the write — so operator-facing text always
+    // shows the real home-scoped path, never a hardcoded ~/.heddle literal (HED-602).
+    const policyFile = policyPath(ctx.homeDir, 'meters');
+
     // dry-run (`heddle setup --dry-run`): report what a real run would do, prompt for nothing, write
     // nothing — mirroring accountsStep. meters is a writing step, so preview returns 'skipped'.
     if (ctx.dryRun) {
-      io.report('dry-run — meters: a real run would prompt per meterable (native Claude) account and write the opt-in policy to ~/.heddle/policy/meters.json; nothing was prompted or written.');
+      io.report(`dry-run — meters: a real run would prompt per meterable (native Claude) account and write the opt-in policy to ${policyFile}; nothing was prompted or written.`);
       return { id: 'meters', status: 'skipped', summary: 'dry-run — meters prompting and policy write skipped' };
     }
 
@@ -119,13 +124,22 @@ export const metersStep: WizardStep = {
     }
 
     // Read any existing policy up front so we can (a) offer each prior choice as the prompt default and
-    // (b) merge into it rather than replace it. A corrupt existing file fails loudly — never clobbered.
-    const policyFile = policyPath(ctx.homeDir, 'meters');
+    // (b) merge into it rather than replace it. Distinguish a genuinely CORRUPT policy (bad JSON / wrong
+    // shape → "fix or remove") from an I/O error such as a permission denial or a non-file at the path (an
+    // errno `code` → "could not read"): reporting an inaccessible-but-valid policy as corruption would tell
+    // the operator to delete a good file (codeant #209). Either way we fail loudly, never clobber.
     let prior: Record<string, unknown>;
     try {
       prior = readPriorPolicy(policyFile);
-    } catch {
-      return { id: 'meters', status: 'failed', summary: 'existing meters policy is corrupt — fix or remove ~/.heddle/policy/meters.json' };
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      return {
+        id: 'meters',
+        status: 'failed',
+        summary: code
+          ? `could not read the existing meters policy at ${policyFile} (${code})`
+          : `existing meters policy is corrupt — fix or remove ${policyFile}`,
+      };
     }
     const priorAccounts = readAccountsMap(prior);
 
