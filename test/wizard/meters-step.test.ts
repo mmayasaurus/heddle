@@ -150,6 +150,7 @@ describe('metersStep', () => {
 
     expect(result).toMatchObject({ id: 'meters', status: 'failed' });
     expect(result.summary).toMatch(/corrupt/i);
+    expect(result.summary).toContain(policyFile); // HED-602: the resolved path, not a hardcoded ~/.heddle literal
     expect(readFileSync(policyFile, 'utf8')).toBe('{ not json');
   });
 
@@ -178,6 +179,22 @@ describe('metersStep', () => {
     expect(readFileSync(policyFile, 'utf8')).toBe(raw);
   });
 
+  it('reports an unreadable policy (I/O error) as a read failure, not corruption', async () => {
+    // codeant #209: a permission/I/O error must NOT be reported as "corrupt — fix or remove", which would
+    // tell an operator to delete a valid-but-inaccessible policy. Here the policy PATH is a directory, so
+    // readFileSync throws EISDIR (deterministic, root-independent) — the errno branch, not the parse branch.
+    const homeDir = homeWithAccounts({ schemaVersion: 2, claude: [{ id: 'claude-one', configDir: null }] });
+    const policyDir = join(homeDir, '.heddle', 'policy');
+    mkdirSync(policyDir, { recursive: true });
+    mkdirSync(join(policyDir, 'meters.json')); // policy path is a directory → readFileSync throws EISDIR
+
+    const result = await metersStep.run(context(homeDir), io([true], []));
+
+    expect(result).toMatchObject({ id: 'meters', status: 'failed' });
+    expect(result.summary).not.toMatch(/corrupt/i);          // not misreported as corruption
+    expect(result.summary).toMatch(/could not read|EISDIR/i); // surfaces the actual read error
+  });
+
   it('under --dry-run reports intent, prompts for nothing, and writes no policy file', async () => {
     const homeDir = homeWithAccounts({ schemaVersion: 2, claude: [{ id: 'claude-one', configDir: null }] });
     const captured: string[] = [];
@@ -186,6 +203,10 @@ describe('metersStep', () => {
 
     expect(result).toMatchObject({ id: 'meters', status: 'skipped' });
     expect(captured.join('\n')).toMatch(/dry-run/i);
+    // HED-602: the preview shows the RESOLVED policy path (home-scoped), never a hardcoded ~/.heddle
+    // literal that would be wrong under --home.
+    expect(captured.join('\n')).toContain(join(homeDir, '.heddle', 'policy', 'meters.json'));
+    expect(captured.join('\n')).not.toContain('~/.heddle');
     expect(existsSync(join(homeDir, '.heddle', 'policy', 'meters.json'))).toBe(false);
   });
 });
