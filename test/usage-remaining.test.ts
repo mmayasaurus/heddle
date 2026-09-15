@@ -5,7 +5,7 @@ import {
   formatUsageRemaining,
   readUsageRemaining,
 } from '../src/usage-remaining.js';
-import { useTempResources } from './helpers.js';
+import { useTempResources, writeMetersPolicy } from './helpers.js';
 import { runCli } from './helpers/cli.js';
 
 const nowS = 1_800_000_000;
@@ -66,11 +66,7 @@ function usageDir(fixtureNowS = nowS): string {
   return dir;
 }
 
-function metersPolicy(contents: string): string {
-  const path = join(tempDir(), 'meters.json');
-  writeFileSync(path, contents);
-  return path;
-}
+const metersPolicy = (contents: string): string => writeMetersPolicy(tempDir(), contents);
 
 describe('heddle usage --remaining', () => {
   it('renders a fresh vendor meter with usage, reset time, source, and age', () => {

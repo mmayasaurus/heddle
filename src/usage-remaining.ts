@@ -117,8 +117,15 @@ export function readUsageRemaining(opts: UsageRemainingOptions = {}): UsageRemai
       pushRow(rows, { provider: provider.provider, account: null, window: id, cap, stale: provider.stale, capturedAt, noteCodes, nowS });
     }
   }
-  // HED-582: an explicit --account request is a direct ask for that account and bypasses the display gate
-  // (otherwise `heddle usage --remaining --account X` for an opted-out X would return nothing = looks broken).
+  return applyMetersGate(rows, opts);
+}
+
+/**
+ * HED-582: apply the meters opt-in DISPLAY gate. An explicit `--account` request is a direct ask for that
+ * account and bypasses the gate (otherwise `heddle usage --remaining --account X` for an opted-out X would
+ * return nothing = looks broken). Kept separate from row assembly so the reader stays a single-purpose builder.
+ */
+function applyMetersGate(rows: UsageRemainingRow[], opts: UsageRemainingOptions): UsageRemainingRow[] {
   if (opts.account) return rows;
   return filterByMetersPolicy(rows, readOptedOutAccounts(opts.metersPolicyPath));
 }

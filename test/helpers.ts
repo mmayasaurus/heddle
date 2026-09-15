@@ -1,6 +1,6 @@
 import { afterEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Ledger } from '../src/ledger.js';
@@ -47,6 +47,13 @@ export function useTempResources(prefix = 'heddle-test-') {
   }
 
   return { tempDir, tempLedger, track, trackLedger };
+}
+
+/** Write a meters opt-in policy file into `dir` and return its path (HED-582 test convenience). */
+export function writeMetersPolicy(dir: string, contents: string): string {
+  const path = join(dir, 'meters.json');
+  writeFileSync(path, contents);
+  return path;
 }
 
 export function fakeAdapter(

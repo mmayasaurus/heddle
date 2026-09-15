@@ -166,9 +166,10 @@ export function assembleTop(opts: AssembleTopOptions = {}): TopView {
   const nowS = opts.nowS ?? Math.floor(Date.now() / 1_000);
   const accounts = safeAccounts(opts.accountsPath);
   const caps = safeCaps({ ...opts, nowS });
+  const optedOut = readOptedOutAccounts(opts.metersPolicyPath);
   // HED-582: gate opted-out accounts' meters BEFORE accountKeys, so the account line still appears (from the
   // registry / caps) but its meters render `—`. `top` has no per-account request, so no bypass here.
-  const usage = filterByMetersPolicy(usageRows(caps, nowS), readOptedOutAccounts(opts.metersPolicyPath));
+  const usage = filterByMetersPolicy(usageRows(caps, nowS), optedOut);
   const byRegistryKey = new Map(accounts.map((account) => [`${account.provider}\0${account.id}`, account]));
   const keys = accountKeys(accounts, usage, caps);
   const topAccounts = keys.map(({ provider, id }) => {
@@ -181,8 +182,11 @@ export function assembleTop(opts: AssembleTopOptions = {}): TopView {
       tier: account?.tier ?? null,
       loggedIn: account?.loggedIn ?? (cap?.dispatch?.reason === 'logged-out' ? false : null),
       dispatchExcluded: cap?.dispatch?.dispatchable === false,
+      // HED-582: provider-level rows (account: null) attach to the FIRST account of the provider — but an
+      // opted-out account must not display them either, so attach to the first NON-opted-out account instead
+      // (if every account opted out, they attach to none and are not shown under any account line).
       usage: usage.filter((row) => row.provider === provider && (row.account === id || (
-        row.account === null && id !== null && keys.find((candidate) => candidate.provider === provider && candidate.id !== null)?.id === id
+        row.account === null && id !== null && keys.find((candidate) => candidate.provider === provider && candidate.id !== null && !optedOut.has(candidate.id.toLowerCase()))?.id === id
       ))),
     };
   });
