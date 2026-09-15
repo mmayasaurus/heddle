@@ -9,6 +9,13 @@ export interface RenderOptions {
   inLangExtensions: string[];
   excludes: string[];
   defaultBranch: string;
+  /**
+   * Whether the preset guarantees the target repo has source in the configured languages. When true, a
+   * zero-target FULL scan (push to the default branch) fails closed — an empty scan means git broke. When
+   * false (the generic preset — the repo may legitimately have no source in the configured languages), a
+   * zero-target full scan warns instead of failing. Unreadable scanner output fails closed either way.
+   */
+  sourceGuaranteed: boolean;
 }
 
 export const TS_NODE: RenderOptions = {
@@ -16,6 +23,7 @@ export const TS_NODE: RenderOptions = {
   inLangExtensions: ['ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs'],
   excludes: ['node_modules', 'dist'],
   defaultBranch: 'main',
+  sourceGuaranteed: true,
 };
 
 export const GENERIC: RenderOptions = {
@@ -23,6 +31,7 @@ export const GENERIC: RenderOptions = {
   inLangExtensions: [],
   excludes: ['node_modules', 'dist'],
   defaultBranch: 'main',
+  sourceGuaranteed: false,
 };
 
 export interface PrAutomationAssets {
@@ -89,11 +98,15 @@ function renderWorkflow(template: string, options: RenderOptions): string {
     '__HEDDLE_EXCLUDES_DESCRIPTION__': options.excludes.join(' / '),
     '__HEDDLE_EXCLUDES_PATH_REGEX__': excludePathRegex(options.excludes),
     '__HEDDLE_DEFAULT_BRANCH__': options.defaultBranch,
+    '__HEDDLE_SOURCE_GUARANTEED__': options.sourceGuaranteed ? 'yes' : '',
   };
-  const rendered = Object.entries(replacements).reduce(
-    (current, [token, replacement]) => current.split(token).join(replacement),
-    template,
-  );
+  // Replace longer tokens FIRST: today no token is a substring of another (the `__` terminators keep
+  // e.g. `__HEDDLE_RULESETS__` out of `__HEDDLE_RULESETS_DESCRIPTION__`), but sorting length-descending
+  // makes that robust against any future token that IS a prefix of another, so a shorter token can never
+  // partially resolve a longer one.
+  const rendered = Object.entries(replacements)
+    .sort(([a], [b]) => b.length - a.length)
+    .reduce((current, [token, replacement]) => current.split(token).join(replacement), template);
   if (rendered.includes('__HEDDLE_')) throw new Error('deterministic-review template contains an unresolved placeholder');
   return rendered;
 }
@@ -113,6 +126,33 @@ function targetPaths(targetDir: string): { readonly workflow: string; readonly g
     workflow: join(targetDir, '.github', 'workflows', 'deterministic-review.yml'),
     gitleaks: join(targetDir, '.github', 'scripts', 'gitleaks-range-scan.sh'),
   };
+}
+
+/**
+ * Write both scaffold files into the target `.github/`, skipping (merge-preserving) any that already
+ * exist. Returns which paths were written vs left unchanged so the caller can report and summarize.
+ */
+function scaffoldWorkflows(
+  paths: { readonly workflow: string; readonly gitleaks: string },
+  options: RenderOptions,
+  io: WizardIO,
+): { written: string[]; existing: string[] } {
+  const templates = readPrAutomationTemplates();
+  const written: string[] = [];
+  const existing: string[] = [];
+  const writeIfAbsent = (path: string, content: string): void => {
+    if (existsSync(path)) {
+      existing.push(path);
+      io.report(`PR automation: already present — left unchanged: ${path}`);
+    } else {
+      atomicWriteFile(path, content);
+      written.push(path);
+      io.report(`PR automation: wrote ${path}`);
+    }
+  };
+  writeIfAbsent(paths.workflow, renderWorkflow(templates.workflowTemplate, options));
+  writeIfAbsent(paths.gitleaks, templates.gitleaksRangeScan);
+  return { written, existing };
 }
 
 export function prAutomationStep(): WizardStep {
@@ -140,26 +180,7 @@ export function prAutomationStep(): WizardStep {
       io.report(`PR automation language preset: ${preset.label}`);
 
       try {
-        const templates = readPrAutomationTemplates();
-        const written: string[] = [];
-        const existing: string[] = [];
-        if (existsSync(paths.workflow)) {
-          existing.push(paths.workflow);
-          io.report(`PR automation: already present — left unchanged: ${paths.workflow}`);
-        } else {
-          atomicWriteFile(paths.workflow, renderWorkflow(templates.workflowTemplate, preset.options));
-          written.push(paths.workflow);
-          io.report(`PR automation: wrote ${paths.workflow}`);
-        }
-        if (existsSync(paths.gitleaks)) {
-          existing.push(paths.gitleaks);
-          io.report(`PR automation: already present — left unchanged: ${paths.gitleaks}`);
-        } else {
-          atomicWriteFile(paths.gitleaks, templates.gitleaksRangeScan);
-          written.push(paths.gitleaks);
-          io.report(`PR automation: wrote ${paths.gitleaks}`);
-        }
-
+        const { written, existing } = scaffoldWorkflows(paths, preset.options, io);
         if (written.length > 0) io.report(nextSteps);
         const changes = [
           written.length > 0 ? `wrote ${written.join(', ')}` : '',

@@ -206,19 +206,30 @@ jobs:
               echo "semgrep volume: scanned $SCANNED target(s); diff has $INLANG in-language file(s)" >> "$GITHUB_STEP_SUMMARY"
             fi
           else
-          # __HEDDLE_DEFAULT_BRANCH__ push (full scan): the repo always has source in the configured languages, so a real scan
-            # covers > 0 targets; 0 means the scan was empty (git broke, etc.).
-            if [ "$SCANNED" -eq 0 ]; then
-              echo "::error::semgrep scanned 0 targets on a full __HEDDLE_DEFAULT_BRANCH__ scan, but the repo has source in the configured languages — the scan is empty (a green scanner is not a scan). NOT a clean pass"
+            # __HEDDLE_DEFAULT_BRANCH__ push (full scan). With a preset that GUARANTEES the repo has
+            # source in the configured languages (__HEDDLE_SOURCE_GUARANTEED__ non-empty), a real scan
+            # covers > 0 targets; 0 means the scan was empty (git broke, etc.) → fail closed. With the
+            # generic preset (source NOT guaranteed — the target repo may legitimately have no source in
+            # the configured languages), a 0-target full scan WARNS instead. Unreadable output above
+            # already failed closed for both.
+            if [ "$SCANNED" -eq 0 ] && [ -n "__HEDDLE_SOURCE_GUARANTEED__" ]; then
+              echo "::error::semgrep scanned 0 targets on a full __HEDDLE_DEFAULT_BRANCH__ scan, but the preset expects source in the configured languages — the scan is empty (a green scanner is not a scan). NOT a clean pass"
               echo "semgrep: ❌ full scan covered 0 targets — NOT a clean pass" >> "$GITHUB_STEP_SUMMARY"
               exit 1
+            elif [ "$SCANNED" -eq 0 ]; then
+              echo "::warning::semgrep scanned 0 targets on a full __HEDDLE_DEFAULT_BRANCH__ scan — expected when the repo has no source in the configured languages (generic preset); not treated as a failure."
+              echo "semgrep volume: full scan covered 0 targets — no source in the configured languages (generic preset)" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "semgrep volume: scanned $SCANNED target(s) (full scan)" >> "$GITHUB_STEP_SUMMARY"
             fi
-            echo "semgrep volume: scanned $SCANNED target(s) (full scan)" >> "$GITHUB_STEP_SUMMARY"
           fi
 
       - name: Upload SARIF to code scanning
+        id: semgrep_sarif_upload
         # Needs a write token — same-repo PRs and main pushes only; fork PRs
-        # keep the scan result in the log + summary above.
+        # keep the scan result in the log + summary above. continue-on-error so a
+        # private repo without code scanning / GitHub Advanced Security degrades to
+        # the log + summary rather than redding this report-only job.
         if: >-
           github.event_name == 'push' ||
           github.event.pull_request.head.repo.full_name == github.repository
@@ -229,8 +240,10 @@ jobs:
           category: semgrep
 
       - name: Explain SARIF upload availability
-        if: always()
-        run: echo "SARIF upload to code scanning skipped or failed — that needs a public repo or GitHub Advanced Security; the scan findings are in the job log + summary above." >> "$GITHUB_STEP_SUMMARY"
+        # Only when the upload actually FAILED (continue-on-error kept the job green) —
+        # not on success, and not on the fork/main skip. Findings still reach the log + summary.
+        if: always() && steps.semgrep_sarif_upload.outcome == 'failure'
+        run: echo "SARIF upload to code scanning failed — that needs a public repo or GitHub Advanced Security; the scan findings are in the job log + summary above." >> "$GITHUB_STEP_SUMMARY"
 
   semgrep:
     # Stable public check context. Commit paths publish the semgrep-scan result;
@@ -427,8 +440,11 @@ jobs:
         run: sh .github/scripts/gitleaks-range-scan.sh
 
       - name: Upload SARIF to code scanning
+        id: gitleaks_sarif_upload
         # always(): the report matters MOST when the scan step just failed on
         # a hit. Same-repo only (write token); fork PRs keep the log verdict.
+        # continue-on-error so a private repo without code scanning / GHAS degrades
+        # to the log + summary rather than redding this job.
         if: >-
           always() &&
           github.event.pull_request.head.repo.full_name == github.repository &&
@@ -454,8 +470,10 @@ jobs:
           category: gitleaks-merge-delta
 
       - name: Explain SARIF upload availability
-        if: always()
-        run: echo "SARIF upload to code scanning skipped or failed — that needs a public repo or GitHub Advanced Security; the scan findings are in the job log + summary above." >> "$GITHUB_STEP_SUMMARY"
+        # Only when the PRIMARY gitleaks upload actually FAILED. The merge-delta upload is
+        # legitimately skipped when there is no delta SARIF, which must NOT read as a failure.
+        if: always() && steps.gitleaks_sarif_upload.outcome == 'failure'
+        run: echo "SARIF upload to code scanning failed — that needs a public repo or GitHub Advanced Security; the scan findings are in the job log + summary above." >> "$GITHUB_STEP_SUMMARY"
 
   gitleaks:
     # Stable public check context. Commit paths publish the gitleaks-scan result;

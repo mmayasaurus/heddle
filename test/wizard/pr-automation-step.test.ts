@@ -57,7 +57,19 @@ describe('prAutomationStep', () => {
     expect(generic).toContain("grep -cE '.+'");
     expect(generic).toContain("grep -vE '(^|/)(node_modules|dist)/'");
     expect(generic).toContain('branches: [main]');
+    // sourceGuaranteed also moves: TS/Node fails a 0-target full scan; generic warns instead.
+    expect(tsNode).toContain('[ -n "yes" ]');
+    expect(generic).toContain('[ -n "" ]');
     expect(generic).not.toContain('__HEDDLE_');
+  });
+
+  it('conditions the SARIF explain note on an actual upload failure, not always()', () => {
+    const workflow = renderDeterministicReview(TS_NODE);
+    // The explanatory note must fire only when an upload really failed — never on success or a
+    // fork/main skip (qodo/cursor: an always() note falsely claims every run was skipped/failed).
+    expect(workflow).toContain("steps.semgrep_sarif_upload.outcome == 'failure'");
+    expect(workflow).toContain("steps.gitleaks_sarif_upload.outcome == 'failure'");
+    expect(workflow).not.toContain('SARIF upload to code scanning skipped or failed');
   });
 
   it('makes all three code-scanning uploads non-blocking', () => {
