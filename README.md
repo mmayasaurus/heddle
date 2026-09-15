@@ -142,7 +142,7 @@ heddle init-project <your-repo> \
   --launcher <launcher-script>
 ```
 
-On a first registration, `--team`, `--agents`, `--room`, and `--launcher` are required. `--name` defaults to the target directory basename. `--canonical` can instead come from `HEDDLE_CANONICAL` or `~/.heddle/canonical.json`; one of those sources is required. The canonical root must contain a `hooks/` directory with all six wired discipline hooks (further workspace-only hooks are optional): `agent-identity.py`, `agent-preflight.py`, `remind-owned-prs.py`, `require-memtrace-first.py`, `delegation-nudge.py`, and `require-pr-sweep.py`.
+On a first registration, `--team`, `--agents`, and `--room` are required. `--launcher` is optional and defaults to `~/.heddle/launch-<name>.sh` when omitted. `--name` defaults to the target directory basename. `--canonical` can instead come from `HEDDLE_CANONICAL` or `~/.heddle/canonical.json`; one of those sources is required. The canonical root must contain a `hooks/` directory with all six wired discipline hooks (further workspace-only hooks are optional): `agent-identity.py`, `agent-preflight.py`, `remind-owned-prs.py`, `require-memtrace-first.py`, `delegation-nudge.py`, and `require-pr-sweep.py`.
 
 | Option | Meaning |
 | --- | --- |
@@ -151,7 +151,7 @@ On a first registration, `--team`, `--agents`, `--room`, and `--launcher` are re
 | `--team <key>` | Project team key for the first registration. |
 | `--agents A,B,…` | Comma-separated agent IDs for the first registration. |
 | `--room <room>` | Default room for the first registration. |
-| `--launcher <script>` | Launcher recorded for the first registration. |
+| `--launcher <script>` | Launcher recorded for the project; optional — defaults to `~/.heddle/launch-<name>.sh` when omitted on a first registration. |
 | `--preset minimal\|standard\|strict` | Select a shipped hook-rule set. |
 | `--hook-rules a,b` | Select named rules rather than a preset. |
 | `--enforce a,b` | Mark selected block rules as enforced. |
