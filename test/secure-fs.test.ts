@@ -566,6 +566,101 @@ describe('secure filesystem primitives', () => {
     expect(() => ensureSecureDir(join(linkParent, 'creds'))).toThrow(/symlink/i);
   });
 
+  describe('ensureSecureDir ancestor-chain validation (boundary / HED-643)', () => {
+    // With a `boundary` trust root, EVERY existing ancestor from the immediate parent up to (but excluding)
+    // `boundary` must be structurally safe — closing the redirect vector where a symlinked or
+    // group/other-writable ancestor ABOVE the immediate parent (which the HED-634 immediate-parent check and
+    // the create climb both miss) could relocate the credential directory. Every case pins `boundary` to a
+    // dir UNDER tempDir() so the walk never climbs into the shared /tmp (CI) or /var (macOS) roots.
+
+    it('accepts an existing safe chain up to the boundary (fast path)', () => {
+      const root = tempDir();
+      const grand = join(root, 'grand'); mkdirSync(grand, { mode: 0o700 });
+      const parent = join(grand, 'parent'); mkdirSync(parent, { mode: 0o700 });
+      const leaf = join(parent, 'creds'); mkdirSync(leaf, { mode: 0o700 });
+
+      expect(() => ensureSecureDir(leaf, { boundary: root })).not.toThrow();
+    });
+
+    it('rejects a symlinked GRANDparent above the immediate parent (fast path)', () => {
+      const root = tempDir();
+      const realGrand = join(root, 'real-grand'); mkdirSync(realGrand, { mode: 0o700 });
+      const parent = join(realGrand, 'parent'); mkdirSync(parent, { mode: 0o700 });
+      mkdirSync(join(parent, 'creds'), { mode: 0o700 });
+      const linkGrand = join(root, 'link-grand'); symlinkSync(realGrand, linkGrand);
+
+      // Reached via the symlinked GRANDparent: the immediate parent (…/parent) still lstats as a real dir, so
+      // only the ancestor-chain walk catches the symlink one level up. Without it this is silently accepted.
+      expect(() => ensureSecureDir(join(linkGrand, 'parent', 'creds'), { boundary: root })).toThrow(/symlink/i);
+    });
+
+    it('rejects a group/other-writable GRANDparent above the immediate parent (fast path)', () => {
+      const root = tempDir();
+      const grand = join(root, 'grand'); mkdirSync(grand, { mode: 0o700 });
+      const parent = join(grand, 'parent'); mkdirSync(parent, { mode: 0o700 });
+      const leaf = join(parent, 'creds'); mkdirSync(leaf, { mode: 0o700 });
+      chmodSync(grand, 0o777); // safe immediate parent, but a loose GRANDparent
+
+      expect(() => ensureSecureDir(leaf, { boundary: root })).toThrow(/writable/i);
+    });
+
+    it('does NOT walk the grandparent without a boundary (HED-634 immediate-parent-only contract unchanged)', () => {
+      const root = tempDir();
+      const grand = join(root, 'grand'); mkdirSync(grand, { mode: 0o700 });
+      const parent = join(grand, 'parent'); mkdirSync(parent, { mode: 0o700 });
+      const leaf = join(parent, 'creds'); mkdirSync(leaf, { mode: 0o700 });
+      chmodSync(grand, 0o777); // loose grandparent …
+
+      // … but with no `boundary` the default contract validates only the leaf + immediate parent, so this
+      // pre-existing safe leaf under a loose GRANDparent is accepted exactly as before (non-regression).
+      expect(() => ensureSecureDir(leaf)).not.toThrow();
+    });
+
+    it('rejects a loose GRANDparent on the create path (missing leaf, boundary), creating nothing', () => {
+      const root = tempDir();
+      const grand = join(root, 'grand'); mkdirSync(grand, { mode: 0o700 });
+      const parent = join(grand, 'parent'); mkdirSync(parent, { mode: 0o700 });
+      chmodSync(grand, 0o777); // loose grandparent above the deepest existing ancestor
+      const leaf = join(parent, 'creds'); // absent → create path
+
+      // The create climb validates only the deepest existing ancestor (…/parent); the chain walk extends that
+      // to the loose GRANDparent before creating under it. Without it the leaf is created under a loose tree.
+      expect(() => ensureSecureDir(leaf, { boundary: root })).toThrow(/writable/i);
+      expect(existsSync(leaf)).toBe(false); // rejected before any create
+    });
+
+    it('creates a missing leaf under a safe chain with a boundary (create path acceptance)', () => {
+      const root = tempDir();
+      const grand = join(root, 'grand'); mkdirSync(grand, { mode: 0o700 });
+      const leaf = join(grand, 'parent', 'creds'); // parent + leaf absent → create path
+
+      ensureSecureDir(leaf, { boundary: root });
+
+      expect(statSync(leaf).mode & 0o777).toBe(0o700);
+    });
+
+    it('does NOT validate the boundary directory itself — it is the operator trust domain (EXCLUSIVE)', () => {
+      const root = tempDir();
+      const home = join(root, 'home'); mkdirSync(home, { mode: 0o700 });
+      const heddle = join(home, '.heddle'); mkdirSync(heddle, { mode: 0o700 });
+      const leaf = join(heddle, 'creds'); mkdirSync(leaf, { mode: 0o700 });
+      chmodSync(home, 0o777); // the boundary (home) is loose …
+
+      // … but `boundary` is EXCLUSIVE: home and everything above it are the operator/OS trust domain, not
+      // heddle's to judge — only ~/.heddle and below are validated. So a euid-owned symlinked or loose HOME is
+      // accepted (the one operator-facing semantic; the inclusive alternative would reject it — Maya's call).
+      expect(() => ensureSecureDir(leaf, { boundary: home })).not.toThrow();
+    });
+
+    it('rejects a boundary that is not an ancestor of the target (loud misuse)', () => {
+      const root = tempDir();
+      const dir = join(root, 'a', 'b', 'creds');
+      const unrelated = join(tempDir(), 'elsewhere'); // a different temp root — not an ancestor of dir
+
+      expect(() => ensureSecureDir(dir, { boundary: unrelated })).toThrow(/boundary|ancestor/i);
+    });
+  });
+
   it('assertSecureDir accepts a safe existing directory and bubbles ENOENT for an absent one', () => {
     const dir = join(tempDir(), 'present');
     mkdirSync(dir, { mode: 0o700 });

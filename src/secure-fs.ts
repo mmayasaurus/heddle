@@ -1,6 +1,6 @@
 import { closeSync, constants, fchmodSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative } from 'node:path';
 
 /**
  * Hardened filesystem primitives for credential files and rotation locks (HED-452). Shared + exported
@@ -16,14 +16,14 @@ import { basename, dirname, join } from 'node:path';
  * (all post-check ops are on the open fd) and the lock (its claim is a single atomic link) have no such
  * pathname-redirect surface, so they do not require parent ownership.
  *
- * They do NOT walk ancestors: Node exposes no per-component `O_NOFOLLOW`/`openat`/`RESOLVE_NO_SYMLINKS`
- * and this project takes zero native deps, so a symlink or a group/other-writable directory HIGHER in the
- * path (or, for the reader/lock, a foreign-owned immediate parent) is not detected here (the one exception
- * is `ensureSecureDir`, which walks to the deepest existing ancestor when CREATING and validates +
- * force-modes each level it makes — see its own contract). That is acceptable
- * only because every path these guard is heddle-owned under `~/.heddle` or a user-owned profile dir — a
- * same-uid trust domain a cross-uid attacker cannot write to, and a same-uid process already holds the
- * credentials outright. Callers MUST pass paths whose ancestors are user-owned and not group/other-writable.
+ * By DEFAULT they do NOT walk ancestors above the immediate parent: Node exposes no per-component
+ * `O_NOFOLLOW`/`openat`/`RESOLVE_NO_SYMLINKS` and this project takes zero native deps, so a symlink or a
+ * group/other-writable directory HIGHER in the path (or, for the reader/lock, a foreign-owned immediate
+ * parent) is not detected in that mode. Two seams narrow this: `ensureSecureDir` already walks to the
+ * deepest existing ancestor when CREATING and validates + force-modes each level it makes; and\n * `ensureSecureDir` accepts an optional `boundary` (a trust root, e.g. the caller's home directory) that\n * extends the STRUCTURAL check up the whole EXISTING ancestor chain to — but excluding — that boundary, in\n * both its fast path and the shared create walk (HED-643, closing the higher-ancestor redirect window). The\n * shared walk (`createSecureDirTree`) carries the `boundary` for `ensureSafeParent` too, though its\n * writer/lock callers do not pass one yet (HED-642). The default (no `boundary`) is acceptable only because every path these guard is
+ * heddle-owned under `~/.heddle` or a user-owned profile dir — a same-uid trust domain a cross-uid attacker
+ * cannot write to, and a same-uid process already holds the credentials outright. Callers MUST pass paths
+ * whose ancestors are user-owned and not group/other-writable.
  * This module is POSIX-only (it relies on `process.geteuid`); `effectiveUid` fails closed with a clear
  * error on a platform without it (e.g. win32) rather than silently degrading.
  */
@@ -165,12 +165,21 @@ export function secureReadFile(path: string, opts: { euid?: number } = {}): stri
  * necessary, and for the intermediate-trust rule the climb uses). An EXISTING directory is validated but
  * never chmodded (a legitimate 0755 profile dir is accepted, exactly as the writer accepts a 0755 parent).
  */
-export function ensureSecureDir(dir: string, opts: { mode?: number; euid?: number } = {}): void {
+export function ensureSecureDir(dir: string, opts: { mode?: number; euid?: number; boundary?: string } = {}): void {
   const mode = opts.mode ?? 0o700;
   if ((mode & 0o700) !== 0o700 || (mode & 0o022) !== 0) {
     throw new Error(`refusing to create credential directory ${dir}: mode 0${mode.toString(8)} must be owner-rwx (0o700) and not group/other-writable`);
   }
   const euid = effectiveUid(opts.euid);
+  // HED-643: an optional trust root. When given, EVERY existing ancestor from the immediate parent up to
+  // (but excluding) `boundary` is validated structurally, closing the redirect vector where a symlinked or
+  // group/other-writable ancestor ABOVE the immediate parent could relocate the credential directory. It
+  // must be a strict ancestor of `dir` (otherwise the walk would climb past the intended trust root and
+  // into the operator/OS domain); absent → the immediate-parent-only contract (HED-634) is unchanged.
+  const boundary = opts.boundary;
+  if (boundary !== undefined && !isStrictlyWithin(dir, boundary)) {
+    throw new Error(`refusing to create credential directory ${dir}: boundary ${boundary} is not an ancestor of it`);
+  }
 
   // Fast path: the target already exists and is a safe, euid-owned directory → accept as-is (never
   // chmodded, exactly like an existing parent). Its natural ENOENT means "absent → create it" below.
@@ -183,6 +192,9 @@ export function ensureSecureDir(dir: string, opts: { mode?: number; euid?: numbe
     // legitimately root-owned parent such as ~ or /Users is fine, and the parent is guaranteed to exist
     // here because the leaf does.
     assertSafeExistingDir(dirname(dir));
+    // HED-643: with a trust root, extend that structural check up the EXISTING ancestor chain to (but not
+    // including) `boundary`. Re-checks the immediate parent — idempotent, one extra lstat.
+    if (boundary !== undefined) assertSafeAncestorsUpTo(dirname(dir), boundary);
     return;
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
@@ -190,7 +202,7 @@ export function ensureSecureDir(dir: string, opts: { mode?: number; euid?: numbe
 
   // Absent → build the target and any missing ancestors via the validated per-level walk (shared with
   // ensureSafeParent — HED-626). The fast path above already handled the existing-target case.
-  createSecureDirTree(dir, mode, euid);
+  createSecureDirTree(dir, mode, euid, boundary);
 }
 
 /**
@@ -218,7 +230,7 @@ export function ensureSecureDir(dir: string, opts: { mode?: number; euid?: numbe
  * does not re-gate `mode`. Shared by `ensureSecureDir` (its absent-target create path) and `ensureSafeParent`
  * (HED-626), so the writer's and lock's parent creation adopts the same umask-safe, ownership-verified walk.
  */
-function createSecureDirTree(dir: string, mode: number, euid: number): void {
+function createSecureDirTree(dir: string, mode: number, euid: number, boundary?: string): void {
   // Climb to the deepest existing ancestor, collecting the missing components to create top-down. The
   // climb requires only STRUCTURAL safety of existing ancestors (not a symlink / not a non-dir / not
   // group-or-other-writable), not euid-ownership: you cannot `mkdir` under a foreign-owned ancestor unless
@@ -236,6 +248,17 @@ function createSecureDirTree(dir: string, mode: number, euid: number): void {
     if (dirname(cur) === cur) break; // reached the filesystem root without an existing ancestor (defensive)
     missing.unshift(cur);
     cur = dirname(cur);
+  }
+
+  // HED-643: the climb above validated only the DEEPEST existing ancestor (`cur`). With a trust root,
+  // validate the rest of the EXISTING chain from there up to (but excluding) `boundary` too, so a symlinked
+  // or group/other-writable ancestor higher in the heddle-owned subtree is rejected before we create under
+  // it. Guarded to the case where `cur` is within (or is) the trust root: if `boundary` does not yet exist
+  // it is among the `missing` components created + mode-forced + euid-verified below by finalizeCreatedDir,
+  // and `cur` then sits ABOVE `boundary` (the operator/OS domain) — nothing to validate, and we must not
+  // climb into it.
+  if (boundary !== undefined && (cur === boundary || isStrictlyWithin(cur, boundary))) {
+    assertSafeAncestorsUpTo(cur, boundary);
   }
 
   // Create each missing component top-down. Each is created then immediately finalized on its own fd
@@ -510,6 +533,42 @@ function assertSafeExistingDir(dir: string, euid?: number): void {
   if (!stats.isDirectory()) throw new Error(`refusing: ${dir} is not a directory`);
   if ((stats.mode & 0o022) !== 0) throw new Error(`refusing: directory ${dir} is group- or other-writable`);
   if (euid !== undefined && stats.uid !== euid) throw new Error(`refusing: directory ${dir} is not owned by effective uid ${euid}`);
+}
+
+/**
+ * True iff `child` is a STRICT descendant of `ancestor`. Used to validate a caller-supplied `boundary`
+ * (trust root) before an ancestor-chain walk, so a boundary that is not actually above the target fails
+ * loud at the entry point rather than letting the walk climb to the filesystem root. POSIX-only paths
+ * (this module relies on `process.geteuid`): a `relative()` result that is empty (equal), starts with `..`
+ * (escapes upward), or is absolute (different root) means `child` is at or outside `ancestor`.
+ */
+function isStrictlyWithin(child: string, ancestor: string): boolean {
+  const rel = relative(ancestor, child);
+  return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel);
+}
+
+/**
+ * Validate every EXISTING directory on the chain from `from` (inclusive) climbing toward the filesystem
+ * root, STOPPING at `boundary` (EXCLUSIVE) — the trust root the caller declares (e.g. its home directory).
+ * Each level must be a real directory, not a symlink, and not group/other-writable (`assertSafeExistingDir`,
+ * STRUCTURAL only — never euid, so a legitimately root-owned level on the path such as `/Users` is accepted,
+ * exactly as the immediate-parent and create-climb checks are). This closes the ancestor-chain TOCTOU gap
+ * (HED-643, same axis as HED-642): a fast path and the create-climb otherwise validate only the immediate / deepest-existing
+ * parent, so a symlinked or group/other-writable ancestor HIGHER in the heddle-owned subtree could redirect
+ * where a credential directory resolves. `boundary` itself and anything above it are the operator/OS trust
+ * domain and are deliberately NOT validated; callers pass a `boundary` that is a strict ancestor of the
+ * target (verified by `isStrictlyWithin` at the entry point), and the fs-root break is a defensive backstop.
+ * Every ancestor of an existing or just-created directory exists, so `assertSafeExistingDir`'s ENOENT cannot
+ * fire here.
+ */
+function assertSafeAncestorsUpTo(from: string, boundary: string): void {
+  let cur = from;
+  while (cur !== boundary) {
+    assertSafeExistingDir(cur);
+    const parent = dirname(cur);
+    if (parent === cur) break; // filesystem root reached without meeting boundary (defensive)
+    cur = parent;
+  }
 }
 
 /**
