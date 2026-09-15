@@ -1,4 +1,5 @@
 import { closeSync, constants, fchmodSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { basename, dirname, join } from 'node:path';
 
 /**
@@ -21,9 +22,19 @@ import { basename, dirname, join } from 'node:path';
  * only because every path these guard is heddle-owned under `~/.heddle` or a user-owned profile dir — a
  * same-uid trust domain a cross-uid attacker cannot write to, and a same-uid process already holds the
  * credentials outright. Callers MUST pass paths whose ancestors are user-owned and not group/other-writable.
+ * This module is POSIX-only (it relies on `process.geteuid`); `effectiveUid` fails closed with a clear
+ * error on a platform without it (e.g. win32) rather than silently degrading.
  */
 
-let temporarySequence = 0;
+/** A null-pid lock younger than this may be one caught mid-creation; back off rather than reclaim it. */
+const CREATION_GRACE_MS = 2000;
+
+/** Options shared by the lock primitives. */
+export interface CredentialLockOptions {
+  pid?: number;
+  isAlive?: (pid: number) => boolean;
+  euid?: number;
+}
 
 /** Result of attempting to claim a credential-operation lock. */
 export interface CredentialLockResult {
@@ -54,12 +65,14 @@ export function secureWriteFile(path: string, content: string, opts: { mode?: nu
   }
 
   // The writer performs pathname ops (rename) after its checks, so it requires a euid-OWNED parent: a
-  // foreign parent owner could otherwise swap the predictable temp name for a symlink between create and
-  // rename. (The reader/lock have no such surface — see the module invariant.)
+  // foreign parent owner could otherwise swap the temp name for a symlink between create and rename.
+  // (The reader/lock have no such surface — see the module invariant.)
   ensureSafeParent(dirname(path), opts.dirMode ?? 0o700, euid);
 
   const mode = opts.mode ?? 0o600;
-  const temporary = join(dirname(path), `.${basename(path)}.${process.pid}.${temporarySequence++}.tmp`);
+  // A random temp name (not a per-process counter) stays unique even across Worker threads that share
+  // process.pid; O_EXCL is the real guard, this just avoids a spurious EEXIST between concurrent writers.
+  const temporary = join(dirname(path), `.${basename(path)}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`);
   let fd: number | undefined;
   try {
     // O_EXCL create (never clobbers, never follows a symlink at the temp name); write, fchmod and close
@@ -91,7 +104,8 @@ export function secureWriteFile(path: string, content: string, opts: { mode?: nu
 /**
  * Read a secret only after rejecting links, non-files, foreign-owned files, and permissive modes.
  * Returning an empty value on a violation would make a credential failure look like an absent secret,
- * so callers receive a descriptive error instead.
+ * so callers receive a descriptive error instead. An absent file is NOT a violation: its natural ENOENT
+ * bubbles unchanged so a caller can probe for a not-yet-created secret without unwrapping a security error.
  *
  * The final component is opened `O_NOFOLLOW` and every check runs against the OPEN fd (fstat + read from
  * the fd), so nothing re-resolves the path after the checks — closing the check-then-read TOCTOU a
@@ -112,7 +126,9 @@ export function secureReadFile(path: string, opts: { euid?: number } = {}): stri
   try {
     fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ELOOP') throw new Error(`refusing to read secret file ${path}: target is a symlink`);
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ELOOP') throw new Error(`refusing to read secret file ${path}: target is a symlink`);
+    if (code === 'ENOENT') throw err; // absent secret → natural not-found, per the module contract
     throw new Error(`refusing to read secret file ${path}: could not securely open it`, { cause: err });
   }
   try {
@@ -157,20 +173,21 @@ export function acquireCredentialLock(
   ensureSafeParent(dirname(lockPath), 0o700);
 
   try {
-    writeFileSync(lockPath, String(pid), { encoding: 'utf8', flag: 'wx' });
+    writeFileSync(lockPath, String(pid), { encoding: 'utf8', flag: 'wx', mode: 0o600 });
     return { ok: true };
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
   }
 
   // Fast-path refusal WITHOUT taking the reclaim gate — confines the gate (and its crash-leak window)
-  // to genuine stale reclaims. A symlink/non-file/foreign lock or a live holder is refused here.
+  // to genuine stale reclaims. A symlink/non-file/foreign lock, a live holder, or a lock caught mid-
+  // creation (null pid + fresh mtime) is refused here.
   const pre = inspectLock(lockPath, euid, isAlive);
   if (pre.refuse) return pre.result;
 
   const reclaimPath = `${lockPath}.reclaim`;
   try {
-    mkdirSync(reclaimPath);
+    mkdirSync(reclaimPath, { mode: 0o700 });
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'EEXIST') return { ok: false };
     throw err;
@@ -184,7 +201,7 @@ export function acquireCredentialLock(
     if (held.present) unlinkSync(lockPath); // stale/unreadable regular euid-owned file → remove (no follow)
     opts.onBeforeClaim?.();
     try {
-      writeFileSync(lockPath, String(pid), { encoding: 'utf8', flag: 'wx' });
+      writeFileSync(lockPath, String(pid), { encoding: 'utf8', flag: 'wx', mode: 0o600 });
       return { ok: true };
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'EEXIST') return { ok: false }; // a fresh claimant won the window
@@ -203,7 +220,9 @@ export function acquireCredentialLock(
 /**
  * Best-effort release for `finally`. Unlinks ONLY if the lock still holds `pid` (our claim): if it was
  * reclaimed and a different process now holds the name, removing it would strand that holder and admit a
- * third — so a lock that is not ours, or is no longer a regular file, is left untouched.
+ * third — so a lock that is not ours, or is no longer a regular file, is left untouched. `pid` is the
+ * caller's OWN live pid; releasing on behalf of a dead process is unsupported (a TOCTOU against a
+ * concurrent reclaim exists only for a dead pid, and the default is the live self).
  */
 export function releaseCredentialLock(lockPath: string, pid: number = process.pid): void {
   try {
@@ -215,12 +234,15 @@ export function releaseCredentialLock(lockPath: string, pid: number = process.pi
   }
 }
 
-/** Run a synchronous credential operation while holding its single-process lock. */
-export function withCredentialLock<T>(
-  lockPath: string,
-  fn: () => T,
-  opts: { pid?: number; isAlive?: (pid: number) => boolean; euid?: number } = {},
-): T {
+/**
+ * Run a credential operation while holding its single-process lock, releasing it afterward. Works for both
+ * a synchronous `fn` and an `async` one: when `fn` returns a promise the lock is held until that promise
+ * SETTLES (a plain `try/finally` cannot do this — `finally` fires the instant `fn()` returns the pending
+ * promise, releasing the lock before the async work runs).
+ */
+export function withCredentialLock<T>(lockPath: string, fn: () => Promise<T>, opts?: CredentialLockOptions): Promise<T>;
+export function withCredentialLock<T>(lockPath: string, fn: () => T, opts?: CredentialLockOptions): T;
+export function withCredentialLock<T>(lockPath: string, fn: () => T | Promise<T>, opts: CredentialLockOptions = {}): T | Promise<T> {
   const pid = opts.pid ?? process.pid;
   const result = acquireCredentialLock(lockPath, pid, { isAlive: opts.isAlive, euid: opts.euid });
   if (!result.ok) {
@@ -228,17 +250,28 @@ export function withCredentialLock<T>(
       ? `could not acquire credential lock at ${lockPath}`
       : `credential lock at ${lockPath} is held by pid ${result.heldBy}`);
   }
+  let out: T | Promise<T>;
   try {
-    return fn();
-  } finally {
+    out = fn();
+  } catch (err) {
     releaseCredentialLock(lockPath, pid);
+    throw err;
   }
+  if (out != null && typeof (out as Promise<T>).then === 'function') {
+    return (out as Promise<T>).then(
+      (value) => { releaseCredentialLock(lockPath, pid); return value; },
+      (err) => { releaseCredentialLock(lockPath, pid); throw err; },
+    );
+  }
+  releaseCredentialLock(lockPath, pid);
+  return out;
 }
 
 /**
  * Classify an existing lock file. `refuse` (with its result) means never touch it — a symlink/non-file
- * (attack), a foreign owner, or a live holder. `present:false` means absent/vanished (claimable).
- * Anything else is a stale/unreadable regular euid-owned file (reclaimable).
+ * (attack), a foreign owner, a live holder, or a lock caught mid-creation (null pid + fresh mtime).
+ * `present:false` means absent/vanished (claimable). Anything else is a stale/unreadable regular
+ * euid-owned file (reclaimable).
  */
 function inspectLock(
   lockPath: string,
@@ -254,6 +287,9 @@ function inspectLock(
   if (stats.isSymbolicLink() || !stats.isFile() || stats.uid !== euid) return { refuse: true, result: { ok: false }, present: true };
   const heldBy = readLockPid(lockPath);
   if (heldBy !== null && isAlive(heldBy)) return { refuse: true, result: { ok: false, heldBy }, present: true };
+  // A null pid is an empty/garbage lock. If it was just written it may be another acquirer's lock caught
+  // between its O_EXCL create and its pid write — back off briefly rather than reclaim a lock in progress.
+  if (heldBy === null && Date.now() - stats.mtimeMs < CREATION_GRACE_MS) return { refuse: true, result: { ok: false }, present: true };
   return { refuse: false, result: { ok: false }, present: true };
 }
 

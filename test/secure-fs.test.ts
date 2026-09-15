@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
@@ -145,6 +145,16 @@ describe('secure filesystem primitives', () => {
     expect(() => secureReadFile(path, { euid: foreignEuid })).toThrow(/owner|owned/i);
   });
 
+  it('secureReadFile lets an absent secret surface a natural ENOENT, not a security error', () => {
+    const path = join(tempDir(), 'credential'); // parent (tempDir) exists; the secret does not
+
+    let caught: NodeJS.ErrnoException | undefined;
+    try { secureReadFile(path); } catch (err) { caught = err as NodeJS.ErrnoException; }
+
+    expect(caught?.code).toBe('ENOENT'); // bubbles unwrapped so a caller can probe for a not-yet-created secret
+    expect(caught?.message ?? '').not.toMatch(/could not securely open/i);
+  });
+
   it('secureReadFile rejects a symlinked parent directory', () => {
     const root = tempDir();
     const realParent = join(root, 'realdir');
@@ -211,6 +221,24 @@ describe('secure filesystem primitives', () => {
     writeFileSync(path, '111');
 
     expect(acquireCredentialLock(path, 222, { isAlive: () => false })).toEqual({ ok: true });
+    expect(readFileSync(path, 'utf8')).toBe('222');
+  });
+
+  it('acquireCredentialLock backs off from a null-pid lock caught in its creation window (grace)', () => {
+    const path = join(tempDir(), 'credential.lock');
+    writeFileSync(path, ''); // empty → readLockPid null; mtime is fresh (another acquirer may be mid-write)
+
+    expect(acquireCredentialLock(path, 222)).toEqual({ ok: false });
+    expect(readFileSync(path, 'utf8')).toBe(''); // NOT reclaimed while it might be a lock in progress
+  });
+
+  it('acquireCredentialLock reclaims a null-pid lock once it is older than the creation grace', () => {
+    const path = join(tempDir(), 'credential.lock');
+    writeFileSync(path, ''); // empty → null pid
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(path, old, old); // backdate beyond the grace window → a genuinely orphaned empty lock
+
+    expect(acquireCredentialLock(path, 222)).toEqual({ ok: true });
     expect(readFileSync(path, 'utf8')).toBe('222');
   });
 
@@ -301,6 +329,39 @@ describe('secure filesystem primitives', () => {
     releaseCredentialLock(path, 111);
 
     expect(readFileSync(path, 'utf8')).toBe('222'); // 222's lock is NOT stranded by our release
+  });
+
+  it('withCredentialLock throws without running fn when the lock is held by a live process', () => {
+    const path = join(tempDir(), 'credential.lock');
+    writeFileSync(path, '111');
+    let called = false;
+
+    expect(() => withCredentialLock(path, () => { called = true; }, { isAlive: () => true })).toThrow(/held by pid 111/);
+    expect(called).toBe(false); // the critical section must NOT run when the lock could not be acquired
+  });
+
+  it('withCredentialLock holds the lock across an async fn until its promise settles', async () => {
+    const path = join(tempDir(), 'credential.lock');
+    let heldDuringAwait = false;
+
+    const result = await withCredentialLock(path, async () => {
+      await Promise.resolve();
+      heldDuringAwait = existsSync(path); // a sync-finally release would have already fired by now
+      return 'x';
+    });
+
+    expect(result).toBe('x');
+    expect(heldDuringAwait).toBe(true); // the lock was still held after the await
+    expect(existsSync(path)).toBe(false); // and released once the promise settled
+  });
+
+  it('withCredentialLock releases the lock when an async fn rejects', async () => {
+    const path = join(tempDir(), 'credential.lock');
+
+    await expect(
+      withCredentialLock(path, async () => { await Promise.resolve(); throw new Error('FAKE_ASYNC_FAILURE'); }),
+    ).rejects.toThrow('FAKE_ASYNC_FAILURE');
+    expect(existsSync(path)).toBe(false);
   });
 
   it('withCredentialLock runs its function under the lock and releases afterward', () => {
