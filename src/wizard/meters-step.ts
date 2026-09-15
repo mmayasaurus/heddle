@@ -28,17 +28,22 @@ export function computeMetersPolicy(
   return { ...prior, version: 1, accounts };
 }
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 function readAccountsMap(policy: Record<string, unknown>): Record<string, { meters: boolean }> {
   const { accounts } = policy;
-  return accounts && typeof accounts === 'object' && !Array.isArray(accounts)
-    ? (accounts as Record<string, { meters: boolean }>)
-    : {};
+  return isPlainObject(accounts) ? (accounts as Record<string, { meters: boolean }>) : {};
 }
 
 /**
- * Read and parse an existing meters policy. Returns {} when the file is absent (a first run); throws
- * on any other read/parse error or a non-object shape so the caller can fail loudly rather than
- * silently overwrite a corrupt file (the ENOENT-vs-error discipline the fleet-canon reader uses).
+ * Read, parse, and shape-validate an existing meters policy. Returns {} when the file is absent (a
+ * first run); throws on any read/parse error, a non-object root, or a malformed `accounts` shape so
+ * the caller can fail loudly rather than silently overwrite a corrupt policy — the ENOENT-vs-error
+ * discipline the fleet-canon reader uses, extended to structure. A parseable-but-corrupt policy
+ * (e.g. `"accounts": []`, an account entry that is not an object, or a non-boolean `meters`) must
+ * force the operator to fix it, not be coerced to an empty map and clobbered on the next write.
  */
 function readPriorPolicy(path: string): Record<string, unknown> {
   let raw: string;
@@ -49,10 +54,24 @@ function readPriorPolicy(path: string): Record<string, unknown> {
     throw error;
   }
   const parsed: unknown = JSON.parse(raw);
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+  if (!isPlainObject(parsed)) {
     throw new Error('meters policy is not a JSON object');
   }
-  return parsed as Record<string, unknown>;
+  const { accounts } = parsed;
+  if (accounts !== undefined) {
+    if (!isPlainObject(accounts)) {
+      throw new Error('meters policy "accounts" is not an object');
+    }
+    for (const [id, entry] of Object.entries(accounts)) {
+      if (!isPlainObject(entry)) {
+        throw new Error(`meters policy account "${id}" is not an object`);
+      }
+      if ('meters' in entry && typeof entry.meters !== 'boolean') {
+        throw new Error(`meters policy account "${id}" has a non-boolean "meters"`);
+      }
+    }
+  }
+  return parsed;
 }
 
 export const metersStep: WizardStep = {

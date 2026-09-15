@@ -153,6 +153,31 @@ describe('metersStep', () => {
     expect(readFileSync(policyFile, 'utf8')).toBe('{ not json');
   });
 
+  it('fails on a parseable-but-corrupt policy (array accounts) instead of clobbering it', async () => {
+    // Valid JSON with an object root but a malformed `accounts` — must fail, not be coerced to {} and
+    // overwritten (the merge-preserving contract covers structurally-broken existing policies too).
+    const homeDir = homeWithAccounts({ schemaVersion: 2, claude: [{ id: 'claude-one', configDir: null }] });
+    const raw = JSON.stringify({ version: 1, accounts: [] });
+    const policyFile = writePriorPolicy(homeDir, raw);
+
+    const result = await metersStep.run(context(homeDir), io([true], []));
+
+    expect(result).toMatchObject({ id: 'meters', status: 'failed' });
+    expect(result.summary).toMatch(/corrupt/i);
+    expect(readFileSync(policyFile, 'utf8')).toBe(raw);
+  });
+
+  it('fails on an existing policy whose account entry has a non-boolean meters', async () => {
+    const homeDir = homeWithAccounts({ schemaVersion: 2, claude: [{ id: 'claude-one', configDir: null }] });
+    const raw = JSON.stringify({ version: 1, accounts: { 'claude-one': { meters: 'yes' } } });
+    const policyFile = writePriorPolicy(homeDir, raw);
+
+    const result = await metersStep.run(context(homeDir), io([true], []));
+
+    expect(result).toMatchObject({ id: 'meters', status: 'failed' });
+    expect(readFileSync(policyFile, 'utf8')).toBe(raw);
+  });
+
   it('under --dry-run reports intent, prompts for nothing, and writes no policy file', async () => {
     const homeDir = homeWithAccounts({ schemaVersion: 2, claude: [{ id: 'claude-one', configDir: null }] });
     const captured: string[] = [];
