@@ -130,6 +130,28 @@ describe('runSetup orchestrator', () => {
     expect(text).toContain('a done');
     expect(text).toContain('b skipped');
   });
+
+  it('closing guidance says "verified end-to-end" when the doctor step ran and passed (no redundant re-run prompt)', async () => {
+    const io = makeIO();
+    await runSetup(baseCtx(), io, [step('a'), step('doctor', { status: 'done', summary: 'setup verified' })]);
+    const text = io.lines.join('\n');
+    expect(text).toContain('verified end-to-end');
+    expect(text).not.toContain('Run `heddle doctor`'); // doctor just ran — don't ask to repeat it
+  });
+
+  it('closing guidance keeps the "Run `heddle doctor`" prompt when doctor did not run (excluded)', async () => {
+    const io = makeIO();
+    await runSetup(baseCtx(), io, [step('a')]);
+    expect(io.lines.join('\n')).toContain('Run `heddle doctor`');
+  });
+
+  it('closing guidance keeps the "Run `heddle doctor`" prompt when doctor was skipped, not done', async () => {
+    const io = makeIO();
+    await runSetup(baseCtx(), io, [step('a'), step('doctor', { status: 'skipped', summary: 'dry-run' })]);
+    const text = io.lines.join('\n');
+    expect(text).toContain('Run `heddle doctor`');
+    expect(text).not.toContain('verified end-to-end');
+  });
 });
 
 describe('accountsStep adapter', () => {
@@ -184,6 +206,22 @@ describe('composed walkthrough (buildSteps -> runSetup)', () => {
     expect(text).toContain('Setup complete');
     // The doctor preview line stands in for the real probe.
     expect(text).toContain('a real setup would run');
+  });
+
+  it('skips the doctor gate under an alternate --home (default install != what setup wrote) — HED-596', async () => {
+    // Non-dry-run + a home that differs from the real home: the doctor gate must NOT run, because the
+    // doctor module verifies the DEFAULT ~/.heddle install — a DIFFERENT one than accounts wrote under
+    // --home — which would paint a hollow green/red. It skips honestly instead. If the guard were
+    // broken the real doctor would run and return done/failed (never 'skipped'), failing this loudly.
+    const runner = {} as CliRunner;
+    const doctor = buildSteps({ runner }).find((s) => s.id === 'doctor');
+    if (!doctor) throw new Error('doctor step missing from buildSteps');
+    const io = makeIO();
+    const ctx: WizardContext = { ...baseCtx({ homeDir: '/tmp/definitely-not-the-real-home', dryRun: false }), results: new Map() };
+    const result = await doctor.run(ctx, io);
+    expect(result.status).toBe('skipped');
+    expect(result.summary).toContain('HED-596');
+    expect(io.lines.join('\n')).toContain('--home');
   });
 });
 
