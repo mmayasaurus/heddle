@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { diffFleetHooks, installFleetHooks, uninstallFleetHooks, verifyFleetCanon } from '../src/fleet.js';
@@ -130,38 +130,62 @@ describe('fleet hooks', () => {
 describe('fleet canon presence (HED-561)', () => {
   const { tempDir } = useTempResources('heddle-fleet-canon-presence-test-');
 
-  // An ABSENT canon dir (a shipped headless pack excludes fleet/ entirely) is "nothing to do", never an
-  // error: install/diff/uninstall all no-op. A present-but-EMPTY canon is a broken checkout and still
-  // throws. canonicalFiles is the shared chokepoint behind all three asset kinds, so exercising one kind
-  // (hooks) proves the behavior for launchers and bin too.
-  function absentCanon(base: string) {
+  // A genuinely FLEETLESS pack ships no fleet/ dir at all — for the default canon that means FLEET_ROOT
+  // (the PARENT of the kind-dir) is absent, so there is nothing of any kind to install/diff/uninstall →
+  // no-op. This is DISTINCT from three broken-checkout cases that still throw: (a) a present-but-empty
+  // canon, (b) a present fleet container with one kind-dir missing (partial corruption — must abort so
+  // uninstall's all-or-nothing preflight and `heddle upgrade` never silently skip a kind), and (c) a
+  // non-directory canon path (symlink/file). canonicalFiles is the shared chokepoint behind all three
+  // asset kinds, so exercising one kind (hooks) proves the rest. Fleetless is modelled with a two-level
+  // path whose PARENT is absent; corruption with a two-level path whose parent exists.
+  function fleetlessCanon(base: string) {
     const homeDir = join(base, 'home');
-    return { canonicalDir: join(base, 'does-not-exist'), homeDir, targetDir: join(homeDir, '.heddle', 'fleet', 'hooks') };
+    return { canonicalDir: join(base, 'no-fleet', 'hooks'), homeDir, targetDir: join(homeDir, '.heddle', 'fleet', 'hooks') };
   }
 
-  it('install no-ops with an empty report when the canon dir is absent', () => {
-    const paths = absentCanon(tempDir());
+  it('install no-ops with an empty report for a fleetless pack (canon container absent)', () => {
+    const paths = fleetlessCanon(tempDir());
     expect(installFleetHooks(paths)).toEqual({ targetDir: paths.targetDir, dryRun: false, files: [] });
     expect(existsSync(paths.targetDir)).toBe(false);
   });
 
-  it('diff reports clean when the canon dir is absent', () => {
-    const paths = absentCanon(tempDir());
+  it('diff reports clean for a fleetless pack', () => {
+    const paths = fleetlessCanon(tempDir());
     expect(diffFleetHooks(paths)).toEqual({ clean: true, files: [] });
   });
 
-  it('uninstall no-ops when the canon dir is absent', () => {
-    const paths = absentCanon(tempDir());
+  it('uninstall no-ops for a fleetless pack', () => {
+    const paths = fleetlessCanon(tempDir());
     expect(uninstallFleetHooks(paths)).toEqual({ targetDir: paths.targetDir, dryRun: false, removed: [], preserved: [], warnings: [] });
   });
 
-  it('verifyFleetCanon tolerates an absent canon dir without throwing', () => {
-    // Public uninstall gate. This exercises a custom canonicalDir, which returns at the
-    // canonicalDir!==default early-return in verifyDefaultCanon. The DEFAULT-canon fleetless path (the
-    // names.length===0 guard added before manifestHashes) is correct by inspection but not reproducible
+  it('verifyFleetCanon tolerates a fleetless pack without throwing', () => {
+    // Public uninstall gate. Exercises a custom canonicalDir whose container is absent; verifyDefaultCanon
+    // returns at the canonicalDir!==default early-return. The DEFAULT-canon fleetless path (the
+    // names.length===0 guard before manifestHashes) is correct by inspection but not reproducible
     // in-suite — the default FLEET_ROOT is import.meta.url-derived and present in the dev checkout.
     const base = tempDir();
-    expect(() => verifyFleetCanon('hook', { canonicalDir: join(base, 'does-not-exist') })).not.toThrow();
+    expect(() => verifyFleetCanon('hook', { canonicalDir: join(base, 'no-fleet', 'hooks') })).not.toThrow();
+  });
+
+  it('throws (corrupt checkout) when the canon container is present but the kind-dir is missing', () => {
+    // The pack shipped a fleet container but this one kind-dir is absent — corruption, not fleetlessness.
+    // Must throw so uninstall's all-or-nothing preflight and upgrade abort rather than skipping the kind.
+    const base = tempDir();
+    mkdirSync(join(base, 'fleet'), { recursive: true });
+    const paths = { canonicalDir: join(base, 'fleet', 'hooks'), homeDir: join(base, 'home'), targetDir: join(base, 'home', '.heddle', 'fleet', 'hooks') };
+    expect(() => installFleetHooks(paths)).toThrow(/canon not found/);
+    expect(() => uninstallFleetHooks(paths)).toThrow(/canon not found/);
+    expect(() => verifyFleetCanon('hook', { canonicalDir: paths.canonicalDir })).toThrow(/canon not found/);
+  });
+
+  it('throws when the canon path is a (dangling) symlink, not a real directory', () => {
+    const base = tempDir();
+    mkdirSync(join(base, 'container'), { recursive: true });
+    const canonicalDir = join(base, 'container', 'hooks');
+    symlinkSync('/nonexistent-canon-target-xyz', canonicalDir);
+    const paths = { canonicalDir, homeDir: join(base, 'home'), targetDir: join(base, 'home', '.heddle', 'fleet', 'hooks') };
+    expect(() => installFleetHooks(paths)).toThrow(/not a directory/);
   });
 
   it('install and uninstall still throw on a present-but-empty canon (broken checkout)', () => {
