@@ -17,6 +17,17 @@ interface CdWorkflow {
   readonly environment: string;
 }
 
+interface AppliedCdWorkflow {
+  readonly path: string;
+  readonly environment: string;
+}
+
+interface CdWorkflowChanges {
+  readonly written: AppliedCdWorkflow[];
+  readonly existing: AppliedCdWorkflow[];
+  readonly declined: string[];
+}
+
 function bundledAssetsRoot(): string {
   return fileURLToPath(new URL('../../assets/pr-automation', import.meta.url));
 }
@@ -59,10 +70,51 @@ function workflowPath(targetDir: string, outputName: string): string {
   return join(targetDir, '.github', 'workflows', outputName);
 }
 
+async function applyCdWorkflows(targetDir: string, io: WizardIO, assets: CdAutomationAssets): Promise<CdWorkflowChanges> {
+  const written: AppliedCdWorkflow[] = [];
+  const existing: AppliedCdWorkflow[] = [];
+  const declined: string[] = [];
+
+  for (const workflow of workflows) {
+    const path = workflowPath(targetDir, workflow.outputName);
+    const add = await io.prompter.confirm(workflow.prompt, false);
+    if (!add) {
+      declined.push(path);
+    } else if (existsSync(path)) {
+      existing.push({ path, environment: workflow.environment });
+      io.report(`CD automation: already present — left unchanged: ${path}`);
+    } else {
+      atomicWriteFile(path, readCdTemplate(workflow.template(assets)));
+      written.push({ path, environment: workflow.environment });
+      io.report(`CD automation: wrote ${path}`);
+    }
+  }
+
+  return { written, existing, declined };
+}
+
+function reportCdNextSteps(io: WizardIO, written: readonly AppliedCdWorkflow[], existing: readonly AppliedCdWorkflow[]): void {
+  if (written.length > 0) {
+    io.report(`Next steps: heddle wrote these manual-dispatch-only workflows — edit each one's build/publish/deploy step: ${written.map(({ path }) => path).join(', ')}. Protect the ${written.map(({ environment }) => environment).join(', ')} environment(s) with required reviewers; heddle configures no environment protection itself.`);
+  }
+  if (existing.length > 0) {
+    io.report(`Note: these workflow files already existed and were left unchanged — heddle did not read or validate them: ${existing.map(({ path }) => path).join(', ')}. Review each one's triggers, permissions, checkout ref, and environment before relying on it.`);
+  }
+}
+
+function summarizeCd(written: readonly AppliedCdWorkflow[], existing: readonly AppliedCdWorkflow[], declined: readonly string[]): string {
+  const changes = [
+    written.length > 0 ? `wrote ${written.map(({ path }) => path).join(', ')}` : '',
+    existing.length > 0 ? `already present ${existing.map(({ path }) => path).join(', ')}` : '',
+    declined.length > 0 ? `declined ${declined.join(', ')}` : '',
+  ].filter(Boolean).join('; ');
+  return `CD automation: ${changes || 'no files changed'}`;
+}
+
 export function cdAutomationStep(): WizardStep {
   return {
     id: 'cd-automation',
-    title: 'CD automation (release workflows)',
+    title: 'CD automation (release / publish / deploy workflows)',
     applies: (ctx: WizardContext): boolean => !!ctx.targetDir && existsSync(join(ctx.targetDir, '.git')),
     async run(ctx: WizardContext, io: WizardIO): Promise<WizardStepResult> {
       if (!ctx.targetDir) {
@@ -83,43 +135,9 @@ export function cdAutomationStep(): WizardStep {
       }
 
       try {
-        const assets = resolveCdAutomationAssets();
-        const written: string[] = [];
-        const existing: string[] = [];
-        const declined: string[] = [];
-        const present: Array<{ path: string; environment: string }> = [];
-
-        for (const workflow of workflows) {
-          const path = workflowPath(ctx.targetDir, workflow.outputName);
-          const add = await io.prompter.confirm(workflow.prompt, false);
-          if (!add) {
-            declined.push(path);
-            continue;
-          }
-
-          if (existsSync(path)) {
-            existing.push(path);
-            present.push({ path, environment: workflow.environment });
-            io.report(`CD automation: already present — left unchanged: ${path}`);
-            continue;
-          }
-
-          atomicWriteFile(path, readCdTemplate(workflow.template(assets)));
-          written.push(path);
-          present.push({ path, environment: workflow.environment });
-          io.report(`CD automation: wrote ${path}`);
-        }
-
-        if (present.length > 0) {
-          io.report(`Next steps: these workflows are manual-dispatch-only. Edit each file's build/publish/deploy step: ${present.map(({ path }) => path).join(', ')}. Protect the ${present.map(({ environment }) => environment).join(', ')} environment(s) with required reviewers; heddle configures no environment protection itself.`);
-        }
-
-        const changes = [
-          written.length > 0 ? `wrote ${written.join(', ')}` : '',
-          existing.length > 0 ? `already present ${existing.join(', ')}` : '',
-          declined.length > 0 ? `declined ${declined.join(', ')}` : '',
-        ].filter(Boolean).join('; ');
-        return { id: 'cd-automation', status: 'done', summary: `CD automation: ${changes || 'no files changed'}` };
+        const changes = await applyCdWorkflows(ctx.targetDir, io, resolveCdAutomationAssets());
+        reportCdNextSteps(io, changes.written, changes.existing);
+        return { id: 'cd-automation', status: 'done', summary: summarizeCd(changes.written, changes.existing, changes.declined) };
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
         io.report(`CD automation failed: ${detail}`);

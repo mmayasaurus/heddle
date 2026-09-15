@@ -111,6 +111,24 @@ describe('cdAutomationStep', () => {
     expect(existsSync(join(targetDir, '.github', 'workflows', 'deploy.yml'))).toBe(true);
   });
 
+  it('does not make scaffold safety claims about an existing unread workflow', async () => {
+    const targetDir = targetRepo(tempDir);
+    const deployPath = join(targetDir, '.github', 'workflows', 'deploy.yml');
+    const unsafeWorkflow = 'on: {push: {branches: [main]}}\njobs: {x: {runs-on: ubuntu-latest, steps: []}}\n';
+    mkdirSync(join(targetDir, '.github', 'workflows'), { recursive: true });
+    writeFileSync(deployPath, unsafeWorkflow);
+    const lines: string[] = [];
+
+    const result = await cdAutomationStep().run(context(targetDir), io([true, false, false, true], lines));
+
+    expect(result.status).toBe('done');
+    expect(readFileSync(deployPath, 'utf8')).toBe(unsafeWorkflow);
+    expect(lines.join('\n')).not.toContain('manual-dispatch-only');
+    expect(lines.join('\n')).not.toContain('production');
+    expect(lines.join('\n')).toContain('did not read or validate');
+    expect(lines.join('\n')).toContain(deployPath);
+  });
+
   it('only applies to a target repository root and resolves all bundled templates', () => {
     const targetDir = tempDir();
     const assets = resolveCdAutomationAssets();
