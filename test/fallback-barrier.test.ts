@@ -453,6 +453,33 @@ describe('autoWipCommit isolation', () => {
     expect(statusState(root).includes('orch-staged.txt')).toBe(true);
   });
 
+  it('reconcile failure after update-ref rolls HEAD back (finding B): index.lock blocks reset, tree restored as found', () => {
+    const root = gitRepo(tempDir);
+    writeFileSync(join(root, 'orch-staged.txt'), 'staged\n');
+    git(root, 'add', 'orch-staged.txt');
+    const preFp = requireFp(root);
+    writeFileSync(join(root, 'leg-new.txt'), 'leg\n');
+    const postFp = requireFp(root);
+    const headBefore = git(root, 'rev-parse', 'HEAD').trim();
+    const indexBefore = indexState(root);
+
+    // Hold the real index lock so the post-commit reconcile `git reset` fails, while the temp-index
+    // staging, commit-tree, and update-ref (none of which take .git/index.lock) all succeed. The
+    // failure path must roll HEAD back via compare-and-swap, leaving the tree exactly as found.
+    const lock = join(root, '.git', 'index.lock');
+    writeFileSync(lock, '');
+    const result = autoWipCommit(root, preFp, postFp);
+    rmSync(lock);
+
+    expect(result.committed).toBe(false);
+    if (!result.committed) expect(result.reason).toContain('reconcile');
+    expect(git(root, 'rev-parse', 'HEAD').trim()).toBe(headBefore);
+    expect(git(root, 'rev-list', '--count', 'HEAD').trim()).toBe('1');
+    expect(indexState(root)).toBe(indexBefore);
+    // The leg's file is back to plain untracked — no phantom staged-deletion left behind.
+    expect(pathStatus(root, 'leg-new.txt')).toBe('?? leg-new.txt');
+  });
+
   it('vanished-path tolerance: remaining safeSet paths still commit; all-vanished refuses', () => {
     const root = gitRepo(tempDir);
     const preFp = requireFp(root);

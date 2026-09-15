@@ -419,12 +419,28 @@ export function autoWipCommit(
         '--pathspec-file-nul',
       ], { GIT_LITERAL_PATHSPECS: '1' });
     } catch (err) {
-      return { committed: false, reason: `auto-WIP committed HEAD but could not reconcile the real index: ${gitErrorMessage(err)}` };
+      // The reset failed AFTER update-ref moved HEAD — most reachably because another process holds
+      // .git/index.lock (memtrace watchers / Verity hooks touch the index in this fleet). A failed
+      // reset writes nothing (git takes index.lock then renames; a lock-acquire failure leaves the
+      // real index untouched), so roll HEAD back to oldHead via compare-and-swap: the tree is then
+      // EXACTLY as found and committed:false is fully honest — the caller refuses the fallback and the
+      // worktree is unchanged. update-ref does not take index.lock, so the rollback succeeds precisely
+      // when the reset failed for that reason (codex round-2 finding B). A rollback that itself fails
+      // (HEAD moved past our commit) leaves the auto-WIP commit on HEAD and says so.
+      const resetErr = gitErrorMessage(err);
+      try {
+        gitWithEnv(cwd, ['update-ref', 'HEAD', oldHead, commitSha]);
+        return { committed: false, reason: `could not reconcile the real index; rolled HEAD back to the tree as found: ${resetErr}` };
+      } catch (rollbackErr) {
+        return { committed: false, reason: `auto-WIP committed HEAD ${commitSha.slice(0, 8)} but could not reconcile the real index, and rollback failed — HEAD holds the auto-WIP commit: ${resetErr}; rollback: ${gitErrorMessage(rollbackErr)}` };
+      }
     }
 
+    // A fingerprint that is unreadable HERE (after a SUCCESSFUL reset) leaves a good tree we simply
+    // cannot read — do NOT roll back; refuse honestly (codex round-2 finding B, B2 half).
     const newFp = checkoutFingerprint(cwd);
     if (newFp === null) {
-      return { committed: false, reason: 'auto-WIP updated HEAD but checkout fingerprint is unreadable' };
+      return { committed: false, reason: 'auto-WIP updated HEAD and reconciled the index, but the checkout fingerprint is now unreadable' };
     }
     return { committed: true, newFp };
   } catch (err) {
