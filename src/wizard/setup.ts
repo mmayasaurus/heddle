@@ -2,13 +2,18 @@
 // into ONE ordered walkthrough and is the SINGLE writer of step composition — step modules stay on
 // disjoint files, never import each other, and never edit this file. Owners land their step module
 // (model-economy HED-473, spread HED-474, meters HED-475, rules HED-544, doctor HED-476) and it is
-// wired here as a one-line addition to `buildSteps`; today accounts and the doctor finish-gate are wired.
+// wired here as a one-line addition to `buildSteps`; today accounts, spread, meters, rules, and the
+// doctor finish-gate are wired — only model-economy (HED-473) is still to come.
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 import type { WizardContext, WizardIO, WizardStep, WizardStepResult, WizardStepStatus } from './step.js';
 import type { CliRunner } from './cli-runner.js';
 import { runAccountsAdd, type AccountsAddSummary } from './accounts-add.js';
 import { doctorStep } from './doctor.js';
+import { spreadStep } from './spread-policy.js';
+import { metersStep } from './meters-step.js';
+import { rulesStep } from './rules-step.js';
+import { resolveCatalogRoot } from '../rules/lifecycle.js';
 
 /**
  * Everything a step needs EXCEPT `results`: the orchestrator owns the results map and fills it as it
@@ -21,8 +26,13 @@ export type SetupContext = Omit<WizardContext, 'results'>;
 export interface SetupDeps {
   /** Native-CLI runner the accounts step uses for vendor logins (injected so tests can fake it). */
   runner: CliRunner;
-  // The rules step (HED-544) will add a `catalogRoot` dep here when it wires in — omitted until then
-  // so nothing computes a value no step reads.
+  /**
+   * Bundled rule-catalog root the rules step (HED-544) reads presets from. OPTIONAL: when omitted,
+   * `buildSteps` defaults it to `resolveCatalogRoot()` (the catalog this binary ships), so production
+   * callers — and W's HED-571 harness — keep calling `buildSteps({ runner })` unchanged. Tests inject a
+   * seeded fixture catalog here to exercise the rules step hermetically.
+   */
+  catalogRoot?: string;
 }
 
 /**
@@ -133,18 +143,24 @@ function skipDoctorUnderAltHome(step: WizardStep): WizardStep {
 }
 
 /**
- * Build the ordered built-in step set. Each new step module is added here as one line as its owner
- * lands it, in walkthrough order: accounts → model-economy → spread → meters → rules → doctor (last).
- * Doctor is the read-only finish gate. It is composed with two guards: `skipDoctorUnderAltHome` (skip
- * when --home diverges — it would otherwise verify a different install than setup wrote, HED-596) and,
- * OUTSIDE that, `dryRunGate` (a --dry-run preview skips it). dryRunGate is outermost so a dry-run
- * preview always wins over the home check. Every other step self-handles dry-run inside its own module.
+ * Build the ordered built-in step set, in walkthrough order:
+ * accounts → model-economy → spread → meters → rules → doctor (last). Each self-contained step module
+ * is registered here as one line by its owner as it lands (HED-564 protocol); only model-economy
+ * (HED-473) is still to come. spread/meters/rules each write UNDER `ctx.homeDir` and self-handle
+ * --dry-run inside their own module, so they need no wrapper here. `rulesStep` is the one step taking a
+ * construction dep — the rule catalog — defaulted to the bundled catalog (`resolveCatalogRoot()`) so
+ * `buildSteps({ runner })` stays the caller contract. Doctor is the read-only finish gate, composed
+ * with two guards: `skipDoctorUnderAltHome` (skip when --home diverges — it would otherwise verify a
+ * different install than setup wrote, HED-596) and, OUTSIDE that, `dryRunGate` (a --dry-run preview
+ * skips it); dryRunGate is outermost so a dry-run preview always wins over the home check.
  */
 export function buildSteps(deps: SetupDeps): WizardStep[] {
   return [
     accountsStep(deps.runner),
-    // model-economy (HED-473), spread (HED-474), meters (HED-475), rules (HED-544) wire in here as a
-    // one-line addition as their owners land the modules.
+    // model-economy (HED-473) wires in here, after accounts, when its module lands.
+    spreadStep,
+    metersStep,
+    rulesStep(deps.catalogRoot ?? resolveCatalogRoot()),
     // doctor (HED-476) is ALWAYS last — the read-only finish gate that verifies setup end-to-end.
     dryRunGate(
       skipDoctorUnderAltHome(doctorStep),
