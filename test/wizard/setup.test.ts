@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { accountsStep, runSetup, buildSteps, selectSteps, type SetupContext } from '../../src/wizard/setup.js';
+import { accountsStep, runSetup, buildSteps, selectSteps, summarizeAccounts, type SetupContext } from '../../src/wizard/setup.js';
 import { policyPath } from '../../src/wizard/persist.js';
 import type { Prompter } from '../../src/wizard/prompt.js';
 import { ScriptedPrompter } from '../../src/wizard/prompt.js';
@@ -68,6 +68,33 @@ describe('runSetup orchestrator', () => {
     expect(boom?.status).toBe('failed');
     expect(boom?.summary).toContain('kaboom');
     expect(results.find((r) => r.id === 'after')?.status).toBe('done');
+  });
+
+  it('is fail-soft when applies() throws: records the step failed AND later steps still run', async () => {
+    const ran: string[] = [];
+    const throwingGate: WizardStep = {
+      id: 'gate',
+      title: 'GATE',
+      applies: () => { throw new Error('gate predicate boom'); },
+      run: async () => { ran.push('gate-run'); return { id: 'gate', status: 'done', summary: 'gate ran' }; },
+    };
+    const io = makeIO();
+    const results = await runSetup(baseCtx(), io, [throwingGate, step('after', { onRun: () => ran.push('after') })]);
+    // The throwing predicate is caught: run() never fired for the gate, but the walkthrough did NOT abort.
+    expect(ran).toEqual(['after']);
+    const gate = results.find((r) => r.id === 'gate');
+    expect(gate?.status).toBe('failed');
+    expect(gate?.summary).toContain('gate predicate boom');
+    expect(results.find((r) => r.id === 'after')?.status).toBe('done');
+    // The finish screen still renders — it would be skipped entirely if the throw had escaped runSetup.
+    expect(io.lines.join('\n')).toContain('Setup complete');
+  });
+
+  it('throws a clear composition error on duplicate step ids, before running any step', async () => {
+    const ran: string[] = [];
+    const dup = [step('dup', { onRun: () => ran.push('a') }), step('dup', { onRun: () => ran.push('b') })];
+    await expect(runSetup(baseCtx(), makeIO(), dup)).rejects.toThrow(/duplicate step id 'dup'/);
+    expect(ran).toEqual([]); // guarded before either step ran
   });
 
   it('skips a step whose applies() returns false without calling run()', async () => {
@@ -145,6 +172,26 @@ describe('composed walkthrough (buildSteps -> runSetup)', () => {
     const results = await runSetup(baseCtx({ dryRun: true }), io, buildSteps({ runner }));
     expect(results).toEqual([{ id: 'accounts', status: 'skipped', summary: expect.stringContaining('dry-run') }]);
     expect(lines.join('\n')).toContain('Setup complete');
+  });
+});
+
+describe('summarizeAccounts', () => {
+  it("reports 'failed' when ANY account failed, so setup exits non-zero (even with some added)", () => {
+    expect(summarizeAccounts({ added: ['claude-1'], failed: ['codex-1'], skipped: [] }).status).toBe('failed');
+  });
+  it("reports 'failed' when every attempted account failed", () => {
+    expect(summarizeAccounts({ added: [], failed: ['claude-1'], skipped: [] }).status).toBe('failed');
+  });
+  it("reports 'done' when something was added and nothing failed", () => {
+    expect(summarizeAccounts({ added: ['claude-1'], failed: [], skipped: ['codex'] }).status).toBe('done');
+  });
+  it("reports 'skipped' when the operator declined every account (nothing added, nothing failed)", () => {
+    expect(summarizeAccounts({ added: [], failed: [], skipped: ['claude', 'codex', 'cursor'] }).status).toBe('skipped');
+  });
+  it('echoes added/failed counts in the summary', () => {
+    const s = summarizeAccounts({ added: ['a'], failed: ['b'], skipped: ['cursor'] }).summary;
+    expect(s).toContain('1 added');
+    expect(s).toContain('1 failed');
   });
 });
 

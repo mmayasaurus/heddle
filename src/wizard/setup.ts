@@ -3,10 +3,9 @@
 // disjoint files, never import each other, and never edit this file. Owners land their step module
 // (model-economy HED-473, spread HED-474, meters HED-475, rules HED-544, doctor HED-476) and it is
 // wired here as a one-line addition to `buildSteps`; today only the accounts step is wired.
-import { join } from 'node:path';
-import type { WizardContext, WizardIO, WizardStep, WizardStepResult } from './step.js';
+import type { WizardContext, WizardIO, WizardStep, WizardStepResult, WizardStepStatus } from './step.js';
 import type { CliRunner } from './cli-runner.js';
-import { runAccountsAdd } from './accounts-add.js';
+import { runAccountsAdd, type AccountsAddSummary } from './accounts-add.js';
 
 /**
  * Everything a step needs EXCEPT `results`: the orchestrator owns the results map and fills it as it
@@ -29,6 +28,27 @@ export interface SetupDeps {
  * step needs a runner and `WizardContext` stays lean. Under --dry-run it prompts for nothing and logs
  * in to nothing: it reports what a real run would do and returns 'skipped'.
  */
+/**
+ * Map a `runAccountsAdd` summary to a step outcome. ANY failed account → 'failed' (so `heddle setup`
+ * exits non-zero and the operator sees setup did not fully succeed — a login/verification failure must
+ * NOT masquerade as success); else anything added → 'done'; else the operator declined every account →
+ * 'skipped'. Pure, so the exit-code semantics are unit-tested independent of a real login.
+ */
+export function summarizeAccounts(result: AccountsAddSummary): { status: WizardStepStatus; summary: string; detail?: string } {
+  const status: WizardStepStatus = result.failed.length ? 'failed' : result.added.length ? 'done' : 'skipped';
+  const counts = [
+    `${result.added.length} added`,
+    ...(result.failed.length ? [`${result.failed.length} failed`] : []),
+    ...(result.skipped.length ? [`${result.skipped.length} declined`] : []),
+  ].join(', ');
+  const detail = [
+    result.added.length ? `added: ${result.added.join(', ')}` : undefined,
+    result.failed.length ? `failed: ${result.failed.join(', ')}` : undefined,
+    result.skipped.length ? `declined: ${result.skipped.join(', ')}` : undefined,
+  ].filter(Boolean).join('\n');
+  return { status, summary: `accounts: ${counts}`, ...(detail ? { detail } : {}) };
+}
+
 export function accountsStep(runner: CliRunner): WizardStep {
   return {
     id: 'accounts',
@@ -42,24 +62,13 @@ export function accountsStep(runner: CliRunner): WizardStep {
           summary: 'dry-run — accounts prompting and login skipped (no registry write)',
         };
       }
-      const summary = await runAccountsAdd(
-        { registryPath: join(ctx.homeDir, '.heddle', 'accounts.json') },
+      // Pass homeDir (not registryPath) so the registry AND the per-account credential dirs share one
+      // root under --home — accounts-add derives both from it (no split install).
+      const result = await runAccountsAdd(
+        { homeDir: ctx.homeDir },
         { prompter: io.prompter, runner, now: ctx.now, report: io.report },
       );
-      const detail = [
-        summary.added.length ? `added: ${summary.added.join(', ')}` : undefined,
-        summary.failed.length ? `failed: ${summary.failed.join(', ')}` : undefined,
-        summary.skipped.length ? `declined: ${summary.skipped.join(', ')}` : undefined,
-      ].filter(Boolean).join('\n');
-      return {
-        id: 'accounts',
-        // 'done' if anything was added; otherwise the operator declined every account → 'skipped'.
-        status: summary.added.length ? 'done' : 'skipped',
-        summary: `${summary.added.length} account${summary.added.length === 1 ? '' : 's'} added` +
-          (summary.failed.length ? `, ${summary.failed.length} failed` : '') +
-          (summary.skipped.length ? `, ${summary.skipped.length} declined` : ''),
-        ...(detail ? { detail } : {}),
-      };
+      return { id: 'accounts', ...summarizeAccounts(result) };
     },
   };
 }
@@ -100,18 +109,33 @@ export function selectSteps(steps: WizardStep[], only?: readonly string[], skip?
  * caller's exit code and machine output.
  */
 export async function runSetup(base: SetupContext, io: WizardIO, steps: WizardStep[]): Promise<WizardStepResult[]> {
+  // Composition guard: step ids key the results map, so a duplicate id would silently drop one
+  // EXECUTED step from the finish screen and the returned machine output (and its exit-code signal).
+  // buildSteps is the single writer, but each step owner appends a line — so catch a collision loudly
+  // and early (a composition bug), before any step runs. Mirrors selectSteps' unknown-id guard.
+  const seen = new Set<string>();
+  for (const step of steps) {
+    if (seen.has(step.id)) {
+      throw new Error(`heddle setup: duplicate step id '${step.id}' — each step must have a unique id (buildSteps composition bug)`);
+    }
+    seen.add(step.id);
+  }
+
   // The single mutable results map; the context exposes it only as a ReadonlyMap to steps.
   const results = new Map<string, Readonly<WizardStepResult>>();
   const ctx: WizardContext = { ...base, results };
 
   for (const step of steps) {
-    if (step.applies && !step.applies(ctx)) {
-      results.set(step.id, { id: step.id, status: 'skipped', summary: 'not applicable in this context' });
-      io.report(`\n== ${step.title} ==  (skipped — not applicable)`);
-      continue;
-    }
     io.report(`\n== ${step.title} ==`);
     try {
+      // applies() is evaluated INSIDE the try so a throwing predicate is recorded 'failed' and the
+      // walkthrough continues (fail-soft) — it must never escape to abort later steps and skip the
+      // finish screen (a step's applies() may probe the filesystem or environment and throw).
+      if (step.applies && !step.applies(ctx)) {
+        results.set(step.id, { id: step.id, status: 'skipped', summary: 'not applicable in this context' });
+        io.report('  – skipped (not applicable in this context)');
+        continue;
+      }
       results.set(step.id, await step.run(ctx, io));
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
