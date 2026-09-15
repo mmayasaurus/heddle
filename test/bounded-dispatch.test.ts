@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -217,6 +217,79 @@ describe('bounded FDL dispatch admission', () => {
     );
     expect(freshSnapshot.ok).toBe(true);
     expect(fake.calls).toHaveLength(2);
+  });
+
+  it('counts settled spend admitted after a no-millis headroom snapshot', async () => {
+    const now = Date.parse('2026-09-15T16:00:00.050Z');
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+    try {
+      const dir = tempDir();
+      const ledgerPath = join(dir, 'ledger.db');
+      const ledger = new Ledger(ledgerPath);
+      const fake = fakeGlm();
+      const first = await dispatch(boundedRequest(dir, {
+        boundedAdmission: admission({ requestId: 'no-millis-first', observedAt: new Date(now).toISOString() }),
+      }), ledger, () => fake.adapter);
+      const db = new DatabaseSync(ledgerPath);
+      const reservation = db.prepare('SELECT reserved_total_tokens FROM bounded_reservations WHERE dispatch_id = ?').get(first.ledgerId) as { reserved_total_tokens: number };
+      db.close();
+      const second = await dispatch(boundedRequest(dir, {
+        boundedAdmission: admission({ requestId: 'no-millis-second', observedAt: '2026-09-15T16:00:00Z', remainingTokens: reservation.reserved_total_tokens + 14 }),
+      }), ledger, () => fake.adapter);
+      expect(second.refusal).toMatchObject({ code: 'bounded-aggregate-exhausted', reason: expect.stringContaining('15 are already outstanding') });
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it('counts settled spend admitted after an offset-form headroom snapshot', async () => {
+    const now = Date.parse('2026-09-15T16:00:00.050Z');
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+    try {
+      const dir = tempDir();
+      const ledgerPath = join(dir, 'ledger.db');
+      const ledger = new Ledger(ledgerPath);
+      const fake = fakeGlm();
+      const first = await dispatch(boundedRequest(dir, {
+        boundedAdmission: admission({ requestId: 'offset-first', observedAt: new Date(now).toISOString() }),
+      }), ledger, () => fake.adapter);
+      const db = new DatabaseSync(ledgerPath);
+      const reservation = db.prepare('SELECT reserved_total_tokens FROM bounded_reservations WHERE dispatch_id = ?').get(first.ledgerId) as { reserved_total_tokens: number };
+      db.close();
+      const second = await dispatch(boundedRequest(dir, {
+        boundedAdmission: admission({ requestId: 'offset-second', observedAt: '2026-09-15T18:00:00+02:00', remainingTokens: reservation.reserved_total_tokens + 14 }),
+      }), ledger, () => fake.adapter);
+      expect(second.refusal).toMatchObject({ code: 'bounded-aggregate-exhausted', reason: expect.stringContaining('15 are already outstanding') });
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it('releases an orphaned concurrency slot while retaining its tokens, but keeps fresh slots occupied', async () => {
+    const dir = tempDir();
+    const ledgerPath = join(dir, 'ledger.db');
+    const ledger = new Ledger(ledgerPath);
+    const fake = fakeGlm();
+    const first = await dispatch(boundedRequest(dir, {
+      boundedAdmission: admission({ requestId: 'orphan-first' }),
+    }), ledger, () => fake.adapter);
+    const db = new DatabaseSync(ledgerPath);
+    const reservation = db.prepare('SELECT reserved_total_tokens FROM bounded_reservations WHERE dispatch_id = ?').get(first.ledgerId) as { reserved_total_tokens: number };
+    const orphanAt = new Date(Date.now() - 10_861_000).toISOString();
+    db.prepare('UPDATE dispatches SET finished_at = NULL WHERE id = ?').run(first.ledgerId);
+    db.prepare('UPDATE bounded_reservations SET admitted_at = ? WHERE dispatch_id = ?').run(orphanAt, first.ledgerId);
+    db.close();
+    const headroomRefusal = await dispatch(boundedRequest(dir, {
+      boundedAdmission: admission({ requestId: 'orphan-second', remainingTokens: reservation.reserved_total_tokens }),
+    }), ledger, () => fake.adapter);
+    expect(headroomRefusal.refusal).toMatchObject({ code: 'bounded-aggregate-exhausted', reason: expect.stringContaining('already outstanding') });
+    const freshDb = new DatabaseSync(ledgerPath);
+    freshDb.prepare('UPDATE bounded_reservations SET admitted_at = ? WHERE dispatch_id = ?').run(new Date().toISOString(), first.ledgerId);
+    freshDb.close();
+    const concurrencyRefusal = await dispatch(boundedRequest(dir, {
+      boundedAdmission: admission({ requestId: 'fresh-second', remainingTokens: 2_400_000 }),
+    }), ledger, () => fake.adapter);
+    expect(concurrencyRefusal.refusal).toMatchObject({ code: 'bounded-aggregate-exhausted', reason: expect.stringContaining('in flight') });
   });
 
   it('refuses a configured fallback before the provider is called', async () => {

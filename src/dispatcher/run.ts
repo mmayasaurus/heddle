@@ -508,7 +508,9 @@ export async function runTarget(
       });
     }
   } catch (err) {
-    result = { ok: false, output: '', exitCode: null, error: `post-admission failure: ${err instanceof Error ? err.message : String(err)}` };
+    // Only the settlement machinery failed — keep the provider's retained output/usage on the outcome
+    // and the finish row rather than discarding a completed analysis over a ledger UPDATE error.
+    result = { ...result, ok: false, error: `post-admission failure: ${err instanceof Error ? err.message : String(err)}` };
     if (route.bounds) {
       try { ctx.ledger.settleBoundedReservation(ledgerId, { inputTokens: null, generatedTokens: null }); } catch { /* finish must still run */ }
     }
@@ -528,7 +530,8 @@ export async function runTarget(
     reasoningTokens: result.usage?.reasoningOutputTokens,
     output: result.output,
   }); } catch (err) {
-    result = { ok: false, output: '', exitCode: null, error: `post-admission failure: ${err instanceof Error ? err.message : String(err)}` };
+    // The row could not be finished; surface the failure but keep the worker's output with it.
+    result = { ...result, ok: false, error: `post-admission failure: ${err instanceof Error ? err.message : String(err)}` };
   }
 
   return {
