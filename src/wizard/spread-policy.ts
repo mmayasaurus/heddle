@@ -27,7 +27,17 @@ export interface SpreadPolicy {
   capPerAccount: number;     // UNCONDITIONAL per-account concurrent-session cap (NEW; not residency_max)
 }
 export interface SpreadPolicyResult { policy: SpreadPolicy; }
-export interface SpreadPolicyOptions { registryPath?: string; }
+export interface SpreadPolicyOptions {
+  /** Registry file to read when `accounts` is not supplied. Defaults to $HEDDLE_ACCOUNTS or ~/.heddle/accounts.json. */
+  registryPath?: string;
+  /**
+   * Pre-loaded accounts to use INSTEAD of reading `registryPath`. spreadStep passes the registry it has
+   * already read + validated, so the registry is read exactly once per wizard run — no second read to
+   * race the first (a corrupt registry is caught by that single read, in the step). Standalone callers
+   * (and this module's own tests) omit it and let the function read `registryPath` itself.
+   */
+  accounts?: Account[];
+}
 export interface SpreadPolicyDeps { prompter: Prompter; report?: (line: string) => void; }
 
 /** PREVIEW ONLY — the idealized exact-split even spread the policy TARGETS, shown to the user at wizard
@@ -57,15 +67,21 @@ function noop(): SpreadPolicyResult {
 }
 
 export async function runSpreadPolicy(opts: SpreadPolicyOptions, deps: SpreadPolicyDeps): Promise<SpreadPolicyResult> {
-  const registryPath = opts.registryPath ?? process.env.HEDDLE_ACCOUNTS ?? join(homedir(), '.heddle', 'accounts.json');
   let claudeAccounts: Account[];
-  try {
-    claudeAccounts = loadAccountRegistry(registryPath).accounts.filter((a) => a.provider === 'claude');
-  } catch (error) {
-    // loadAccountRegistry throws a clear message on a corrupt/invalid registry. This step is optional,
-    // so surface it and skip rather than aborting the whole wizard mid-run.
-    deps.report?.(`⚠ Could not read the account registry (${registryPath}): ${error instanceof Error ? error.message : String(error)}. Skipping the spread policy — fix the registry and re-run.`);
-    return noop();
+  if (opts.accounts) {
+    // Caller supplied the accounts (spreadStep, which read + validated the registry itself) — use them
+    // directly so the registry is read only once per run.
+    claudeAccounts = opts.accounts.filter((a) => a.provider === 'claude');
+  } else {
+    const registryPath = opts.registryPath ?? process.env.HEDDLE_ACCOUNTS ?? join(homedir(), '.heddle', 'accounts.json');
+    try {
+      claudeAccounts = loadAccountRegistry(registryPath).accounts.filter((a) => a.provider === 'claude');
+    } catch (error) {
+      // loadAccountRegistry throws a clear message on a corrupt/invalid registry. This step is optional,
+      // so surface it and skip rather than aborting the whole wizard mid-run.
+      deps.report?.(`⚠ Could not read the account registry (${registryPath}): ${error instanceof Error ? error.message : String(error)}. Skipping the spread policy — fix the registry and re-run.`);
+      return noop();
+    }
   }
   if (claudeAccounts.length === 0) {
     deps.report?.('No Claude accounts registered — add them with accounts-add first; skipping spread policy.');
@@ -155,20 +171,20 @@ export const spreadStep: WizardStep = {
     // Mirror runAccountsAdd's registry-path precedence (explicit HEDDLE_ACCOUNTS env, else the
     // home-derived default) so BOTH steps read/write the SAME registry under `heddle setup --home <dir>`.
     const registryPath = process.env.HEDDLE_ACCOUNTS ?? join(ctx.homeDir, '.heddle', 'accounts.json');
-    // FAIL (not skip) on a corrupt/unreadable registry so setup forces repair rather than reporting "all
-    // done or skipped". loadAccountRegistry returns an EMPTY registry for a MISSING file — a genuine
-    // no-op that runSpreadPolicy reports as 'skipped' below — and throws ONLY for malformed/invalid
-    // content, so this catch fires only on real corruption. (runSpreadPolicy re-reads and would swallow
-    // the error into a no-op by design, to stay optional standalone; the wizard's fail-vs-skip decision
-    // lives here in the step, above it — mirroring metersStep — and the extra small-file read is its cost.)
+    // Read + validate the registry ONCE here and hand the accounts to runSpreadPolicy so it does not
+    // re-read (a single read, no time-of-check/time-of-use gap). loadAccountRegistry returns an EMPTY
+    // registry for a MISSING file — a genuine no-op runSpreadPolicy reports as 'skipped' below — and
+    // throws ONLY for malformed/invalid content, so we FAIL only on real corruption, forcing repair
+    // rather than a silent skip that lets `heddle setup` finish "all done or skipped".
+    let registry: ReturnType<typeof loadAccountRegistry>;
     try {
-      loadAccountRegistry(registryPath);
+      registry = loadAccountRegistry(registryPath);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       io.report(`✗ spread: ${message}`);
       return { id: 'spread', status: 'failed', summary: `could not read the account registry: ${message}` };
     }
-    const { policy } = await runSpreadPolicy({ registryPath }, { prompter: io.prompter, report: io.report });
+    const { policy } = await runSpreadPolicy({ accounts: registry.accounts }, { prompter: io.prompter, report: io.report });
     if (policy.accounts.length === 0) {
       // Genuine no-op — runSpreadPolicy already reported which (no Claude accounts, none selected, or the
       // operator declined). A corrupt registry was already caught above as 'failed'.
@@ -181,14 +197,15 @@ export const spreadStep: WizardStep = {
     let prior: Record<string, unknown>;
     try {
       prior = readPriorSpreadPolicy(policyFile);
-    } catch {
-      return { id: 'spread', status: 'failed', summary: 'existing spread policy is corrupt — fix or remove ~/.heddle/policy/spread.json' };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return { id: 'spread', status: 'failed', summary: `existing spread policy at ${policyFile} is corrupt or unreadable: ${message}` };
     }
     try {
       atomicWriteFile(policyFile, `${JSON.stringify({ ...prior, ...policy }, null, 2)}\n`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      return { id: 'spread', status: 'failed', summary: `could not write the spread policy: ${message}` };
+      return { id: 'spread', status: 'failed', summary: `could not write the spread policy at ${policyFile}: ${message}` };
     }
     return {
       id: 'spread',
