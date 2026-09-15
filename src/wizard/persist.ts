@@ -5,6 +5,14 @@ import { join } from 'node:path';
 
 // Re-export the canonical atomic writer (temp-in-same-dir + rename, mode-preserving) so a step never
 // hand-rolls its own. Single source: src/accounts.ts.
+//
+// TRUST DOMAIN (HED-650): this writer is for the operator's OWN policy objects under `~/.heddle` — a
+// same-uid trust domain, where its `mkdirSync(recursive)` following a symlinked ancestor is harmless. A step
+// that scaffolds PUBLIC files into a user-selected PROJECT repo must NOT use it: git carries symlinks as
+// content, so a cloned repo can ship a symlinked `.github` that would relocate the write outside the tree.
+// Those writes go through `createFileWithinRoot` (src/secure-fs.ts), which guards the directory chain below
+// the repo root. The pr-automation and cd-automation steps route there; the policy steps here stay on
+// atomicWriteFile.
 export { atomicWriteFile } from '../accounts.js';
 
 /**
