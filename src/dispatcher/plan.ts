@@ -323,7 +323,9 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
   const reachesRunTarget = execution !== 'in-session-subagent';
   // Same list the worker would actually get, family pack included — a refusal or dry run that
   // advertises a different set than runTarget materializes is a lie the operator acts on (PR #34).
-  const skillsForRefusal = packsFor(target.provider, requestedPacks(route.reviewerPool, target.skills, req.skills), req.cwd);
+  const skillsForRefusal = route.bounds
+    ? []
+    : packsFor(target.provider, requestedPacks(route.reviewerPool, target.skills, req.skills), req.cwd);
 
   // Account (HED-68/78): codex → the CODEX_HOME the caller selected; claude → the registry account
   // with the most 5h headroom (headless worker) — or advice only when the caller wants in-session.

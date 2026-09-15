@@ -116,7 +116,9 @@ export function openAICompatInputTokenUpperBound(
   prompt: string,
   opts: DispatchOptions,
 ): number {
-  return Buffer.byteLength(buildOpenAICompatRequest(provider, prompt, opts, '').body, 'utf8');
+  return Buffer.byteLength(buildOpenAICompatRequest(
+    provider, prompt, opts, '', opts.maxOutputTokens ?? PROVIDER_REGISTRY[provider].maxTokensDefault,
+  ).body, 'utf8');
 }
 
 /** Generic HTTP worker for OpenAI Chat Completions-compatible providers. */
@@ -199,7 +201,7 @@ export class OpenAICompatAdapter implements WorkerAdapter {
               while (Buffer.byteLength(partial, 'utf8') > opts.maxOutputBytes) partial = partial.slice(0, -1);
               return { result: {
                 ok: false, output: partial, exitCode: null, incomplete: true, remoteOutcome: 'unknown',
-                error: `${this.provider}: response exceeded the ${opts.maxOutputBytes}-byte bounded transport cap`,
+                error: `${this.provider}: HTTP ${response.status}; response exceeded the ${opts.maxOutputBytes}-byte bounded transport cap`,
               } };
             }
             chunks.push(next.value);

@@ -476,10 +476,17 @@ export class Ledger {
           `bounded request id ${JSON.stringify(reservation.requestId)} was already reserved by dispatch #${duplicate.dispatch_id}`);
       }
       const inFlight = this.inFlightCount(r.orchestrator, structuralCap.staleAfterMs, nowMs);
-      const concurrencyCap = Math.min(structuralCap.max, bounds.maxConcurrency);
-      if (inFlight >= concurrencyCap) {
+      if (inFlight >= structuralCap.max) {
         return refuse('max-children',
-          `bounded route already has ${inFlight} worker(s) in flight (cap ${concurrencyCap})`);
+          `orchestrator ${r.orchestrator} already has ${inFlight} worker(s) in flight (cap ${structuralCap.max})`);
+      }
+      const boundedInFlight = this.db.prepare(`
+        SELECT COUNT(*) AS n FROM bounded_reservations br JOIN dispatches d ON d.id = br.dispatch_id
+        WHERE br.account = ? AND d.finished_at IS NULL
+      `).get(reservation.account) as { n: number };
+      if (Number(boundedInFlight.n) >= bounds.maxConcurrency) {
+        return refuse('bounded-aggregate-exhausted',
+          `account ${reservation.account} already has ${boundedInFlight.n} bounded dispatch(es) in flight (cap ${bounds.maxConcurrency})`);
       }
       const hourCutoff = new Date(nowMs - 60 * 60 * 1000).toISOString();
       const hourly = this.db.prepare(
@@ -503,11 +510,13 @@ export class Ledger {
           `session ${reservation.sessionId} cannot reserve ${reservedTotalTokens} tokens: ` +
           `${session.tokens} already committed of ${bounds.maxSessionTokens}`);
       }
+      // An in-flight reservation admitted before the snapshot is deliberately double-counted: the
+      // fail-safe over-reservation is preferable to trusting headroom that might not include it.
       const outstanding = this.db.prepare(`
-        SELECT COALESCE(SUM(br.reserved_total_tokens), 0) AS tokens
+        SELECT COALESCE(SUM(COALESCE(br.actual_total_tokens, br.reserved_total_tokens)), 0) AS tokens
         FROM bounded_reservations br JOIN dispatches d ON d.id = br.dispatch_id
-        WHERE br.account = ? AND d.finished_at IS NULL
-      `).get(reservation.account) as { tokens: number };
+        WHERE br.account = ? AND (d.finished_at IS NULL OR br.admitted_at >= ?)
+      `).get(reservation.account, reservation.observedAt) as { tokens: number };
       if (Number(outstanding.tokens) + reservedTotalTokens > reservation.remainingTokens) {
         return refuse('bounded-aggregate-exhausted',
           `account ${reservation.account} cannot reserve ${reservedTotalTokens} tokens: snapshot has ` +

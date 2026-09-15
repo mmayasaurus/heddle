@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 vi.mock('node:fs', () => ({ readFileSync: vi.fn() }));
 import { readFileSync } from 'node:fs';
-import { OpenAICompatAdapter } from '../../src/adapters/openai-compat.js';
+import { OpenAICompatAdapter, openAICompatInputTokenUpperBound } from '../../src/adapters/openai-compat.js';
 
 const opts = { model: 'openai/gpt-oss-120b', cwd: '/tmp' };
 const response = (body: unknown, ok = true, status = 200) => ({ ok, status, json: async () => body });
@@ -100,6 +100,21 @@ describe('OpenAICompatAdapter', () => {
       error: expect.stringContaining('response exceeded'),
     });
     expect(Buffer.byteLength(result.output, 'utf8')).toBeLessThanOrEqual(16_000);
+  });
+
+  it('reports the HTTP status when an oversized error response is capped', async () => {
+    vi.mocked(readFileSync).mockReturnValue('ZAI_API_KEY=secret\n');
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('x'.repeat(20_000), { status: 429 })));
+    const result = await new OpenAICompatAdapter('glm').dispatch('hello', {
+      ...opts, model: 'glm-5.3', maxOutputBytes: 16_000,
+    });
+    expect(result.error).toContain('HTTP 429; response exceeded the 16000-byte bounded transport cap');
+  });
+
+  it('measures the same output-token limit that the request serializes', () => {
+    const request = new OpenAICompatAdapter('glm').buildRequest('hello', { ...opts, model: 'glm-5.3', maxOutputTokens: 8_000 }, 'key', 8_000);
+    expect(openAICompatInputTokenUpperBound('glm', 'hello', { ...opts, model: 'glm-5.3', maxOutputTokens: 8_000 }))
+      .toBe(Buffer.byteLength(request.body, 'utf8'));
   });
 
   it('fails loudly when its key is missing', async () => {

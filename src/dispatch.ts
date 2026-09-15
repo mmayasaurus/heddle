@@ -126,8 +126,9 @@ export async function dispatch(
     };
   }
 
-  // Hard-bounded routes fail closed before classifiers, provider-cap reads, adapter creation, or any
-  // provider request. The later transactional gate rechecks time-sensitive headroom under the lock.
+  // Hard-bounded routes fail closed before adapter creation, ledger writes, or any provider request.
+  // planDispatch has already resolved provider capabilities; the later transactional gate rechecks
+  // time-sensitive headroom under the lock.
   const boundedVeto = boundedPreflight(route, target, req, table);
   if (boundedVeto) {
     return refusalOutcome(ctx, req, route.taskClass, target, skillsForRefusal, boundedVeto.refusal, {
@@ -352,7 +353,9 @@ export async function dispatch(
   // "retry" it on the fallback (that would re-run in an already-mutated tree and mask the violation).
   // HED-601: keyed on `quarantine` (set for ANY read_only violation, review pair or not), so a non-review
   // read-only violation is not retried on the fallback either.
-  if (primary.ok || primary.refusal || primary.quarantine) return primary;
+  // A truncated response completed a provider interaction; retrying the same prompt would truncate
+  // again, so preserve its retained output instead of spending a fallback request.
+  if (primary.ok || primary.truncated || primary.refusal || primary.quarantine) return primary;
   if (req.noFallback) {
     if ((target.provider === 'codex' || target.provider === 'cursor') && ctx.rotationAccount
         && classifyRotationRefusal(target.provider, primary) === 'rate-limit') {

@@ -125,6 +125,10 @@ export function boundedPreflight(
 ): BoundedPreflightRefusal | null {
   const bounds = route.bounds;
   if (!bounds) return null;
+  if ((req.skills?.length ?? 0) > 0) {
+    return refused(route, target, req, table, 'bounded-forbidden-tools',
+      'bounded FDL analysis is tool-free and byte-predictable; explicit packs are forbidden', ['packs']);
+  }
   if (route.fallback) {
     return refused(route, target, req, table, 'bounded-forbidden-fallback',
       `bounded route "${route.taskClass}" declares a fallback; a second provider path is forbidden`, ['fallback']);

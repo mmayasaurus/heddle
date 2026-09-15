@@ -85,12 +85,16 @@ export async function runTarget(
   target: RouteTarget, req: DispatchRequest, ctx: DispatchContext, route: Route,
   fellBackFrom: string | null,
 ): Promise<DispatchOutcome> {
-  // Caller's explicit list REPLACES the table default; the mandatory governance pack(s) are unioned
+  // Caller's explicit list REPLACES the table default; bounded routes intentionally materialize no
+  // packs so their one HTTP request remains tool-free and byte-predictable.
+  // The mandatory governance pack(s) are unioned
   // into whichever applies (see skillpacks.ts) — the ledger records the result, so it is auditable.
   // Review classes: the class packs carry the find-only MANDATE — an explicit skills list may add
   // packs but can never drop them (same posture as the worker-role union). requestedPacks is the
   // single definition every dry-run/refusal path shares.
-  const skills = packsFor(target.provider, requestedPacks(route.reviewerPool, target.skills, req.skills), req.cwd);
+  const skills = route.bounds
+    ? []
+    : packsFor(target.provider, requestedPacks(route.reviewerPool, target.skills, req.skills), req.cwd);
   // mcp is a REQUIREMENT, not best-effort: validateWorkerMcp (below) THROWS if the resolved provider
   // has no attachment path. HED-249 reverses HED-205's graceful-degrade — an mcp-carrying class may
   // only resolve to mcp-attachable providers (a routing.v0.yaml CI invariant enforces this for
@@ -171,9 +175,12 @@ export async function runTarget(
   // written and nothing is left in flight.
   for (const p of skills) readPack(p);
   validateWorkerMcp(target.provider, mcp);
+  // Bounded HTTP dispatches are structurally fenced: a tool-less single-response call cannot write,
+  // which is positive enforcement stronger than a mandate. Other routes retain HED-404's account gate.
   // HED-404: only a bound native account whose harness positively enforces read-only may be
   // recorded as fenced. Every resolution error or mismatch degrades to the explicit mandate.
   const fence = (() => {
+    if (route.readOnly && route.bounds && isInProcessHttpProvider(target.provider)) return 'fenced';
     if (!route.readOnly) return undefined;
     try {
       const account = ctx.account === null ? undefined
@@ -231,7 +238,9 @@ export async function runTarget(
       boundedReceipt.status = 'refused';
       boundedReceipt.refusedDimensions = [
         refusalCode === 'bounded-input-oversize' ? 'inputTokens' :
-          refusalCode === 'max-children' ? 'concurrency' : 'aggregateBudget',
+          refusalCode === 'max-children' ? 'concurrency' :
+            refusalCode === 'bounded-duplicate-request' ? 'duplicateRequest' :
+              refusalCode === 'bounded-headroom-stale' ? 'accountHeadroom' : 'aggregateBudget',
       ];
       boundedReceipt.times.completedAt = new Date().toISOString();
     }

@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { dispatch } from '../src/dispatch.js';
+import { Ledger } from '../src/ledger.js';
 import type { DispatchOptions, WorkerAdapter, WorkerResult } from '../src/types.js';
 import { useTempResources } from './helpers.js';
 
@@ -104,13 +106,15 @@ describe('bounded FDL dispatch admission', () => {
 
   it('refuses a provider without native request/output enforcement before the provider is called', async () => {
     const fake = fakeGlm();
+    let factoryCalls = 0;
     const outcome = await dispatch(
       boundedRequest(tempDir(), { provider: 'codex', model: 'gpt-5.6-luna' }),
-      tempLedger(), () => fake.adapter,
+      tempLedger(), () => { factoryCalls += 1; return fake.adapter; },
     );
     expect(outcome.refusal?.code).toBe('bounded-unsupported-bound');
     expect((outcome as any).boundedReceipt.refusedDimensions).toEqual(expect.arrayContaining(['modelRequests', 'generatedTokens']));
     expect(fake.calls).toHaveLength(0);
+    expect(factoryCalls).toBe(0);
   });
 
   it('refuses unknown and stale account headroom before the provider is called', async () => {
@@ -151,6 +155,31 @@ describe('bounded FDL dispatch admission', () => {
     expect(fake.calls).toHaveLength(1);
   });
 
+  it('does not reuse a settled spend that the same headroom snapshot could not have seen', async () => {
+    const ledger = tempLedger();
+    const observedAt = new Date(Date.now() - 1_000).toISOString();
+    const fake = fakeGlm({
+      ok: true, output: '{"finding":"spent"}', exitCode: null,
+      usage: { inputTokens: 72_000, outputTokens: 8_000 } as any,
+    });
+    const first = await dispatch(
+      boundedRequest(tempDir(), { prompt: 'x'.repeat(71_900), boundedAdmission: admission({ requestId: 'spent-first', remainingTokens: 100_000, observedAt }) }),
+      ledger, () => fake.adapter,
+    );
+    expect(first.ok).toBe(true);
+    const staleSnapshot = await dispatch(
+      boundedRequest(tempDir(), { prompt: 'x'.repeat(71_900), boundedAdmission: admission({ requestId: 'spent-second', remainingTokens: 100_000, observedAt }) }),
+      ledger, () => fake.adapter,
+    );
+    expect(staleSnapshot.refusal?.code).toBe('bounded-aggregate-exhausted');
+    const freshSnapshot = await dispatch(
+      boundedRequest(tempDir(), { boundedAdmission: admission({ requestId: 'spent-third', remainingTokens: 20_000, observedAt: new Date().toISOString() }) }),
+      ledger, () => fake.adapter,
+    );
+    expect(freshSnapshot.ok).toBe(true);
+    expect(fake.calls).toHaveLength(2);
+  });
+
   it('refuses a configured fallback before the provider is called', async () => {
     const dir = tempDir();
     const routingPath = join(dir, 'routing.yaml');
@@ -164,7 +193,10 @@ describe('bounded FDL dispatch admission', () => {
 
   it('pins one GLM request and normalizes reasoning and cache creation without double counting', async () => {
     const fake = fakeGlm();
-    const outcome = await dispatch(boundedRequest(tempDir()), tempLedger(), () => fake.adapter);
+    const dir = tempDir();
+    const ledgerPath = join(dir, 'ledger.db');
+    const ledger = new Ledger(ledgerPath);
+    const outcome = await dispatch(boundedRequest(dir), ledger, () => fake.adapter);
     expect(fake.calls).toHaveLength(1);
     expect(fake.calls[0].opts).toMatchObject({
       model: 'glm-5.3', maxOutputTokens: 8_000, maxModelRequests: 1,
@@ -186,6 +218,22 @@ describe('bounded FDL dispatch admission', () => {
         modelRequests: 'native', inputTokens: 'preflight-conservative', generatedTokens: 'native',
       },
     });
+    expect(fake.calls[0].opts.systemPromptAppend).toBeUndefined();
+    const db = new DatabaseSync(ledgerPath);
+    expect(db.prepare('SELECT reserved_generated_tokens, actual_total_tokens FROM bounded_reservations').get())
+      .toEqual({ reserved_generated_tokens: 8_000, actual_total_tokens: 15 });
+    expect(ledger.recent(1)[0].fence).toBe('fenced');
+    db.close();
+  });
+
+  it('refuses explicit packs before the provider is called', async () => {
+    const fake = fakeGlm();
+    const outcome = await dispatch(
+      boundedRequest(tempDir(), { skills: ['worker-role'] }), tempLedger(), () => fake.adapter,
+    );
+    expect(outcome.refusal?.code).toBe('bounded-forbidden-tools');
+    expect(outcome.refusal?.reason).toContain('packs');
+    expect(fake.calls).toHaveLength(0);
   });
 
   it('retains over-byte JSON but never admits it as a valid result', async () => {
