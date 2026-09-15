@@ -219,6 +219,7 @@ task_classes:
     why: independent diagnosis/review of a diff or plan — diversity of model FAMILY is the point; Grok sits on the generous Cursor-Models pool, with glm-5.3 as the cheap cross-family fallback. Give it a SELF-CONTAINED brief (no memtrace); expect 5-8 min (grok ran ~374-520s in the 2026-08-18 ledger), so pick it deliberately — for a SMALL diff use quick-alt-take (grok-medium) instead.
     skills: [worker-role]
     edits_code: false
+    read_only: true         # HED-606: independent diagnosis/review returned as TEXT — no worktree write; fence is defense-in-depth (mirrors adversarial-review). Blast-radius verified: fence attaches per-class/tier-independent (run.ts fence = route.readOnly), so this fences every dispatch incl untiered — safe here because the worker only reads + returns findings.
   second-opinion-hard:      # opt-in only: costs the metered pool PR review needs
     provider: cursor
     model: kimi-k3-high
@@ -227,6 +228,7 @@ task_classes:
     why: opt-in only — Kimi is ~74s even on a trivial prompt and bills the metered "Other Models" pool that Cursor PR review draws on; ask the operator first
     skills: [worker-role]
     edits_code: false
+    read_only: true         # HED-606: opt-in review variant; returns TEXT findings only — no worktree write.
   escalate-judgment:        # genuinely hard bounded problems — Fable as an OOP worker (operator decision, 2026-08-16)
     provider: claude
     model: fable
@@ -276,6 +278,7 @@ task_classes:
     why: cheap second draft, and the cheap REVIEW variant for SMALL diffs — same Grok family as second-opinion at lower effort (grok-medium), with glm-5.3 as the cheap cross-family fallback; prefer this over second-opinion when the diff is small (HED-79 retune 2026-08-18)
     skills: [worker-role]
     edits_code: false
+    read_only: true         # HED-606: cheap alternative take / small-diff review returned as TEXT — no worktree write; same cursor/grok family as adversarial-review (proven read_only in production).
   adversarial-review:       # HED-3 (operator decision: "super important") — a DIFFERENT model family reviews a diff/
     provider: cursor        #   worktree read-only, find-only; the author fixes; the ledger scores each
     model: cursor-grok-4.6-high   # author→reviewer provider pair by accepted-finding rate.
