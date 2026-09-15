@@ -216,4 +216,45 @@ describe('countHallucinatedCitations (HED-568 gate-4 post-check)', () => {
   it('(g) resolves a basename-only citation against a diffed nested path (lenient prefix)', () => {
     expect(countHallucinatedCitations('F1: high, foo.ts:3, basename resolves to src/foo.ts', diffFoo(1, 3))).toBe(0);
   });
+
+  it('(h) reads a hunk-body line beginning with +++ as an added line, not a header (qodo #2)', () => {
+    // Hunk 1 adds a source line whose text is `++ counter;` (diff line `+++ counter;`); hunk 2 in the SAME
+    // file must still be attributed to src/foo.ts so its citation resolves, and `counter` never becomes a path.
+    const diff =
+      'diff --git a/src/foo.ts b/src/foo.ts\n--- a/src/foo.ts\n+++ b/src/foo.ts\n' +
+      '@@ -1,1 +1,2 @@\n ctx\n+++ counter;\n' +
+      '@@ -8,1 +9,2 @@\n ctx\n+valid\n';
+    expect(countHallucinatedCitations('F1: high, src/foo.ts:9, in the second hunk', diff)).toBe(0);
+    expect(countHallucinatedCitations('F1: high, counter.ts:1, phantom from the increment', diff)).toBe(1);
+  });
+
+  it('(i) resolves an old-side citation into a deletion-only hunk (qodo #3)', () => {
+    const diff =
+      'diff --git a/src/foo.ts b/src/foo.ts\n--- a/src/foo.ts\n+++ b/src/foo.ts\n' +
+      '@@ -5,3 +4,0 @@\n-gone1\n-gone2\n-gone3\n';
+    expect(countHallucinatedCitations('F1: high, src/foo.ts:6, cites a deleted line', diff)).toBe(0);
+  });
+
+  it('(j) resolves an old-side citation into a fully deleted file (+++ /dev/null) (qodo #3)', () => {
+    const diff =
+      'diff --git a/src/foo.ts b/src/foo.ts\n--- a/src/foo.ts\n+++ /dev/null\n' +
+      '@@ -1,3 +0,0 @@\n-a\n-b\n-c\n';
+    expect(countHallucinatedCitations('F1: high, src/foo.ts:2, cites into the deleted file', diff)).toBe(0);
+  });
+
+  it('(k) examines an extensionless path that is present in the diff, e.g. Dockerfile (qodo #1)', () => {
+    const diff =
+      'diff --git a/Dockerfile b/Dockerfile\n--- a/Dockerfile\n+++ b/Dockerfile\n@@ -1,1 +1,3 @@\n FROM node\n+RUN a\n+RUN b\n';
+    expect(countHallucinatedCitations('F1: med, Dockerfile:2, real extensionless path', diff)).toBe(0);
+    expect(countHallucinatedCitations('F1: med, Dockerfile:99, out of range', diff)).toBe(1);
+  });
+
+  it('(l) strips surrounding backticks/quotes around a citation', () => {
+    expect(countHallucinatedCitations('F1: high, `src/foo.ts:2`, quoted path', diffFoo(1, 3))).toBe(0);
+  });
+
+  it('(m) ignores prose word:number tokens that are not path-like — precision for the zero-tolerance gate', () => {
+    // `timeout:5` must NOT inflate the count; the real citation src/foo.ts:2 resolves ⇒ 0 total.
+    expect(countHallucinatedCitations('F1: high, src/foo.ts:2, increase the timeout:5 retries', diffFoo(1, 3))).toBe(0);
+  });
 });

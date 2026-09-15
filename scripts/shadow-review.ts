@@ -188,63 +188,153 @@ interface RoundContext {
   dryRun: boolean;
 }
 
+type CitationRanges = Map<string, Array<[number, number]>>;
+interface DiffSides {
+  oldSide: CitationRanges;
+  newSide: CitationRanges;
+}
+interface ParsedCitation {
+  path: string;
+  lo: number;
+  hi: number;
+  key: string;
+}
+
+/** basename of a POSIX-ish path (segment after the last `/`). */
+function citationBasename(path: string): string {
+  return path.slice(path.lastIndexOf('/') + 1);
+}
+
+/** Normalise a unified-diff path token: text before any tab, `a/`/`b/` prefix dropped, `/dev/null` → null. */
+function diffPath(raw: string): string | null {
+  const p = (raw.split('\t')[0] ?? '').trim();
+  if (p === '' || p === '/dev/null') return null;
+  return /^[ab]\//.test(p) ? p.slice(2) : p;
+}
+
 /**
- * Gate-4 mechanical post-check (HED-568): count local-reviewer findings whose cited `file:line` is NOT
- * present in the reviewed diff — a "hallucinated citation". Deterministic and best-effort: it NEVER throws
- * on malformed input; a citation (or diff fragment) that fails to parse is skipped, never aborting the count.
- *
- * Leniency is deliberate — catch CLEAR fabrications (a cited location absent from the diff) without punishing
- * an approximate-but-real line number inside a shown hunk: the path match is suffix/basename-lenient and the
- * line check is an inclusive-range overlap against the diff's NEW-side hunk ranges. Known v1 limitation: a
- * citation into a PURE-DELETION file (old-side only) may be flagged, since we validate new-side hunk ranges
- * only — acceptable for v1.
+ * Parse a unified diff into per-file OLD-side and NEW-side half-open line ranges (`[start, start+count)`).
+ * A STATEFUL hunk-body scanner consumes each hunk's declared line counts, so hunk-body content whose text
+ * merely begins with `+++ `, `--- `, or `@@` is treated as an added/deleted/context line, never as a header
+ * (fixes the "`+++ counter;` read as a file header" class of bug). Ranges are taken from the `@@` header
+ * itself, so a body shorter/longer than declared (synthetic diffs) still records the correct declared range.
+ */
+function parseDiffSides(diff: string): DiffSides {
+  const oldSide: CitationRanges = new Map();
+  const newSide: CitationRanges = new Map();
+  const push = (map: CitationRanges, path: string, range: [number, number]): void => {
+    const list = map.get(path);
+    if (list) list.push(range);
+    else map.set(path, [range]);
+  };
+  const hunkRe = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
+  let oldPath: string | null = null;
+  let newPath: string | null = null;
+  let oldRem = 0;
+  let newRem = 0;
+  let inBody = false;
+  for (const line of diff.split(/\r?\n/)) {
+    if (inBody) {
+      const c = line.charAt(0);
+      if (c === '+') newRem -= 1;
+      else if (c === '-') oldRem -= 1;
+      else if (c === ' ') { oldRem -= 1; newRem -= 1; }
+      else if (c === '\\') { /* "\ No newline at end of file" — counts to neither side */ }
+      else inBody = false; // a non-body line ends a short/malformed hunk; fall through and reprocess as header
+      if (inBody) {
+        if (oldRem <= 0 && newRem <= 0) inBody = false;
+        continue;
+      }
+    }
+    if (line.startsWith('diff --git ')) { oldPath = null; newPath = null; continue; }
+    if (line.startsWith('--- ')) { oldPath = diffPath(line.slice(4)); continue; }
+    if (line.startsWith('+++ ')) { newPath = diffPath(line.slice(4)); continue; }
+    const hunk = hunkRe.exec(line);
+    if (!hunk) continue;
+    const os = Number(hunk[1]);
+    const oc = hunk[2] === undefined ? 1 : Number(hunk[2]); // `-os` with no comma ⇒ oc=1
+    const ns = Number(hunk[3]);
+    const nc = hunk[4] === undefined ? 1 : Number(hunk[4]); // `+ns` with no comma ⇒ nc=1
+    if (oldPath && Number.isFinite(os) && Number.isFinite(oc) && oc > 0) push(oldSide, oldPath, [os, os + oc]);
+    if (newPath && Number.isFinite(ns) && Number.isFinite(nc) && nc > 0) push(newSide, newPath, [ns, ns + nc]);
+    oldRem = Number.isFinite(oc) ? oc : 0;
+    newRem = Number.isFinite(nc) ? nc : 0;
+    inBody = oldRem > 0 || newRem > 0;
+  }
+  return { oldSide, newSide };
+}
+
+/**
+ * Extract candidate `path:line[-line]` citation tokens. The path token is broad (so extensionless, quoted, and
+ * backticked paths are seen — surrounding quotes/backticks/brackets are outside the character class) but must
+ * contain a letter, which drops ratios and timestamps like `3:1` or `10:30`. Path-likeness is judged later,
+ * against the diff, in `isPathLikeCitation`.
+ */
+function extractCitations(output: string): ParsedCitation[] {
+  const citations: ParsedCitation[] = [];
+  const citationRe = /([^\s:,;()[\]{}"'`]+):(\d+)(?:\s*-\s*(\d+))?/g;
+  for (const match of output.matchAll(citationRe)) {
+    const path = match[1] ?? '';
+    if (!/[A-Za-z]/.test(path)) continue;
+    const start = Number(match[2]);
+    if (!Number.isFinite(start)) continue;
+    const rawEnd = match[3] === undefined ? start : Number(match[3]);
+    const end = Number.isFinite(rawEnd) ? rawEnd : start;
+    citations.push({ path, lo: Math.min(start, end), hi: Math.max(start, end), key: `${path}:${start}` });
+  }
+  return citations;
+}
+
+/**
+ * A citation is EXAMINED only when its path is "path-like": it has a directory separator or a dotted extension,
+ * or its basename actually appears in the diff. This keeps prose tokens (e.g. `timeout:5`) out of a
+ * ZERO-tolerance gate — a single spurious count would permanently block promotion — while still examining a
+ * fabricated but realistic path (e.g. `src/nope.ts:99`). Residual: an extensionless path NOT present in the
+ * diff (e.g. a fabricated `Dockerfile:10` when the diff has no Dockerfile) is indistinguishable from prose and
+ * is therefore not counted — the conservative choice for this gate.
+ */
+function isPathLikeCitation(path: string, sides: DiffSides): boolean {
+  if (path.includes('/') || /\.[A-Za-z]/.test(path)) return true;
+  const base = citationBasename(path);
+  for (const map of [sides.newSide, sides.oldSide]) for (const p of map.keys()) if (citationBasename(p) === base) return true;
+  return false;
+}
+
+/**
+ * Resolve a citation against the diff: true when its inclusive `[lo, hi]` overlaps a half-open range on EITHER
+ * side (a reviewer sees the whole diff and may cite a deleted old-side line) of a path that matches
+ * exactly / by trailing path-suffix / by basename.
+ */
+function citationResolves(cit: ParsedCitation, sides: DiffSides): boolean {
+  const base = citationBasename(cit.path);
+  for (const map of [sides.newSide, sides.oldSide]) {
+    for (const [filePath, ranges] of map) {
+      if (filePath !== cit.path && !filePath.endsWith(`/${cit.path}`) && citationBasename(filePath) !== base) continue;
+      // Inclusive citation [lo, hi] overlaps a half-open range [rs, re) iff lo < re && hi >= rs.
+      if (ranges.some(([rs, re]) => cit.lo < re && cit.hi >= rs)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Gate-4 mechanical post-check (HED-568): count local-reviewer findings whose cited `file:line` is NOT present
+ * in the reviewed diff — a "hallucinated citation". Deterministic and best-effort: it NEVER throws on malformed
+ * input; a citation (or diff fragment) that fails to parse is skipped, never aborting the count. Distinct
+ * hallucinations are deduped by `path:startLine`. See `parseDiffSides` (both-sides, header-safe parsing),
+ * `isPathLikeCitation` (precision) and `citationResolves` (lenient path + range overlap) for the semantics.
  */
 export function countHallucinatedCitations(candidateOutput: string, diff: string): number {
   const hallucinated = new Set<string>();
   try {
     if (!candidateOutput) return 0;
-    // (a) Parse the unified diff into per-file NEW-side line ranges: path -> list of half-open [start, end).
-    const fileRanges = new Map<string, Array<[number, number]>>();
-    let current: string | null = null;
-    for (const line of (diff ?? '').split(/\r?\n/)) {
-      if (line.startsWith('+++ ')) {
-        const rest = line.slice(4).split('\t')[0]!.trim();
-        if (rest === '/dev/null') { current = null; continue; } // deleted file has no new-side; skip its hunks
-        current = rest.startsWith('b/') ? rest.slice(2) : rest;
-        if (!fileRanges.has(current)) fileRanges.set(current, []);
-        continue;
-      }
-      if (current !== null && line.startsWith('@@')) {
-        const hunk = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/.exec(line);
-        if (!hunk) continue;
-        const start = Number(hunk[1]);
-        const count = hunk[2] === undefined ? 1 : Number(hunk[2]); // `+ns` with no comma ⇒ nc=1
-        if (!Number.isFinite(start) || !Number.isFinite(count)) continue;
-        fileRanges.get(current)!.push([start, start + count]);
-      }
-    }
-    // (b) Extract every file:line[-line] citation, then (c) resolve each against the new-side ranges.
-    const basename = (path: string): string => path.slice(path.lastIndexOf('/') + 1);
-    const citationRe = /([\w./+\-]+\.[A-Za-z][A-Za-z0-9]{0,9}):(\d+)(?:\s*-\s*(\d+))?/g;
-    for (const match of candidateOutput.matchAll(citationRe)) {
+    const sides = parseDiffSides(diff ?? '');
+    for (const cit of extractCitations(candidateOutput)) {
       try {
-        const citedPath = match[1]!;
-        const startLine = Number(match[2]);
-        if (!Number.isFinite(startLine)) continue;
-        const rawEnd = match[3] === undefined ? startLine : Number(match[3]);
-        const endLine = Number.isFinite(rawEnd) ? rawEnd : startLine;
-        const lo = Math.min(startLine, endLine);
-        const hi = Math.max(startLine, endLine);
-        // Lenient path match: exact, a trailing path-suffix (leading directories flexible), or same basename.
-        let resolved = false;
-        for (const [filePath, ranges] of fileRanges) {
-          if (filePath !== citedPath && !filePath.endsWith(`/${citedPath}`) && basename(filePath) !== basename(citedPath)) continue;
-          // Inclusive citation [lo, hi] overlaps a half-open hunk range [rs, re) iff lo < re && hi >= rs.
-          if (ranges.some(([rs, re]) => lo < re && hi >= rs)) { resolved = true; break; }
-        }
-        if (!resolved) hallucinated.add(`${citedPath}:${startLine}`); // (d) distinct hallucinations, deduped
+        if (!isPathLikeCitation(cit.path, sides)) continue;
+        if (!citationResolves(cit, sides)) hallucinated.add(cit.key);
       } catch {
-        // A single unparseable citation is skipped — best-effort, never aborts the whole count.
+        // A single unresolvable citation is skipped — best-effort, never aborts the whole count.
       }
     }
   } catch {
