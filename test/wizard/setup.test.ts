@@ -185,11 +185,10 @@ describe('accountsStep adapter', () => {
   it('buildSteps wires the full walkthrough in order with the doctor finish-gate last', () => {
     const runner = {} as CliRunner;
     const ids = buildSteps({ runner }).map((s) => s.id);
-    // Walkthrough order (HED-564): accounts → spread → meters → rules → doctor. model-economy (HED-473)
-    // is not built yet; it slots after accounts when it lands. buildSteps({ runner }) with no catalogRoot
-    // defaults it to resolveCatalogRoot() (the bundled catalog), so this also proves the default path
-    // constructs without throwing.
-    expect(ids).toEqual(['accounts', 'spread', 'meters', 'rules', 'doctor']);
+    // Walkthrough order (HED-564): accounts → model-economy → spread → meters → rules → permissions → doctor.
+    // buildSteps({ runner }) with no catalogRoot defaults it to resolveCatalogRoot() (the bundled
+    // catalog), so this also proves the default path constructs without throwing.
+    expect(ids).toEqual(['accounts', 'model-economy', 'spread', 'meters', 'rules', 'permissions', 'doctor']);
     // Doctor is the finish gate — it must ALWAYS be last so it verifies AFTER every write-step ran.
     expect(ids[ids.length - 1]).toBe('doctor');
   });
@@ -221,9 +220,11 @@ describe('composed walkthrough (buildSteps -> runSetup)', () => {
     // dryRunGate) → all skipped, none prompts or writes. toEqual pins the exact composed order + shape.
     expect(results).toEqual([
       { id: 'accounts', status: 'skipped', summary: expect.stringContaining('dry-run') },
+      { id: 'model-economy', status: 'skipped', summary: expect.stringContaining('dry-run') },
       { id: 'spread', status: 'skipped', summary: expect.stringContaining('dry-run') },
       { id: 'meters', status: 'skipped', summary: expect.stringContaining('dry-run') },
       { id: 'rules', status: 'skipped', summary: expect.stringContaining('dry-run') },
+      { id: 'permissions', status: 'skipped', summary: expect.stringContaining('dry-run') },
       { id: 'doctor', status: 'skipped', summary: expect.stringContaining('dry-run') },
     ]);
     const text = lines.join('\n');

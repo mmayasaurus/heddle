@@ -51,8 +51,15 @@ export function tierReadOnlyVerdict(input: TierGateInput): TierVerdict {
     return {};
   }
 
-  // Not found, or no declared tier, or a higher tier (T1-T3): not a T0 -> allow.
-  const account = registry.accounts.find((a) => a.provider === provider && a.id === accountId);
+  // Resolve the NATIVE (provider, id) match FIRST — account ids are unique only WITHIN a native provider,
+  // so an env-repoint row from a DIFFERENT provider that names this provider as its service and shares the
+  // id must NOT shadow the actual native account (that would let a T0 dispatch bypass the gate: qodo/codacy
+  // #205). Only when there is no native match do we resolve an env-repoint account by its service route (an
+  // env-repoint account runs through its native harness but is selected by its service). Not found, or no
+  // declared tier, or a higher tier (T1-T3): not a T0 -> allow.
+  const account =
+    registry.accounts.find((a) => a.provider === provider && a.id === accountId) ??
+    registry.accounts.find((a) => a.envRepoint?.service === provider && a.id === accountId);
   if (!account || account.tier !== 'T0') return {};
 
   // POSITIVE evidence: a T0 account selected for a class that is not marked read-only. Structural refusal.
