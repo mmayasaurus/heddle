@@ -289,6 +289,53 @@ export function fallbackBarrier(
 const AUTO_WIP_MESSAGE = 'heddle auto-wip: isolate failed-leg new paths';
 
 /**
+ * Decide which of a failed leg's paths are safe to auto-commit (HED-622). Pure — no git calls or I/O,
+ * so it is unit-testable in isolation and keeps autoWipCommit's git-mutation sequence readable. Safe
+ * requires HEAD unchanged, every pre-existing dirty path byte-identical, and the only paths new since
+ * preFp being newly-created UNTRACKED files ('??'). A leg that touched an established TRACKED file
+ * (modify/delete/rename — codex finding 2: checkoutFingerprint omits CLEAN tracked files, so such a
+ * change also lands in postFp minus preFp), a moved HEAD, a changed/cleared pre-existing path, or an
+ * empty safe set all REFUSE.
+ */
+function classifyIsolableSet(
+  preFp: CheckoutFingerprint, postFp: CheckoutFingerprint,
+): { safeSet: string[] } | { refuse: string } {
+  const unsafe: string[] = [];
+  if (postFp.head !== preFp.head) {
+    unsafe.push(`HEAD moved ${preFp.head.slice(0, 8)} → ${postFp.head.slice(0, 8)}`);
+  }
+  const changed: string[] = [];
+  const cleared: string[] = [];
+  for (const [path, state] of preFp.entries) {
+    const now = postFp.entries.get(path);
+    if (now === undefined) cleared.push(path);
+    else if (now !== state) changed.push(path);
+  }
+  if (changed.length) unsafe.push(`pre-existing dirty path changed: ${changed.join(', ')}`);
+  if (cleared.length) unsafe.push(`pre-existing dirty path cleared: ${cleared.join(', ')}`);
+  if (unsafe.length) return { refuse: unsafe.join('; ') };
+
+  // A path absent from preFp is safe ONLY if it is a newly-created UNTRACKED file ('??'); a tracked
+  // file the leg modified/deleted/renamed is a change to established project content and makes the
+  // whole operation unsafe (refuse), never merely skipped — the tree cannot be isolated at path
+  // granularity once it is entangled with real project changes.
+  const safeSet: string[] = [];
+  const trackedTouched: string[] = [];
+  for (const [path, marker] of postFp.entries) {
+    if (preFp.entries.has(path)) continue;
+    if (marker.startsWith('??')) safeSet.push(path);
+    else trackedTouched.push(`${marker.slice(0, 2).trim() || '??'} ${path}`);
+  }
+  if (trackedTouched.length) {
+    return { refuse: `leg changed pre-existing tracked path(s): ${trackedTouched.join(', ')}` };
+  }
+  if (safeSet.length === 0) {
+    return { refuse: 'no isolable new paths (safeSet empty)' };
+  }
+  return { safeSet };
+}
+
+/**
  * Opt-in path-scoped auto-WIP of a failed leg's newly-created paths (HED-622).
  *
  * Commits ONLY paths present in `postFp` and absent from `preFp` that are newly-created UNTRACKED
@@ -309,41 +356,9 @@ export function autoWipCommit(
   if (preFp === null || postFp === null) {
     return { committed: false, reason: 'undecidable: missing pre or post fingerprint' };
   }
-
-  const unsafe: string[] = [];
-  if (postFp.head !== preFp.head) {
-    unsafe.push(`HEAD moved ${preFp.head.slice(0, 8)} → ${postFp.head.slice(0, 8)}`);
-  }
-  const changed: string[] = [];
-  const cleared: string[] = [];
-  for (const [path, state] of preFp.entries) {
-    const now = postFp.entries.get(path);
-    if (now === undefined) cleared.push(path);
-    else if (now !== state) changed.push(path);
-  }
-  if (changed.length) unsafe.push(`pre-existing dirty path changed: ${changed.join(', ')}`);
-  if (cleared.length) unsafe.push(`pre-existing dirty path cleared: ${cleared.join(', ')}`);
-  if (unsafe.length) return { committed: false, reason: unsafe.join('; ') };
-
-  // Membership guard (codex adversarial finding 2): a path absent from preFp is safe to auto-commit
-  // ONLY when it is a newly-created UNTRACKED file (git status '??'). checkoutFingerprint omits CLEAN
-  // tracked files, so a leg that MODIFIES (' M'), DELETES (' D'), or RENAMES ('R…') a clean tracked
-  // file ALSO produces a postFp∖preFp path; committing it would commit a change to an established
-  // project file. Any such path makes the whole operation UNSAFE (refuse), never merely skipped — the
-  // tree is entangled with real project changes that cannot be isolated at path granularity.
-  const safeSet: string[] = [];
-  const trackedTouched: string[] = [];
-  for (const [path, marker] of postFp.entries) {
-    if (preFp.entries.has(path)) continue;
-    if (marker.startsWith('??')) safeSet.push(path);
-    else trackedTouched.push(`${marker.slice(0, 2).trim() || '??'} ${path}`);
-  }
-  if (trackedTouched.length) {
-    return { committed: false, reason: `leg changed pre-existing tracked path(s): ${trackedTouched.join(', ')}` };
-  }
-  if (safeSet.length === 0) {
-    return { committed: false, reason: 'no isolable new paths (safeSet empty)' };
-  }
+  const classified = classifyIsolableSet(preFp, postFp);
+  if ('refuse' in classified) return { committed: false, reason: classified.refuse };
+  const { safeSet } = classified;
 
   // Pin every HEAD reference to one captured value (codex finding 1). commit-tree re-resolving HEAD
   // plus an unconditional update-ref would clobber a HEAD that advanced concurrently: the new tree is
