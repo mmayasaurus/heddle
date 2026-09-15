@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { loadAccountRegistry, upsertAccount, writeAccountRegistry, type Account, type AccountTier, type BillingClass } from '../accounts.js';
@@ -63,6 +63,12 @@ function createIsolatedConfigDir(provider: 'claude' | 'codex', id: string, home:
   // created tree (rejecting a symlink / foreign-owned / group-or-other-writable path) — F8/HED-590.
   if (existsSync(configPath)) throw new Error(`isolated config directory already exists for ${provider} ${id}`);
   ensureSecureDir(configPath, { mode: 0o700 });
+  // Defense-in-depth for the check-then-create window between existsSync and ensureSecureDir: ensureSecureDir
+  // ACCEPTS (never chmods) an existing safe dir, so a same-uid dir raced in after the existsSync could carry a
+  // stale .credentials.json. A cross-uid or symlinked race is already rejected by ensureSecureDir; refusing a
+  // raced-in NON-empty dir collapses the residual to a harmless empty dir. The runtime backstop stays the
+  // harness-side hard-fail-on-empty-token (see below); this is setup-time freshness hardening (F8/HED-590).
+  if (readdirSync(configPath).length !== 0) throw new Error(`isolated config directory is not fresh (non-empty) for ${provider} ${id}`);
   return configPath;
 }
 
@@ -148,7 +154,18 @@ async function addOne(provider: NativeProvider, deps: AccountsAddDeps, ordinal: 
   // as not-logged-in (not a redundant boolean compare — Codacy 1cc5654).
   const loggedIn = probe.exitCode === 0 && loginStatus(probe.stdout, probe.stderr) === true;
   registry = upsertAccount(registry, { ...account, loggedIn, lastVerified: (deps.now ?? (() => new Date()))().toISOString() });
-  writeAccountRegistry(registry, registryPath);
+  // secureWriteFile fails CLOSED on an unsafe registry parent/target (a group-or-other-writable ~/.heddle, or
+  // a symlinked/foreign accounts.json). The config-dir precheck validates the config dir and its ancestors but
+  // NOT accounts.json itself, and cursor has no config-dir precheck at all — so this refusal can reach here
+  // after a successful login. Record a per-account FAIL rather than aborting the whole wizard, matching the
+  // config-dir and login handlers above (F8/HED-590).
+  try {
+    writeAccountRegistry(registry, registryPath);
+  } catch (error) {
+    summary.failed.push(id);
+    deps.report?.(`FAIL ${provider} ${id} (registry: ${error instanceof Error ? error.message : String(error)})`);
+    return;
+  }
   // Surface the signed-in identity so the operator can confirm the browser step landed on the intended
   // account (claude only — from the verified `auth status --json` identity schema; HED-585).
   const identity = loggedIn && provider === 'claude' ? loginIdentity(probe.stdout) : undefined;
@@ -339,6 +356,15 @@ export async function runAccountsAdd(
     while (await deps.prompter.confirm(`Any other ${entry.displayName} accounts to cycle through?`, false));
   }
   if (opts.provider === 'custom' || !opts.provider && await deps.prompter.confirm('Any provider/key/model not listed?', false)) await addCustomProvider(deps, registryPath, summary, home);
-  if (!loadAccountRegistry(registryPath).accounts.length) writeAccountRegistry({ schemaVersion: 2, accounts: [] }, registryPath);
+  // Write a valid empty registry when nothing was recorded (all declined, or every attempt failed). This
+  // write can hit the same unsafe-~/.heddle refusal as the per-account writes — report it rather than let an
+  // uncaught throw abort the wizard after the per-account failures were already handled gracefully (F8/HED-590).
+  if (!loadAccountRegistry(registryPath).accounts.length) {
+    try {
+      writeAccountRegistry({ schemaVersion: 2, accounts: [] }, registryPath);
+    } catch (error) {
+      deps.report?.(`FAIL (registry: ${error instanceof Error ? error.message : String(error)})`);
+    }
+  }
   return summary;
 }

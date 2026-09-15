@@ -180,6 +180,24 @@ describe('accounts add wizard', () => {
     expect(transcript.some((line) => line.startsWith('FAIL claude wide (config dir'))).toBe(true);
   });
 
+  it('records a per-account registry-write FAIL instead of aborting the wizard on a group-writable ~/.heddle (HED-590)', async () => {
+    const home = tempDir();
+    mkdirSync(join(home, '.heddle'), { recursive: true });
+    chmodSync(join(home, '.heddle'), 0o770); // group-writable creds home — secureWriteFile refuses the registry write
+    const path = join(home, '.heddle', 'accounts.json');
+    const transcript: string[] = [];
+    // cursor has no isolated config dir, so it reaches the registry write (claude/codex fail earlier at the
+    // config-dir step). billing + tier are consumed before the write; then secureWriteFile refuses the parent.
+    // Without the try/catch the throw would abort the wizard after login; with it the account fails cleanly.
+    const summary = await runAccountsAdd({ provider: 'cursor', registryPath: path, homeDir: home }, {
+      prompter: new ScriptedPrompter([true, 'work', 'paid', 'T1', false]), runner: fakeRunner,
+      report: (line) => transcript.push(line),
+    });
+    expect(summary.failed).toEqual(['work']);
+    expect(summary.added).toEqual([]);
+    expect(transcript.some((line) => line.startsWith('FAIL cursor work (registry'))).toBe(true);
+  });
+
   it('echoes the signed-in identity on the claude PASS line, never a token field (HED-585)', async () => {
     const home = tempDir();
     const path = join(home, 'identity.json');
