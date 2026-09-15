@@ -39,21 +39,28 @@ export interface PrAutomationAssets {
   readonly gitleaksRangeScan: string;
 }
 
-const presetChoices = ['TS/Node', 'Generic'] as const;
+// Single source of truth: the choice label IS the preset key, so `presetChoices` (shown to the operator)
+// and `presetFor` (used to render) can never drift apart — renaming a label here updates both at once.
+const PRESETS: Record<string, RenderOptions> = { 'TS/Node': TS_NODE, 'Generic': GENERIC };
+const presetChoices = Object.keys(PRESETS);
 const nextSteps = [
   'What’s next:',
   '1. These scanners run on every PR automatically. To ENFORCE them as merge-blocking, add a repository ruleset requiring the `semgrep` and `gitleaks` check contexts — that’s a GitHub *settings* change (Settings → Rules), not a file this wizard can write.',
-  '2. SARIF upload to code scanning skipped or failed — that needs a public repo or GitHub Advanced Security; the scan findings are in the job log + summary above.',
+  '2. On a public repo, SARIF findings upload to GitHub code scanning automatically. On a private repo without GitHub Advanced Security that upload is skipped — expected, not an error; the scan findings still appear in each PR run’s job log and summary.',
   '3. Full CI review out-of-the-box; external AI reviewer apps (Codacy, CodeFactor, Cursor Bugbot, …) are a separate guided step.',
 ].join('\n');
 
-// The two templates under assets/pr-automation are VENDORED SECURITY ARTIFACTS, copied from heddle's own
-// CI: `deterministic-review.yml.tmpl` is `.github/workflows/deterministic-review.yml` with only its
-// language-coupled sites tokenized, and `gitleaks-range-scan.sh` is `.github/scripts/gitleaks-range-scan.sh`
-// copied BYTE-FOR-BYTE. The gitleaks script's fail-closed guarantees were earned over many review rounds —
-// do NOT hand-edit the vendored copy; re-sync it from heddle's canonical script. A test
-// (`test/wizard/pr-automation-step.test.ts`) asserts the vendored script stays byte-identical to the
-// canonical one, so any drift reds until it is re-synced.
+// The two templates under assets/pr-automation are VENDORED from heddle's own CI. `gitleaks-range-scan.sh`
+// is `.github/scripts/gitleaks-range-scan.sh` copied BYTE-FOR-BYTE (a security artifact — do NOT hand-edit;
+// re-sync from canonical; a test asserts byte-identity, so any drift reds). `deterministic-review.yml.tmpl`
+// is `.github/workflows/deterministic-review.yml` with its language-coupled sites tokenized (`__HEDDLE_*__`)
+// PLUS three deliberate additions over canonical — a re-syncer must NOT strip these as spurious drift:
+//   (1) the identity scrub (tenant/operator names → "the first consumer project"/"the operator"; required
+//       because a shipped file goes through public-scrub);
+//   (2) the `__HEDDLE_SOURCE_GUARANTEED__` full-scan-zero guard (the generic preset warns rather than fails
+//       when a repo has no source in the configured languages);
+//   (3) per-upload `id:` + `continue-on-error: true` + the outcome-conditioned "Explain SARIF upload
+//       availability" steps, so a private repo without code scanning degrades to the log + summary cleanly.
 function bundledAssetsRoot(): string {
   return fileURLToPath(new URL('../../assets/pr-automation', import.meta.url));
 }
@@ -116,9 +123,10 @@ export function renderDeterministicReview(options: RenderOptions = TS_NODE): str
 }
 
 function presetFor(choice: string): { readonly label: string; readonly options: RenderOptions } {
-  return choice === 'Generic'
-    ? { label: 'Generic', options: GENERIC }
-    : { label: 'TS/Node', options: TS_NODE };
+  // Keyed on PRESETS so a label rename cannot misroute. Fall back to the first choice if the prompter ever
+  // returns an unknown label (defensive — the shipped prompters only return a member of `presetChoices`).
+  const label = choice in PRESETS ? choice : presetChoices[0];
+  return { label, options: PRESETS[label] };
 }
 
 function targetPaths(targetDir: string): { readonly workflow: string; readonly gitleaks: string } {

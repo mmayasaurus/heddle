@@ -47,6 +47,17 @@ describe('prAutomationStep', () => {
     expect(vendored.equals(canonical)).toBe(true);
   });
 
+  it('routes the Generic preset choice through run() to the written workflow (not just renderDeterministicReview)', async () => {
+    // Drives the real prompt → presetFor → scaffold path so a future preset-label/keys drift is caught,
+    // not only the direct render helper (adversarial review, HED-597).
+    const targetDir = targetRepo(tempDir);
+    const result = await prAutomationStep().run(context(targetDir), io(['Generic']));
+    const workflow = readFileSync(join(targetDir, '.github', 'workflows', 'deterministic-review.yml'), 'utf8');
+    expect(result.status).toBe('done');
+    expect(workflow).toContain('--config p/default');
+    expect(workflow).not.toContain('p/typescript');
+  });
+
   it('keeps all language-coupled rendering sites in sync for the generic preset', () => {
     const tsNode = renderDeterministicReview(TS_NODE);
     const generic = renderDeterministicReview(GENERIC);
