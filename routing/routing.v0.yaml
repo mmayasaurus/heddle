@@ -188,7 +188,8 @@ lane_defaults:
 #               VIOLATION that HARD-FAILS the dispatch (ok=0) and QUARANTINES the findings — withheld
 #               from the trusted output, kept on the ledger record; adopting them is a deliberate,
 #               logged act (HED-601).
-#   auto_assess: (HED-3) run assess_result on the worker's output and return the assessment with it.
+#   auto_assess: (HED-3) run assess_result on the worker's output and return the assessment with it —
+#               skipped when the run is quarantined (a mandate-violating worker is never graded, HED-601).
 #   reviewer_pool: (HED-3) ordered provider/model alternatives used when the caller names the
 #               author's provider (`author_provider`) — a reviewer must be a DIFFERENT family.
 task_classes:

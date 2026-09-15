@@ -175,7 +175,7 @@ export interface DispatchOutcome extends WorkerResult {
    * home and callers that key on a non-empty `error` as failure must not misread it.
    */
   quarantine?: { reason: 'mandate-violation'; note: string; output: string; ledgerId: number };
-  /** HED-3 (`auto_assess: true` classes): assess_result on the worker's output — done | needs-rework | needs-human. */
+  /** HED-3 (`auto_assess: true` classes): assess_result on the worker's output — done | needs-rework | needs-human. Absent on a quarantined run (a mandate violation is never graded). */
   assessment?: ResultAssessment;
   /** Set on capability-denied refusals: which check failed (`unenforceable` means a fallback may fit). */
   capabilityRefusalKind?: 'unknown-token' | 'operator-gate' | 'opt-in' | 'unenforceable';
