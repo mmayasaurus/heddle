@@ -10,19 +10,22 @@ export function redactSecrets(text: string, opts: { credential?: string } = {}):
       // never survives.
       .replace(/-----BEGIN [^-]+-----[\s\S]*?-----END [^-]+-----/g, '[redacted]')
       // Credentials in a URL's userinfo (scheme://user:pass@host) — a common HTTP-client error form.
-      // Bounded quantifiers only (scheme <=16, userinfo <=256): an unbounded scheme class with a required
-      // "://" backtracks O(n^2) on a long non-URL run — the opaque/dotted rules avoid this via their
-      // leading lookbehind, but this pattern has none, so it must be bounded.
-      .replace(/([a-z][a-z0-9+.-]{0,15}:\/\/)[^/\s:@]{1,256}:[^/\s@]{1,256}@/gi, '$1[redacted]@')
-      // The WHOLE Authorization header value, any scheme (Bearer, Basic, Digest, …): a short/letter-only
-      // Basic credential slips past the prefix and opaque-token rules otherwise.
+      // The SCHEME class is bounded ({0,15}) because it has no leading anchor — unbounded it backtracks
+      // O(n^2) on a long non-URL run. The userinfo is unbounded (any-length password) but ReDoS-safe: it
+      // is reached only after the literal "://", and "[^/\s@]" excludes "/" so a repeated "scheme://…"
+      // fast-fails instead of re-scanning (verified by probe).
+      .replace(/([a-z][a-z0-9+.-]{0,15}:\/\/)[^/\s:@]+:[^/\s@]+@/gi, '$1[redacted]@')
+      // Authorization header: redact the scheme + its first credential token (Bearer/Basic/…, incl.
+      // short/letter-only values that dodge the prefix + opaque rules). Multi-param schemes (Digest) stop
+      // at the first comma; their sensitive params (nonce/response) are caught by the opaque rule below.
       .replace(/\bAuthorization\s*:\s*(?:[A-Za-z][A-Za-z0-9-]*\s+)?[^\s,;]+/gi, 'Authorization: [redacted]')
       .replace(/\bBearer\s+[^\s,;]+/gi, 'Bearer [redacted]')
       .replace(/\b(?:sk-[A-Za-z0-9_-]+|gh[po]_[A-Za-z0-9_-]+|xox[baprs]-[A-Za-z0-9_-]+)/g, '[redacted]')
       // key=value where the key NAME contains a sensitive word (ZAI_API_KEY=, aws_secret_access_key=,
-      // "api_key": …). No \b so an embedded keyword matches; the {0,40}-bounded suffix is ReDoS-safe; any
+      // "api_key": …). No \b so an embedded keyword matches; the {0,80}-bounded suffix stays ReDoS-safe
+      // (an unbounded suffix is O(n^2) on a repeated-keyword run) and covers every realistic key name; any
       // prefix (ZAI_, aws_) stays outside the match and is preserved. Optional quotes for JSON bodies.
-      .replace(/["']?((?:token|secret|password|api[-_]?key|x-api-key)[\w-]{0,40})["']?\s*([:=])\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi, '$1$2[redacted]')
+      .replace(/["']?((?:token|secret|password|api[-_]?key|x-api-key)[\w-]{0,80})["']?\s*([:=])\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi, '$1$2[redacted]')
       // Dotted token pairs (e.g. the GLM <32>.<16> key) — redact as a unit BEFORE the opaque catch-all,
       // which would otherwise split on the dot and leave the second half exposed.
       .replace(/(?<![A-Za-z0-9_/-])[A-Za-z0-9]{20,64}\.[A-Za-z0-9]{12,64}(?![A-Za-z0-9])/g, '[redacted]')

@@ -94,10 +94,34 @@ describe('redactSecrets — review-hardened cases', () => {
     expect(out).not.toContain('abcdef0123456789');
   });
 
-  it('is ReDoS-safe: ~0.5MB non-matching runs redact well under a second', () => {
+  // Fresh-adversarial-review round (codex/gpt-5.6-sol @5765564): long URL password, long embedded-key
+  // suffix, and multi-param Digest.
+  it('redacts an arbitrarily long URL userinfo password (unbounded, no fixed cap)', () => {
+    const pw = 'p'.repeat(300);
+    const out = redactSecrets(`https://user:${pw}@example.com/x`);
+    expect(out).toBe('https://[redacted]@example.com/x');
+    expect(out).not.toContain(pw);
+  });
+
+  it('redacts the value when a sensitive keyword is embedded mid-key with a long suffix', () => {
+    expect(redactSecrets('MY_SECRET_ACCESS_TOKEN_HANDLE=hunter2')).not.toContain('hunter2');
+  });
+
+  it('redacts the sensitive params of a multi-param Authorization header (Digest)', () => {
+    const h = 'Authorization: Digest username="x", realm="r", nonce="EXAMPLE00000000000000000000000000", response="EXAMPLE11111111111111111111111111"';
+    const out = redactSecrets(h);
+    expect(out).not.toContain('EXAMPLE00000000000000000000000000');
+    expect(out).not.toContain('EXAMPLE11111111111111111111111111');
+  });
+
+  it('is ReDoS-safe: ~0.5MB pathological runs redact well under a second', () => {
     const start = Date.now();
-    redactSecrets('a'.repeat(500_000));
-    redactSecrets('x'.repeat(200_000) + '.' + 'y'.repeat(200_000));
+    for (const s of [
+      'a'.repeat(500_000),                                   // no match
+      'http://' + 'a'.repeat(300_000),                       // unbounded userinfo, no '@'
+      'secret'.repeat(80_000),                               // repeated embedded keyword
+      'x'.repeat(200_000) + '.' + 'y'.repeat(200_000),       // dotted pair
+    ]) redactSecrets(s);
     expect(Date.now() - start).toBeLessThan(2000);
   });
 });
