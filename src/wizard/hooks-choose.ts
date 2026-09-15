@@ -9,7 +9,7 @@ import type { Prompter } from './prompt.js';
 export interface HookRuleSelection { id: string; enforce: boolean; }
 export interface HooksChooseResult { selected: HookRuleSelection[]; }
 export interface HooksChooseDeps { prompter: Prompter; report?: (msg: string) => void; }
-export interface HooksChooseOptions { catalogRoot: string; }
+export interface HooksChooseOptions { catalogRoot: string; defaults?: HookRuleSelection[]; }
 
 type PreviewFixtureCase = { name: string; payload: HookPayload };
 
@@ -56,12 +56,14 @@ export async function runHooksChoose(opts: HooksChooseOptions, deps: HooksChoose
     deps.report?.(`${rule.id} — ${rule.action} ${rule.event}: ${oneLine}`);
     const cases = fixtureCases(join(opts.catalogRoot, 'tests', `${rule.id}.jsonl`));
     reportPreview(rule, cases, deps.report);
-    if (!await deps.prompter.confirm(`include ${rule.id}?`, false)) continue;
+    const includeDefault = (opts.defaults ?? []).some((defaultSelection) => defaultSelection.id === rule.id);
+    if (!await deps.prompter.confirm(`include ${rule.id}?`, includeDefault)) continue;
     let enforce = rule.enforce;
     if (rule.action === 'block') {
       const enforced = { ...rule, enforce: true };
       reportPreview(enforced, cases, deps.report, 'ENFORCED ');
-      enforce = await deps.prompter.confirm(`enable ENFORCEMENT for ${rule.id}? this will DENY matching tool calls, not just warn.`, false);
+      const enforceDefault = opts.defaults?.find((defaultSelection) => defaultSelection.id === rule.id)?.enforce ?? false;
+      enforce = await deps.prompter.confirm(`enable ENFORCEMENT for ${rule.id}? this will DENY matching tool calls, not just warn.`, enforceDefault);
     }
     selected.push({ id: rule.id, enforce });
   }

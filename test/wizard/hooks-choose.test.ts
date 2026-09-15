@@ -33,6 +33,21 @@ class TranscriptPrompter implements Prompter {
   close(): void {}
 }
 
+class RecordingPrompter implements Prompter {
+  readonly calls: { question: string; defaultValue?: boolean }[] = [];
+  constructor(private readonly answers: boolean[]) {}
+  async text(): Promise<string> { throw new Error('not expected'); }
+  async select(): Promise<string> { throw new Error('not expected'); }
+  async secret(): Promise<string> { throw new Error('not expected'); }
+  async confirm(question: string, defaultValue?: boolean): Promise<boolean> {
+    this.calls.push({ question, defaultValue });
+    const answer = this.answers.shift();
+    if (answer === undefined) throw new Error('answer script exhausted');
+    return answer;
+  }
+  close(): void {}
+}
+
 describe('runHooksChoose', () => {
   const { tempDir } = useTempResources('heddle-hooks-choose-');
 
@@ -72,5 +87,46 @@ describe('runHooksChoose', () => {
     await expect(runHooksChoose({ catalogRoot: root }, { prompter: new TranscriptPrompter([false]), report: (line) => lines.push(line) }))
       .resolves.toEqual({ selected: [] });
     expect(lines.some((line) => line.includes('no fixture cases available for preview'))).toBe(true);
+  });
+});
+
+describe('runHooksChoose defaults pre-fill', () => {
+  const { tempDir } = useTempResources('heddle-hooks-choose-defaults-');
+
+  it('pre-fills included defaults by rule id', async () => {
+    const root = tempDir(); seedCatalog(root);
+    const prompter = new RecordingPrompter([false, false]);
+
+    await runHooksChoose({ catalogRoot: root, defaults: [{ id: 'synthetic-block', enforce: false }] }, { prompter });
+
+    expect(prompter.calls.find((call) => call.question.includes('include synthetic-block'))?.defaultValue).toBe(true);
+    expect(prompter.calls.find((call) => call.question.includes('include synthetic-nudge'))?.defaultValue).toBe(false);
+  });
+
+  it('uses false include defaults when defaults are omitted', async () => {
+    const root = tempDir(); seedCatalog(root);
+    const prompter = new RecordingPrompter([false, false]);
+
+    await runHooksChoose({ catalogRoot: root }, { prompter });
+
+    expect(prompter.calls.filter((call) => call.question.includes('include ')).every((call) => call.defaultValue === false)).toBe(true);
+  });
+
+  it('pre-fills enforcement from the matching block default', async () => {
+    const root = tempDir(); seedCatalog(root);
+    const prompter = new RecordingPrompter([true, false, false]);
+
+    await runHooksChoose({ catalogRoot: root, defaults: [{ id: 'synthetic-block', enforce: true }] }, { prompter });
+
+    expect(prompter.calls.find((call) => call.question.includes('enable ENFORCEMENT for synthetic-block'))?.defaultValue).toBe(true);
+  });
+
+  it('uses answers rather than defaults for the selected rules', async () => {
+    const root = tempDir(); seedCatalog(root);
+    const prompter = new RecordingPrompter([false, false]);
+
+    const result = await runHooksChoose({ catalogRoot: root, defaults: [{ id: 'synthetic-block', enforce: false }] }, { prompter });
+
+    expect(result.selected.some((selection) => selection.id === 'synthetic-block')).toBe(false);
   });
 });
