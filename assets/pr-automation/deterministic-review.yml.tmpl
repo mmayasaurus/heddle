@@ -1,0 +1,592 @@
+# Deterministic Review — the NON-AI reviewer tier (ported from Spinventory's
+# deterministic-review.yml, Maya-approved there 2026-07-13; heddle port is HED-11).
+#
+# Zero-flake scanners that catch what a rule engine catches every single time,
+# complementing whatever AI reviewers Maya enables (HED-13):
+#   semgrep   — registry rulesets __HEDDLE_RULESETS_DESCRIPTION__. DIFF-AWARE on PRs
+#               (--baseline-commit = the merge ref's first parent, i.e. the
+#               base tip actually merged: only findings this PR introduces —
+#               HED-80), FULL on pushes to __HEDDLE_DEFAULT_BRANCH__ (so the Security tab holds
+#               the whole picture, not just deltas). PR-controlled
+#               suppressions (.semgrepignore, inline nosemgrep) are
+#               neutralised — see the Scan step.
+#   gitleaks  — secrets in exactly the PR's commit range (base.sha..head.sha),
+#               values REDACTED. Runs the official gitleaks CLI image directly
+#               rather than gitleaks-action: the action lists PR commits with
+#               the API default per_page=30 and never paginates, so a PR with
+#               >30 commits is silently PARTIALLY scanned — and it needs a
+#               write token, which fork PRs never get. Push-to-__HEDDLE_DEFAULT_BRANCH__ coverage is
+#               GitHub's native secret scanning + push protection (enabled on
+#               this repo 2026-08-15) — a second engine on the same pushes.
+# Workflow hygiene (actionlint + zizmor) lives in actions-hygiene.yml, path-
+# filtered to .github/ changes.
+#
+# Where findings show up — DIFFERENT PLUMBING from Spinventory, SAME DISCIPLINE:
+# instead of a hand-rolled, sanitized PR-comment poster, results are uploaded
+# as SARIF to GitHub code scanning (free on public repos): they render as the
+# "Code scanning results / <tool>" check + inline annotations on the PR and in
+# the repo's Security tab; each job also writes a one-line job summary. The PR
+# sweep (review discipline doc, HED-16) must read code-scanning alerts + the
+# checks tab, not only comments/reviews/threads.
+#
+# Fork PRs: the SCANS run for everyone (read-only token is enough — nothing
+# here checks out untrusted code with secrets, and no PR-controlled string is
+# expanded into a run: block); only the SARIF-upload steps, which need a write
+# token, are skipped for forks — the log + job summary still carry the result.
+#
+# Posture: semgrep is REPORT-ONLY (the job never reds on findings; code
+# scanning's own "check failure" threshold decides whether its check reds —
+# repo default: errors only). gitleaks is BLOCKING-red on a hit (rotating the
+# secret is the fix, not re-running CI) but NOT a required check.
+#
+# Hardening (zizmor-clean): every action hash-pinned + Dependabot-bumped;
+# container images tag+digest-pinned (Dependabot does NOT track `container:`
+# images or `docker://` uses — bump those by hand, see the notes at each one);
+# workflow-level `permissions: {}`; checkout without persisted credentials;
+# runners pinned to an Ubuntu series (ubuntu-24.04), not `-latest`.
+name: Deterministic Review
+
+on:
+  pull_request:
+    # `edited` is here for ONE reason: retargeting the PR's base branch moves
+    # semgrep's baseline and gitleaks' commit range, so the scans must re-run.
+    # `edited` also fires on title/body edits — those runs echo the head SHA's
+    # last real scanner verdict instead of scanning or publishing `skipped`.
+    types: [opened, reopened, synchronize, ready_for_review, edited]
+  push:
+    branches: [__HEDDLE_DEFAULT_BRANCH__]
+
+permissions: {}
+
+# TWO SLOTS (HED-131). Commit-driven events and base retargets take the `scan`
+# slot, where newer work cancels stale work. Title/body edits take the `noop`
+# slot with cancellation disabled: their verdict echoes must never cancel an
+# in-flight real scan or one another.
+concurrency:
+  group: det-review-${{ github.event.pull_request.number || github.ref }}-${{ (github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base.ref.from != '') && 'scan' || 'noop' }}
+  cancel-in-progress: ${{ github.event_name != 'pull_request' || github.event.action != 'edited' || github.event.changes.base.ref.from != '' }}
+
+jobs:
+  semgrep-scan:
+    name: semgrep scan (diff-aware on PRs · full on __HEDDLE_DEFAULT_BRANCH__)
+    # Every push to __HEDDLE_DEFAULT_BRANCH__ is scanned. PRs: skip drafts and Dependabot's own PRs
+    # (Dependabot gets a read-only token that cannot upload SARIF — semgrep's
+    # sample config skips them too); the guard is PR-only so a __HEDDLE_DEFAULT_BRANCH__ push whose
+    # actor happens to be dependabot is still scanned. Like gate.yml's `build`,
+    # title/body edits skip this leaf; base retargets run it because the
+    # baseline moved.
+    if: >-
+      github.event_name == 'push' ||
+      (github.event.pull_request.draft == false &&
+       github.event.pull_request.user.login != 'dependabot[bot]' &&
+       (github.event.action != 'edited' || github.event.changes.base.ref.from != ''))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write  # SARIF upload to code scanning (same-repo only)
+    container:
+      # Semgrep's documented CI image (docs.semgrep.dev sample-ci-configs),
+      # tag+digest-pinned. MANUAL BUMP (Dependabot ignores container images):
+      # bump the tag, refresh the digest from Docker Hub, and expect newer
+      # rules = new findings.
+      image: semgrep/semgrep:1.173.0@sha256:67319956da3dcb58baf5b322899c15458e3963e7018a86aeeb5cd224e69cb77a
+    steps:
+      - name: Checkout (full history — the baseline commit must be present)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Scan
+        env:
+          # PR: diff-aware; the baseline is resolved in the script below from
+          # the checked-out merge commit's FIRST PARENT (the exact base tip
+          # GitHub merged), NOT from pull_request.base.sha — that value is
+          # recorded on the PR object and does not refresh when __HEDDLE_DEFAULT_BRANCH__ moves, so
+          # a scan against it attributes __HEDDLE_DEFAULT_BRANCH__'s newer findings to the PR
+          # (heddle-dashboard#13 → HED-80). Push: empty → full scan.
+          IS_PR: ${{ github.event_name == 'pull_request' && 'yes' || '' }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          BASE_SHA_FALLBACK: ${{ github.event.pull_request.base.sha }}
+        # POSIX sh on purpose: inside a `container:` the runner defaults to
+        # `sh -e`, not bash (first run of this workflow proved it — a bash
+        # array here failed with "syntax error: unexpected (").
+        #
+        # PR-controlled suppressions are neutralised (CodeRabbit, r3): every
+        # `.semgrepignore` in the PR tree is replaced by the BASE branch's copy
+        # (or removed if the base has none) and that swap is committed LOCALLY —
+        # `--baseline-commit` refuses a dirty tree, and the commit never leaves
+        # the runner (no credentials in .git). Inline `nosemgrep` comments are
+        # ignored via --disable-nosem. `.gitignore` is not a vector: semgrep
+        # only applies it to UNTRACKED files, and PR files are tracked.
+        run: |
+          set -u
+          # Container jobs: the workspace is owned by the runner uid, git in
+          # this step runs as the image user, and actions/checkout writes its
+          # safe.directory entry to a TEMPORARY HOME — so without this line
+          # every git call below dies with "dubious ownership" (round-4 run).
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          BASELINE=""
+          if [ -n "$IS_PR" ]; then
+            # actions/checkout checks out refs/pull/N/merge — GitHub's synthetic
+            # merge commit: first parent = the base branch tip actually merged,
+            # second parent = the PR head. Both facts are CHECKED (qodo, HED-80
+            # r1): HEAD^2 must be the PR head, otherwise this is some other
+            # merge commit (ref: override) and HEAD^1 would be an unrelated
+            # baseline. Fallback = merge-base of the CURRENT base tip and HEAD
+            # (fetch-depth 0 has origin/<base>), never the stale base.sha
+            # unless even that is unavailable.
+            if [ "$(git rev-parse -q --verify HEAD^2 2>/dev/null)" = "$PR_HEAD_SHA" ]; then
+              BASELINE=$(git rev-parse HEAD^1)
+            elif BASELINE=$(git merge-base "origin/$PR_BASE_REF" HEAD 2>/dev/null) && [ -n "$BASELINE" ]; then
+              echo "::warning::HEAD is not GitHub's synthetic merge of this PR — baseline = merge-base(origin/$PR_BASE_REF, HEAD)"
+            else
+              BASELINE="$BASE_SHA_FALLBACK"
+              echo "::warning::could not resolve the current base tip — falling back to pull_request.base.sha as the baseline (may lag __HEDDLE_DEFAULT_BRANCH__)"
+            fi
+          fi
+          if [ -n "$BASELINE" ]; then
+            git ls-files | grep -E '(^|/)\.semgrepignore$' | while IFS= read -r f; do
+              git rm -q -- "$f"
+            done
+            git ls-tree -r --name-only "$BASELINE" | grep -E '(^|/)\.semgrepignore$' | while IFS= read -r f; do
+              mkdir -p "$(dirname "$f")"; git show "$BASELINE:$f" > "$f"; git add -- "$f"
+            done
+            if ! git diff --cached --quiet; then
+              git -c user.name=ci -c user.email=ci@localhost commit -q -m "ci: base-branch .semgrepignore for the diff-aware scan"
+              echo "::notice::.semgrepignore differs from the base branch — scanned with the base branch's copy"
+            fi
+          fi
+          set -- scan __HEDDLE_RULESETS__ \
+                 --metrics=off --disable-nosem --sarif-output=semgrep.sarif --json-output=semgrep.json \
+                 __HEDDLE_EXCLUDES_ARGS__
+          if [ -n "$BASELINE" ]; then
+            echo "diff-aware scan: baseline $BASELINE"
+            set -- "$@" --baseline-commit="$BASELINE"
+          else
+            echo "full scan (push to __HEDDLE_DEFAULT_BRANCH__)"
+          fi
+          # No --error: report-only tier. A tool crash / unparseable output is
+          # still an honest red (the upload step needs the file).
+          semgrep "$@"
+          # One-line receipt in the job summary. python3 is guaranteed in the
+          # image (the semgrep CLI is a Python package); jq is not (qodo, r3).
+          N=$(python3 -c 'import json; print(len(json.load(open("semgrep.sarif"))["runs"][0]["results"]))')
+          echo "semgrep: **$N** finding(s) (${BASELINE:+new vs base }${BASELINE:-full scan})" >> "$GITHUB_STEP_SUMMARY"
+          # ── Scanned-volume guard (HED-70): a green scanner is not proof it scanned.
+          #    gitleaks shipped GREEN with EMPTY scans in heddle#2 r3/r4 when its git
+          #    broke; semgrep already ABORTS (non-zero, so this step reds) when
+          #    --baseline-commit's git fails, so this guard covers the residue.
+          #    paths.scanned lists the files semgrep analysed (measured, uvx semgrep
+          #    1.173.0). semgrep emits NO paths.skipped, so on a PR a 0-scan cannot be
+          #    proven a real miss vs a legitimate skip (excludes / .semgrepignore /
+          #    deletions) — a PR 0-scan WARNS; only a full-main 0-scan or unreadable
+          #    output (schema drift) fails closed.
+          SCANNED=$(python3 -c 'import json,sys; p=json.load(open("semgrep.json")).get("paths") or {}; s=p.get("scanned"); print(len(s)) if isinstance(s,list) else sys.exit(3)' 2>/dev/null) \
+            || { echo "::error::semgrep scanned-volume unreadable (paths.scanned missing/unparseable in semgrep.json) — NOT a clean pass"; echo "semgrep: ❌ scanned-volume unreadable — NOT a clean pass" >> "$GITHUB_STEP_SUMMARY"; exit 1; }
+          if [ -n "$BASELINE" ]; then
+            # PR: expected = in-language changed files MINUS the scan's own excludes.
+            # Keep both sets in sync with the scan flags above (excludes: __HEDDLE_EXCLUDES_DESCRIPTION__;
+            # languages from __HEDDLE_RULESETS_DESCRIPTION__ → __HEDDLE_INLANG_EXTENSIONS_DESCRIPTION__).
+            # Too-narrow here only weakens the guard (safe); too-broad false-reds.
+            CHANGED=$(git diff --name-only --diff-filter=ACMR "$BASELINE"..HEAD) \
+              || { echo "::error::git diff failed for the semgrep scanned-volume guard — NOT a clean pass"; exit 1; }
+            INLANG=$(printf '%s\n' "$CHANGED" \
+              | grep -vE '__HEDDLE_EXCLUDES_PATH_REGEX__' \
+              | grep -cE '__HEDDLE_INLANG_EXTENSION_REGEX__' || true)
+            if [ "$INLANG" -gt 0 ] && [ "$SCANNED" -eq 0 ]; then
+              # WARN, not RED: semgrep emits no paths.skipped, so a PR 0-scan cannot be
+              # proven a real miss vs a legitimate skip (nested excludes / .semgrepignore
+              # / deletions). Only a full-main 0-scan or unreadable output fails closed.
+              echo "::warning::semgrep scanned 0 targets while this PR changed $INLANG in-language file(s) — expected when they are all excluded / .semgrepignore'd, but verify it is not a scan miss."
+              echo "semgrep volume: scanned 0 target(s) with $INLANG in-language file(s) changed — verify (excludes/ignores expected)" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "semgrep volume: scanned $SCANNED target(s); diff has $INLANG in-language file(s)" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          else
+          # __HEDDLE_DEFAULT_BRANCH__ push (full scan): the repo always has source in the configured languages, so a real scan
+            # covers > 0 targets; 0 means the scan was empty (git broke, etc.).
+            if [ "$SCANNED" -eq 0 ]; then
+              echo "::error::semgrep scanned 0 targets on a full __HEDDLE_DEFAULT_BRANCH__ scan, but the repo has source in the configured languages — the scan is empty (a green scanner is not a scan). NOT a clean pass"
+              echo "semgrep: ❌ full scan covered 0 targets — NOT a clean pass" >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+            fi
+            echo "semgrep volume: scanned $SCANNED target(s) (full scan)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload SARIF to code scanning
+        # Needs a write token — same-repo PRs and main pushes only; fork PRs
+        # keep the scan result in the log + summary above.
+        if: >-
+          github.event_name == 'push' ||
+          github.event.pull_request.head.repo.full_name == github.repository
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep
+
+      - name: Explain SARIF upload availability
+        if: always()
+        run: echo "SARIF upload to code scanning skipped or failed — that needs a public repo or GitHub Advanced Security; the scan findings are in the job log + summary above." >> "$GITHUB_STEP_SUMMARY"
+
+  semgrep:
+    # Stable public check context. Commit paths publish the semgrep-scan result;
+    # title/body edits echo the head SHA's last real semgrep verdict.
+    name: semgrep (diff-aware on PRs · full on __HEDDLE_DEFAULT_BRANCH__)
+    needs: [semgrep-scan]
+    # Runs whenever semgrep-scan runs (push, or a non-draft non-Dependabot PR)
+    # PLUS eligible title/body edits (to echo) — i.e. SKIPS exactly when
+    # semgrep-scan skips (draft / Dependabot). Its skip predicate MUST stay
+    # equivalent to semgrep-scan's `if` (change one, change both). `always()` is
+    # LOAD-BEARING: without it, `needs: [semgrep-scan]` would SKIP this job when
+    # the scan fails/cancels — masking a real failure as `skipped`. With it, an
+    # eligible event always runs this job, which then publishes the real verdict
+    # (success OR failure) from needs.<scan>.result.
+    if: >-
+      always() &&
+      (github.event_name == 'push' ||
+       (github.event_name == 'pull_request' &&
+        github.event.pull_request.draft == false &&
+        github.event.pull_request.user.login != 'dependabot[bot]'))
+    runs-on: ubuntu-24.04
+    # INVARIANT (HED-182), two rules that size this echo:
+    #   (1) the loop's sleep-sum > longest leaf timeout (`semgrep-scan` = 15) + a
+    #       publish grace, so the echo can't run out of polls while a leaf
+    #       legitimately runs; seq 1 57 at the backoff cadence ≈ 24m50s > 15.
+    #   (2) timeout-minutes > the loop's sleep-sum + an API/startup allowance, so
+    #       a stuck echo exits CLEANLY via the loop's own fail-closed rather than
+    #       as a `timed_out` red in a NEWER suite; 30 > 24m50s + ~3-4min of 57
+    #       paginated API reads. (25 left only ~10s of API headroom.)
+    # Raise a leaf timeout and you must re-check BOTH rules.
+    timeout-minutes: 30
+    permissions:
+      checks: write
+    steps:
+      - name: Verdict (commit) or echo (edit)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          IS_EDIT: ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.base.ref.from == '' }}
+          SCAN_RESULT: ${{ needs.semgrep-scan.result }}
+        run: |
+          set -eu
+          if [ "$IS_EDIT" = "true" ]; then
+            echo "edit event — echoing the last real verdict (semgrep-verdict marker) for $SHA"
+            CONC=none; DRY=0; VERDICT=""
+            # WAIT for this SHA's real verdict; never fail closed on a timer. A
+            # premature red would land in a check-suite NEWER than the commit
+            # run's own semgrep, and GitHub resolves a required check from the
+            # newest SUITE, so it would block the PR until another edit superseded
+            # it. Fail-closed is reached two ways, both leaving VERDICT empty: the
+            # commit-path scan is verifiably GONE (no leaf in flight) with still no
+            # FRESH marker for a sustained dry window, OR the loop exhausts its
+            # belt. The belt (seq 1 57 at the backoff cadence ≈ 24m50s) is sized
+            # ABOVE the longest leaf timeout (semgrep-scan = 15) so it cannot run
+            # out while a leaf legitimately runs; the job timeout (30) is sized
+            # ABOVE the belt so a stuck echo exits cleanly via the fail-closed
+            # case below, never a `timed_out` red in a newer suite. Poll fast for
+            # ~2 min, then back off to 30s to spare the API rate limit on a long
+            # scan.
+            for i in $(seq 1 57); do
+              if ! CR=$(gh api "repos/$REPO/commits/$SHA/check-runs?filter=all" --paginate --slurp 2>/dev/null); then
+                echo "  could not read check runs for ${SHA}; scan liveness is unknown — retrying"
+                DRY=0
+                if [ "$i" -lt 12 ]; then sleep 10; else sleep 30; fi
+                continue
+              fi
+              # A marker is fresh only when it follows the newest REAL scan leaf.
+              # The != "skipped" guard is LOAD-BEARING: a title/body edit skips
+              # semgrep-scan, producing a newer skipped check-run; counting that
+              # makes every marker stale and reds every bot edit. In-progress
+              # leaves retain null conclusions, so they still count.
+              CONC=$(printf '%s\n' "$CR" | jq -r '
+                [.[].check_runs[]] as $all
+                | ([$all[] | select((.name | test("^semgrep scan")) and .conclusion != "skipped") | .started_at] | max) as $leaf
+                | ([$all[] | select(.name == "semgrep-verdict")] | sort_by(.started_at) | last) as $m
+                | if $m == null or $leaf == null then "none"
+                  elif $m.started_at >= $leaf then ($m.conclusion // "none")
+                  else "none" end')
+              INFLIGHT=$(printf '%s\n' "$CR" | jq -r '[.[].check_runs[]] | [ .[] | select((.name|test("^semgrep scan")) and .status!="completed") ] | length')
+              # Four states: a marker is usable only after the matching scan is
+              # gone; any in-flight scan resets the dry proof, with or without a
+              # stale marker; only no-marker + no-inflight advances fail-closed.
+              if [ "$CONC" != "none" ] && [ "$INFLIGHT" = "0" ]; then
+                VERDICT="$CONC"; break
+              fi
+              if [ "$CONC" = "none" ] && [ "$INFLIGHT" = "0" ]; then
+                DRY=$((DRY + 1))
+              else
+                DRY=0
+              fi
+              # Fail closed only when the scan is verifiably gone AND still no
+              # marker, sustained a few polls past the 90s grace — this bridges
+              # the brief gap between the leaf finishing and the commit-path
+              # aggregator publishing the marker.
+              if [ "$i" -gt 9 ] && [ "$DRY" -ge 6 ]; then
+                echo "  semgrep scan is no longer in flight and no semgrep-verdict marker appeared — the commit aggregator did not publish (cancelled / never ran)."
+                break
+              fi
+              if [ -z "${WAITED:-}" ]; then
+                WAITED=1
+                {
+                  echo "### semgrep — waiting for the commit-path verdict on \`${SHA}\`"
+                  echo "This edit run is holding \`semgrep\` **pending** until the commit-path scan for this commit publishes its \`semgrep-verdict\`, which the echo then reflects. Pending here means *blocked-while-scanning*, not failed."
+                } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+              fi
+              echo "  waiting for the commit run's verdict on ${SHA} (poll ${i}; marker=${CONC}, commit-path jobs in flight=${INFLIGHT}, dry=${DRY})"
+              if [ "$i" -lt 12 ]; then sleep 10; else sleep 30; fi
+            done
+            case "$VERDICT" in
+              success)
+                echo "real verdict for ${SHA} = success — semgrep green"
+                exit 0 ;;
+              "")
+                echo "::error::no confirmed semgrep verdict for ${SHA} — never saw a fresh semgrep-verdict marker with no commit-path scan in flight (the commit 'semgrep' run was cancelled / never ran / still queued, or the check-runs API was unreachable). Re-run 'Deterministic Review' on this PR, or push a commit. Failing closed."
+                exit 1 ;;
+              *)
+                echo "::error::real verdict for ${SHA} was '${VERDICT}' — echoing it. An edit never masks a real failure; fix the code and push a commit."
+                exit 1 ;;
+            esac
+          fi
+          # Commit / retarget / push: the real verdict IS the leaf result.
+          case "$SCAN_RESULT" in
+            success) MARK=success ;;
+            *)       MARK=failure ;;
+          esac
+          # Record the verdict as a non-required marker on the head SHA so future
+          # edit runs can echo it. Best-effort: on a fork-head PR GITHUB_TOKEN is
+          # read-only regardless of `permissions:`, so this POST 403s — the
+          # aggregator still reflects the real result below; only later EDIT runs
+          # on a fork degrade (they fail closed, never mask). Same-repo branches
+          # always publish.
+          if ! gh api "repos/$REPO/check-runs" -X POST -f name=semgrep-verdict \
+                -f head_sha="$SHA" -f status=completed -f conclusion="$MARK" >/dev/null 2>&1; then
+            echo "::warning::could not publish the semgrep-verdict marker for ${SHA} (read-only token / fork PR?) — edit runs on this commit will fail closed until a commit run can publish one."
+          fi
+          echo "real verdict = ${MARK} (semgrep-scan=${SCAN_RESULT}); recorded as semgrep-verdict marker for ${SHA}"
+          # Make THIS job's conclusion the scanner verdict.
+          [ "$MARK" = success ]
+
+  gitleaks-scan:
+    name: gitleaks scan (secrets in the PR's commits)
+    # PRs only — drafts INCLUDED (a leaked secret does not wait for
+    # ready_for_review); `edited` only when the base branch changed (the
+    # scanned range moves). Push-to-__HEDDLE_DEFAULT_BRANCH__ coverage is GitHub secret scanning.
+    if: >-
+      github.event_name == 'pull_request' &&
+      (github.event.action != 'edited' || github.event.changes.base.ref.from != '')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      security-events: write  # SARIF upload to code scanning (same-repo only)
+    container:
+      # Official gitleaks image (alpine + git + gitleaks), tag+digest-pinned.
+      # MANUAL BUMP (Dependabot ignores container images): bump the tag and
+      # refresh the digest from Docker Hub.
+      image: zricethezav/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
+    steps:
+      - name: Checkout (full history — the PR range must be present)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Scan the PR's commit range
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        # POSIX sh (container job — see the semgrep step). Exit code 2 = leaks
+        # found (job goes red); anything else non-zero = tool/infra error.
+        # --redact keeps values out of logs AND out of the report; the report
+        # is uploaded to code scanning below (rule/file/line only).
+        #
+        # FAIL-CLOSED (round-3/4 lesson): gitleaks exits 0 with "0 commits
+        # scanned … no leaks found" when its internal `git log` fails — the
+        # round-3 run did exactly that (dubious-ownership error in the
+        # container) and went GREEN with an EMPTY scan. So the step computes
+        # the expected non-merge commit count itself and refuses any run whose
+        # log shows a git/tool error or a different scanned count.
+        #
+        # Suppressions are PR-CONTROLLED (.gitleaks.toml, .gitleaksignore,
+        # inline `gitleaks:allow` comments) — a PR (or fork) that ships a
+        # lenient config would otherwise scan itself green. So the scan always
+        # uses the BASE branch's suppression files (a default-rules stub when
+        # the base has none), never the PR's, and inline allow-comments are
+        # ignored. Consequence: a suppression must land on __HEDDLE_DEFAULT_BRANCH__ first (its own
+        # config-only PR, reviewed by a human) before a PR can benefit from it.
+        # A PR that touches those files is additionally flagged in the summary
+        # (Spinventory det-tier finding, #2077).
+        # Invoked via `sh` on purpose: the script sets its own `set -eu`, and
+        # calling the interpreter explicitly means a lost exec bit (archive/checkout
+        # quirks) cannot turn the security scan into a silent no-op (codacy).
+        run: sh .github/scripts/gitleaks-range-scan.sh
+
+      - name: Upload SARIF to code scanning
+        # always(): the report matters MOST when the scan step just failed on
+        # a hit. Same-repo only (write token); fork PRs keep the log verdict.
+        if: >-
+          always() &&
+          github.event.pull_request.head.repo.full_name == github.repository &&
+          hashFiles('gitleaks.sarif') != ''
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        with:
+          sarif_file: gitleaks.sarif
+          category: gitleaks
+
+      - name: Upload merge-delta SARIF to code scanning
+        # Separate category: these findings live in merge-only content
+        # (conflict resolutions / automerge-synthesized bytes), which the
+        # history scan structurally cannot report (HED-109).
+        if: >-
+          always() &&
+          github.event.pull_request.head.repo.full_name == github.repository &&
+          hashFiles('gitleaks-delta.sarif') != ''
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        with:
+          sarif_file: gitleaks-delta.sarif
+          category: gitleaks-merge-delta
+
+      - name: Explain SARIF upload availability
+        if: always()
+        run: echo "SARIF upload to code scanning skipped or failed — that needs a public repo or GitHub Advanced Security; the scan findings are in the job log + summary above." >> "$GITHUB_STEP_SUMMARY"
+
+  gitleaks:
+    # Stable public check context. Commit paths publish the gitleaks-scan result;
+    # title/body edits echo the head SHA's last real gitleaks verdict.
+    name: gitleaks (secrets in the PR's commits)
+    needs: [gitleaks-scan]
+    # Runs on every PR event (drafts included — a leaked secret does not wait for
+    # ready_for_review; edits included, to echo); SKIPS on push (gitleaks-scan is
+    # PR-only — push coverage is native GitHub secret scanning). Its skip
+    # predicate MUST stay equivalent to gitleaks-scan's `if`. `always()` is
+    # LOAD-BEARING: without it, `needs: [gitleaks-scan]` would SKIP this job when
+    # the scan FAILS (a secret hit) — masking the leak as `skipped`. With it, a PR
+    # event always runs this job, which publishes the real verdict.
+    if: >-
+      always() && github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    # INVARIANT (HED-182), two rules that size this echo:
+    #   (1) the loop's sleep-sum > longest leaf timeout (`gitleaks-scan` = 10) + a
+    #       publish grace, so the echo can't run out of polls while a leaf
+    #       legitimately runs; seq 1 57 at the backoff cadence ≈ 24m50s > 10.
+    #   (2) timeout-minutes > the loop's sleep-sum + an API/startup allowance, so
+    #       a stuck echo exits CLEANLY via the loop's own fail-closed rather than
+    #       as a `timed_out` red in a NEWER suite; 30 > 24m50s + ~3-4min of 57
+    #       paginated API reads. (25 left only ~10s of API headroom.)
+    # Raise a leaf timeout and you must re-check BOTH rules.
+    timeout-minutes: 30
+    permissions:
+      checks: write
+    steps:
+      - name: Verdict (commit) or echo (edit)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          IS_EDIT: ${{ github.event_name == 'pull_request' && github.event.action == 'edited' && github.event.changes.base.ref.from == '' }}
+          SCAN_RESULT: ${{ needs.gitleaks-scan.result }}
+        run: |
+          set -eu
+          if [ "$IS_EDIT" = "true" ]; then
+            echo "edit event — echoing the last real verdict (gitleaks-verdict marker) for $SHA"
+            CONC=none; DRY=0; VERDICT=""
+            # WAIT for this SHA's real verdict; never fail closed on a timer. A
+            # premature red would land in a check-suite NEWER than the commit
+            # run's own gitleaks, and GitHub resolves a required check from the
+            # newest SUITE, so it would block the PR until another edit superseded
+            # it. Fail-closed is reached two ways, both leaving VERDICT empty: the
+            # commit-path scan is verifiably GONE (no leaf in flight) with still no
+            # FRESH marker for a sustained dry window, OR the loop exhausts its
+            # belt. The belt (seq 1 57 at the backoff cadence ≈ 24m50s) is sized
+            # ABOVE the longest leaf timeout (gitleaks-scan = 10) so it cannot run
+            # out while a leaf legitimately runs; the job timeout (30) is sized
+            # ABOVE the belt so a stuck echo exits cleanly via the fail-closed
+            # case below, never a `timed_out` red in a newer suite. Poll fast for
+            # ~2 min, then back off to 30s to spare the API rate limit on a long
+            # scan.
+            for i in $(seq 1 57); do
+              if ! CR=$(gh api "repos/$REPO/commits/$SHA/check-runs?filter=all" --paginate --slurp 2>/dev/null); then
+                echo "  could not read check runs for ${SHA}; scan liveness is unknown — retrying"
+                DRY=0
+                if [ "$i" -lt 12 ]; then sleep 10; else sleep 30; fi
+                continue
+              fi
+              # A marker is fresh only when it follows the newest REAL scan leaf.
+              # The != "skipped" guard is LOAD-BEARING: a title/body edit skips
+              # gitleaks-scan, producing a newer skipped check-run; counting that
+              # makes every marker stale and reds every bot edit. In-progress
+              # leaves retain null conclusions, so they still count.
+              CONC=$(printf '%s\n' "$CR" | jq -r '
+                [.[].check_runs[]] as $all
+                | ([$all[] | select((.name | test("^gitleaks scan")) and .conclusion != "skipped") | .started_at] | max) as $leaf
+                | ([$all[] | select(.name == "gitleaks-verdict")] | sort_by(.started_at) | last) as $m
+                | if $m == null or $leaf == null then "none"
+                  elif $m.started_at >= $leaf then ($m.conclusion // "none")
+                  else "none" end')
+              INFLIGHT=$(printf '%s\n' "$CR" | jq -r '[.[].check_runs[]] | [ .[] | select((.name|test("^gitleaks scan")) and .status!="completed") ] | length')
+              # Four states: a marker is usable only after the matching scan is
+              # gone; any in-flight scan resets the dry proof, with or without a
+              # stale marker; only no-marker + no-inflight advances fail-closed.
+              if [ "$CONC" != "none" ] && [ "$INFLIGHT" = "0" ]; then
+                VERDICT="$CONC"; break
+              fi
+              if [ "$CONC" = "none" ] && [ "$INFLIGHT" = "0" ]; then
+                DRY=$((DRY + 1))
+              else
+                DRY=0
+              fi
+              # Fail closed only when the scan is verifiably gone AND still no
+              # marker, sustained a few polls past the 90s grace — this bridges
+              # the brief gap between the leaf finishing and the commit-path
+              # aggregator publishing the marker.
+              if [ "$i" -gt 9 ] && [ "$DRY" -ge 6 ]; then
+                echo "  gitleaks scan is no longer in flight and no gitleaks-verdict marker appeared — the commit aggregator did not publish (cancelled / never ran)."
+                break
+              fi
+              if [ -z "${WAITED:-}" ]; then
+                WAITED=1
+                {
+                  echo "### gitleaks — waiting for the commit-path verdict on \`${SHA}\`"
+                  echo "This edit run is holding \`gitleaks\` **pending** until the commit-path scan for this commit publishes its \`gitleaks-verdict\`, which the echo then reflects. Pending here means *blocked-while-scanning*, not failed."
+                } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+              fi
+              echo "  waiting for the commit run's verdict on ${SHA} (poll ${i}; marker=${CONC}, commit-path jobs in flight=${INFLIGHT}, dry=${DRY})"
+              if [ "$i" -lt 12 ]; then sleep 10; else sleep 30; fi
+            done
+            case "$VERDICT" in
+              success)
+                echo "real verdict for ${SHA} = success — gitleaks green"
+                exit 0 ;;
+              "")
+                echo "::error::no confirmed gitleaks verdict for ${SHA} — never saw a fresh gitleaks-verdict marker with no commit-path scan in flight (the commit 'gitleaks' run was cancelled / never ran / still queued, or the check-runs API was unreachable). Re-run 'Deterministic Review' on this PR, or push a commit. Failing closed."
+                exit 1 ;;
+              *)
+                echo "::error::real verdict for ${SHA} was '${VERDICT}' — echoing it. An edit never masks a real failure; fix the code and push a commit."
+                exit 1 ;;
+            esac
+          fi
+          # Commit / retarget / push: the real verdict IS the leaf result.
+          case "$SCAN_RESULT" in
+            success) MARK=success ;;
+            *)       MARK=failure ;;
+          esac
+          # Record the verdict as a non-required marker on the head SHA so future
+          # edit runs can echo it. Best-effort: on a fork-head PR GITHUB_TOKEN is
+          # read-only regardless of `permissions:`, so this POST 403s — the
+          # aggregator still reflects the real result below; only later EDIT runs
+          # on a fork degrade (they fail closed, never mask). Same-repo branches
+          # always publish.
+          if ! gh api "repos/$REPO/check-runs" -X POST -f name=gitleaks-verdict \
+                -f head_sha="$SHA" -f status=completed -f conclusion="$MARK" >/dev/null 2>&1; then
+            echo "::warning::could not publish the gitleaks-verdict marker for ${SHA} (read-only token / fork PR?) — edit runs on this commit will fail closed until a commit run can publish one."
+          fi
+          echo "real verdict = ${MARK} (gitleaks-scan=${SCAN_RESULT}); recorded as gitleaks-verdict marker for ${SHA}"
+          # Make THIS job's conclusion the scanner verdict.
+          [ "$MARK" = success ]
