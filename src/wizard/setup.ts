@@ -208,7 +208,17 @@ export async function runSetup(base: SetupContext, io: WizardIO, steps: WizardSt
         io.report('  – skipped (not applicable in this context)');
         continue;
       }
-      results.set(step.id, await step.run(ctx, io));
+      const result = await step.run(ctx, io);
+      results.set(step.id, result);
+      // HED-624: a step may resolve a project directory DURING its run (pr-automation's offer-to-add-repo,
+      // reached when setup ran outside a repo). The ORCHESTRATOR — not the step, which never mutates ctx —
+      // applies it to the shared context here, BEFORE the next step's applies() runs, so a later target-gated
+      // step (cd-automation) acts on the repo the operator just chose. Marked derived (it is not an explicit
+      // --target), so any scaffolding step still confirms before writing. See WizardStepResult.selectedTargetDir.
+      if (result.selectedTargetDir) {
+        ctx.targetDir = result.selectedTargetDir;
+        ctx.targetDirDerived = true;
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       results.set(step.id, { id: step.id, status: 'failed', summary: `failed: ${message}` });

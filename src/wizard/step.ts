@@ -30,19 +30,33 @@ export interface WizardStepResult {
   readonly summary: string;
   /** Optional multi-line detail. */
   readonly detail?: string;
+  /**
+   * A project directory this step resolved DURING its run for LATER steps to target — e.g. pr-automation's
+   * HED-624 offer-to-add-repo, where the operator enters a repo path because setup ran outside one. The
+   * orchestrator (not the step) applies it to `WizardContext.targetDir` before evaluating later steps'
+   * `applies()`, so a downstream target-gated step (cd-automation) acts on the repo the operator just chose.
+   * Optional and additive: a step that resolves no new target omits it, and every existing step compiles
+   * unchanged. This publishes a target FORWARD; it does not rewrite this or any prior result (still readonly).
+   */
+  readonly selectedTargetDir?: string;
 }
 
-/** Shared, read-only context passed to every step. A step writes its own config; it does not mutate this. */
+/**
+ * Shared context passed to every step. A step never mutates it and writes only its own config; the
+ * ORCHESTRATOR, between steps, applies a step's published `selectedTargetDir` (see `WizardStepResult`) to
+ * `targetDir` so a later target-gated step sees a repo an earlier step resolved at runtime.
+ */
 export interface WizardContext {
   /** The operator's home root (~). Account registry, `routing/lanes.yaml`, etc. resolve under here / the repo. */
   homeDir: string;
   /** The project directory for init-project-scoped steps; undefined for global-only steps. */
   targetDir?: string;
   /**
-   * True when `targetDir` was AUTO-DERIVED from the invocation cwd (a detected git repository),
-   * not passed explicitly via `--target`. A step that scaffolds into the project MUST confirm
-   * before writing when this is set: the operator never named this directory, so writing silently
-   * would assume intent (HED-624). An explicit `--target` leaves this unset — that IS the opt-in.
+   * True when `targetDir` was NOT passed explicitly via `--target` — either AUTO-DERIVED from the invocation
+   * cwd (a detected git repository) or resolved at runtime from a step's published `selectedTargetDir` (a path
+   * the operator entered at pr-automation's offer prompt). A step that scaffolds into the project MUST confirm
+   * before writing when this is set: the operator never named this directory on the command line, so writing
+   * silently would assume intent (HED-624). An explicit `--target` leaves this unset — that IS the opt-in.
    * Optional and additive, exactly like `dryRun` below.
    */
   targetDirDerived?: boolean;
