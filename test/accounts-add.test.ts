@@ -71,9 +71,13 @@ describe('accounts add wizard', () => {
   it('strips inherited Anthropic creds from the claude onboarding env, keeping only CLAUDE_CONFIG_DIR (HED-585)', async () => {
     const home = tempDir();
     const path = join(home, 'sanitize.json');
-    const captured: { login?: NodeJS.ProcessEnv; status?: NodeJS.ProcessEnv } = {};
+    const captured: { login?: NodeJS.ProcessEnv; status?: NodeJS.ProcessEnv; envDuringLogin?: Record<string, string | undefined> } = {};
     const capturingRunner: CliRunner = {
-      login: (_provider, env) => { captured.login = { ...env }; },
+      login: (_provider, env) => {
+        captured.login = { ...env };
+        // Snapshot the LIVE process.env during the call — proves accountEnv copied it, never mutated it.
+        captured.envDuringLogin = Object.fromEntries(Object.keys(ambient).map((key) => [key, process.env[key]]));
+      },
       status: (_provider, env) => {
         captured.status = { ...env };
         return { stdout: JSON.stringify({ loggedIn: true }), stderr: '', exitCode: 0, timedOut: false };
@@ -105,8 +109,35 @@ describe('accounts add wizard', () => {
       expect(env?.CLAUDE_CONFIG_DIR).toBe(expectedConfigDir);
       for (const key of Object.keys(ambient)) expect(env).not.toHaveProperty(key);
     }
-    // The strip acts on a COPY — the live process.env is untouched.
-    expect(process.env.ANTHROPIC_API_KEY).toBeUndefined();
+    // accountEnv copies process.env — during the call the live env still carried every ambient value
+    // (proves non-mutation without depending on post-cleanup state, which a real CI env could hold).
+    expect(captured.envDuringLogin).toEqual(ambient);
+  });
+
+  it('strips inherited claude creds case-insensitively — a Windows mixed-case key would otherwise survive (HED-585)', async () => {
+    const home = tempDir();
+    const path = join(home, 'case.json');
+    const captured: { login?: NodeJS.ProcessEnv } = {};
+    const capturingRunner: CliRunner = {
+      login: (_provider, env) => { captured.login = { ...env }; },
+      status: () => ({ stdout: JSON.stringify({ loggedIn: true }), stderr: '', exitCode: 0, timedOut: false }),
+    };
+    // Lower/mixed-case spellings: case-insensitive on Windows, so a fixed-case delete would miss them.
+    const mixed: Record<string, string> = {
+      anthropic_api_key: 'lower-must-not-leak', Anthropic_Auth_Token: 'mixed-must-not-leak',
+    };
+    const saved: Record<string, string | undefined> = {};
+    for (const [key, value] of Object.entries(mixed)) { saved[key] = process.env[key]; process.env[key] = value; }
+    try {
+      await runAccountsAdd({ provider: 'claude', registryPath: path, homeDir: home }, {
+        prompter: new ScriptedPrompter([true, 'mc', 'paid', 'T2', false, false]), runner: capturingRunner,
+      });
+    } finally {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key]; else process.env[key] = value;
+      }
+    }
+    for (const key of Object.keys(mixed)) expect(captured.login).not.toHaveProperty(key);
   });
 
   it('echoes the signed-in identity on the claude PASS line, never a token field (HED-585)', async () => {

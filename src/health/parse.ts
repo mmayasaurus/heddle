@@ -53,14 +53,20 @@ export function loginStatus(stdout: string, stderr: string): boolean | undefined
  * It reads ONLY these three identity fields by name, so no credential/token field can be surfaced.
  */
 export function loginIdentity(stdout: string): string | undefined {
-  let parsed: Record<string, unknown>;
+  let parsed: unknown;
   try {
-    parsed = JSON.parse(stdout) as Record<string, unknown>;
+    parsed = JSON.parse(stdout);
   } catch {
     return undefined;
   }
 
-  const str = (key: string): string | undefined => (typeof parsed[key] === 'string' ? (parsed[key] as string) : undefined);
+  // `JSON.parse('null')` is null and primitives/arrays are not the identity object — guard before indexing.
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return undefined;
+  }
+
+  const obj = parsed as Record<string, unknown>;
+  const str = (key: string): string | undefined => (typeof obj[key] === 'string' ? (obj[key] as string) : undefined);
   const email = str('email');
 
   if (!email) {

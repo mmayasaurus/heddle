@@ -83,8 +83,13 @@ const CLAUDE_AMBIENT_CRED_VARS = [
 function accountEnv(provider: NativeProvider, configPath: string | null): NodeJS.ProcessEnv {
   if (provider === 'claude' && configPath) {
     // Copy process.env first, then strip the ambient creds from the COPY — never mutate process.env.
+    // Match keys case-INSENSITIVELY: Windows env var names are case-insensitive, and the copied object
+    // can retain a mixed-case spelling (e.g. anthropic_api_key) that a fixed-case delete would miss.
+    const strip = new Set<string>(CLAUDE_AMBIENT_CRED_VARS.map((name) => name.toUpperCase()));
     const env: NodeJS.ProcessEnv = { ...process.env, CLAUDE_CONFIG_DIR: configPath };
-    for (const key of CLAUDE_AMBIENT_CRED_VARS) delete env[key];
+    for (const key of Object.keys(env)) {
+      if (strip.has(key.toUpperCase())) delete env[key];
+    }
     return env;
   }
   if (provider === 'codex' && configPath) return { ...process.env, CODEX_HOME: configPath };
