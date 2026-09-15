@@ -245,6 +245,24 @@ describe('redactSecrets — shapes-only decorated credentials (HED-651)', () => 
     }
   });
 
+  it('redacts a GLM key with an over-long contiguous run glued to it — the shapes-only dotted rule is unbounded (no {64} ceiling)', () => {
+    // Round-2 adversarial MEDIUM: the shared full-mode GLM rule caps each side at {20,64}; with the opaque
+    // backstop OFF, a decorated key whose contiguous alnum run exceeds 64 on either side outran that ceiling
+    // and leaked (the lookbehind pins the ONLY valid start at the run head, so backtracking never reaches
+    // the dot). Shapes-only lifts the cap to {20,}/{12,}; the pinned start keeps it linear (ReDoS test above).
+    const glm = 'abcdef0123456789abcdef0123456789.abcdef0123456789'; // <32>.<16>, scrub/gitleaks-safe
+    for (const input of [
+      '?? ' + 'p'.repeat(33) + glm, // left run 65 = 33 filler + 32 — leaks on the pre-fix HEAD
+      '?? ' + 'p'.repeat(35) + glm, // left run 67
+      '?? ' + glm + 'q'.repeat(49), // right run 65 = 16 + 49
+      '?? ' + 'p'.repeat(32) + glm, // left run 64 — the ceiling edge, must still redact (no regression)
+    ]) {
+      const out = S(input);
+      expect(out).toBe('?? [redacted]');
+      expect(out).not.toContain('abcdef0123456789');
+    }
+  });
+
   it('preserves ordinary filenames whose names merely contain an sk-/dotted substring', () => {
     // sk- is a common English substring; the (?<![A-Za-z]) guard keeps letter-preceded words intact.
     for (const f of [
@@ -266,8 +284,14 @@ describe('redactSecrets — shapes-only decorated credentials (HED-651)', () => 
     expect(redactSecrets('?? backup_' + 'gh' + 'p_EXAMPLE000000000000000000000000')).toBe('?? [redacted]');
   });
 
-  it('accepts the documented residual: a LETTER-decorated recognized prefix (xsk-) reads as an ordinary word', () => {
-    const residual = '?? x' + 'sk-' + 'DEADBEEF1234567890';
-    expect(S(residual)).toBe(residual); // unchanged — same class as the prefix-less opaque residual
+  it('accepts the documented residual: a LETTER-decorated recognized prefix (xsk-) reads as an ordinary word in shapes-only, yet full mode still scrubs it', () => {
+    // Realistic ~100-char key body so full mode's opaque 24+ backstop actually FIRES — proving the residual
+    // is SHAPES-ONLY (letter-decoration reads as a word: no \b precedes the embedded sk-) while the
+    // vendor-error path (full mode) still scrubs the whole run. Split literals keep the shipped source
+    // free of a scannable sk- shape (public-scrub convention).
+    const body = 'ant-api03-' + 'A1b2c3D4e5'.repeat(9); // ~100 chars, obviously synthetic
+    const residual = '?? x' + 'sk-' + body;
+    expect(S(residual)).toBe(residual);                    // shapes-only: unchanged (accepted residual)
+    expect(redactSecrets(residual)).toBe('?? [redacted]'); // full mode: opaque backstop catches it
   });
 });

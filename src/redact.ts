@@ -1,6 +1,7 @@
-// The credential-PREFIX arms — the src/release/scrub.ts credentialPatterns set (sk-, gh[po]_,
-// github_pat_, gsk_, csk-, lin_api_/lin_oauth_, xox[baprs]-) plus the AWS access-key-id shape
-// (A[KS]IA + 16). SINGLE SOURCE OF TRUTH for both redaction modes, so a prefix added here is covered in
+// The credential-PREFIX arms — a SUPERSET of src/release/scrub.ts credentialPatterns: the shared sk-,
+// github_pat_, gsk_, csk-, lin_api_/lin_oauth_; gh[po]_ (scrub.ts has ghp_ only — this also catches
+// gho_); PLUS xox[baprs]- (Slack) and the AWS access-key-id shape A[KS]IA + 16, neither of which is in
+// scrub.ts. SINGLE SOURCE OF TRUTH for both redaction modes, so a prefix added here is covered in
 // full mode AND shapes-only and the two can never drift apart. sk- alone is a common English substring
 // (ta[sk]-, di[sk]-, ri[sk]-), so it carries a LEFT BOUNDARY in both modes (\b in full mode,
 // (?<![A-Za-z]) in the shapes-only pass); every DISTINCTIVE arm appears in no ordinary filename, so the
@@ -16,6 +17,10 @@ const DISTINCTIVE_PREFIX_ARMS =
 const CREDENTIAL_PREFIX_RULE = new RegExp(`\\b(?:${SK_PREFIX_ARM}|${DISTINCTIVE_PREFIX_ARMS})`, 'g');
 // Shapes-only: the DISTINCTIVE arms only, with no left boundary (embedded-in-filename credential).
 const EMBEDDED_DISTINCTIVE_PREFIX_RULE = new RegExp(DISTINCTIVE_PREFIX_ARMS, 'g');
+// Shapes-only sk-: the shared SK_PREFIX_ARM guarded by a LEFT-LETTER boundary only (single source with
+// full mode's sk- arm, so the two can't drift; _/digit/boundary decorations are caught, English
+// ta[sk]-/di[sk]- survive). Its source is character-identical to the prior inline shapes-only literal.
+const EMBEDDED_SK_RULE = new RegExp('(?<![A-Za-z])' + SK_PREFIX_ARM, 'g');
 
 /** Remove credential-shaped values from text that may be persisted or returned to callers. */
 export function redactSecrets(text: string, opts: { credential?: string; shapesOnly?: boolean } = {}): string {
@@ -39,10 +44,11 @@ export function redactSecrets(text: string, opts: { credential?: string; shapesO
       // at the first comma; their sensitive params (nonce/response) are caught by the opaque rule below.
       .replace(/\bAuthorization\s*:\s*(?:[A-Za-z][A-Za-z0-9-]*\s+)?[^\s,;]+/gi, 'Authorization: [redacted]')
       .replace(/\bBearer\s+[^\s,;]+/gi, 'Bearer [redacted]')
-      // Unmistakable credential-PREFIX shapes — the src/release/scrub.ts credentialPatterns set: sk-*
-      // (Anthropic/OpenAI), gh[po]_ + github_pat_ (GitHub), gsk_ (Groq), csk- (Cerebras),
-      // lin_api_/lin_oauth_ (Linear), xox[baprs]- (Slack) — PLUS the AWS access-key-id shape A[KS]IA + 16
-      // (AKIA long-term / ASIA STS): it is exactly 20 chars, so it DODGES the 24+ opaque backstop and needs
+      // Unmistakable credential-PREFIX shapes — a SUPERSET of src/release/scrub.ts credentialPatterns:
+      // sk-* (Anthropic/OpenAI), gh[po]_ + github_pat_ (GitHub; scrub.ts has ghp_ only, this also
+      // catches gho_), gsk_ (Groq), csk- (Cerebras), lin_api_/lin_oauth_ (Linear), xox[baprs]- (Slack,
+      // not in scrub.ts) — PLUS the AWS access-key-id shape A[KS]IA + 16 (also not in scrub.ts;
+      // AKIA long-term / ASIA STS): it is exactly 20 chars, so it DODGES the 24+ opaque backstop and needs
       // its own arm. Redacted by shape, so a BARE token (no key=value context, too short or dot-split for the
       // opaque rule) is still caught. Each arm is prefix + one bounded/unbounded class with no trailing
       // literal, so matching stays linear. (AWS SECRET keys are 40-char base64: a slashless one is caught by
@@ -80,15 +86,23 @@ export function redactSecrets(text: string, opts: { credential?: string; shapesO
       //     left boundary (EMBEDDED_DISTINCTIVE_PREFIX_RULE, built from the SAME arms as full mode's rule,
       //     so the two cannot drift);
       //   • sk-: a common English substring (ta[sk]-, di[sk]-, ri[sk]-), so guard only against a preceding
-      //     LETTER — _/digit/boundary-decorated (backup_sk-, v2sk-) are caught, the English words survive;
-      //   • the GLM-dotted pair with a letter/digit-only lookbehind (allows a leading _/-, still refuses a
-      //     mid-token match) — the shared rule's lookbehind excludes _ and misses backup_<32>.<16>.
-      // Residual (accepted, same class as the prefix-less opaque token this mode already preserves): a
-      // recognized prefix decorated with a LETTER (xsk-…) is indistinguishable from an ordinary word.
+      //     LETTER (EMBEDDED_SK_RULE = (?<![A-Za-z]) + the shared SK_PREFIX_ARM) — _/digit/boundary-
+      //     decorated (backup_sk-, v2sk-) are caught, the English words survive;
+      //   • the GLM-dotted pair, lookbehind relaxed to (?<![A-Za-z0-9]) so a leading _/- is allowed
+      //     (the shared rule's lookbehind excludes _ and misses backup_<32>.<16>), and UNBOUNDED
+      //     ({20,}/{12,}, not the shared rule's {20,64}/{12,64}) so an over-long contiguous alnum run
+      //     glued to the key can't outrun a ceiling and leak; the lookbehind still pins the single match
+      //     start, so it stays linear. Over-redaction direction: a rare ordinary <20+>.<12+> alnum name.
+      // Residuals (accepted, same class as the prefix-less opaque token this mode already preserves):
+      //   (1) a recognized prefix decorated with a LETTER (xsk-…) is indistinguishable from an ordinary
+      //       word;
+      //   (2) a credential family in NEITHER the enumerated arms NOR the GLM shape (a novel vendor
+      //       prefix) — shapes-only recognizes only the enumerated forms, so it leaks here, though full
+      //       mode's opaque backstop still catches it on the vendor-error path.
       redacted = redacted
         .replace(EMBEDDED_DISTINCTIVE_PREFIX_RULE, '[redacted]')
-        .replace(/(?<![A-Za-z])sk-[A-Za-z0-9_-]+/g, '[redacted]')
-        .replace(/(?<![A-Za-z0-9])[A-Za-z0-9]{20,64}\.[A-Za-z0-9]{12,64}(?![A-Za-z0-9])/g, '[redacted]');
+        .replace(EMBEDDED_SK_RULE, '[redacted]')
+        .replace(/(?<![A-Za-z0-9])[A-Za-z0-9]{20,}\.[A-Za-z0-9]{12,}(?![A-Za-z0-9])/g, '[redacted]');
     }
 
     return redacted;
