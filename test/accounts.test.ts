@@ -296,6 +296,7 @@ describe('account registry writes', () => {
 
 describe('reconcileRegistryIdentity', () => {
   const { tempDir } = useTempResources('heddle-reconcile-identity-test-');
+  const CLAUDE_PRO_DIR = '/tmp/claude-pro';
 
   function registry(claudeIdentity: { accountUuid?: string; orgId?: string } = {}): AccountRegistry {
     return {
@@ -303,7 +304,7 @@ describe('reconcileRegistryIdentity', () => {
       accounts: [
         {
           id: 'claude-pro', provider: 'claude', harness: 'claude-code',
-          credentialRef: 'claude:/tmp/claude-pro', configDir: '/tmp/claude-pro', ...claudeIdentity,
+          credentialRef: `claude:${CLAUDE_PRO_DIR}`, configDir: CLAUDE_PRO_DIR, ...claudeIdentity,
         },
         {
           id: 'codex-pro', provider: 'codex', harness: 'codex-cli',
@@ -315,7 +316,7 @@ describe('reconcileRegistryIdentity', () => {
 
   it('populates fresh account and organization identities', () => {
     const result = reconcileRegistryIdentity(registry(), {
-      rows: [{ id: 'claude-pro', liveIdentity: { accountUuid: 'A', organizationUuid: 'O' } }],
+      rows: [{ id: 'claude-pro', configDir: CLAUDE_PRO_DIR, liveIdentity: { accountUuid: 'A', organizationUuid: 'O' } }],
     });
 
     expect(result.changes).toEqual([{ id: 'claude-pro', accountUuid: 'A', orgId: 'O' }]);
@@ -325,7 +326,7 @@ describe('reconcileRegistryIdentity', () => {
 
   it('populates accountUuid without orgId when the live organization is null', () => {
     const result = reconcileRegistryIdentity(registry(), {
-      rows: [{ id: 'claude-pro', liveIdentity: { accountUuid: 'A', organizationUuid: null } }],
+      rows: [{ id: 'claude-pro', configDir: CLAUDE_PRO_DIR, liveIdentity: { accountUuid: 'A', organizationUuid: null } }],
     });
 
     expect(result.changes).toEqual([{ id: 'claude-pro', accountUuid: 'A' }]);
@@ -337,7 +338,7 @@ describe('reconcileRegistryIdentity', () => {
   it('does nothing when persisted identity already matches the live identity', () => {
     const original = registry({ accountUuid: 'A', orgId: 'O' });
     const result = reconcileRegistryIdentity(original, {
-      rows: [{ id: 'claude-pro', liveIdentity: { accountUuid: 'A', organizationUuid: 'O' } }],
+      rows: [{ id: 'claude-pro', configDir: CLAUDE_PRO_DIR, liveIdentity: { accountUuid: 'A', organizationUuid: 'O' } }],
     });
 
     expect(result.changes).toEqual([]);
@@ -347,16 +348,28 @@ describe('reconcileRegistryIdentity', () => {
 
   it('backfills orgId when accountUuid already matches', () => {
     const result = reconcileRegistryIdentity(registry({ accountUuid: 'A' }), {
-      rows: [{ id: 'claude-pro', liveIdentity: { accountUuid: 'A', organizationUuid: 'O' } }],
+      rows: [{ id: 'claude-pro', configDir: CLAUDE_PRO_DIR, liveIdentity: { accountUuid: 'A', organizationUuid: 'O' } }],
     });
 
     expect(result.changes).toEqual([{ id: 'claude-pro', accountUuid: 'A', orgId: 'O' }]);
     expect(result.registry.accounts[0]).toMatchObject({ accountUuid: 'A', orgId: 'O' });
   });
 
+  it('treats an empty-string persisted orgId as unset and backfills it', () => {
+    // optionalString yields "" (not undefined) for an empty orgId on disk; "" is unset, so a live org must
+    // backfill it and never be reported as a conflict — the same truthiness accountUuid already uses (qodo).
+    const result = reconcileRegistryIdentity(registry({ accountUuid: 'A', orgId: '' }), {
+      rows: [{ id: 'claude-pro', configDir: CLAUDE_PRO_DIR, liveIdentity: { accountUuid: 'A', organizationUuid: 'O' } }],
+    });
+
+    expect(result.changes).toEqual([{ id: 'claude-pro', accountUuid: 'A', orgId: 'O' }]);
+    expect(result.warnings).toEqual([]);
+    expect(result.registry.accounts[0]).toMatchObject({ accountUuid: 'A', orgId: 'O' });
+  });
+
   it('refuses to overwrite a conflicting persisted orgId (populate-only)', () => {
     const result = reconcileRegistryIdentity(registry({ accountUuid: 'A', orgId: 'OLD-ORG' }), {
-      rows: [{ id: 'claude-pro', liveIdentity: { accountUuid: 'A', organizationUuid: 'NEW-ORG' } }],
+      rows: [{ id: 'claude-pro', configDir: CLAUDE_PRO_DIR, liveIdentity: { accountUuid: 'A', organizationUuid: 'NEW-ORG' } }],
     });
 
     expect(result.changes).toEqual([]);
@@ -369,7 +382,7 @@ describe('reconcileRegistryIdentity', () => {
 
   it('populates a blank accountUuid but refuses a conflicting orgId in the same row', () => {
     const result = reconcileRegistryIdentity(registry({ orgId: 'OLD-ORG' }), {
-      rows: [{ id: 'claude-pro', liveIdentity: { accountUuid: 'A', organizationUuid: 'NEW-ORG' } }],
+      rows: [{ id: 'claude-pro', configDir: CLAUDE_PRO_DIR, liveIdentity: { accountUuid: 'A', organizationUuid: 'NEW-ORG' } }],
     });
 
     // accountUuid was blank → populated; orgId differs → refused + warned, left as OLD-ORG.
@@ -382,7 +395,7 @@ describe('reconcileRegistryIdentity', () => {
 
   it('refuses to overwrite a conflicting persisted accountUuid', () => {
     const result = reconcileRegistryIdentity(registry({ accountUuid: 'OLD' }), {
-      rows: [{ id: 'claude-pro', liveIdentity: { accountUuid: 'NEW', organizationUuid: 'O' } }],
+      rows: [{ id: 'claude-pro', configDir: CLAUDE_PRO_DIR, liveIdentity: { accountUuid: 'NEW', organizationUuid: 'O' } }],
     });
 
     expect(result.changes).toEqual([]);
@@ -397,7 +410,7 @@ describe('reconcileRegistryIdentity', () => {
   it('skips a poll row without a live identity', () => {
     const original = registry({ accountUuid: 'A', orgId: 'O' });
     const result = reconcileRegistryIdentity(original, {
-      rows: [{ id: 'claude-pro', liveIdentity: null }],
+      rows: [{ id: 'claude-pro', configDir: CLAUDE_PRO_DIR, liveIdentity: null }],
     });
 
     expect(result.changes).toEqual([]);
@@ -408,14 +421,30 @@ describe('reconcileRegistryIdentity', () => {
   it('warns when a poll row has no matching claude registry account', () => {
     const original = registry();
     const result = reconcileRegistryIdentity(original, {
-      rows: [{ id: 'ghost', liveIdentity: { accountUuid: 'A', organizationUuid: 'O' } }],
+      rows: [{ id: 'ghost', configDir: null, liveIdentity: { accountUuid: 'A', organizationUuid: 'O' } }],
     });
 
     expect(result.changes).toEqual([]);
     expect(result.warnings).toEqual([{
       code: 'no-registry-match', id: 'ghost',
-      message: 'poll row id "ghost" has no matching claude registry account',
+      message: 'no matching claude registry account',
     }]);
+    expect(result.registry).toBe(original);
+  });
+
+  it('refuses to write when the account was replaced under the same id during the poll (configDir changed)', () => {
+    // The identity was polled from the pre-poll credential; if the registry row now points at a DIFFERENT
+    // configDir, that identity belongs to the old credential and must not be written (populate-only would
+    // otherwise make the mis-attribution sticky). A true CAS is HED-503.
+    const original = registry({ accountUuid: 'A' });
+    const result = reconcileRegistryIdentity(original, {
+      rows: [{ id: 'claude-pro', configDir: '/tmp/replacement-credential', liveIdentity: { accountUuid: 'STALE', organizationUuid: 'O' } }],
+    });
+
+    expect(result.changes).toEqual([]);
+    expect(result.warnings).toHaveLength(1);
+    expect(result.warnings[0]).toMatchObject({ code: 'no-registry-match', id: 'claude-pro' });
+    expect(result.warnings[0]!.message).toContain('replaced during the poll');
     expect(result.registry).toBe(original);
   });
 
@@ -423,7 +452,7 @@ describe('reconcileRegistryIdentity', () => {
     const original = registry();
     const codexBefore = original.accounts[1];
     const result = reconcileRegistryIdentity(original, {
-      rows: [{ id: 'claude-pro', liveIdentity: { accountUuid: 'A', organizationUuid: 'O' } }],
+      rows: [{ id: 'claude-pro', configDir: CLAUDE_PRO_DIR, liveIdentity: { accountUuid: 'A', organizationUuid: 'O' } }],
     });
 
     expect(result.registry.accounts[1]).toBe(codexBefore);
@@ -438,13 +467,13 @@ describe('reconcileRegistryIdentity', () => {
     };
     writeFileSync(path, JSON.stringify({
       schemaVersion: 2,
-      claude: [{ id: 'claude-pro', configDir: '/tmp/claude-pro' }],
+      claude: [{ id: 'claude-pro', configDir: CLAUDE_PRO_DIR }],
       codex: [codexRow],
       someUnknownKey: 123,
     }));
 
     const identity = reconcileRegistryIdentity(loadAccountRegistry(path), {
-      rows: [{ id: 'claude-pro', liveIdentity: { accountUuid: 'A', organizationUuid: 'O' } }],
+      rows: [{ id: 'claude-pro', configDir: CLAUDE_PRO_DIR, liveIdentity: { accountUuid: 'A', organizationUuid: 'O' } }],
     });
     writeAccountRegistry(identity.registry, path);
     const raw = JSON.parse(readFileSync(path, 'utf8'));

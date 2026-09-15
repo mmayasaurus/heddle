@@ -807,7 +807,7 @@ try {
         let identityError: string | undefined;
         try {
           const registry = loadAccountRegistry();
-          const identity = reconcileRegistryIdentity(registry, { rows: result.rows.map((r) => ({ id: r.id, liveIdentity: r.liveIdentity })) });
+          const identity = reconcileRegistryIdentity(registry, { rows: result.rows.map((r) => ({ id: r.id, configDir: r.configDir, liveIdentity: r.liveIdentity })) });
           if (identity.changes.length) writeAccountRegistry(identity.registry);
           // Report changes/warnings only AFTER a successful write: a writeAccountRegistry throw (disk full,
           // EACCES, concurrent lock) then jumps to catch with idChanges still [] — the output surfaces the
