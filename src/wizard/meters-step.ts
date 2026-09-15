@@ -1,5 +1,6 @@
 import { join } from 'node:path';
 import { loadAccountRegistry } from '../accounts.js';
+import { atomicWriteFile, policyPath } from './persist.js';
 import type { WizardStep } from './step.js';
 
 export interface MetersPolicy {
@@ -18,6 +19,13 @@ export const metersStep: WizardStep = {
   id: 'meters',
   title: 'Usage meters',
   async run(ctx, io) {
+    // dry-run (`heddle setup --dry-run`): report what a real run would do, prompt for nothing, write
+    // nothing — mirroring accountsStep. meters is a writing step, so preview returns 'skipped'.
+    if (ctx.dryRun) {
+      io.report('dry-run — meters: a real run would prompt per meterable (native Claude) account and write the opt-in policy to ~/.heddle/policy/meters.json; nothing was prompted or written.');
+      return { id: 'meters', status: 'skipped', summary: 'dry-run — meters prompting and policy write skipped' };
+    }
+
     io.report([
       'Usage meters in the statusline read from each account\'s usage tap.',
       'They are blank until a session\'s first turn, then populate and self-heal each session.',
@@ -57,8 +65,9 @@ export const metersStep: WizardStep = {
     }
 
     const policy = computeMetersPolicy(decisions);
-    // HOLD(HED-564): persist policy via ./persist.js (policyPath + atomicWriteFile) under a ctx.dryRun guard once HED-564 lands.
-    void policy;
+    // Own our write via the HED-564 persist seam: atomic (temp-in-dir + rename), parent-dir-creating,
+    // mode-preserving. The dry-run guard at the top of run() means this only runs for a real setup.
+    atomicWriteFile(policyPath(ctx.homeDir, 'meters'), `${JSON.stringify(policy, null, 2)}\n`);
 
     const enabled = decisions.filter(({ meters }) => meters).length;
     return {

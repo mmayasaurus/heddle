@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { mkdtempSync } from 'node:fs';
@@ -40,6 +40,10 @@ describe('metersStep', () => {
     expect(captured.join('\n')).toMatch(/blank|first turn|self-heal/i);
     expect(result).toMatchObject({ id: 'meters', status: 'done', summary: 'usage meters enabled for 1 of 2 account(s)' });
     expect(result.detail).toBe('claude-one (claude): on\nclaude-two (claude): off');
+    // The step owns its write: the meters policy lands atomically at ~/.heddle/policy/meters.json.
+    expect(JSON.parse(readFileSync(join(homeDir, '.heddle', 'policy', 'meters.json'), 'utf8'))).toEqual({
+      version: 1, accounts: { 'claude-one': { meters: true }, 'claude-two': { meters: false } },
+    });
   });
 
   it('skips an empty registry without prompting', async () => {
@@ -83,6 +87,17 @@ describe('metersStep', () => {
 
     expect(result).toEqual({ id: 'meters', status: 'skipped', summary: 'no meterable accounts' });
     expect(captured).toContain('no accounts with a populated usage meter yet (native Claude only today)');
+  });
+
+  it('under --dry-run reports intent, prompts for nothing, and writes no policy file', async () => {
+    const homeDir = homeWithAccounts({ schemaVersion: 2, claude: [{ id: 'claude-one', configDir: null }] });
+    const captured: string[] = [];
+    // Empty ScriptedPrompter: a dry run must short-circuit before any prompt.
+    const result = await metersStep.run({ ...context(homeDir), dryRun: true }, io([], captured));
+
+    expect(result).toMatchObject({ id: 'meters', status: 'skipped' });
+    expect(captured.join('\n')).toMatch(/dry-run/i);
+    expect(existsSync(join(homeDir, '.heddle', 'policy', 'meters.json'))).toBe(false);
   });
 });
 
