@@ -648,7 +648,7 @@ describe('secure filesystem primitives', () => {
 
       // … but `boundary` is EXCLUSIVE: home and everything above it are the operator/OS trust domain, not
       // heddle's to judge — only ~/.heddle and below are validated. So a euid-owned symlinked or loose HOME is
-      // accepted (the one operator-facing semantic; the inclusive alternative would reject it — Maya's call).
+      // accepted (the one operator-facing semantic; the inclusive alternative would reject it — operator's call).
       expect(() => ensureSecureDir(leaf, { boundary: home })).not.toThrow();
     });
 
