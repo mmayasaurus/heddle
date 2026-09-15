@@ -119,12 +119,14 @@ export function dryRunGate(step: WizardStep, would: string): WizardStep {
 
 /**
  * Build the ordered built-in step set, in walkthrough order:
- * accounts → model-economy → spread → meters → rules → permissions → pr-automation → doctor (last). Each
+ * canonical → accounts → model-economy → spread → meters → rules → permissions → pr-automation → doctor (last). Each
  * self-contained step module is registered here as one line by its owner as it lands (HED-564 protocol).
- * model-economy, spread, meters, rules, and permissions each write UNDER `ctx.homeDir` and self-handle
- * --dry-run inside their own module; pr-automation writes under `ctx.targetDir` (the target repo's
- * `.github/`) and self-gates via `applies` on a git target (skipped when no `--target` is set) — all
- * self-dry-run, so they need no wrapper here. `rulesStep` is the one step taking a construction dep — the rule catalog
+ * canonical (FIRST — records `~/.heddle/canonical.json` and materializes the discipline hooks the doctor
+ * gate and a flag-free `init-project` depend on), model-economy, spread, meters, rules, and permissions each
+ * write UNDER `ctx.homeDir` and self-handle --dry-run inside their own module; pr-automation writes under
+ * `ctx.targetDir` (the target repo's `.github/`), auto-deriving that target from the cwd git repo or offering
+ * to add one when there is none (HED-624), and self-gates via `applies` — all self-dry-run, so they need no
+ * wrapper here. `rulesStep` is the one step taking a construction dep — the rule catalog
  * — defaulted to the bundled catalog (`resolveCatalogRoot()`) so
  * `buildSteps({ runner })` stays the caller contract. Doctor is the read-only finish gate, wrapped only
  * in `dryRunGate` (a --dry-run preview skips it). It now runs under `heddle setup --home <dir>` too: the
