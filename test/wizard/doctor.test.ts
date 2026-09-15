@@ -1,8 +1,8 @@
 import { existsSync, mkdirSync, readdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join, resolve, sep } from 'node:path';
+import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createDoctorStep, homePaths, relocateHomePath } from '../../src/wizard/doctor.js';
+import { createDoctorStep, homePaths } from '../../src/wizard/doctor.js';
 import { runDoctor as realRunDoctor, formatDoctorReport, type DoctorReport, type DoctorDeps } from '../../src/doctor.js';
 import { ScriptedPrompter } from '../../src/wizard/prompt.js';
 import type { WizardContext, WizardIO } from '../../src/wizard/step.js';
@@ -36,46 +36,22 @@ function makeIO(): { io: WizardIO; lines: string[] } {
 describe('homePaths', () => {
   const { tempDir } = useTempResources('heddle-wizard-doctor-home-paths-');
 
-  it('returns the complete home-scoped doctor path set under <home>/.heddle', () => {
+  it('re-roots ONLY the account registry under <home> — the sole setup-written path doctor verifies', () => {
     const home = tempDir();
-    const paths = homePaths(home);
-    const heddleDir = resolve(home, '.heddle');
-
-    expect(Object.keys(paths).sort()).toEqual(['accounts', 'comms', 'heddle', 'operatorToken', 'projects']);
-    for (const path of Object.values(paths)) {
-      expect(path).toBeDefined();
-      const resolvedPath = resolve(path!);
-      expect(resolvedPath === heddleDir || resolvedPath.startsWith(`${heddleDir}${sep}`)).toBe(true);
-      expect(resolvedPath.startsWith(resolve(home))).toBe(true);
-    }
+    const paths = homePaths(home, {});
+    // Deliberately NOT projects/comms/operatorToken/heddle: those are not written by `heddle setup`
+    // and their runtime consumers are homedir/env-fixed, so doctor keeps its standard resolution.
+    expect(Object.keys(paths)).toEqual(['accounts']);
+    expect(paths.accounts).toBe(join(home, '.heddle', 'accounts.json'));
   });
 
-  it('relocates a genuine process-home default beneath the requested home', () => {
+  it('honors HEDDLE_ACCOUNTS first, exactly as accountsStep resolves the registry path', () => {
     const home = tempDir();
-    expect(relocateHomePath(home, join(homedir(), '.heddle', 'fixture.json')))
-      .toBe(join(home, '.heddle', 'fixture.json'));
-  });
-
-  it('throws when a default path would escape the requested home', () => {
-    const outsideDefault = resolve(homedir(), '..', 'outside-default.json');
-    expect(() => relocateHomePath(tempDir(), outsideDefault)).toThrow(outsideDefault);
-  });
-
-  it('stays valid when process.env.HOME is overridden AFTER module load (HED-596/HED-599 regression)', () => {
-    // The setup-dryrun harness (W, HED-599) sets process.env.HOME to a per-test temp dir in beforeEach
-    // — AFTER this module and the DEFAULT_* constants were imported. relocateHomePath relativizes
-    // against the frozen module-load home (PROCESS_HOME), NOT the live overridden homedir(); a live
-    // read would make relative()/join() escape the real-home default and the fail-closed guard would
-    // wrongly throw on a valid home, mapping a canned-green doctor finish to 'failed'. Create the temp
-    // dirs BEFORE the stub so tempDir() is unaffected, then prove homePaths neither throws nor drifts.
-    const target = tempDir();
-    const overriddenHome = tempDir();
-    vi.stubEnv('HOME', overriddenHome); // homedir() now returns overriddenHome, not the module-load home
-    const paths = homePaths(target); // must NOT throw despite the override
-    expect(paths.accounts).toBe(join(target, '.heddle', 'accounts.json'));
-    for (const path of Object.values(paths)) {
-      expect(resolve(path!).startsWith(resolve(target))).toBe(true); // still strictly under target
-    }
+    const envAccounts = join(tempDir(), 'env-accounts.json');
+    // mirrors accounts-add.ts registryPath (`HEDDLE_ACCOUNTS ?? join(home,…)`): the env var wins.
+    expect(homePaths(home, { HEDDLE_ACCOUNTS: envAccounts } as NodeJS.ProcessEnv).accounts).toBe(envAccounts);
+    // env is a PARAMETER, so the result never depends on the tester's real shell env.
+    expect(homePaths(home, {}).accounts).toBe(join(home, '.heddle', 'accounts.json'));
   });
 });
 
@@ -142,32 +118,37 @@ describe('createDoctorStep (HED-476 wizard finish = read-only `heddle doctor`)',
     expect(result.summary).toBe('setup NOT verified — no checks ran');
   });
 
-  it('runs a FULL sweep with the wizard clock and home-scoped config paths (F1/F7)', async () => {
+  it('runs a FULL sweep with the wizard clock and the home-scoped account path (F1/F7)', async () => {
     const home = tempDir();
     const spy = vi.fn(async (_opts: { provider?: string }, _partial: Partial<DoctorDeps>) => report({ ok: 1 }));
-    const step = createDoctorStep({ runDoctor: spy });
+    // Inject env:{} so homePaths is deterministic regardless of the tester's real HEDDLE_ACCOUNTS —
+    // createDoctorStep feeds the SAME env to homePaths and to the doctor's deps.env.
+    const step = createDoctorStep({ runDoctor: spy, doctorDeps: { env: {} as NodeJS.ProcessEnv } });
     await step.run(makeCtx(home), makeIO().io);
     expect(spy).toHaveBeenCalledTimes(1);
     const [opts, partial] = spy.mock.calls[0];
     expect(opts).toEqual({}); // full sweep — no {provider} filter (cursor F7)
     expect(partial.now?.()).toEqual(FIXED); // the wizard's clock reaches the runner
-    expect(partial.paths).toEqual(homePaths(home));
+    expect(partial.paths).toEqual(homePaths(home, {})); // re-roots the account registry under ctx.homeDir
     for (const path of Object.values(partial.paths!)) {
       expect(resolve(path!).startsWith(resolve(home))).toBe(true);
     }
   });
 
-  it('ignores HEDDLE_ACCOUNTS in the composed step even when ctx.homeDir is the default home', async () => {
+  it('honors HEDDLE_ACCOUNTS in the composed step, mirroring accountsStep (never a split verify)', async () => {
+    // accountsStep/spread/meters resolve the registry as HEDDLE_ACCOUNTS-first (accounts-add.ts:265), so
+    // the finish gate must verify THAT file — not the home-derived default — or it checks a registry the
+    // wizard never wrote (cursor HIGH / codeant, #204). env is injected so the doctor's deps.env and
+    // homePaths see the same value.
     const envAccounts = join(tempDir(), 'env-accounts.json');
-    vi.stubEnv('HEDDLE_ACCOUNTS', envAccounts);
     const spy = vi.fn(async (_opts: { provider?: string }, _partial: Partial<DoctorDeps>) => report({ ok: 1 }));
-    const step = createDoctorStep({ runDoctor: spy });
+    const step = createDoctorStep({ runDoctor: spy, doctorDeps: { env: { HEDDLE_ACCOUNTS: envAccounts } as NodeJS.ProcessEnv } });
 
     await step.run(makeCtx(homedir()), makeIO().io);
 
     const [, partial] = spy.mock.calls[0];
-    expect(partial.paths?.accounts).toBe(join(homedir(), '.heddle', 'accounts.json'));
-    expect(partial.paths?.accounts).not.toBe(envAccounts);
+    expect(partial.paths?.accounts).toBe(envAccounts); // HEDDLE_ACCOUNTS wins, exactly as the writer resolves it
+    expect(partial.paths?.accounts).not.toBe(join(homedir(), '.heddle', 'accounts.json'));
   });
 
   it('preserves an injected doctorDeps path over the home-scoped base paths', async () => {

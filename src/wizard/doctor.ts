@@ -7,66 +7,44 @@
 // (dashboard source vs installed), and provider catalog freshness. It does NOT check hook rules or
 // skill packs — those wizard steps carry their own results.
 //
-// In the composed wizard flow, the finish step relocates the home-scoped config tree (accounts,
-// projects, comms, operator token, and the heddle root used by the drift check) under ctx.homeDir via
-// homePaths. That mirrors exactly what accountsStep wrote under --home and ignores HEDDLE_* for
-// those paths, preventing a split install. Standalone `heddle doctor` (runDoctor via the CLI, not
-// this step) keeps its real-environment resolution unchanged. Routing and lanes are repo-scoped
-// config-as-code and are never re-rooted.
+// In the composed wizard flow, the finish step re-roots the ONE config path the sweep verifies that
+// setup also writes — the account registry — under ctx.homeDir, honoring HEDDLE_ACCOUNTS first exactly
+// as accountsStep does (see homePaths). That verifies the registry setup wrote under --home. Every
+// other doctor path keeps its standard env→homedir resolution: comms.db / operator token / projects
+// are not written by `heddle setup` (they come from `heddle comms init` / `heddle init-project`) and
+// their runtime consumers are homedir- or env-fixed — the operator token especially is a fixed trust
+// root the comms server only reads at ~/.heddle/operator.token, so re-rooting it would verify a token
+// the server can never read. Standalone `heddle doctor` (runDoctor via the CLI, not this step) is
+// unchanged. Routing and lanes are repo-scoped config-as-code and are never re-rooted.
 //
 // This is HED-564's read-only step: it makes NO config changes of its own. runDoctor is a read-only
 // probe with one incidental exception — opening an EXISTING older comms.db applies the standard
 // schema migration on construction (idempotent; a current-version db is a no-op; an absent db is not
 // created). Because the sweep changes no config, re-running `heddle setup` (or `heddle doctor`)
 // always reflects current truth rather than a one-time claim.
-import { homedir } from 'node:os';
-import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { join } from 'node:path';
 import type { WizardStep, WizardContext, WizardIO, WizardStepResult, WizardStepStatus } from './step.js';
 import { runDoctor as realRunDoctor, formatDoctorReport, type DoctorReport, type DoctorDeps } from '../doctor.js';
-import { DEFAULT_ACCOUNTS_PATH } from '../capaware.js';
-import { DEFAULT_PROJECTS_PATH } from '../projects.js';
-import { DEFAULT_COMMS_PATH } from '../comms/log.js';
-import { OPERATOR_TOKEN_PATH } from '../comms/server.js';
 
-// The reference home the DEFAULT_* path constants were built from, captured ONCE at module load.
-// Each DEFAULT_* is `join(homedir(), '.heddle', <name>)` frozen at ITS module's import — so relocation
-// must relativize against the home in effect THEN, not a live homedir() read. A test harness that
-// overrides process.env.HOME AFTER import (e.g. setup-dryrun.test.ts's per-test temp HOME) would
-// otherwise make homedir() diverge from the frozen constants: relative(tempHome, real-home-default)
-// escapes with `../..`, join() climbs back out, and the fail-closed guard would wrongly throw on a
-// perfectly valid `home`. Snapshotting keeps relocation faithful to the constants regardless of any
-// later HOME override, while the guard still catches a genuine non-home default. Do NOT replace this
-// with a live homedir() call. (heddle CLI processes never change HOME mid-run, so this is exact.)
-const PROCESS_HOME = homedir();
-
-/** Re-root a process-home default beneath `home`, failing closed if that default could escape. */
-export function relocateHomePath(home: string, defaultPath: string): string {
-  const relativePath = relative(PROCESS_HOME, defaultPath);
-  const relocated = join(home, relativePath);
-  const resolvedHome = resolve(home);
-  const resolvedRelocated = resolve(relocated);
-  const relativeToHome = relative(resolvedHome, resolvedRelocated);
-  if (
-    isAbsolute(relativePath)
-    || relativeToHome === ''
-    || isAbsolute(relativeToHome)
-    || relativeToHome === '..'
-    || relativeToHome.startsWith(`..${sep}`)
-  ) {
-    throw new Error(`Cannot relocate default path "${defaultPath}": expected it to be under "${PROCESS_HOME}"`);
-  }
-  return relocated;
-}
-
-/** Home-scoped path overrides for the composed setup wizard's doctor finish gate. */
-export function homePaths(home: string): Partial<DoctorDeps['paths']> {
-  return {
-    accounts: relocateHomePath(home, DEFAULT_ACCOUNTS_PATH),
-    projects: relocateHomePath(home, DEFAULT_PROJECTS_PATH),
-    comms: relocateHomePath(home, DEFAULT_COMMS_PATH),
-    operatorToken: relocateHomePath(home, OPERATOR_TOKEN_PATH),
-    heddle: join(home, '.heddle'),
-  };
+/**
+ * The home-scoped doctor path override for the composed setup wizard's finish gate.
+ *
+ * Of everything `heddle setup` writes, the account registry is the ONLY path the doctor sweep also
+ * verifies: comms.db + operator.token come from `heddle comms init`, projects.json from
+ * `heddle init-project`, and the policy/*.json files aren't checked by doctor at all. accountsStep —
+ * and the spread/meters readers — resolve that registry as
+ * `HEDDLE_ACCOUNTS ?? join(<homeDir>, '.heddle', 'accounts.json')` (src/wizard/accounts-add.ts
+ * registryPath), so the gate mirrors that EXACT resolution and verifies the registry setup actually
+ * wrote under `--home`. Every OTHER doctor path keeps its standard env→homedir resolution
+ * (resolveDoctorPaths): re-rooting them would make doctor check a path the runtime never reads — the
+ * operator token especially is a FIXED trust root the comms server only reads at OPERATOR_TOKEN_PATH.
+ * `env` is passed in (never read from process.env here) so it always matches the doctor's own
+ * `deps.env`, which resolveDoctorPaths reads for the same var.
+ */
+export function homePaths(home: string, env: NodeJS.ProcessEnv): Partial<DoctorDeps['paths']> {
+  // Mirror accounts-add.ts registryPath verbatim: `??` (so an empty HEDDLE_ACCOUNTS resolves the same
+  // path the writer used, not the default) over a literal join with no dependence on the process home.
+  return { accounts: env.HEDDLE_ACCOUNTS ?? join(home, '.heddle', 'accounts.json') };
 }
 
 /**
@@ -93,18 +71,20 @@ export function createDoctorStep(injected: DoctorStepDeps = {}): WizardStep {
     id: 'doctor',
     title: 'Verify setup',
     // No `applies` — doctor is the finish gate, so it always runs. targetDir is unused (global sweep),
-    // while homeDir relocates only the home-scoped config tree (see the header).
+    // while homeDir re-roots only the account registry the sweep verifies (see the header).
     async run(ctx: WizardContext, io: WizardIO): Promise<WizardStepResult> {
       // The verification itself is the ONLY failure that means "could not verify", so its catch is
       // scoped to just the runDoctor call — a later progress-reporting error must never be
       // misattributed as a verification failure (a real report would then be silently swallowed).
       let report: DoctorReport;
       try {
-        // Verify what the composed wizard wrote. Hermetic path overrides still win over the
-        // home-scoped base, while ctx.now remains authoritative for the wizard's run clock.
+        // Verify the account registry the composed wizard wrote under ctx.homeDir. homePaths reads the
+        // SAME env the doctor resolves against (deps.env defaults to process.env — src/doctor.ts), so
+        // its HEDDLE_ACCOUNTS-first resolution matches accountsStep's. Hermetic path overrides still
+        // win over the home-scoped base; ctx.now remains authoritative for the wizard's run clock.
         report = await run({}, {
           ...injected.doctorDeps,
-          paths: { ...homePaths(ctx.homeDir), ...injected.doctorDeps?.paths },
+          paths: { ...homePaths(ctx.homeDir, injected.doctorDeps?.env ?? process.env), ...injected.doctorDeps?.paths },
           now: () => ctx.now(),
         });
       } catch (error) {
