@@ -18,9 +18,14 @@ jobs:
       contents: write
     steps:
       - name: Checkout release tag
+        # ref is pinned to refs/tags/… so checkout resolves the TAG specifically. An unqualified ref
+        # resolves a same-named BRANCH first, so a repo with both a branch and a tag "v1.2.3" would build
+        # the branch tip while the release below tags the tag's commit — different commits. A branch name,
+        # a commit SHA, or a nonexistent tag has no refs/tags/<input> and fails closed HERE, so the build
+        # can only ever run the exact commit the named tag points at.
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.tag }}
+          ref: refs/tags/${{ inputs.tag }}
           persist-credentials: false
 
       - name: Configure this release build
@@ -31,8 +36,8 @@ jobs:
       - name: Create GitHub Release
         # inputs.tag is routed through an env var (not interpolated into the shell) to avoid script
         # injection — the same pattern gate.yml.tmpl uses for every ${{ }} value. --verify-tag makes gh
-        # fail if the tag does not already exist, so a release is never created at the default-branch tip
-        # from a non-tag / nonexistent ref: it must be an existing tag (the one checked out and built).
+        # fail if the tag does not already exist, so gh never creates one at the default-branch tip; the
+        # release references the same existing tag the checkout above pinned and built.
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ inputs.tag }}

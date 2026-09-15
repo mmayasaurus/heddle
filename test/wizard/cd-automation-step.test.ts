@@ -86,7 +86,12 @@ describe('cdAutomationStep', () => {
     // that would not load on GitHub) AND lets us assert the safety shape structurally, not by substring.
     const doc = parse(template) as {
       on?: Record<string, unknown>;
-      jobs?: { release?: { 'runs-on'?: unknown; steps?: Array<{ run?: string; if?: unknown; 'continue-on-error'?: unknown }> } };
+      jobs?: {
+        release?: {
+          'runs-on'?: unknown;
+          steps?: Array<{ name?: string; run?: string; uses?: string; with?: { ref?: unknown }; if?: unknown; 'continue-on-error'?: unknown }>;
+        };
+      };
     };
 
     // Manual-dispatch ONLY — no push / tags / schedule / release / pull_request / repository_dispatch /
@@ -98,12 +103,22 @@ describe('cdAutomationStep', () => {
     expect(doc.jobs?.release?.['runs-on']).toBe('ubuntu-24.04');
 
     const steps = doc.jobs?.release?.steps ?? [];
-    // Fail-closed: a placeholder build step exits non-zero (operator must configure it) and the release
-    // step does not bypass that failure via if:/continue-on-error — so a fresh, unconfigured scaffold
-    // cannot create a Release on its first dispatch.
-    expect(steps.some((step) => typeof step.run === 'string' && step.run.includes('exit 1'))).toBe(true);
-    const releaseStep = steps.find((step) => typeof step.run === 'string' && step.run.includes('gh release create'));
-    expect(releaseStep).toBeDefined();
+    // Fail-closed, bound STRUCTURALLY so a future drift edit that breaks it reddens (not just a surface
+    // substring check): a fresh, unconfigured scaffold cannot reach `gh release create` on first dispatch.
+    // (1) The placeholder is a real `exit 1` LINE — `/^\s*exit 1\s*$/m` rejects a defanged `echo "exit 1"`.
+    const placeholderIdx = steps.findIndex((step) => typeof step.run === 'string' && /^\s*exit 1\s*$/m.test(step.run));
+    const releaseIdx = steps.findIndex((step) => typeof step.run === 'string' && step.run.includes('gh release create'));
+    expect(placeholderIdx).toBeGreaterThanOrEqual(0);
+    expect(releaseIdx).toBeGreaterThanOrEqual(0);
+    // (2) The failing build precedes the release, so the release step's implicit `if: success()` is false
+    //     after it fails (a reorder that put the release first would run it unconditionally).
+    expect(placeholderIdx).toBeLessThan(releaseIdx);
+    // (3) The placeholder's own failure is not swallowed — `continue-on-error: true` here would flip the
+    //     job back to success and let the release run.
+    expect(steps[placeholderIdx]?.['continue-on-error']).toBeUndefined();
+
+    const releaseStep = steps[releaseIdx];
+    // The release step itself does not bypass a failed build via if:/continue-on-error either.
     expect(releaseStep?.if).toBeUndefined();
     expect(releaseStep?.['continue-on-error']).toBeUndefined();
     // Injection-safe: the dispatch input is routed through env:, never interpolated into the run: shell.
@@ -111,6 +126,12 @@ describe('cdAutomationStep', () => {
     // --verify-tag: gh fails if the tag does not already exist, so a release can never be created at the
     // default-branch tip from a non-tag/nonexistent ref (qodo HIGH + cursor "wrong commit").
     expect(releaseStep?.run).toContain('--verify-tag');
+
+    // Checkout pins the TAG ref (refs/tags/…), so a branch name / commit SHA / nonexistent input fails at
+    // checkout — the release can only ever build the commit the named tag points at (an unqualified ref
+    // resolves a same-named branch first, diverging the built commit from the released one).
+    const checkoutStep = steps.find((step) => typeof step.uses === 'string' && step.uses.includes('actions/checkout'));
+    expect(checkoutStep?.with?.ref).toBe('refs/tags/${{ inputs.tag }}');
   });
 
   it('only applies to a target repository root and resolves its bundled template', () => {
