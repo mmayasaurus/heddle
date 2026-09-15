@@ -337,11 +337,12 @@ export function configChecks(
 /**
  * comms readiness (HED-463 / HED-409 acceptance "doctor comms: ok"). READ-ONLY: it must never
  * create ~/.heddle or the db — a health check that provisioned state would defeat its own
- * "not initialized" detection — so it gates on existsSync(commsDbPath) BEFORE constructing
- * CommsLog (whose constructor mkdirs the parent and creates the sqlite file). The operator token
- * is checked as a non-empty regular file (statSync metadata only, never its bytes). Opening an
- * older-but-migratable db applies a schema migration on construction, exactly as every CommsLog
- * opener does — not a health-check-specific mutation; a current-version db opens as a no-op.
+ * "not initialized" detection — so it gates on existsSync(commsDbPath) BEFORE opening, and opens in
+ * read-only PROBE mode (HED-635): CommsLog { readOnly: true } skips the mkdir, the WAL journal-mode
+ * write, and the schema migration, so the diagnostic observes the shared db without mutating it — a
+ * newer-schema db is still reported (upgrade heddle), an older one is read as-is and left for the
+ * broker to migrate on its next real open. The operator token is checked as a non-empty regular
+ * file (statSync metadata only, never its bytes).
  */
 export function commsCheck(commsDbPath: string, operatorTokenPath: string): Definition {
   return {
@@ -357,14 +358,18 @@ export function commsCheck(commsDbPath: string, operatorTokenPath: string): Defi
       const tokenPresent = tokenStat !== null && tokenStat.isFile() && tokenStat.size > 0;
       let log: CommsLog;
       try {
-        log = new CommsLog(commsDbPath);
+        log = new CommsLog(commsDbPath, { readOnly: true });
       } catch (err) {
         return result('fail', `comms.db present but cannot be opened: ${errorText(err)}`, 'run `heddle comms init`');
       }
       try {
+        // A read-only probe never migrates, so an empty/partial db reaches this read without its
+        // tables — surface that as a corrupt-db fail rather than letting the query throw out of run().
         if (log.room(DEFAULT_ROOM) === null) {
           return result('fail', `comms.db present but ${DEFAULT_ROOM} room missing (partial or corrupt db)`, 'run `heddle comms init`');
         }
+      } catch (err) {
+        return result('fail', `comms.db present but unreadable (${DEFAULT_ROOM} query failed): ${errorText(err)}`, 'run `heddle comms init`');
       } finally {
         log.close();
       }

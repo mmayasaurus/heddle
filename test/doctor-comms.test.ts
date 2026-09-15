@@ -1,5 +1,6 @@
 import { existsSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { describe, expect, test } from 'vitest';
 import { bootstrapComms } from '../src/comms/bootstrap.js';
 import { CommsLog, DEFAULT_ROOM } from '../src/comms/log.js';
@@ -110,5 +111,31 @@ describe('runDoctor comms readiness', () => {
     expect(check(report, 'comms:ready')).toMatchObject({
       outcome: 'warn', detail: expect.stringMatching(/operator token/),
     });
+  });
+
+  test('opens the comms db read-only — a doctor run never migrates it (HED-635)', async () => {
+    const dir = resources.tempDir();
+    const dbPath = join(dir, 'comms.db');
+    const tokenPath = join(dir, 'operator.token');
+    const log = new CommsLog(dbPath);
+    log.ensureDefaultRooms();
+    log.close();
+    // Mark the db as an older (migratable) schema. A read-WRITE open would migrate it in place (bump
+    // user_version to the current schema); the read-only probe must leave it untouched — reverting
+    // commsCheck to a read-write open would bump this to the current version and fail the assertion.
+    const down = new DatabaseSync(dbPath);
+    down.exec('PRAGMA user_version = 1;');
+    down.close();
+
+    const report = await runDoctor({}, fakeDeps({ ...config(), comms: dbPath, operatorToken: tokenPath }));
+    // The db + default room are read fine read-only; only the operator token is missing → warn, not fail.
+    expect(check(report, 'comms:ready').outcome).toBe('warn');
+
+    const after = new DatabaseSync(dbPath, { readOnly: true });
+    try {
+      expect((after.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(1);
+    } finally {
+      after.close();
+    }
   });
 });

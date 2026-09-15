@@ -1,9 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { CommsLog, COMMS_SCHEMA_VERSION } from '../../src/comms/log.js';
+import { CommsLog, COMMS_SCHEMA_VERSION, DEFAULT_ROOM } from '../../src/comms/log.js';
 import { seal } from '../../src/comms/seal.js';
 import type { TierDecision } from '../../src/comms/types.js';
 
@@ -424,5 +424,53 @@ describe('CommsLog (temp db)', () => {
       expect(log.mintChild('K').address).toBe('K.1');
       expect(other.mintChild('K').address).toBe('K.2');
     } finally { other.close(); }
+  });
+});
+
+describe('CommsLog read-only probe mode (HED-635)', () => {
+  let dir: string;
+  let path: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'heddle-comms-ro-'));
+    path = join(dir, 'comms.db');
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  it('reads an older (migratable) db without migrating it', () => {
+    const rw = new CommsLog(path);
+    rw.ensureDefaultRooms();
+    rw.close();
+    // Downgrade the version marker to simulate a v1 db the broker would migrate on a real open.
+    const down = new DatabaseSync(path);
+    down.exec('PRAGMA user_version = 1;');
+    down.close();
+
+    const ro = new CommsLog(path, { readOnly: true });
+    try {
+      expect(ro.room(DEFAULT_ROOM)).not.toBeNull(); // reads fine read-only
+    } finally { ro.close(); }
+
+    const after = new DatabaseSync(path, { readOnly: true });
+    try {
+      // Still v1 — the probe never migrated it (a read-write open would have bumped it to current).
+      expect((after.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(1);
+    } finally { after.close(); }
+  });
+
+  it('is read-only — a write throws', () => {
+    const rw = new CommsLog(path);
+    rw.ensureDefaultRooms();
+    rw.close();
+    const ro = new CommsLog(path, { readOnly: true });
+    try {
+      expect(() => ro.append({ from: 'K', to: DEFAULT_ROOM, body: 'nope' })).toThrow(/readonly/i);
+    } finally { ro.close(); }
+  });
+
+  it('does not create a missing db or its parent directory', () => {
+    const missing = join(dir, 'nested', 'comms.db');
+    expect(() => new CommsLog(missing, { readOnly: true })).toThrow();
+    expect(existsSync(missing)).toBe(false);
+    expect(existsSync(dirname(missing))).toBe(false);
   });
 });
