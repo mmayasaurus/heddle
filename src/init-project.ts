@@ -11,6 +11,7 @@ import type { HookRuleSelection } from './wizard/hooks-choose.js';
 
 const WIRED_HOOKS = ['agent-identity.py', 'agent-preflight.py', 'remind-owned-prs.py', 'require-memtrace-first.py', 'delegation-nudge.py', 'require-pr-sweep.py'] as const;
 const OPTIONAL_HOOKS = ['protect-workspace.py', 'require-vault-search.py', 'auto-reindex-vault.py'] as const;
+const DISCIPLINE_RULES = ['pr-review-sweep.md', 'pr-ownership.md', 'worktree-discipline.md'] as const;
 const DISCIPLINE_HOOKS = new Set(WIRED_HOOKS);
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -385,10 +386,33 @@ function renderSettingsStep(dir: string, canonical: string, selection: HookRuleS
   return step;
 }
 function renderRulesSteps(dir: string, canonical: string, dryRun: boolean): InstallStep[] {
-  return ['pr-review-sweep.md', 'pr-ownership.md', 'worktree-discipline.md'].map((file) => {
+  return DISCIPLINE_RULES.map((file) => {
     const path = join(dir, '.claude', 'rules', file);
     return existsSync(path) ? { step: `rule:${file}`, path, action: 'skip', reason: 'exists' } : stepFor(path, `rule:${file}`, rulesContent(canonical, file), dryRun, false);
   });
+}
+function renderCanonicalRuleSteps(canonical: string, dryRun: boolean): InstallStep[] {
+  return DISCIPLINE_RULES.map((file) => {
+    const path = join(canonical, 'rules', file);
+    return existsSync(path)
+      ? { step: `canonical-rule:${file}`, path, action: 'skip', reason: 'exists' }
+      : stepFor(path, `canonical-rule:${file}`, readFileSync(installerAsset('fleet', 'rules', file), 'utf8'), dryRun, false);
+  });
+}
+function renderGitignoreStep(dir: string, dryRun: boolean): InstallStep {
+  const path = join(dir, '.gitignore');
+  const content = `.DS_Store
+
+# Memtrace database
+.memdb/
+# Memtrace runtime state
+.memtrace/
+# Serena runtime state
+.serena/
+# Worktree checkouts
+.worktrees/
+`;
+  return existsSync(path) ? { step: 'gitignore', path, action: 'skip', reason: 'exists' } : stepFor(path, 'gitignore', content, dryRun, false);
 }
 export function renderHookRulesSteps(dir: string, selection: HookRuleSelection[], catalogRoot: string, dryRun: boolean): InstallStep[] {
   return selection.flatMap(({ id, enforce }) => {
@@ -478,7 +502,7 @@ export function planInstall(input: InstallOptions): InstallPlan {
   const details = registrationDetails(input, dir, state.registry, state.raw);
   const dryRun = input.dryRun === true;
   const hookCatalogRoot = input.hookCatalogRoot ?? resolveCatalogRoot();
-  const steps = [canonicalStep(canonical), renderSettingsStep(dir, canonical, input.hookRules ?? [], hookCatalogRoot, dryRun), ...renderRulesSteps(dir, canonical, dryRun), ...renderHookRulesSteps(dir, input.hookRules ?? [], hookCatalogRoot, dryRun), renderMcpStep(dir, dryRun), renderIgnoreStep(dir, dryRun), renderGateStep(dir, dryRun), ...renderLifecycleCommandSteps(dir, dryRun), registryStep(input, dir, state, details, dryRun), enforceMarkerStep(input, dir, homeDir, dryRun)];
+  const steps = [canonicalStep(canonical), ...renderCanonicalRuleSteps(canonical, dryRun), renderSettingsStep(dir, canonical, input.hookRules ?? [], hookCatalogRoot, dryRun), ...renderRulesSteps(dir, canonical, dryRun), ...renderHookRulesSteps(dir, input.hookRules ?? [], hookCatalogRoot, dryRun), renderMcpStep(dir, dryRun), renderGitignoreStep(dir, dryRun), renderIgnoreStep(dir, dryRun), renderGateStep(dir, dryRun), ...renderLifecycleCommandSteps(dir, dryRun), registryStep(input, dir, state, details, dryRun), enforceMarkerStep(input, dir, homeDir, dryRun)];
   return { options: { ...input, dir, canonical, name: details.name, homeDir }, steps };
 }
 
