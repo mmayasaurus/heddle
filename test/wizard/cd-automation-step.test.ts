@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
@@ -140,6 +140,22 @@ describe('cdAutomationStep', () => {
     for (const workflow of workflows) {
       expect(existsSync(assets[workflow.templateKey])).toBe(true);
     }
+  });
+
+  it('fails loudly and never escapes when .github is a symlink pointing outside the repo (HED-650)', async () => {
+    const targetDir = targetRepo(tempDir);
+    const outside = tempDir(); // an attacker-chosen destination OUTSIDE the repo
+    symlinkSync(outside, join(targetDir, '.github')); // git carries symlinks as content — a repo can ship this
+    const lines: string[] = [];
+
+    // Proceed the gate and accept the first workflow → reaches the guarded write, which refuses the symlink.
+    const result = await cdAutomationStep().run(context(targetDir), io([true, true, true, true], lines));
+
+    expect(result.status).toBe('failed');
+    // Target the reported DETAIL line, not the whole log: the remediation hint also says "symlink", so
+    // matching the joined output would pass on any failure. This proves the actual reason reached the operator.
+    expect(lines.find((l) => l.startsWith('CD automation failed:')) ?? '').toMatch(/symlink/i);
+    expect(existsSync(join(outside, 'workflows'))).toBe(false); // nothing written outside the repo
   });
 });
 

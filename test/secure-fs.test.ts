@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import {
   acquireCredentialLock,
   assertSecureDir,
+  createFileWithinRoot,
   ensureSecureDir,
   releaseCredentialLock,
   secureReadFile,
@@ -704,6 +705,102 @@ describe('secure filesystem primitives', () => {
       expect(() => ensureSecureDir(`${root}/link/../creds`, { boundary: root })).toThrow(/\.\.|traversal/i);
       expect(existsSync(join(root, 'creds'))).toBe(false);
       expect(existsSync(join(outside, 'creds'))).toBe(false);
+    });
+  });
+
+  describe('createFileWithinRoot (public scaffold-into-repo writer / HED-650)', () => {
+    // The setup wizard scaffolds CI/CD workflow files into the operator's chosen repo. The threat is a
+    // symlinked or group/other-writable directory component BELOW the repo root — git carries symlinks as
+    // content, so a cloned/template repo can ship a `.github` that is a symlink pointing outside the tree,
+    // relocating the whole write. Each refusal case also asserts BEHAVIORALLY that nothing was written: at the
+    // target, or at the location a planted symlink pointed to.
+    const ghGate = (root: string): string => join(root, '.github', 'workflows', 'gate.yml');
+
+    it('creates the file and its .github/workflows chain in a fresh repo (0600 file, 0700 created dirs)', () => {
+      const root = join(tempDir(), 'repo'); mkdirSync(root, { mode: 0o755 });
+      const path = ghGate(root);
+
+      expect(createFileWithinRoot(root, path, 'GATE_YAML_BODY')).toBe('written');
+      expect(readFileSync(path, 'utf8')).toBe('GATE_YAML_BODY');
+      expect(statSync(path).mode & 0o777).toBe(0o600);
+      expect(statSync(join(root, '.github', 'workflows')).mode & 0o777).toBe(0o700);
+      expect(statSync(join(root, '.github')).mode & 0o777).toBe(0o700);
+    });
+
+    it('is create-only: a second call leaves the existing file unchanged and returns "exists"', () => {
+      const root = join(tempDir(), 'repo'); mkdirSync(root, { mode: 0o755 });
+      const path = ghGate(root);
+
+      expect(createFileWithinRoot(root, path, 'ORIGINAL')).toBe('written');
+      expect(createFileWithinRoot(root, path, 'REPLACEMENT')).toBe('exists');
+      expect(readFileSync(path, 'utf8')).toBe('ORIGINAL'); // merge-preserving: never overwritten
+    });
+
+    it('REFUSES a symlinked .github and writes nothing outside the repo (the HED-650 escape)', () => {
+      const root = join(tempDir(), 'repo'); mkdirSync(root, { mode: 0o755 });
+      const outside = tempDir(); // an attacker-chosen destination OUTSIDE the repo
+      symlinkSync(outside, join(root, '.github')); // a repo can ship this as committed content
+
+      expect(() => createFileWithinRoot(root, ghGate(root), 'GATE_YAML_BODY')).toThrow(/symlink/i);
+      // Behavioral proof of no escape: the symlink target never gained a workflows/gate.yml.
+      expect(existsSync(join(outside, 'workflows'))).toBe(false);
+      expect(readdirSync(outside)).toHaveLength(0);
+    });
+
+    it('REFUSES a WORLD-writable (0o777) .github below the root, writing nothing', () => {
+      const root = join(tempDir(), 'repo'); mkdirSync(root, { mode: 0o755 });
+      const dotGithub = join(root, '.github'); mkdirSync(dotGithub, { mode: 0o755 });
+      chmodSync(dotGithub, 0o777); // other-writable: any local user could race a symlink into the chain
+
+      // Other-writable stays rejected even in the tolerant public-file mode — it is a real escape vector.
+      expect(() => createFileWithinRoot(root, ghGate(root), 'GATE_YAML_BODY')).toThrow(/other-writable/i);
+      expect(existsSync(join(dotGithub, 'workflows'))).toBe(false);
+    });
+
+    it('TOLERATES a group-writable (0o775) .github — the umask-002 + UPG default — and writes (HED-650)', () => {
+      const root = join(tempDir(), 'repo'); mkdirSync(root, { mode: 0o755 });
+      const dotGithub = join(root, '.github'); mkdirSync(dotGithub, { mode: 0o755 });
+      chmodSync(dotGithub, 0o775); // exactly what `git clone` yields under the common Linux desktop umask
+
+      // Group-writable under UPG is the operator's OWN private group — benign, and refusing it would break
+      // onboarding for every default-Ubuntu/Fedora user with a pre-existing `.github`.
+      expect(createFileWithinRoot(root, ghGate(root), 'GATE_YAML_BODY')).toBe('written');
+      expect(readFileSync(ghGate(root), 'utf8')).toBe('GATE_YAML_BODY');
+    });
+
+    it('credential default (ensureSecureDir, tolerateGroupWritable off) STILL rejects the same 0o775 ancestor', () => {
+      const root = join(tempDir(), 'repo'); mkdirSync(root, { mode: 0o755 });
+      const dotGithub = join(root, '.github'); mkdirSync(dotGithub, { mode: 0o755 });
+      chmodSync(dotGithub, 0o775);
+
+      // The relaxation is public-file-only: secrets never tolerate group access. Same 0775 ancestor, strict
+      // default → refused. (createFileWithinRoot opts in; ensureSecureDir's default does not.)
+      expect(() => ensureSecureDir(join(root, '.github', 'workflows'), { boundary: root })).toThrow(/writable/i);
+    });
+
+    it('REFUSES a non-directory .github (a regular file where the dir should be), writing nothing', () => {
+      const root = join(tempDir(), 'repo'); mkdirSync(root, { mode: 0o755 });
+      writeFileSync(join(root, '.github'), 'not a directory');
+
+      expect(() => createFileWithinRoot(root, ghGate(root), 'GATE_YAML_BODY')).toThrow(/not a directory/i);
+    });
+
+    it('REFUSES a target that is not strictly within the root (fail-closed precondition)', () => {
+      const root = join(tempDir(), 'repo'); mkdirSync(root, { mode: 0o755 });
+      const outsideTarget = join(tempDir(), 'elsewhere.yml');
+
+      expect(() => createFileWithinRoot(root, outsideTarget, 'BODY')).toThrow(/within root|strictly/i);
+      expect(existsSync(outsideTarget)).toBe(false);
+    });
+
+    it('returns "exists" for a symlink planted at the target name — never writes THROUGH it', () => {
+      const root = join(tempDir(), 'repo'); mkdirSync(root, { mode: 0o755 });
+      const workflowsDir = join(root, '.github', 'workflows'); mkdirSync(workflowsDir, { recursive: true, mode: 0o755 });
+      const destination = join(tempDir(), 'link-target.txt'); // deliberately NOT created
+      symlinkSync(destination, join(workflowsDir, 'gate.yml')); // a planted symlink at the file name
+
+      expect(createFileWithinRoot(root, join(workflowsDir, 'gate.yml'), 'GATE_YAML_BODY')).toBe('exists');
+      expect(existsSync(destination)).toBe(false); // O_EXCL | O_NOFOLLOW did not follow the link to create it
     });
   });
 

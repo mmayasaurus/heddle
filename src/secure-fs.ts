@@ -7,6 +7,15 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
  * so the credential-audit fixes (HED-586 reader, HED-590 writer, HED-591 lock) adopt ONE implementation
  * instead of each re-inventing the checks.
  *
+ * HED-650 adds one NON-credential primitive on the same guards: `createFileWithinRoot` writes a PUBLIC file
+ * (a CI/CD workflow the setup wizard scaffolds) into a caller-declared trust ROOT — the operator's chosen
+ * project repo. Its threat is a symlinked, non-directory, or world-writable directory component BELOW the
+ * root (git carries symlinks as content, so a cloned repo can ship a `.github` that is a symlink pointing
+ * outside the tree); a group-writable component is tolerated (umask-002 is the Linux desktop default). The
+ * root and everything above it are the operator/OS trust domain, deliberately not validated, exactly like
+ * the `boundary` seam below. It reuses `ensureSecureDir` (with a `boundary`) for that guard, and is
+ * create-only, so it permits public modes and never overwrites.
+ *
  * CALLER CONTRACT / invariant: these primitives validate the TARGET and its IMMEDIATE PARENT only. The
  * target is checked at the open FD / file level (regular file, owned by the effective uid, not a symlink,
  * no group/other permission for a secret) — that FD-level ownership check is the authoritative cross-uid
@@ -113,6 +122,88 @@ export function secureWriteFile(path: string, content: string, opts: { mode?: nu
 }
 
 /**
+ * Create a NON-secret file inside a caller-declared trust ROOT, refusing a symlinked, non-directory, or
+ * world-writable directory component BELOW the root — a group-writable one is tolerated (HED-650). The
+ * public-file counterpart to `secureWriteFile`: the setup wizard scaffolds CI/CD workflow files into the
+ * operator's chosen project repo, where the threat is a symlinked ancestor INSIDE the repo — git carries
+ * symlinks as content, so a cloned/template repo can ship a `.github` that is a symlink relocating the whole
+ * write outside the tree.
+ *
+ * ROOT-TRUST PRECONDITION: `root` must be the operator's already-accepted project directory — canonical, and
+ * never attacker-influenced. The guard's `boundary` is EXCLUSIVE (HED-643 design): `root` itself and every
+ * ancestor above it are the operator/OS trust domain and are deliberately NOT validated, so only the chain
+ * from `root` DOWN to the file is checked. A caller whose `root` came from an untrusted source must
+ * canonicalize/validate it (e.g. realpath + an owned-dir check) BEFORE calling — this primitive does not, both
+ * because a trusted root needs it and because realpath-ing only `root` would desync it from the caller-formed
+ * `path` and break the lexical containment check. In heddle the wizard's target is a git toplevel it detected
+ * or the operator named, which meets this precondition.
+ *
+ * It differs from `secureWriteFile` in two deliberate ways: it PERMITS public modes (a workflow file is
+ * world-readable, so the secret writer's group/other-access rejection does not apply), and it is CREATE-ONLY
+ * — the scaffold is merge-preserving, so it never overwrites. Being create-only, it opens the target itself
+ * with `O_CREAT | O_EXCL` (which fails EEXIST if the name exists AND, per POSIX, will not follow a symlink at
+ * the final component; `O_NOFOLLOW` is added for module-consistent defense-in-depth) and needs no temp+rename
+ * — there is nothing to atomically replace, so a create-only writer's temp would be pure attack surface.
+ * Returns `'written'` when it created the file, `'exists'` when a regular file OR a planted symlink already
+ * occupied the target (never written THROUGH — the caller cannot distinguish the two, which is fine for a
+ * scaffold-skip).
+ */
+export function createFileWithinRoot(
+  root: string,
+  path: string,
+  content: string,
+  opts: { mode?: number; dirMode?: number; euid?: number } = {},
+): 'written' | 'exists' {
+  const mode = opts.mode ?? 0o600;
+  const dirMode = opts.dirMode ?? 0o700;
+  const resolvedRoot = resolve(root);
+  const resolvedPath = resolve(path);
+  // Fail closed unless `root` is a strict ancestor of the target: a target outside root (or root itself) is a
+  // caller bug, not something to write through — and strict containment is the precondition the boundary walk
+  // below relies on. This is a cheap LEXICAL check (resolve() is pure); a symlinked component would make
+  // lexical containment lie, which is exactly why step 2 — not this line — is the real defense.
+  if (!isStrictlyWithin(resolvedPath, resolvedRoot)) {
+    throw new Error(`refusing to create ${path}: target is not strictly within root ${root}`);
+  }
+  // THE symlink defense (HED-650): validate every existing directory component from the file's parent up to
+  // (but excluding) `root`, and create any missing components via the validated per-level walk. A symlinked,
+  // non-directory, or WORLD-writable `.github` (or deeper) is refused HERE, before the file is opened, so a
+  // redirected write can never occur. A GROUP-writable component is TOLERATED (tolerateGroupWritable): a
+  // git-cloned `.github` is 0775 under the umask-002 + UPG default (the operator's own private group), and
+  // rejecting it would break onboarding; other-writable stays rejected as a real escape vector. Skipped only
+  // when the parent IS the root (the operator's own directory, which the boundary never validates);
+  // `boundary: root` stops the walk at the repo top.
+  const parent = dirname(resolvedPath);
+  if (parent !== resolvedRoot) {
+    ensureSecureDir(parent, { mode: dirMode, boundary: resolvedRoot, euid: opts.euid, tolerateGroupWritable: true });
+  }
+
+  let fd: number | undefined;
+  try {
+    // O_CREAT | O_EXCL: EEXIST if the target already exists — including a symlink, which POSIX refuses to
+    // follow under these flags — so a create-only scaffold neither clobbers an existing file nor writes
+    // through a planted link. O_NOFOLLOW is redundant with O_EXCL here (ELOOP vs EEXIST) but kept for
+    // module consistency and defense-in-depth. No temp/rename: there is nothing to atomically replace, and a
+    // create-only writer's temp name would be pure attack surface.
+    fd = openSync(resolvedPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, mode);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'EEXIST' || code === 'ELOOP') return 'exists';
+    throw err;
+  }
+  try {
+    // fchmod on the OPEN fd guarantees the requested mode against a restrictive umask and cannot be redirected
+    // through a swapped name. No fstat-uid check is needed: O_CREAT | O_EXCL means WE created the inode, so it
+    // is euid-owned by construction.
+    fchmodSync(fd, mode);
+    writeFileSync(fd, content, 'utf8');
+  } finally {
+    closeSync(fd);
+  }
+  return 'written';
+}
+
+/**
  * Read a secret only after rejecting links, non-files, foreign-owned files, and permissive modes.
  * Returning an empty value on a violation would make a credential failure look like an absent secret,
  * so callers receive a descriptive error instead. An absent file is NOT a violation: its natural ENOENT
@@ -169,13 +260,21 @@ export function secureReadFile(path: string, opts: { euid?: number } = {}): stri
  * single recursive `mkdir` (see that helper for why a umask stripping owner-execute makes the walk
  * necessary, and for the intermediate-trust rule the climb uses). An EXISTING directory is validated but
  * never chmodded (a legitimate 0755 profile dir is accepted, exactly as the writer accepts a 0755 parent).
+ *
+ * `tolerateGroupWritable` (default false, HED-650) forwards to every ancestor check: when true it narrows the
+ * EXISTING-ancestor writable rejection from group-or-other to OTHER-only (see `assertSafeExistingDir`). It is
+ * for the PUBLIC-file path (`createFileWithinRoot`) only; credential callers leave it false and are unchanged.
  */
-export function ensureSecureDir(dir: string, opts: { mode?: number; euid?: number; boundary?: string } = {}): void {
+export function ensureSecureDir(dir: string, opts: { mode?: number; euid?: number; boundary?: string; tolerateGroupWritable?: boolean } = {}): void {
   const mode = opts.mode ?? 0o700;
   if ((mode & 0o700) !== 0o700 || (mode & 0o022) !== 0) {
     throw new Error(`refusing to create credential directory ${dir}: mode 0${mode.toString(8)} must be owner-rwx (0o700) and not group/other-writable`);
   }
   const euid = effectiveUid(opts.euid);
+  // HED-650: narrows the EXISTING-ancestor writable check from group-or-other to other-only (see
+  // assertSafeExistingDir). Default false keeps credential / HED-643 callers strict; only the public-file
+  // path (createFileWithinRoot) opts in. Forwarded to every ancestor check below.
+  const tolerateGroupWritable = opts.tolerateGroupWritable ?? false;
   // HED-643: an optional trust root. When given, EVERY existing ancestor from the immediate parent up to
   // (but excluding) `boundary` is validated structurally, closing the redirect vector where a symlinked or
   // group/other-writable ancestor ABOVE the immediate parent could relocate the credential directory. It
@@ -202,17 +301,17 @@ export function ensureSecureDir(dir: string, opts: { mode?: number; euid?: numbe
   // Fast path: the target already exists and is a safe, euid-owned directory → accept as-is (never
   // chmodded, exactly like an existing parent). Its natural ENOENT means "absent → create it" below.
   try {
-    assertSafeExistingDir(dir, euid);
+    assertSafeExistingDir(dir, euid, tolerateGroupWritable);
     // HED-634: an existing leaf is not enough — also reject an unsafe IMMEDIATE PARENT (symlink /
     // non-dir / group-or-other-writable), matching the create-path climb in createSecureDirTree. Otherwise a safe,
     // euid-owned leaf that already exists under a group/other-writable ancestor is accepted on a re-run,
     // while a first run (which takes the create path) would refuse it. Structural only (no euid): a
     // legitimately root-owned parent such as ~ or /Users is fine, and the parent is guaranteed to exist
     // here because the leaf does.
-    assertSafeExistingDir(dirname(dir));
+    assertSafeExistingDir(dirname(dir), undefined, tolerateGroupWritable);
     // HED-643: with a trust root, extend that structural check up the EXISTING ancestor chain to (but not
     // including) `boundary`. Re-checks the immediate parent — idempotent, one extra lstat.
-    if (boundary !== undefined) assertSafeAncestorsUpTo(dirname(dir), boundary);
+    if (boundary !== undefined) assertSafeAncestorsUpTo(dirname(dir), boundary, tolerateGroupWritable);
     return;
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
@@ -220,7 +319,7 @@ export function ensureSecureDir(dir: string, opts: { mode?: number; euid?: numbe
 
   // Absent → build the target and any missing ancestors via the validated per-level walk (shared with
   // ensureSafeParent — HED-626). The fast path above already handled the existing-target case.
-  createSecureDirTree(dir, mode, euid, boundary);
+  createSecureDirTree(dir, mode, euid, boundary, tolerateGroupWritable);
 }
 
 /**
@@ -248,7 +347,7 @@ export function ensureSecureDir(dir: string, opts: { mode?: number; euid?: numbe
  * does not re-gate `mode`. Shared by `ensureSecureDir` (its absent-target create path) and `ensureSafeParent`
  * (HED-626), so the writer's and lock's parent creation adopts the same umask-safe, ownership-verified walk.
  */
-function createSecureDirTree(dir: string, mode: number, euid: number, boundary?: string): void {
+function createSecureDirTree(dir: string, mode: number, euid: number, boundary?: string, tolerateGroupWritable = false): void {
   // Climb to the deepest existing ancestor, collecting the missing components to create top-down. The
   // climb requires only STRUCTURAL safety of existing ancestors (not a symlink / not a non-dir / not
   // group-or-other-writable), not euid-ownership: you cannot `mkdir` under a foreign-owned ancestor unless
@@ -258,7 +357,7 @@ function createSecureDirTree(dir: string, mode: number, euid: number, boundary?:
   let cur = dirname(dir);
   for (;;) {
     try {
-      assertSafeExistingDir(cur);
+      assertSafeExistingDir(cur, undefined, tolerateGroupWritable);
       break; // deepest existing ancestor found — everything in `missing` sits below it
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
@@ -277,7 +376,7 @@ function createSecureDirTree(dir: string, mode: number, euid: number, boundary?:
   // climb into it.
   if (boundary !== undefined) {
     const rcur = resolve(cur); // canonical compare — `boundary` was resolved once at the entry point
-    if (rcur === boundary || isStrictlyWithin(rcur, boundary)) assertSafeAncestorsUpTo(cur, boundary);
+    if (rcur === boundary || isStrictlyWithin(rcur, boundary)) assertSafeAncestorsUpTo(cur, boundary, tolerateGroupWritable);
   }
 
   // Create each missing component top-down. Each is created then immediately finalized on its own fd
@@ -541,16 +640,26 @@ function ensureSafeParent(parent: string, mode: number, euid?: number): void {
 }
 
 /**
- * Reject an immediate parent another user could tamper with: a symlink, a non-directory, or one that is
- * group/other-WRITABLE. A 0755 profile dir passes (`0o755 & 0o022 === 0`); 0775/0777/0757 do not. When
- * `euid` is given, the directory must also be owned by it. Throws the underlying ENOENT when the directory
- * is absent so callers can distinguish "create it".
+ * Reject an immediate parent another user could tamper with: a symlink, a non-directory, or a writable one.
+ * A 0755 profile dir passes (`0o755 & 0o022 === 0`). When `euid` is given, the directory must also be owned
+ * by it. Throws the underlying ENOENT when the directory is absent so callers can distinguish "create it".
+ *
+ * `tolerateGroupWritable` (default false) narrows the writable check for the PUBLIC-file domain only
+ * (HED-650): the credential default rejects group- OR other-writable (`0o022` — 0775/0777/0757 all fail); the
+ * tolerant mode rejects only OTHER-writable (`0o002` — 0777/0757 still fail, but a group-writable 0775 passes).
+ * Rationale: a git-cloned `.github` is 0775 under the umask-002 + UPG default (the operator's own private
+ * group), while a WORLD-writable ancestor is a real escape vector (any local user can race a symlink into the
+ * chain) and stays rejected. Secrets never opt in; this is an operator-ratified relaxation for public
+ * scaffold files only (see `createFileWithinRoot`).
  */
-function assertSafeExistingDir(dir: string, euid?: number): void {
+function assertSafeExistingDir(dir: string, euid?: number, tolerateGroupWritable = false): void {
   const stats = lstatSync(dir);
   if (stats.isSymbolicLink()) throw new Error(`refusing: directory ${dir} is a symlink`);
   if (!stats.isDirectory()) throw new Error(`refusing: ${dir} is not a directory`);
-  if ((stats.mode & 0o022) !== 0) throw new Error(`refusing: directory ${dir} is group- or other-writable`);
+  const writableMask = tolerateGroupWritable ? 0o002 : 0o022;
+  if ((stats.mode & writableMask) !== 0) {
+    throw new Error(`refusing: directory ${dir} is ${tolerateGroupWritable ? 'other' : 'group- or other'}-writable`);
+  }
   if (euid !== undefined && stats.uid !== euid) throw new Error(`refusing: directory ${dir} is not owned by effective uid ${euid}`);
 }
 
@@ -582,12 +691,12 @@ function isStrictlyWithin(child: string, ancestor: string): boolean {
  * Every ancestor of an existing or just-created directory exists, so `assertSafeExistingDir`'s ENOENT cannot
  * fire here.
  */
-function assertSafeAncestorsUpTo(from: string, boundary: string): void {
+function assertSafeAncestorsUpTo(from: string, boundary: string, tolerateGroupWritable = false): void {
   // `boundary` is pre-resolved by the caller; resolve `from` to the same canonical form so the stop compare
   // is exact even when the caller's boundary had a trailing slash or a `.`/`..` alias.
   let cur = resolve(from);
   while (cur !== boundary) {
-    assertSafeExistingDir(cur);
+    assertSafeExistingDir(cur, undefined, tolerateGroupWritable);
     const parent = dirname(cur);
     if (parent === cur) break; // filesystem root reached without meeting boundary (defensive)
     cur = parent;
