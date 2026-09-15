@@ -2,10 +2,13 @@
 // into ONE ordered walkthrough and is the SINGLE writer of step composition — step modules stay on
 // disjoint files, never import each other, and never edit this file. Owners land their step module
 // (model-economy HED-473, spread HED-474, meters HED-475, rules HED-544, doctor HED-476) and it is
-// wired here as a one-line addition to `buildSteps`; today only the accounts step is wired.
+// wired here as a one-line addition to `buildSteps`; today accounts and the doctor finish-gate are wired.
+import { homedir } from 'node:os';
+import { resolve } from 'node:path';
 import type { WizardContext, WizardIO, WizardStep, WizardStepResult, WizardStepStatus } from './step.js';
 import type { CliRunner } from './cli-runner.js';
 import { runAccountsAdd, type AccountsAddSummary } from './accounts-add.js';
+import { doctorStep } from './doctor.js';
 
 /**
  * Everything a step needs EXCEPT `results`: the orchestrator owns the results map and fills it as it
@@ -74,14 +77,79 @@ export function accountsStep(runner: CliRunner): WizardStep {
 }
 
 /**
+ * Wrap a step so it does NOT run under --dry-run: it reports what a real run WOULD do and returns
+ * 'skipped'. Only the doctor finish-gate needs this. In a preview every write-step above it skips, so
+ * the machine stays unchanged — running the real `heddle doctor` probe would then report failures the
+ * preview never caused (on a fresh box that alone would make `heddle setup --dry-run` exit non-zero,
+ * turning a preview into a false alarm). The doctor MODULE always runs by design — correct for
+ * `heddle doctor` standalone and for the real walkthrough (see doctor.ts); whether the walkthrough
+ * runs its finish gate in PREVIEW mode is a composition choice, so it lives here, not in doctor.ts.
+ * `would` is the preview line shown in place of the real run. Exported so the pass-through (a real run
+ * delegates to the wrapped step untouched) is unit-tested directly.
+ */
+export function dryRunGate(step: WizardStep, would: string): WizardStep {
+  return {
+    ...step,
+    async run(ctx: WizardContext, io: WizardIO): Promise<WizardStepResult> {
+      if (ctx.dryRun) {
+        io.report(would);
+        return {
+          id: step.id,
+          status: 'skipped',
+          summary: `dry-run — ${step.id} skipped (a preview makes no changes)`,
+        };
+      }
+      return step.run(ctx, io);
+    },
+  };
+}
+
+/**
+ * Wrap the doctor finish-gate so it SKIPS when the setup home diverges from the default home
+ * (`heddle setup --home <dir>`). The doctor module deliberately verifies the resolved DEFAULT
+ * environment (doctor.ts:10-16) — it does NOT relocate its home-scoped paths under `ctx.homeDir` —
+ * whereas accountsStep writes UNDER `ctx.homeDir`. So under an alternate --home the gate would verify a
+ * DIFFERENT installation than setup just wrote, and paint a hollow green (or a spurious red) for an
+ * install it never looked at. Until the doctor module can verify a home-scoped install (HED-596), skip
+ * HONESTLY here rather than claim a verification that did not happen. In the common case
+ * (ctx.homeDir === the real home, i.e. no --home) doctor runs normally. `resolve` on both sides so a
+ * trailing slash or a relative --home does not spuriously read as divergence.
+ */
+function skipDoctorUnderAltHome(step: WizardStep): WizardStep {
+  return {
+    ...step,
+    async run(ctx: WizardContext, io: WizardIO): Promise<WizardStepResult> {
+      if (resolve(ctx.homeDir) !== resolve(homedir())) {
+        io.report(`  – skipped: ${step.id} verifies the default install (~/.heddle), not a --home install — home-aware verification is tracked in HED-596.`);
+        return {
+          id: step.id,
+          status: 'skipped',
+          summary: `skipped — a --home install is not verified by the doctor gate yet (HED-596)`,
+        };
+      }
+      return step.run(ctx, io);
+    },
+  };
+}
+
+/**
  * Build the ordered built-in step set. Each new step module is added here as one line as its owner
  * lands it, in walkthrough order: accounts → model-economy → spread → meters → rules → doctor (last).
+ * Doctor is the read-only finish gate. It is composed with two guards: `skipDoctorUnderAltHome` (skip
+ * when --home diverges — it would otherwise verify a different install than setup wrote, HED-596) and,
+ * OUTSIDE that, `dryRunGate` (a --dry-run preview skips it). dryRunGate is outermost so a dry-run
+ * preview always wins over the home check. Every other step self-handles dry-run inside its own module.
  */
 export function buildSteps(deps: SetupDeps): WizardStep[] {
   return [
     accountsStep(deps.runner),
-    // model-economy (HED-473), spread (HED-474), meters (HED-475), rules (HED-544),
-    // doctor (HED-476 — always last) wire in here as their owners land the modules.
+    // model-economy (HED-473), spread (HED-474), meters (HED-475), rules (HED-544) wire in here as a
+    // one-line addition as their owners land the modules.
+    // doctor (HED-476) is ALWAYS last — the read-only finish gate that verifies setup end-to-end.
+    dryRunGate(
+      skipDoctorUnderAltHome(doctorStep),
+      'dry-run — doctor: a real setup would run `heddle doctor` to verify the configured environment end-to-end; nothing was verified.',
+    ),
   ];
 }
 
@@ -152,8 +220,16 @@ export async function runSetup(base: SetupContext, io: WizardIO, steps: WizardSt
     io.report(`  ${mark} ${result.id}: ${result.summary}`);
   }
   const failed = ordered.filter((result) => result.status === 'failed').length;
-  io.report(failed
-    ? `\n${failed} step${failed === 1 ? '' : 's'} failed — fix, then re-run: heddle setup --only <id>.`
-    : '\nAll steps done or skipped. Run `heddle doctor` to verify the setup end-to-end.');
+  // The doctor finish-gate, when it ran and passed, IS the end-to-end verification — so don't tell the
+  // operator to re-run `heddle doctor` in that case (it would ask them to repeat the check just done).
+  // Only when doctor was skipped (dry-run / --home / --skip doctor) or excluded do they still need it.
+  const doctorVerified = results.get('doctor')?.status === 'done';
+  io.report(
+    failed
+      ? `\n${failed} step${failed === 1 ? '' : 's'} failed — fix, then re-run: heddle setup --only <id>.`
+      : doctorVerified
+        ? '\nSetup verified end-to-end — heddle doctor passed.'
+        : '\nAll steps done or skipped. Run `heddle doctor` to verify the setup end-to-end.',
+  );
   return ordered;
 }
