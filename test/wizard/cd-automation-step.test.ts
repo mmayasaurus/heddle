@@ -103,24 +103,34 @@ describe('cdAutomationStep', () => {
     expect(doc.jobs?.release?.['runs-on']).toBe('ubuntu-24.04');
 
     const steps = doc.jobs?.release?.steps ?? [];
-    // Fail-closed, bound STRUCTURALLY so a future drift edit that breaks it reddens (not just a surface
-    // substring check): a fresh, unconfigured scaffold cannot reach `gh release create` on first dispatch.
-    // (1) The placeholder is a real `exit 1` LINE — `/^\s*exit 1\s*$/m` rejects a defanged `echo "exit 1"`.
+    // Binds the fail-closed SHAPE of the shipped template — NOT a proof that no conceivable drift could
+    // ever create a release (a negative-proof test can't be exhaustive; e.g. a release-creating step
+    // inserted BEFORE the placeholder is out of scope here). Each property below reddens on the drift named:
+    //  • exactly one job (`release`) — a second release-capable job (e.g. a `publish:` job) would run on
+    //    dispatch alongside it, with no placeholder to fail first;
+    //  • the placeholder is a real `exit 1` LINE (`/^\s*exit 1\s*$/m` rejects a defanged `echo "exit 1"`),
+    //    neither skippable (`if:`) nor swallowed (`continue-on-error:`);
+    //  • every step AFTER the placeholder is unconditional, so once the placeholder fails the release
+    //    step's implicit `if: success()` is false (covers a reorder or a trailing `if: always()` step);
+    //  • the release `run:` routes the tag through env: (no `${{` interpolation) and carries `--verify-tag`;
+    //  • checkout pins `refs/tags/…` (asserted after this block) so a branch / SHA / nonexistent input fails.
+    expect(Object.keys(doc.jobs ?? {})).toEqual(['release']);
     const placeholderIdx = steps.findIndex((step) => typeof step.run === 'string' && /^\s*exit 1\s*$/m.test(step.run));
     const releaseIdx = steps.findIndex((step) => typeof step.run === 'string' && step.run.includes('gh release create'));
     expect(placeholderIdx).toBeGreaterThanOrEqual(0);
     expect(releaseIdx).toBeGreaterThanOrEqual(0);
-    // (2) The failing build precedes the release, so the release step's implicit `if: success()` is false
-    //     after it fails (a reorder that put the release first would run it unconditionally).
     expect(placeholderIdx).toBeLessThan(releaseIdx);
-    // (3) The placeholder's own failure is not swallowed — `continue-on-error: true` here would flip the
-    //     job back to success and let the release run.
+    // The placeholder itself cannot be skipped or swallowed.
+    expect(steps[placeholderIdx]?.if).toBeUndefined();
     expect(steps[placeholderIdx]?.['continue-on-error']).toBeUndefined();
+    // Every step after the failing placeholder is unconditional — this subsumes the release step's own
+    // if:/continue-on-error, and also reddens on a trailing `if: always()` release step or any swallowed failure.
+    steps.slice(placeholderIdx + 1).forEach((step) => {
+      expect(step?.if).toBeUndefined();
+      expect(step?.['continue-on-error']).toBeUndefined();
+    });
 
     const releaseStep = steps[releaseIdx];
-    // The release step itself does not bypass a failed build via if:/continue-on-error either.
-    expect(releaseStep?.if).toBeUndefined();
-    expect(releaseStep?.['continue-on-error']).toBeUndefined();
     // Injection-safe: the dispatch input is routed through env:, never interpolated into the run: shell.
     expect(releaseStep?.run).not.toContain('${{');
     // --verify-tag: gh fails if the tag does not already exist, so a release can never be created at the
