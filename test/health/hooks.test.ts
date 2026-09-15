@@ -265,6 +265,26 @@ describe('hooksChecks', () => {
     expect(received).toEqual(['--config', `${projectDir}/cfg.json`]);
   });
 
+  test('labels an exec-form hook by its executable basename even when its path contains a space', async () => {
+    // Exec form (args present): the command is a single executable path, so commandName basenames it
+    // whole rather than whitespace-splitting — otherwise a resolved ${CLAUDE_PROJECT_DIR} path with a
+    // space is mislabeled by its first token (HED-648).
+    const entry = await one(
+      { type: 'command', command: '/opt/My Tools/lint.sh', args: ['--fix'] },
+      { stdout: '', stderr: '', exitCode: 0, timedOut: false }, 5,
+    );
+    expect(entry.detail).toContain('(lint.sh)');
+    expect(entry.detail).not.toContain('(My)');
+  });
+
+  test('still labels a shell-form hook by its first whitespace token', async () => {
+    const entry = await one(
+      { type: 'command', command: 'prettier --write .' },
+      { stdout: '', stderr: '', exitCode: 0, timedOut: false }, 5,
+    );
+    expect(entry.detail).toContain('(prettier)');
+  });
+
   test('passes the probe marker environment', async () => {
     const clock = { value: 0 };
     let seen: { env: NodeJS.ProcessEnv; stdin: string } | undefined;

@@ -25,8 +25,12 @@ const defaultTimeoutSeconds = (event: string): number => {
   return 600;
 };
 
-function commandName(command: string): string {
-  const token = command.trim().split(/\s+/)[0] ?? command;
+function commandName(command: string, execForm: boolean): string {
+  // Exec form: the command IS a single executable path (spawned directly, and it may contain spaces),
+  // so do not whitespace-split it. Shell form: the command is a shell line, so the first whitespace
+  // token is the program name. (Before HED-648 this always split, mislabeling an exec-form hook whose
+  // resolved ${CLAUDE_PROJECT_DIR} path contains a space.)
+  const token = execForm ? command.trim() : (command.trim().split(/\s+/)[0] ?? command);
   return basename(token.replace(/^['"]|['"]$/g, '')) || token;
 }
 
@@ -200,7 +204,7 @@ function hookDefinition(
         elapsed,
         timeoutMs,
         timeoutSeconds,
-        name: commandName(command),
+        name: commandName(command, resolvedArgs !== undefined && resolvedArgs.length > 0),
         command,
         budgetBound,
         deadlineMs,
