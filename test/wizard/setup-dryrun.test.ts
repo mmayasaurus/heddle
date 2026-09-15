@@ -14,7 +14,9 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadAccountRegistry } from '../../src/accounts.js';
-import { buildSteps, runSetup, type SetupContext } from '../../src/wizard/setup.js';
+import { accountsStep, buildSteps, runSetup, type SetupContext } from '../../src/wizard/setup.js';
+import { createDoctorStep } from '../../src/wizard/doctor.js';
+import type { DoctorReport } from '../../src/doctor.js';
 import type { Prompter } from '../../src/wizard/prompt.js';
 import type { CliRunner } from '../../src/wizard/cli-runner.js';
 import type { ProbeResult } from '../../src/health/probe.js';
@@ -51,6 +53,18 @@ afterEach(() => {
 // ---- fakes ----------------------------------------------------------------------------------------
 const loggedIn = (): ProbeResult => ({ stdout: '{"loggedIn":true}', stderr: '', exitCode: 0, timedOut: false });
 const loggedOut = (): ProbeResult => ({ stdout: '{"loggedIn":false}', stderr: '', exitCode: 0, timedOut: false });
+
+/**
+ * A canned DoctorReport for composing a green (or failing) doctor FINISH without a real config tree.
+ * fakeDeps()→realRunDoctor does NOT yield green on a bare temp HOME (accounts/projects/comms/secrets
+ * absent → fails+skips — T, doctor.test.ts:146), so the ORCHESTRATOR's success-finish path is proven
+ * by injecting the report directly, which is the HED-599 wizard-integration angle (T's doctor.test.ts
+ * owns the isolated step mapping). Local to keep this PR within my own files; mirrors that report().
+ */
+const cannedReport = (over: Partial<DoctorReport['summary']> = {}): DoctorReport => {
+  const summary = { ok: 5, warn: 0, fail: 0, skipped: 0, ...over };
+  return { checks: [], summary, exitCode: summary.fail > 0 ? 1 : 0 };
+};
 
 /**
  * A CliRunner whose status() is scripted and whose login() performs no real vendor login — but it
@@ -243,5 +257,49 @@ describe('heddle setup — fresh-machine validation harness (HED-571)', () => {
     const haystack = [io.lines.join('\n'), ...filesUnderHome().map((file) => readFileSync(file, 'utf8'))].join('\n');
     expect(haystack).not.toContain(SECRET_VALUE);           // the VALUE never appears anywhere
     expect(readFileSync(registryPath(), 'utf8')).toContain('HED571_SENTINEL_KEY'); // the NAME is what's stored
+  });
+});
+
+// =================================================================================================
+// HED-599 (HED-571 follow-up): the ORCHESTRATOR's success-finish path. buildSteps composes the REAL
+// read-only doctorStep, which is 'failed' on a bare temp HOME (proven above) — so no scenario here
+// exercises runSetup's doctor-VERIFIED finish branch. These compose the real accountsStep + the real
+// createDoctorStep with an INJECTED report (T's canned-report seam) to prove the orchestrator maps a
+// green finish-gate to "verified end-to-end" and a failing one to a failure finish, never hollow green.
+// Distinct from doctor.test.ts (isolated step mapping) and from asserting a real setup is green (a
+// brittle fixture chase, and doctor.ts's domain — T, msg 2157).
+describe('heddle setup — doctor-green finish composition (HED-599)', () => {
+  it('a passing doctor finish makes the walkthrough report end-to-end verification', async () => {
+    const io = makeIO(new PlanPrompter({ confirmTrue: [/Do you have a Claude account/] }));
+    const steps = [accountsStep(fakeRunner(loggedIn)), createDoctorStep({ runDoctor: async () => cannedReport({ ok: 5 }) })];
+    const results = await runSetup(ctx(), io, steps);
+
+    expect(results.map((result) => result.id)).toEqual(['accounts', 'doctor']);
+    expect(results.every((result) => result.status === 'done')).toBe(true);
+    const transcript = io.lines.join('\n');
+    expect(transcript).toContain('== Setup complete ==');
+    // The success line the orchestrator prints ONLY when the doctor finish-gate ran and passed —
+    // distinct from the "run heddle doctor to verify" line emitted when doctor is skipped or failed.
+    expect(transcript).toContain('Setup verified end-to-end');
+  });
+
+  it('doctor warnings are advisory — a warn-only report still finishes done and verified', async () => {
+    const io = makeIO(new PlanPrompter({ confirmTrue: [/Do you have a Claude account/] }));
+    const steps = [accountsStep(fakeRunner(loggedIn)), createDoctorStep({ runDoctor: async () => cannedReport({ ok: 3, warn: 2 }) })];
+    const results = await runSetup(ctx(), io, steps);
+
+    expect(results.find((result) => result.id === 'doctor')?.status).toBe('done');
+    expect(io.lines.join('\n')).toContain('Setup verified end-to-end');
+  });
+
+  it('a failing doctor finish reports failure and never claims end-to-end verification', async () => {
+    const io = makeIO(new PlanPrompter({ confirmTrue: [/Do you have a Claude account/] }));
+    const steps = [accountsStep(fakeRunner(loggedIn)), createDoctorStep({ runDoctor: async () => cannedReport({ ok: 2, fail: 1 }) })];
+    const results = await runSetup(ctx(), io, steps);
+
+    expect(results.find((result) => result.id === 'doctor')?.status).toBe('failed');
+    const transcript = io.lines.join('\n');
+    expect(transcript).toMatch(/1 step failed/);
+    expect(transcript).not.toContain('Setup verified end-to-end'); // never hollow green
   });
 });
