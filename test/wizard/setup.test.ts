@@ -186,10 +186,10 @@ describe('accountsStep adapter', () => {
   it('buildSteps wires the full walkthrough in order with the doctor finish-gate last', () => {
     const runner = {} as CliRunner;
     const ids = buildSteps({ runner }).map((s) => s.id);
-    // Walkthrough order (HED-564): canonical → accounts → model-economy → spread → meters → rules → permissions → pr-automation → doctor.
+    // Walkthrough order (HED-564): canonical → accounts → model-economy → spread → meters → rules → permissions → pr-automation → cd-automation → doctor.
     // buildSteps({ runner }) with no catalogRoot defaults it to resolveCatalogRoot() (the bundled
     // catalog), so this also proves the default path constructs without throwing.
-    expect(ids).toEqual(['canonical', 'accounts', 'model-economy', 'spread', 'meters', 'rules', 'permissions', 'pr-automation', 'doctor']);
+    expect(ids).toEqual(['canonical', 'accounts', 'model-economy', 'spread', 'meters', 'rules', 'permissions', 'pr-automation', 'cd-automation', 'doctor']);
     // Doctor is the finish gate — it must ALWAYS be last so it verifies AFTER every write-step ran.
     expect(ids[ids.length - 1]).toBe('doctor');
   });
@@ -225,8 +225,10 @@ describe('composed walkthrough (buildSteps -> runSetup)', () => {
     // rules/permissions self-handle dry-run in their own module, doctor via dryRunGate, and pr-automation —
     // which now APPLIES even without a --target so it can offer to add a repo (HED-624) — takes its no-target
     // dry-run branch: it DISCLOSES that a real run would offer a repo path then confirm, and returns skipped
-    // without prompting or writing (the exhausted prompter above would throw if it prompted). toEqual pins the
-    // exact composed order + shape.
+    // without prompting or writing (the exhausted prompter above would throw if it prompted). cd-automation
+    // (HED-603) is git-target-gated via applies() and there is no --target here, so runSetup records it
+    // 'not applicable in this context' (its dry-run branch is covered by the module's own tests). toEqual pins
+    // the exact composed order + shape.
     expect(results).toEqual([
       { id: 'canonical', status: 'skipped', summary: expect.stringContaining('dry-run') },
       { id: 'accounts', status: 'skipped', summary: expect.stringContaining('dry-run') },
@@ -236,6 +238,7 @@ describe('composed walkthrough (buildSteps -> runSetup)', () => {
       { id: 'rules', status: 'skipped', summary: expect.stringContaining('dry-run') },
       { id: 'permissions', status: 'skipped', summary: expect.stringContaining('dry-run') },
       { id: 'pr-automation', status: 'skipped', summary: expect.stringContaining('a real run would offer a path, then confirm') },
+      { id: 'cd-automation', status: 'skipped', summary: expect.stringContaining('not applicable') },
       { id: 'doctor', status: 'skipped', summary: expect.stringContaining('dry-run') },
     ]);
     const text = lines.join('\n');
