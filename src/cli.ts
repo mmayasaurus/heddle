@@ -77,6 +77,7 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
       --override-reason <r> REQUIRED with --provider/--model when no --class: why this bypasses the
                            routing table (recorded on the ledger row; HED-95)
       --no-fallback        do not try the table's fallback on failure
+      --fallback-wip-commit  opt-in: auto-commit the failed leg's own new files so fallback can proceed (default off; a tree with pre-existing local changes is never auto-committed)
       --preserve-permissions keep the worker CLI's own permission prompts (agy: omit --dangerously-skip-permissions); absent = provider default. WARNING: a headless run with no terminal to answer the prompts will hang.
       --capabilities a,b   GRANT worker capabilities: net | browse | exec-privileged (default: none)
       --in-session         claude classes: return the in-session (Agent tool) instruction instead of a headless worker
@@ -243,6 +244,7 @@ try {
         optIn: has('--opt-in'),
         overrideReason: arg('--override-reason'),
         noFallback: has('--no-fallback'),
+        fallbackWipCommit: has('--fallback-wip-commit'),
         skipPermissions: has('--preserve-permissions') ? false : undefined,
         capabilities: arg('--capabilities')?.split(',').map((s) => s.trim()).filter(Boolean),
         inSession: has('--in-session'),
