@@ -53,7 +53,7 @@ function createIsolatedConfigDir(provider: 'claude' | 'codex', id: string, home:
   // dir rather than reuse it; ensureSecureDir then creates it 0700-from-outset and validates the whole
   // created tree (rejecting a symlink / foreign-owned / group-or-other-writable path) — F8/HED-590.
   if (existsSync(configPath)) throw new Error(`isolated config directory already exists for ${provider} ${id}`);
-  ensureSecureDir(configPath, { mode: 0o700 });
+  ensureSecureDir(configPath, { mode: 0o700, boundary: home });
   // Defense-in-depth for the check-then-create window between existsSync and ensureSecureDir: ensureSecureDir
   // ACCEPTS (never chmods) an existing safe dir, so a same-uid dir raced in after the existsSync could carry a
   // stale .credentials.json. A cross-uid or symlinked race is already rejected by ensureSecureDir; refusing a
@@ -117,7 +117,7 @@ async function addOne(provider: NativeProvider, deps: AccountsAddDeps, ordinal: 
     // group-or-other-writable path rather than trusting it (F8/HED-590). Refuse-closed on an unsafe path
     // fails just THIS account (like the env-repoint path), never aborts the whole wizard.
     try {
-      ensureSecureDir(configPath, { mode: 0o700 });
+      ensureSecureDir(configPath, { mode: 0o700, boundary: home });
     } catch (error) {
       summary.failed.push(id);
       deps.report?.(`FAIL ${provider} ${id} (config dir: ${error instanceof Error ? error.message : String(error)})`);
