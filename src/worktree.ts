@@ -88,9 +88,11 @@ function pathStillExists(cwd: string, rel: string): boolean {
 
 /** The repo top level for `cwd`. `git status` emits paths relative to it, so root-relative status
  * paths must be joined against this, never a (possibly nested) cwd. Falls back to `cwd` when the top
- * level cannot be resolved (e.g. a bare repo); a genuinely broken repo then fails at the first git op. */
+ * level cannot be resolved (e.g. a bare repo); a genuinely broken repo then fails at the first git op.
+ * Strips ONLY git's terminating newline, not arbitrary whitespace — a repo directory name may legitimately
+ * end in a space, and `.trim()` would remove it and leave a nonexistent path (codex re-convergence P3). */
 function repoTopLevel(cwd: string): string {
-  try { return git(cwd, ['rev-parse', '--show-toplevel']).trim() || cwd; }
+  try { return git(cwd, ['rev-parse', '--show-toplevel']).replace(/\r?\n$/, '') || cwd; }
   catch { return cwd; }
 }
 

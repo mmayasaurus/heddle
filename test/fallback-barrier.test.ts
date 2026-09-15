@@ -602,4 +602,27 @@ describe('autoWipCommit isolation', () => {
     expect(pathStatus(root, 'sub/new.txt')).toBe('');
     if (result.committed) expect(result.newFp.entries.has('sub/new.txt')).toBe(false);
   });
+
+  it('top-level path ending in whitespace is preserved (codex re-convergence P3)', () => {
+    // A repo whose top-level directory name ends in a space: `git rev-parse --show-toplevel` returns
+    // the whitespace-preserving path, and a `.trim()` would drop the space and leave a nonexistent
+    // path — the auto-WIP would then falsely refuse. repoTopLevel strips only git's trailing newline.
+    const root = join(tempDir(), 'ws-repo ');
+    mkdirSync(root);
+    git(root, 'init', '-q');
+    git(root, 'config', 'user.email', 't@t');
+    git(root, 'config', 'user.name', 't');
+    git(root, 'config', 'commit.gpgsign', 'false');
+    writeFileSync(join(root, 'tracked.txt'), 'committed\n');
+    git(root, 'add', 'tracked.txt');
+    git(root, 'commit', '-q', '-m', 'init');
+    const preFp = requireFp(root);
+    writeFileSync(join(root, 'leg-new.txt'), 'leg\n');
+    const postFp = requireFp(root);
+
+    const result = autoWipCommit(root, preFp, postFp);
+    expect(result.committed).toBe(true);
+    expect(committedPaths(root)).toEqual(['leg-new.txt']);
+    expect(git(root, 'show', 'HEAD:leg-new.txt')).toBe('leg\n');
+  });
 });
