@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
-import { appendFileSync, rmSync, writeFileSync, chmodSync } from 'node:fs';
-import { join } from 'node:path';
+import { appendFileSync, mkdirSync, rmSync, writeFileSync, chmodSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { diffInstruction, embeddedDiff, pickReviewer, sameSnapshot, snapshotWorktree } from '../src/review.js';
 import { loadRouting, resolveRoute } from '../src/routing.js';
@@ -148,6 +148,84 @@ describe('adversarial review helpers', () => {
   }, 90_000); // snapshot-heavy: ~6 REAL git spawns/call × ~10 calls; ~9s standalone but a loaded
   //            parallel-fork CI runner can exceed 45s (HED-211). It hangs on nothing — a generous
   //            ceiling beats a tight bound that intermittently reds CI; not masking a hang.
+
+  it('excludes only untracked daemon churn under the top-level runtime prefixes, catching everything else (HED-550 round-3)', () => {
+    const cwd = tempDir();
+    git(cwd, 'init', '-q');
+    mkdirSync(join(cwd, 'src'));
+    writeFileSync(join(cwd, 'src', 'x.ts'), 'export const x = 1;\n');
+    git(cwd, 'add', 'src/x.ts');
+    commit(cwd, 'init');
+    const writeAt = (rel: string, body: string) => {
+      mkdirSync(dirname(join(cwd, rel)), { recursive: true });
+      writeFileSync(join(cwd, rel), body);
+    };
+
+    // Daemon churn under the three top-level runtime dirs is excluded — the false positive HED-550 fixes.
+    const baseline = snapshotWorktree(cwd);
+    for (const rel of ['.memdb/daemon-state.json', '.memtrace/fts/index', '.serena/cache/typescript/sym.pkl']) {
+      writeAt(rel, 'machine-local');
+    }
+    expect(sameSnapshot(baseline, snapshotWorktree(cwd))).toBe(true);
+
+    // But a reviewer write OUTSIDE that narrow zone still flips the digest: a nested fake runtime dir
+    // (round-2 was a silent write zone, F2) and serena AUTHORED content (only .serena/cache/ is daemon
+    // churn — .serena/project.yml and .serena/memories/ are user/agent content, F1).
+    for (const rel of ['src/.serena/cache/backdoor.ts', '.serena/project.yml', '.serena/memories/note.md']) {
+      const prev = snapshotWorktree(cwd);
+      writeAt(rel, 'reviewer write');
+      expect(sameSnapshot(prev, snapshotWorktree(cwd))).toBe(false);
+      rmSync(join(cwd, rel));
+    }
+
+    // .memtraceignore is tracked configuration, never a runtime artifact.
+    writeFileSync(join(cwd, '.memtraceignore'), 'tracked configuration');
+    expect(sameSnapshot(baseline, snapshotWorktree(cwd))).toBe(false);
+  }, 90_000); // snapshot-heavy: ~10 snapshotWorktree calls, each several REAL git spawns; a loaded
+  //            parallel-fork run can exceed the default 30s (HED-211). Generous ceiling, not a hang.
+
+  it('still hashes a TRACKED file under a runtime dir, and excludes only untracked .serena/cache churn (HED-550)', () => {
+    const cwd = tempDir();
+    git(cwd, 'init', '-q');
+    mkdirSync(join(cwd, '.serena'));
+    writeFileSync(join(cwd, '.serena', 'project.yml'), 'name: proj\n');
+    git(cwd, 'add', '.serena/project.yml');
+    commit(cwd, 'init');
+
+    const baseline = snapshotWorktree(cwd);
+    // .serena/project.yml is authored config, not daemon cache — an edit is ALWAYS hashed (tracked or
+    // not), so a reviewer cannot change committed serena config unseen (qodo #1 / round-3 F1).
+    writeFileSync(join(cwd, '.serena', 'project.yml'), 'name: proj-edited\n');
+    expect(sameSnapshot(baseline, snapshotWorktree(cwd))).toBe(false);
+
+    // An untracked daemon cache write under .serena/cache/ stays excluded.
+    const withEdit = snapshotWorktree(cwd);
+    mkdirSync(join(cwd, '.serena', 'cache'), { recursive: true });
+    writeFileSync(join(cwd, '.serena', 'cache', 'symbols.pkl'), 'machine-local');
+    expect(sameSnapshot(withEdit, snapshotWorktree(cwd))).toBe(true);
+  }, 90_000); // snapshot-heavy (HED-211): generous ceiling under parallel-fork load, not a hang.
+
+  it('does NOT see a reviewer write to a gitignored .serena/ path — the pre-existing ignored-path boundary (HED-569)', () => {
+    // Boundary DOC, not a HED-550 regression: snapshotWorktree enumerates via
+    // `git ls-files --others --exclude-standard`, which omits gitignored paths — so in a repo that
+    // gitignores .serena/ (heddle itself does), a reviewer write_memory to .serena/memories/x, or an
+    // edit to .serena/project.yml, is invisible to the mandate digest before isToolRuntimePath is ever
+    // consulted. Same boundary the mandate already accepts for node_modules/, dist/, .env. Whether to
+    // enumerate authored tool-runtime paths even when ignored is HED-569; this pins current behavior so
+    // any future change is deliberate. (Round-2 code had the identical property — the gap predates 550.)
+    const cwd = tempDir();
+    git(cwd, 'init', '-q');
+    writeFileSync(join(cwd, '.gitignore'), '.serena/\n');
+    git(cwd, 'add', '.gitignore');
+    commit(cwd, 'gitignore serena');
+
+    const baseline = snapshotWorktree(cwd);
+    mkdirSync(join(cwd, '.serena', 'memories'), { recursive: true });
+    writeFileSync(join(cwd, '.serena', 'memories', 'note.md'), 'reviewer write_memory');
+    writeFileSync(join(cwd, '.serena', 'project.yml'), 'name: proj\n');
+    // Both writes sit under a gitignored dir → outside the enumeration → digest unchanged.
+    expect(sameSnapshot(baseline, snapshotWorktree(cwd))).toBe(true);
+  });
 
   it('prepends an actionable diff instruction and leaves a blank line before the task', () => {
     const instruction = diffInstruction('main');
