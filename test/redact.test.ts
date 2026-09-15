@@ -2,6 +2,26 @@ import { describe, expect, it } from 'vitest';
 import { redactSecrets } from '../src/redact.js';
 
 describe('redactSecrets', () => {
+  it('redacts credential shapes in shapes-only mode while preserving long opaque filenames', () => {
+    const sk = 'sk-' + 'DEADBEEF1234567890';
+    const glm = 'abcdef0123456789abcdef0123456789.abcdef0123456789';
+    const bearer = 'Bearer ' + 'tok1234567890';
+    const github = 'gh' + 'p_EXAMPLE000000000000000000000000';
+    const akia = 'AKIA' + 'IOSFODNN7EXAMPLE';
+
+    for (const value of [sk, glm, bearer, github, akia]) {
+      expect(redactSecrets(value, { shapesOnly: true })).toContain('[redacted]');
+    }
+
+    for (const filename of [
+      'release-20260915-build-artifact.txt',
+      'a1b2c3d4e5f6a1b2c3d4e5f6',
+    ]) {
+      expect(redactSecrets(filename, { shapesOnly: true })).toBe(filename);
+      expect(redactSecrets(filename)).toContain('[redacted]');
+    }
+  });
+
   it('redacts recognized credential shapes', () => {
     // Split literals so these shipped source lines carry no contiguous credential shape (public-scrub
     // convention — src/release/scrub.ts credentialPatterns); the runtime values are the full tokens.

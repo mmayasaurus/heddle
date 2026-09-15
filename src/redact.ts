@@ -1,5 +1,5 @@
 /** Remove credential-shaped values from text that may be persisted or returned to callers. */
-export function redactSecrets(text: string, opts: { credential?: string } = {}): string {
+export function redactSecrets(text: string, opts: { credential?: string; shapesOnly?: boolean } = {}): string {
   try {
     let redacted = text;
     if (opts.credential) redacted = redacted.split(opts.credential).join('[redacted]');
@@ -46,10 +46,12 @@ export function redactSecrets(text: string, opts: { credential?: string } = {}):
     // shapes with no recognizable prefix (session tokens, JWT segments, Digest nonce/response). It cannot
     // tell a random token from a long filename, so it over-redacts long opaque names — the accepted
     // direction (under-redaction leaks; over-redaction only degrades debuggability). Real filesystem paths
-    // survive via the '/' lookbehind/lookahead. Applied to the vendor-error string only (run.ts:337);
-    // heddle-generated escape/destroyed notes carry checkout filenames and are persisted verbatim, never
-    // routed through this rule (scrubbing those safely, without eating ordinary filenames, is HED-651).
-    redacted = redacted.replace(/(?<![A-Za-z0-9_/-])(?=[A-Za-z0-9_-]*[0-9_-])[A-Za-z0-9_-]{24,}(?![A-Za-z0-9_/-])/g, '[redacted]');
+    // survive via the '/' lookbehind/lookahead. This backstop runs in full mode only (the vendor-error
+    // string); shapes-only mode, used for heddle-generated escape/destroyed notes per HED-651, skips it so
+    // an ordinary long filename survives while unmistakable credential SHAPES are still redacted.
+    if (!opts.shapesOnly) {
+      redacted = redacted.replace(/(?<![A-Za-z0-9_/-])(?=[A-Za-z0-9_-]*[0-9_-])[A-Za-z0-9_-]{24,}(?![A-Za-z0-9_/-])/g, '[redacted]');
+    }
 
     return redacted;
   } catch {
