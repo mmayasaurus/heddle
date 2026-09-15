@@ -188,6 +188,179 @@ interface RoundContext {
   dryRun: boolean;
 }
 
+type CitationRanges = Map<string, Array<[number, number]>>;
+interface DiffSides {
+  oldSide: CitationRanges;
+  newSide: CitationRanges;
+}
+interface ParsedCitation {
+  path: string;
+  lo: number;
+  hi: number;
+  key: string;
+}
+
+/** basename of a POSIX-ish path (segment after the last `/`). */
+function citationBasename(path: string): string {
+  return path.slice(path.lastIndexOf('/') + 1);
+}
+
+/** Normalise a unified-diff path token: text before any tab, `a/`/`b/` prefix dropped, `/dev/null` → null. */
+function diffPath(raw: string): string | null {
+  const p = (raw.split('\t')[0] ?? '').trim();
+  if (p === '' || p === '/dev/null') return null;
+  return /^[ab]\//.test(p) ? p.slice(2) : p;
+}
+
+interface HunkBody {
+  oldRem: number;
+  newRem: number;
+  inBody: boolean;
+}
+
+/** Append a half-open range to a path's range list. */
+function pushRange(map: CitationRanges, path: string, range: [number, number]): void {
+  const list = map.get(path);
+  if (list) list.push(range);
+  else map.set(path, [range]);
+}
+
+/** Advance hunk-body counters for one line. Returns true when the line was consumed as a body line; false when
+ *  it is not a body line — a short/malformed hunk has ended and the caller must reprocess it as a header. A
+ *  body line whose text merely begins with `+`/`-`/` ` (e.g. `+++ counter;`) is content, never a header. */
+function advanceHunkBody(line: string, body: HunkBody): boolean {
+  const c = line.charAt(0);
+  if (c === '+') body.newRem -= 1;
+  else if (c === '-') body.oldRem -= 1;
+  else if (c === ' ') { body.oldRem -= 1; body.newRem -= 1; }
+  else if (c === '\\') { /* "\ No newline at end of file" — counts to neither side */ }
+  else { body.inBody = false; return false; }
+  if (body.oldRem <= 0 && body.newRem <= 0) body.inBody = false;
+  return true;
+}
+
+/** Record a hunk header's OLD/NEW declared ranges and return the body counters left to consume. Ranges come
+ *  from the header counts, so a body shorter/longer than declared (synthetic diffs) still records correctly. */
+function recordHunkRanges(hunk: RegExpExecArray, oldPath: string | null, newPath: string | null, sides: DiffSides): HunkBody {
+  const os = Number(hunk[1]);
+  const oc = hunk[2] === undefined ? 1 : Number(hunk[2]); // `-os` with no comma ⇒ oc=1
+  const ns = Number(hunk[3]);
+  const nc = hunk[4] === undefined ? 1 : Number(hunk[4]); // `+ns` with no comma ⇒ nc=1
+  if (oldPath && Number.isFinite(os) && Number.isFinite(oc) && oc > 0) pushRange(sides.oldSide, oldPath, [os, os + oc]);
+  if (newPath && Number.isFinite(ns) && Number.isFinite(nc) && nc > 0) pushRange(sides.newSide, newPath, [ns, ns + nc]);
+  const oldRem = Number.isFinite(oc) ? oc : 0;
+  const newRem = Number.isFinite(nc) ? nc : 0;
+  return { oldRem, newRem, inBody: oldRem > 0 || newRem > 0 };
+}
+
+/**
+ * Parse a unified diff into per-file OLD-side and NEW-side half-open line ranges (`[start, start+count)`).
+ * A STATEFUL hunk-body scanner (`advanceHunkBody`) consumes each hunk's declared line counts, so hunk-body
+ * content whose text merely begins with `+++ `, `--- `, or `@@` is treated as an added/deleted/context line,
+ * never as a file header (fixes the "`+++ counter;` read as a header" class of bug).
+ */
+function parseDiffSides(diff: string): DiffSides {
+  const sides: DiffSides = { oldSide: new Map(), newSide: new Map() };
+  const hunkRe = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
+  const body: HunkBody = { oldRem: 0, newRem: 0, inBody: false };
+  let oldPath: string | null = null;
+  let newPath: string | null = null;
+  for (const line of diff.split(/\r?\n/)) {
+    if (body.inBody && advanceHunkBody(line, body)) continue;
+    if (line.startsWith('diff --git ')) { oldPath = null; newPath = null; continue; }
+    if (line.startsWith('--- ')) { oldPath = diffPath(line.slice(4)); continue; }
+    if (line.startsWith('+++ ')) { newPath = diffPath(line.slice(4)); continue; }
+    const hunk = hunkRe.exec(line);
+    if (hunk) Object.assign(body, recordHunkRanges(hunk, oldPath, newPath, sides));
+  }
+  return sides;
+}
+
+/**
+ * Extract candidate `path:line[-line]` citation tokens. The path token is broad (so extensionless, quoted, and
+ * backticked paths are seen — surrounding quotes/backticks/brackets are outside the character class) but must
+ * contain a letter, which drops ratios and timestamps like `3:1` or `10:30`. Path-likeness is judged later,
+ * against the diff, in `isPathLikeCitation`.
+ */
+function extractCitations(output: string): ParsedCitation[] {
+  const citations: ParsedCitation[] = [];
+  // Stop the path token only at whitespace / `:` / `,` / `;` — a deliberately simple class with no brackets,
+  // braces, quotes or backticks, which a line-counting linter can misparse (reading the rest of the file as this
+  // function's body). Wrapping punctuation is trimmed off the match below instead of excluded in the pattern.
+  const citationRe = /([^\s:,;]+):(\d+)(?:\s*-\s*(\d+))?/g;
+  const wrap = '()[]{}"\'\x60';
+  for (const match of output.matchAll(citationRe)) {
+    let path = match[1] ?? '';
+    while (path && wrap.includes(path.charAt(0))) path = path.slice(1);
+    while (path && wrap.includes(path.charAt(path.length - 1))) path = path.slice(0, -1);
+    if (!/[A-Za-z]/.test(path)) continue;
+    const start = Number(match[2]);
+    if (!Number.isFinite(start)) continue;
+    const rawEnd = match[3] === undefined ? start : Number(match[3]);
+    const end = Number.isFinite(rawEnd) ? rawEnd : start;
+    citations.push({ path, lo: Math.min(start, end), hi: Math.max(start, end), key: `${path}:${start}` });
+  }
+  return citations;
+}
+
+/**
+ * A citation is EXAMINED only when its path is "path-like": it has a directory separator or a dotted extension,
+ * or its basename actually appears in the diff. This keeps prose tokens (e.g. `timeout:5`) out of a
+ * ZERO-tolerance gate — a single spurious count would permanently block promotion — while still examining a
+ * fabricated but realistic path (e.g. `src/nope.ts:99`). Residual: an extensionless path NOT present in the
+ * diff (e.g. a fabricated `Dockerfile:10` when the diff has no Dockerfile) is indistinguishable from prose and
+ * is therefore not counted — the conservative choice for this gate.
+ */
+function isPathLikeCitation(path: string, sides: DiffSides): boolean {
+  if (path.includes('/') || /\.[A-Za-z]/.test(path)) return true;
+  const base = citationBasename(path);
+  for (const map of [sides.newSide, sides.oldSide]) for (const p of map.keys()) if (citationBasename(p) === base) return true;
+  return false;
+}
+
+/**
+ * Resolve a citation against the diff: true when its inclusive `[lo, hi]` overlaps a half-open range on EITHER
+ * side (a reviewer sees the whole diff and may cite a deleted old-side line) of a path that matches
+ * exactly / by trailing path-suffix / by basename.
+ */
+function citationResolves(cit: ParsedCitation, sides: DiffSides): boolean {
+  const base = citationBasename(cit.path);
+  for (const map of [sides.newSide, sides.oldSide]) {
+    for (const [filePath, ranges] of map) {
+      if (filePath !== cit.path && !filePath.endsWith(`/${cit.path}`) && citationBasename(filePath) !== base) continue;
+      // Inclusive citation [lo, hi] overlaps a half-open range [rs, re) iff lo < re && hi >= rs.
+      if (ranges.some(([rs, re]) => cit.lo < re && cit.hi >= rs)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Gate-4 mechanical post-check (HED-568): count local-reviewer findings whose cited `file:line` is NOT present
+ * in the reviewed diff — a "hallucinated citation". Deterministic and best-effort: it NEVER throws on malformed
+ * input; a citation (or diff fragment) that fails to parse is skipped, never aborting the count. Distinct
+ * hallucinations are deduped by `path:startLine`. See `parseDiffSides` (both-sides, header-safe parsing),
+ * `isPathLikeCitation` (precision) and `citationResolves` (lenient path + range overlap) for the semantics.
+ */
+export function countHallucinatedCitations(candidateOutput: string, diff: string): number {
+  const hallucinated = new Set<string>();
+  try {
+    if (!candidateOutput) return 0;
+    const sides = parseDiffSides(diff ?? '');
+    for (const cit of extractCitations(candidateOutput)) {
+      try {
+        if (!isPathLikeCitation(cit.path, sides)) continue;
+        if (!citationResolves(cit, sides)) hallucinated.add(cit.key);
+      } catch {
+        // A single unresolvable citation is skipped — best-effort, never aborts the whole count.
+      }
+    }
+  } catch {
+    // Defensive: any unexpected failure yields the best-effort count so far (never throws).
+  }
+  return hallucinated.size;
+}
+
 /** Dispatch the local candidate, then the judge, then score + write the receipt for one selected round.
  *  A local/judge decline or a scoring error is recorded as a skip result — never thrown. */
 function dispatchScoreReceipt(selected: CorpusRound, ctx: RoundContext): ShadowResult {
@@ -219,6 +392,7 @@ function dispatchScoreReceipt(selected: CorpusRound, ctx: RoundContext): ShadowR
       candidateLedgerId: candidate.ledgerId, judgeLedgerId: judge.ledgerId,
       findingsTotal: selected.findingsTotal, findingsAccepted: selected.findingsAccepted,
       tp: round.tp, fp: round.fp, novel: round.novel.length, acceptedMatched: round.acceptedMatched,
+      hallucinatedCitations: countHallucinatedCitations(candidate.output ?? '', selected.diff),
       recall: report.totals.recall, precision: report.totals.precision, status: 'scored', at,
     };
     if (!dryRun) appendReceipt(receiptDir, receipt);
@@ -311,7 +485,7 @@ function promotionBarLines(scored: readonly ScoredReceipt[], totals: ReportTotal
     `  • calendar days elapsed: ${days.toFixed(1)}/${SHADOW_BAR_MIN_DAYS}${tick(days >= SHADOW_BAR_MIN_DAYS)}`,
     `  • precision (confirmed-real/raised, same diffs — the gate): local ${pct(localPrecision)} vs cloud ${pct(cloudPrecision)}${tick(precisionMeets)}`,
     `      context: local excl. NOVEL = ${pct(localPrecisionExclNovel)} (NOVEL counted as raised-but-unconfirmed; final NOVEL handling is R's call at promotion)`,
-    `  • hallucinated citations surviving file:line check: ${hallucinationKnown ? `${totals.hallucinated}${tick(totals.hallucinated === 0)}` : `pending — ${checked}/${scored.length} rounds checked (mechanical post-check not yet implemented)`}`,
+    `  • hallucinated citations surviving file:line check: ${hallucinationKnown ? `${totals.hallucinated}${tick(totals.hallucinated === 0)}` : `pending — ${checked}/${scored.length} rounds checked`}`,
   ];
 }
 
