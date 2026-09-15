@@ -417,12 +417,17 @@ export async function runTarget(
     // The escape note is appended to the LEDGER's error column so the row is durably self-describing
     // (the outcome keeps it in its own `escape` field, so callers never mistake it for a failure). The
     // HED-395 billing-degraded note rides the same column for the same reason (queryable, never silent).
-    // result.error is already redacted at the line-337 boundary (the vendor-stderr credential vector).
-    // The escape/destroyed-work notes and the billing reason are heddle-GENERATED safety/status strings
-    // (they carry checkout FILENAMES, not vendor credentials) — they must NOT be re-redacted here, or an
-    // ordinary long filename (24+ chars w/ digits, not '/'-anchored) would be scrubbed from the ledger's
-    // own escape record. So the join is persisted verbatim; only result.error passed through redaction.
-    error: [result.error, escapeReport?.note, destroyedReport?.note, billingDegraded?.reason].filter(Boolean).join('; ') || undefined,
+    // result.error was fully redacted at the line-337 boundary (the vendor-stderr credential vector). The
+    // escape/destroyed-work notes carry checkout FILENAMES — a worker could name a parent-checkout file
+    // after its own credential — so scrub them SHAPES-ONLY: unmistakable credential forms (sk-*/Bearer/
+    // GLM-dotted/…) are redacted while ordinary long filenames survive (the opaque 24+ heuristic that would
+    // over-redact a filename is skipped). billingDegraded.reason is fixed heddle text (account id only).
+    error: [
+      result.error,
+      escapeReport ? redactSecrets(escapeReport.note, { shapesOnly: true }) : undefined,
+      destroyedReport ? redactSecrets(destroyedReport.note, { shapesOnly: true }) : undefined,
+      billingDegraded?.reason,
+    ].filter(Boolean).join('; ') || undefined,
     sessionId: result.sessionId,
     durationMs: result.durationMs,
     inputTokens: result.usage?.inputTokens,

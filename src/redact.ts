@@ -1,5 +1,5 @@
 /** Remove credential-shaped values from text that may be persisted or returned to callers. */
-export function redactSecrets(text: string, opts: { credential?: string } = {}): string {
+export function redactSecrets(text: string, opts: { credential?: string; shapesOnly?: boolean } = {}): string {
   try {
     let redacted = text;
     if (opts.credential) redacted = redacted.split(opts.credential).join('[redacted]');
@@ -28,10 +28,15 @@ export function redactSecrets(text: string, opts: { credential?: string } = {}):
       .replace(/["']?((?:token|secret|password|api[-_]?key|x-api-key)[\w-]{0,80})["']?\s*([:=])\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi, '$1$2[redacted]')
       // Dotted token pairs (e.g. the GLM <32>.<16> key) — redact as a unit BEFORE the opaque catch-all,
       // which would otherwise split on the dot and leave the second half exposed.
-      .replace(/(?<![A-Za-z0-9_/-])[A-Za-z0-9]{20,64}\.[A-Za-z0-9]{12,64}(?![A-Za-z0-9])/g, '[redacted]')
-      // Opaque tokens: 24+ chars with a digit/underscore/dash (so ordinary long words and PATHS — the
-      // leading '/' fails the lookbehind — pass through unchanged).
-      .replace(/(?<![A-Za-z0-9_/-])(?=[A-Za-z0-9_-]*[0-9_-])[A-Za-z0-9_-]{24,}(?![A-Za-z0-9_/-])/g, '[redacted]');
+      .replace(/(?<![A-Za-z0-9_/-])[A-Za-z0-9]{20,64}\.[A-Za-z0-9]{12,64}(?![A-Za-z0-9])/g, '[redacted]');
+
+    // Opaque tokens: 24+ chars with a digit/underscore/dash. This is a HEURISTIC — it cannot tell a random
+    // token from a long filename — so `shapesOnly` skips it. A caller redacting FILENAME-bearing text (the
+    // ledger's escape/destroyed-work notes) uses shapesOnly to scrub the unmistakable credential SHAPES
+    // above while preserving ordinary long filenames (real paths are already exempt via the '/' lookbehind).
+    if (!opts.shapesOnly) {
+      redacted = redacted.replace(/(?<![A-Za-z0-9_/-])(?=[A-Za-z0-9_-]*[0-9_-])[A-Za-z0-9_-]{24,}(?![A-Za-z0-9_/-])/g, '[redacted]');
+    }
 
     return redacted;
   } catch {

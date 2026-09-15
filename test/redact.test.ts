@@ -114,6 +114,18 @@ describe('redactSecrets — review-hardened cases', () => {
     expect(out).not.toContain('EXAMPLE11111111111111111111111111');
   });
 
+  // shapesOnly (the ledger escape/destroyed-note boundary): scrub unmistakable credential SHAPES but keep
+  // ordinary long filenames — a worker could name a parent-checkout file after its own credential.
+  it('shapesOnly redacts credential shapes yet preserves an ordinary long filename', () => {
+    const sk = 'sk-' + 'ant-EXAMPLE0123456789abcdefghijklmnop'; // split literal (scrub/gitleaks-safe)
+    const filename = 'release-20260915-build-artifact.txt';
+    const out = redactSecrets(`escape-warning: 2 change(s): ${sk}, ${filename}`, { shapesOnly: true });
+    expect(out).not.toContain(sk);       // credential shape scrubbed
+    expect(out).toContain(filename);     // ordinary long filename survives (opaque heuristic skipped)
+    // full mode (no flag) still redacts the opaque 24+ catch-all.
+    expect(redactSecrets('deadbeef0123456789abcdef01')).toBe('[redacted]');
+  });
+
   it('is ReDoS-safe: ~0.5MB pathological runs redact well under a second', () => {
     const start = Date.now();
     for (const s of [
