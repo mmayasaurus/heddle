@@ -117,7 +117,11 @@ let atomicWriteSequence = 0;
 // secureWriteFile (fd-level ownership/symlink guards + validated parent); this stays for the
 // non-credential policy files under ~/.heddle/policy.
 export function atomicWriteFile(path: string, content: string): void {
-  mkdirSync(dirname(path), { recursive: true });
+  // Owner-only parent (0700) for consistency with the hardened creds tree. mkdir's mode is umask-subject
+  // (unlike the fd-fchmod path in secure-fs), acceptable here because policy files are non-credential —
+  // so the umask-proof per-level walk isn't warranted, but 0700-under-a-normal-umask still beats the 0755
+  // default (F8/HED-590).
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const temporary = join(dirname(path), `.${basename(path)}.${process.pid}.${atomicWriteSequence++}.tmp`);
   try {
     writeFileSync(temporary, content, { mode: 0o600 });

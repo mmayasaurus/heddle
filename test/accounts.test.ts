@@ -37,6 +37,16 @@ describe('writeAccountRegistry / atomicWriteFile permission hardening (F8/HED-59
     atomicWriteFile(path, '{"strategy":"even-spread"}\n');
     expect(statSync(path).mode & 0o777).toBe(0o600);
   });
+
+  it('atomicWriteFile creates a missing parent directory without group/other access (policy tree)', () => {
+    const dir = join(tempDir(), 'policy');
+    atomicWriteFile(join(dir, 'strategy.json'), '{"strategy":"even-spread"}\n');
+    // mkdir's mode is umask-subject, so assert the security-relevant invariant (no group/other access —
+    // Codacy MEDIUM: others could otherwise list/traverse) rather than an exact mode a restrictive umask
+    // could narrow.
+    expect(existsSync(join(dir, 'strategy.json'))).toBe(true);
+    expect(statSync(dir).mode & 0o077).toBe(0o000);
+  });
 });
 
 describe('loadAccountRegistry', () => {
