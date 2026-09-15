@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { loadAccountRegistry } from '../src/accounts.js';
@@ -147,6 +147,37 @@ describe('accounts add wizard', () => {
       prompter: new ScriptedPrompter([true, 'locked', 'paid', 'T2', false, false]), runner: fakeRunner,
     });
     expect(statSync(join(home, '.heddle', 'accounts', 'claude', 'locked')).mode & 0o777).toBe(0o700);
+  });
+
+  it('reuses an existing owner-only claude config dir on re-run after validating it (HED-590)', async () => {
+    const home = tempDir();
+    const path = join(home, 'reuse.json');
+    const dir = join(home, '.heddle', 'accounts', 'claude', 'again');
+    mkdirSync(dir, { recursive: true });
+    chmodSync(dir, 0o700);
+    const summary = await runAccountsAdd({ provider: 'claude', registryPath: path, homeDir: home }, {
+      prompter: new ScriptedPrompter([true, 'again', 'paid', 'T2', false, false]), runner: fakeRunner,
+    });
+    expect(summary.added).toEqual(['again']);
+    expect(statSync(dir).mode & 0o777).toBe(0o700);
+  });
+
+  it('refuses a pre-existing group-writable claude config dir — fails that account, not the wizard (HED-590)', async () => {
+    const home = tempDir();
+    const path = join(home, 'unsafe.json');
+    const dir = join(home, '.heddle', 'accounts', 'claude', 'wide');
+    mkdirSync(dir, { recursive: true });
+    chmodSync(dir, 0o770); // group-writable — an unsafe home for persisted credentials
+    const transcript: string[] = [];
+    // The config-dir refusal returns before the billing/tier prompts, so only have-account + id +
+    // any-other? are consumed.
+    const summary = await runAccountsAdd({ provider: 'claude', registryPath: path, homeDir: home }, {
+      prompter: new ScriptedPrompter([true, 'wide', false]), runner: fakeRunner,
+      report: (line) => transcript.push(line),
+    });
+    expect(summary.failed).toEqual(['wide']);
+    expect(summary.added).toEqual([]);
+    expect(transcript.some((line) => line.startsWith('FAIL claude wide (config dir'))).toBe(true);
   });
 
   it('echoes the signed-in identity on the claude PASS line, never a token field (HED-585)', async () => {

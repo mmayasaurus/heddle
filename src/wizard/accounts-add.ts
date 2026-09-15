@@ -1,7 +1,8 @@
-import { chmodSync, existsSync, mkdirSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { loadAccountRegistry, upsertAccount, writeAccountRegistry, type Account, type AccountTier, type BillingClass } from '../accounts.js';
+import { ensureSecureDir } from '../secure-fs.js';
 import { loginStatus, loginIdentity } from '../health/parse.js';
 import type { CliRunner, NativeProvider } from './cli-runner.js';
 import type { Prompter } from './prompt.js';
@@ -57,9 +58,11 @@ function validateBaseUrl(value: string): void {
 
 function createIsolatedConfigDir(provider: 'claude' | 'codex', id: string, home: string = homedir()): string {
   const configPath = pathFor(provider, id, home);
+  // Freshness is a security property for env-repoint (a stale login must not survive) — refuse an existing
+  // dir rather than reuse it; ensureSecureDir then creates it 0700-from-outset and validates the whole
+  // created tree (rejecting a symlink / foreign-owned / group-or-other-writable path) — F8/HED-590.
   if (existsSync(configPath)) throw new Error(`isolated config directory already exists for ${provider} ${id}`);
-  mkdirSync(configPath, { recursive: true });
-  chmodSync(configPath, 0o700);
+  ensureSecureDir(configPath, { mode: 0o700 });
   return configPath;
 }
 
@@ -112,11 +115,17 @@ async function addOne(provider: NativeProvider, deps: AccountsAddDeps, ordinal: 
   const configPath = provider === 'cursor' ? null : pathFor(provider, id, home);
   const env = accountEnv(provider, configPath);
   if (configPath) {
-    // 0700: `claude auth login` now persists .credentials.json here, so lock the dir to the owner on
-    // shared machines — mirrors createIsolatedConfigDir (the env-repoint path). recursive mkdir is
-    // idempotent so a native re-run is fine; the chmod re-asserts perms on an existing dir too.
-    mkdirSync(configPath, { recursive: true });
-    chmodSync(configPath, 0o700);
+    // `claude auth login` persists .credentials.json here, so create it 0700-from-outset (or re-validate an
+    // existing owner-only dir) via the shared secure-fs primitive — rejecting a symlink / foreign-owned /
+    // group-or-other-writable path rather than trusting it (F8/HED-590). Refuse-closed on an unsafe path
+    // fails just THIS account (like the env-repoint path), never aborts the whole wizard.
+    try {
+      ensureSecureDir(configPath, { mode: 0o700 });
+    } catch (error) {
+      summary.failed.push(id);
+      deps.report?.(`FAIL ${provider} ${id} (config dir: ${error instanceof Error ? error.message : String(error)})`);
+      return;
+    }
   }
   try {
     deps.runner.login(provider, env);
