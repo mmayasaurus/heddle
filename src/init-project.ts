@@ -3,7 +3,7 @@ import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseDocument } from 'yaml';
-import { isAncestorOrEqual, PROJECTS_SCHEMA_VERSION, validateRegistry } from './projects.js';
+import { isAncestorOrEqual, PROJECTS_SCHEMA_VERSION, validateRegistry, type Project } from './projects.js';
 import { resolveCatalogRoot } from './rules/lifecycle.js';
 import { loadRules } from './rules/load.js';
 import { RuleIdPattern } from './rules/schema.js';
@@ -21,6 +21,10 @@ export interface InstallOptions {
 }
 export interface InstallStep {
   step: string; path: string; action: 'ok' | 'create' | 'update' | 'skip' | 'would-create' | 'would-update'; reason?: string; content?: string; bytes?: number; expectedContent?: string | null;
+  /** POSIX mode for the written file (e.g. 0o755 for an executable launcher). When set, applyInstall
+   *  chmods the file to it after the atomic write; when unset, an existing file's mode is preserved and
+   *  a new file takes the umask default (HED-671, enabling the HED-669 launcher-gen step). */
+  mode?: number;
 }
 export interface InstallPlan { options: Required<Pick<InstallOptions, 'dir' | 'canonical' | 'name' | 'homeDir'>> & InstallOptions; steps: InstallStep[]; }
 export interface InstallReport { steps: InstallStep[]; humanSteps: string[]; }
@@ -62,11 +66,16 @@ function jsonIndent(source: string | undefined): string | number {
   return source?.match(/\n([ \t]+)\u0022/)?.[1] ?? 2;
 }
 let atomicWriteSequence = 0;
-function atomicWriteFile(path: string, content: string): void {
+function atomicWriteFile(path: string, content: string, mode?: number): void {
   const temporary = join(dirname(path), `.${basename(path)}.${process.pid}.${atomicWriteSequence++}.tmp`);
   try {
     writeFileSync(temporary, content);
-    if (existsSync(path)) chmodSync(temporary, statSync(path).mode);
+    // An explicit mode (e.g. an executable launcher) wins; else preserve an existing file's mode
+    // (masked to 0o7777 so only permission + setuid/setgid/sticky bits reach chmod, never S_IFMT
+    // file-type bits). A brand-new file with no explicit mode keeps the umask default (unchanged
+    // pre-HED-671 behaviour).
+    const targetMode = mode ?? (existsSync(path) ? statSync(path).mode & 0o7777 : undefined);
+    if (targetMode !== undefined) chmodSync(temporary, targetMode);
     renameSync(temporary, path);
   } finally {
     try { if (existsSync(temporary)) unlinkSync(temporary); } catch { /* preserve the original write/rename failure */ }
@@ -354,19 +363,32 @@ function registryState(homeDir: string): { path: string; content: string | undef
   const raw = content === undefined ? { schemaVersion: PROJECTS_SCHEMA_VERSION, projects: [] } : parseJson(content, path, 'projects.json');
   return { path, content, raw, registry: validateRegistry(raw, path) };
 }
-function registrationDetails(input: InstallOptions, dir: string, registry: any, rawRegistry: any): any {
+function defaultLauncherPath(homeDir: string, name: string): string {
+  // Derived when --launcher is omitted on a FIRST registration so the registry `launcher` field and
+  // the HED-669 launcher-gen step share ONE resolved path. Guard against a name that would escape
+  // ~/.heddle via a path separator or traversal segment — such a name must pass --launcher explicitly.
+  if (/[/\\]/.test(name) || name === '..' || name === '.') {
+    throw new Error(`cannot derive a default launcher path for project name ${JSON.stringify(name)} (contains a path separator or traversal segment); pass --launcher explicitly`);
+  }
+  return join(homeDir, '.heddle', `launch-${name}.sh`);
+}
+function registrationDetails(input: InstallOptions, dir: string, homeDir: string, registry: any, rawRegistry: any): any {
   const name = valueFor('--name', input.name) ?? basename(dir);
   if (registry.projects.some((project: any) => project.workspaceRoots.some((root: string) => dir !== root && isAncestorOrEqual(dir, root)))) throw new Error(`refuses install target ${dir}: it is an ancestor of a registered workspace root`);
   const namedPrior = registry.projects.find((project: any) => project.name === name);
   const prior = registry.projects.find((project: any) => project.workspaceRoots.includes(dir)) ?? namedPrior;
   const rawPrior = prior ? rawRegistry.projects.find((project: any) => project.name === prior.name) : undefined;
   const supplied = (flag: 'team' | 'agents' | 'room' | 'launcher'): string | undefined => valueFor('--' + flag, input[flag]);
-  const team = supplied('team'); const agents = supplied('agents'); const room = supplied('room'); const launcher = supplied('launcher');
+  const team = supplied('team'); const agents = supplied('agents'); const room = supplied('room');
+  // --launcher is optional now: unsupplied on a FIRST registration derives ~/.heddle/launch-<name>.sh
+  // (single source with the launcher-gen step); on a re-init it stays undefined and falls back to the
+  // prior entry's launcher in resolveProjectEntry (HED-671).
+  const launcher = supplied('launcher') ?? (prior ? undefined : defaultLauncherPath(homeDir, name));
   const parsedAgents = agents?.split(',').map((agent) => agent.trim()).filter(Boolean);
   if (agents !== undefined && !parsedAgents?.length) throw new Error('--agents must include at least one agent');
   if (!input.name && namedPrior && !namedPrior.workspaceRoots.includes(dir)) throw new Error('project name "' + name + '" is already registered to a different root; provide an explicit --name');
   if (!prior) {
-    const missingFlags = [['team', team], ['agents', parsedAgents?.length ? agents : undefined], ['room', room], ['launcher', launcher]].filter(([, value]) => !value).map(([flag]) => '--' + flag);
+    const missingFlags = [['team', team], ['agents', parsedAgents?.length ? agents : undefined], ['room', room]].filter(([, value]) => !value).map(([flag]) => '--' + flag);
     if (missingFlags.length) throw new Error(`first registration requires ${missingFlags.join(', ')}`);
   }
   return { name, prior, rawPrior, team, room, launcher, parsedAgents };
@@ -449,11 +471,23 @@ function renderLifecycleCommandSteps(dir: string, dryRun: boolean): InstallStep[
       : stepFor(path, `command:${file}`, readFileSync(installerAsset('assets', 'commands', file), 'utf8'), dryRun, false);
   });
 }
-function registryStep(input: InstallOptions, dir: string, state: any, details: any, dryRun: boolean): InstallStep {
-  const projectName = details.prior?.name ?? details.name;
-  const project = details.prior
+/**
+ * The single source of truth for a project's registry entry — the exact object registryStep writes to
+ * projects.json, resolving the new-vs-re-init fallbacks in ONE place. Exported so the HED-669
+ * launcher-gen step consumes the SAME resolved agentIds + launcher rather than re-deriving them (which
+ * would drift on a re-init that omits --agents/--launcher). `tracker` is intentionally absent from a
+ * new entry — projects.ts defaults it to 'linear' on read, so the written file carries no redundant
+ * default. The return type is Project-without-tracker (tracker is a read-time default, never written
+ * here); .agentIds and .launcher — the fields the launcher-gen step reads — are present on both branches.
+ */
+export function resolveProjectEntry(details: any, dir: string): Omit<Project, 'tracker'> {
+  return details.prior
     ? { ...details.rawPrior, workspaceRoots: details.prior.workspaceRoots.includes(dir) ? details.rawPrior.workspaceRoots : [...details.rawPrior.workspaceRoots, dir], agentIds: details.parsedAgents ?? details.rawPrior.agentIds, linearTeam: details.team ?? details.rawPrior.linearTeam, defaultRoom: details.room ?? details.rawPrior.defaultRoom, launcher: details.launcher ?? details.rawPrior.launcher }
-    : { name: projectName, workspaceRoots: [dir], agentIds: details.parsedAgents!, linearTeam: details.team!, defaultRoom: details.room!, launcher: details.launcher! };
+    : { name: details.name, workspaceRoots: [dir], agentIds: details.parsedAgents!, linearTeam: details.team!, defaultRoom: details.room!, launcher: details.launcher! };
+}
+function registryStep(input: InstallOptions, dir: string, state: any, details: any, dryRun: boolean): InstallStep {
+  const project = resolveProjectEntry(details, dir);
+  const projectName = project.name;
   const nextRegistry = { ...state.raw, projects: details.prior ? state.raw.projects.map((candidate: any) => candidate.name === projectName ? project : candidate) : [...state.raw.projects, project] };
   validateRegistry(nextRegistry, state.path);
   return { ...stepFor(state.path, 'registry', registryContent(state.raw, state.content, details.rawPrior, project, projectName), dryRun), expectedContent: state.content ?? null };
@@ -475,7 +509,7 @@ export function planInstall(input: InstallOptions): InstallPlan {
   const { homeDir, dir } = resolveTarget(input);
   const canonical = resolveCanonical(input, homeDir);
   const state = registryState(homeDir);
-  const details = registrationDetails(input, dir, state.registry, state.raw);
+  const details = registrationDetails(input, dir, homeDir, state.registry, state.raw);
   const dryRun = input.dryRun === true;
   const hookCatalogRoot = input.hookCatalogRoot ?? resolveCatalogRoot();
   const steps = [canonicalStep(canonical), renderSettingsStep(dir, canonical, input.hookRules ?? [], hookCatalogRoot, dryRun), ...renderRulesSteps(dir, canonical, dryRun), ...renderHookRulesSteps(dir, input.hookRules ?? [], hookCatalogRoot, dryRun), renderMcpStep(dir, dryRun), renderIgnoreStep(dir, dryRun), renderGateStep(dir, dryRun), ...renderLifecycleCommandSteps(dir, dryRun), registryStep(input, dir, state, details, dryRun), enforceMarkerStep(input, dir, homeDir, dryRun)];
@@ -499,9 +533,19 @@ export function applyInstall(plan: InstallPlan, dryRun = false): InstallReport {
     }
   }
   for (const step of plan.steps) {
-    if (skipWrites || !step.content || step.action === 'ok' || step.action === 'skip') continue;
+    if (skipWrites || !step.content) continue;
+    if (step.action === 'ok') {
+      // Content already matches, so no rewrite — but re-apply an explicit mode if it has drifted: a
+      // launcher whose bytes are intact yet lost its execute bit (an external chmod, or a fresh clone
+      // that dropped +x) is otherwise never repaired by a re-run, because stepFor keys 'ok' on content
+      // alone and cannot see the mode (HED-671, qodo correctness finding). A mode-less 'ok' (e.g.
+      // canonicalStep) is untouched; like every other write here, a failed chmod throws.
+      if (step.mode !== undefined && (statSync(step.path).mode & 0o7777) !== step.mode) chmodSync(step.path, step.mode);
+      continue;
+    }
+    if (step.action === 'skip') continue;
     mkdirSync(dirname(step.path), { recursive: true });
-    atomicWriteFile(step.path, step.content);
+    atomicWriteFile(step.path, step.content, step.mode);
   }
   const root = plan.options.dir;
   return { steps: plan.steps, humanSteps: [`watch_directory(path=${root}, repo_id=${basename(root)})`, 'confirm index freshness', 'Linear team/labels — HED-299 ws3'] };

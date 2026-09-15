@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { parse as parseYaml } from 'yaml';
-import { applyInstall, DISCIPLINE_WIRING, planInstall, redactReport, renderHookRulesSteps } from '../src/init-project.js';
+import { applyInstall, DISCIPLINE_WIRING, planInstall, redactReport, renderHookRulesSteps, resolveProjectEntry } from '../src/init-project.js';
 import { loadRules } from '../src/rules/load.js';
 import { useTempResources } from './helpers.js';
 import { runCli } from './helpers/cli.js';
@@ -482,10 +482,12 @@ describe('init-project', () => {
     expect(existsSync(join(opts.dir, '.claude'))).toBe(false);
   });
 
-  it('requires all first-registration fleet flags without writing a registry', () => {
+  it('requires the first-registration fleet flags (team, agents, room) — launcher is now optional (derived) — without writing a registry', () => {
     const opts = options(tempDir());
     const { team, agents, room, launcher, ...incomplete } = opts;
-    expect(() => planInstall(incomplete)).toThrow(/--team, --agents, --room, --launcher/);
+    // --launcher no longer appears in the required set (HED-671: it derives a default); the error is
+    // anchored so a regression that re-adds --launcher to the list is caught.
+    expect(() => planInstall(incomplete)).toThrow(/first registration requires --team, --agents, --room$/);
     expect(existsSync(join(opts.homeDir, '.heddle', 'projects.json'))).toBe(false);
   });
 
@@ -761,6 +763,89 @@ describe('init-project', () => {
       chmodSync(settingsPath, 0o600);
       applyInstall(planInstall(opts));
       expect(statSync(settingsPath).mode & 0o777).toBe(0o600);
+    });
+  });
+
+  describe('HED-671 — resolveProjectEntry + InstallStep.mode', () => {
+    it('resolveProjectEntry builds a NEW entry from parsed details (single source for registry + launcher-gen)', () => {
+      const dir = join(tempDir(), 'ws');
+      const entry = resolveProjectEntry({ name: 'toy', prior: undefined, rawPrior: undefined, team: 'NEW', room: '#toy', launcher: '/h/.heddle/launch-toy.sh', parsedAgents: ['X', 'Y'] }, dir);
+      expect(entry).toEqual({ name: 'toy', workspaceRoots: [dir], agentIds: ['X', 'Y'], linearTeam: 'NEW', defaultRoom: '#toy', launcher: '/h/.heddle/launch-toy.sh' });
+    });
+
+    it('resolveProjectEntry falls back to the prior entry on a re-init omitting agents/launcher (no drift for the launcher-gen step)', () => {
+      const dir = join(tempDir(), 'ws');
+      const rawPrior = { name: 'toy', workspaceRoots: [dir], agentIds: ['A', 'B'], linearTeam: 'OLD', defaultRoom: '#old', launcher: 'old.sh', tracker: 'linear' };
+      const entry = resolveProjectEntry({ name: 'toy', prior: { name: 'toy', workspaceRoots: [dir] }, rawPrior, team: undefined, room: undefined, launcher: undefined, parsedAgents: undefined }, dir);
+      expect(entry.agentIds).toEqual(['A', 'B']);
+      expect(entry.launcher).toBe('old.sh');
+      expect(entry.linearTeam).toBe('OLD');
+    });
+
+    it('applyInstall chmods a newly created file to InstallStep.mode (executable launcher)', () => {
+      const base = tempDir();
+      const target = join(base, 'launch-toy.sh');
+      const plan = { options: { dir: base, canonical: base, name: 'toy', homeDir: base }, steps: [{ step: 'launcher', path: target, action: 'create' as const, content: '#!/bin/sh\necho hi\n', mode: 0o755 }] };
+      applyInstall(plan);
+      expect(existsSync(target)).toBe(true);
+      expect(statSync(target).mode & 0o777).toBe(0o755);
+    });
+
+    it('applyInstall lets an explicit InstallStep.mode override an existing file mode', () => {
+      const base = tempDir();
+      const target = join(base, 'launch-toy.sh');
+      writeFileSync(target, 'old'); chmodSync(target, 0o600);
+      const plan = { options: { dir: base, canonical: base, name: 'toy', homeDir: base }, steps: [{ step: 'launcher', path: target, action: 'update' as const, content: 'new', mode: 0o755 }] };
+      applyInstall(plan);
+      expect(statSync(target).mode & 0o777).toBe(0o755);
+    });
+
+    it('applyInstall in dryRun writes nothing even for a mode-bearing step', () => {
+      const base = tempDir();
+      const target = join(base, 'launch-toy.sh');
+      const plan = { options: { dir: base, canonical: base, name: 'toy', homeDir: base }, steps: [{ step: 'launcher', path: target, action: 'create' as const, content: 'x', mode: 0o755 }] };
+      applyInstall(plan, true);
+      expect(existsSync(target)).toBe(false);
+    });
+
+    it('re-applies an explicit mode on a content-identical (ok) re-run — repairs a launcher that lost +x', () => {
+      const base = tempDir();
+      const target = join(base, 'launch-toy.sh');
+      writeFileSync(target, '#!/bin/sh\necho hi\n');
+      chmodSync(target, 0o644); // execute bit dropped by an external chmod or a fresh clone
+      const plan = { options: { dir: base, canonical: base, name: 'toy', homeDir: base }, steps: [{ step: 'launcher', path: target, action: 'ok' as const, content: '#!/bin/sh\necho hi\n', mode: 0o755 }] };
+      applyInstall(plan);
+      expect(statSync(target).mode & 0o777).toBe(0o755);
+    });
+
+    it('throws (fail-loud) on a mode-bearing (ok) step whose file is gone — a stale plan, like the CAS check', () => {
+      const base = tempDir();
+      const target = join(base, 'launch-gone.sh');
+      const plan = { options: { dir: base, canonical: base, name: 'toy', homeDir: base }, steps: [{ step: 'launcher', path: target, action: 'ok' as const, content: 'x', mode: 0o755 }] };
+      expect(() => applyInstall(plan)).toThrow();
+    });
+  });
+
+  describe('HED-671 — derived launcher default', () => {
+    it('derives ~/.heddle/launch-<name>.sh when --launcher is omitted on first registration', () => {
+      const opts = options(tempDir());
+      const { launcher, ...noLauncher } = opts;
+      applyInstall(planInstall(noLauncher));
+      const registry = JSON.parse(readFileSync(join(opts.homeDir, '.heddle', 'projects.json'), 'utf8'));
+      expect(registry.projects[0].launcher).toBe(join(opts.homeDir, '.heddle', 'launch-toy.sh'));
+    });
+
+    it('honors an explicit --launcher over the derived default', () => {
+      const opts = options(tempDir());
+      applyInstall(planInstall(opts));
+      const registry = JSON.parse(readFileSync(join(opts.homeDir, '.heddle', 'projects.json'), 'utf8'));
+      expect(registry.projects[0].launcher).toBe('resume-toy.sh');
+    });
+
+    it('refuses to derive a launcher for a project name with a path separator (must pass --launcher)', () => {
+      const opts = options(tempDir());
+      const { launcher, ...noLauncher } = opts;
+      expect(() => planInstall({ ...noLauncher, name: 'a/../b' })).toThrow(/path separator or traversal/);
     });
   });
 });
