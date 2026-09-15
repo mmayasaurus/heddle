@@ -460,7 +460,12 @@ export function freshnessCheck(
       const days = Math.floor(
         (ctx.deps.now().getTime() - new Date(config.lastVerified).getTime()) / 86_400_000,
       );
-      const present = Boolean(readSecretsEnvValue(config.keyEnv, ctx.deps.paths.secrets));
+      let present: boolean;
+      try {
+        present = Boolean(readSecretsEnvValue(config.keyEnv, ctx.deps.paths.secrets));
+      } catch (err) {
+        return result('fail', `secrets.env has insecure permissions — ${err instanceof Error ? err.message : String(err)}`, 'chmod 600 ~/.heddle/secrets.env');
+      }
       const verification =
         days > ctx.lanes.value.floors.menial_verify_days
           ? `last verified ${days} days ago (> ${ctx.lanes.value.floors.menial_verify_days})`

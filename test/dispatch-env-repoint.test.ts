@@ -1,6 +1,7 @@
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { resolveEnvRepoint } from '../src/dispatcher/run.js';
 import type { ProviderCaps } from '../src/usage.js';
 import { fakeAdapter, IDENTITIES, useTempResources } from './helpers.js';
 
@@ -18,11 +19,22 @@ afterEach(() => {
 describe('dispatch — env-repoint credentials (HED-531)', () => {
   const { tempDir, tempLedger } = useTempResources('heddle-dispatch-env-repoint-test-');
 
+  it('refuses an insecure secrets-file reader without falling back to native Claude billing', () => {
+    const resolution = resolveEnvRepoint(
+      { id: 'kimi-free', envRepoint: { baseUrl: 'https://kimi.example.test/anthropic', authTokenRef: 'KIMI_FREE_TEST_KEY', service: 'kimi' } },
+      'claude',
+      () => { throw new Error('refusing to read secret file /x: group or other permissions are present'); },
+    );
+
+    expect(resolution).toMatchObject({ kind: 'refuse', refusal: { code: 'env-repoint.insecure-secrets' } });
+  });
+
   it('refuses and ledgers a missing env-repoint token without spawning or writing Claude settings', async () => {
     const home = tempDir();
     const heddleDir = join(home, '.heddle');
     mkdirSync(heddleDir);
     writeFileSync(join(heddleDir, 'secrets.env'), 'OTHER_KEY=SYNTHETIC_VALUE_THAT_MUST_NOT_LEAK\n');
+    chmodSync(join(heddleDir, 'secrets.env'), 0o600);
     const accountsPath = join(heddleDir, 'accounts.json');
     writeFileSync(accountsPath, JSON.stringify({ schemaVersion: 2, claude: [{
       id: 'kimi-free', configDir: null, billingClass: 'free-tier',
@@ -68,6 +80,7 @@ describe('dispatch — env-repoint credentials (HED-531)', () => {
     const heddleDir = join(home, '.heddle');
     mkdirSync(heddleDir);
     writeFileSync(join(heddleDir, 'secrets.env'), 'KIMI_FREE_TEST_KEY=synthetic-kimi-free-token\n');
+    chmodSync(join(heddleDir, 'secrets.env'), 0o600);
     const accountsPath = join(heddleDir, 'accounts.json');
     writeFileSync(accountsPath, JSON.stringify({ schemaVersion: 2, claude: [{
       id: 'kimi-free', configDir: null, billingClass: 'free-tier',

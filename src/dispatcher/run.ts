@@ -58,7 +58,19 @@ export function resolveEnvRepoint(
       },
     };
   }
-  const authToken = readSecret(envRepoint.authTokenRef);
+  let authToken: string;
+  try {
+    authToken = readSecret(envRepoint.authTokenRef);
+  } catch (err) {
+    return {
+      kind: 'refuse',
+      refusal: {
+        code: 'env-repoint.insecure-secrets',
+        reason: `env-repoint ${envRepoint.service}: refusing to read ${envRepoint.authTokenRef} — ${err instanceof Error ? err.message : String(err)}`,
+        instruction: 'Fix ~/.heddle/secrets.env permissions (chmod 600; owner-only, no symlink) and retry.',
+      },
+    };
+  }
   if (!authToken) {
     return {
       kind: 'refuse',

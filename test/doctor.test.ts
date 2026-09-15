@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { writeFileSync } from 'node:fs';
+import { chmodSync, writeFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import { formatDoctorReport, runDoctor } from '../src/doctor.js';
@@ -223,10 +223,26 @@ describe('runDoctor', () => {
     const paths = config();
     const secrets = join(resources.tempDir(), 'secrets.env');
     writeFileSync(secrets, 'GROQ_API_' + 'KEY="fakefakefakefake"\n');
+    chmodSync(secrets, 0o600);
     const report = await runDoctor({}, fakeDeps(paths, { paths: { ...paths, secrets } }));
     const output = `${formatDoctorReport(report)}\n${JSON.stringify(report)}`;
     expect(output).toContain('GROQ_API_KEY: present in secrets.env');
     expect(output).not.toContain('fakefakefakefake');
+  });
+
+  test('regression: insecure secrets-file permissions fail freshness checks with a repair hint', async () => {
+    const paths = config();
+    const secrets = join(resources.tempDir(), 'insecure-secrets.env');
+    writeFileSync(secrets, 'GROQ_API_KEY=fakefakefakefake\n');
+    chmodSync(secrets, 0o644);
+
+    const report = await runDoctor({ provider: 'groq' }, fakeDeps(paths, { paths: { ...paths, secrets } }));
+
+    expect(check(report, 'freshness:groq')).toMatchObject({
+      outcome: 'fail',
+      detail: expect.stringMatching(/insecure permissions/),
+      hint: 'chmod 600 ~/.heddle/secrets.env',
+    });
   });
 
   test('regression: corrupt lanes fail their check while independent probes continue', async () => {
