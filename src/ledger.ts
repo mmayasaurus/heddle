@@ -64,6 +64,8 @@ export interface DispatchRecord {
   overrideReason: string | null;
   /** Account selected for the worker (HED-68 / CODEX_HOME rotation), when heddle chose one. */
   account: string | null;
+  /** HED-404 read-only posture: confirmed harness fence, mandate-only fallback, or null when not read-only. */
+  fence: 'fenced' | 'mandate-only' | null;
   /** How `orchestrator` was determined: `bound` (process identity) or `caller` (tool/CLI argument). */
   identitySource: string | null;
   /** How the work ran: a heddle subprocess, or an orchestrator-owned in-session subagent. */
@@ -90,13 +92,13 @@ export interface DispatchRecord {
 export type DispatchStartRecord =
   Omit<DispatchRecord, 'id' | 'ok' | 'error' | 'inputTokens' | 'cachedInputTokens' | 'outputTokens' |
     'reasoningTokens' | 'durationMs' | 'finishedAt' | 'startedAt' | 'refusal' | 'capabilities' |
-    'routeReason' | 'symbol' | 'account' | 'identitySource' | 'overrideReason' |
+    'routeReason' | 'symbol' | 'account' | 'fence' | 'identitySource' | 'overrideReason' |
     // Derived/sweep-owned, never caller-provided: the owner identity is stamped by insertStart
     // itself; `outcome` is written only by the orphan sweep (HED-90); `outputPath` is produced by
     // persistOutput when finish() records a deliverable (HED-23); and `executionMode` is decided by
     // which insert ran — 'subprocess' for start(), 'in-session' for a claude handoff (HED-99).
     'executionMode' | 'outputPath' | 'ownerPid' | 'ownerComm' | 'ownerStartedAt' | 'outcome'> &
-  Partial<Pick<DispatchRecord, 'capabilities' | 'routeReason' | 'symbol' | 'account' | 'identitySource' | 'overrideReason'>>;
+  Partial<Pick<DispatchRecord, 'capabilities' | 'routeReason' | 'symbol' | 'account' | 'fence' | 'identitySource' | 'overrideReason'>>;
 
 /** Worker-facing aggregates exclude classifier rows by default (HED-25). NULL-safe: rows written
  *  before the column existed have execution_mode NULL and must still count as worker dispatches. */
@@ -128,6 +130,7 @@ CREATE TABLE IF NOT EXISTS dispatches (
   route_reason TEXT,
   symbol TEXT,
   account TEXT,
+  fence TEXT,
   identity_source TEXT,
   override_reason TEXT,
   execution_mode TEXT,
@@ -210,6 +213,7 @@ const MIGRATIONS: { column: string; ddl: string }[] = [
   { column: 'route_reason', ddl: 'ALTER TABLE dispatches ADD COLUMN route_reason TEXT' },
   { column: 'symbol', ddl: 'ALTER TABLE dispatches ADD COLUMN symbol TEXT' },
   { column: 'account', ddl: 'ALTER TABLE dispatches ADD COLUMN account TEXT' },
+  { column: 'fence', ddl: 'ALTER TABLE dispatches ADD COLUMN fence TEXT' },
   { column: 'identity_source', ddl: 'ALTER TABLE dispatches ADD COLUMN identity_source TEXT' },
   // HED-95: WHY a dispatch bypassed the routing table. Nullable by design — class dispatches
   // never carry one, and that asymmetry is exactly what makes the retune (HED-79) readable.
@@ -329,13 +333,13 @@ export class Ledger {
     const info = this.db.prepare(`
       INSERT INTO dispatches
         (orchestrator, task_class, provider, model, skills, issue, pr, cwd, prompt_preview,
-         session_id, fell_back_from, capabilities, route_reason, symbol, account, identity_source,
+         session_id, fell_back_from, capabilities, route_reason, symbol, account, fence, identity_source,
          override_reason, execution_mode, started_at, owner_pid, owner_comm, owner_started_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'subprocess', ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'subprocess', ?, ?, ?, ?)
     `).run(
       r.orchestrator, r.taskClass, r.provider, r.model, r.skills, r.issue, r.pr, r.cwd,
       r.promptPreview.slice(0, 500), r.sessionId, r.fellBackFrom, r.capabilities ?? null,
-      r.routeReason ?? null, r.symbol ?? null, r.account ?? null, r.identitySource ?? null, r.overrideReason ?? null, now,
+      r.routeReason ?? null, r.symbol ?? null, r.account ?? null, r.fence ?? null, r.identitySource ?? null, r.overrideReason ?? null, now,
       process.pid, basename(process.execPath), Math.round(Date.now() - process.uptime() * 1000),
     );
     return Number(info.lastInsertRowid);
@@ -347,13 +351,13 @@ export class Ledger {
     const info = this.db.prepare(`
       INSERT INTO dispatches
         (orchestrator, task_class, provider, model, skills, issue, pr, cwd, prompt_preview,
-         session_id, fell_back_from, refusal, capabilities, route_reason, symbol, account, identity_source,
+         session_id, fell_back_from, refusal, capabilities, route_reason, symbol, account, fence, identity_source,
          override_reason, execution_mode, ok, error, started_at, finished_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
     `).run(
       r.orchestrator, r.taskClass, r.provider, r.model, r.skills, r.issue, r.pr, r.cwd,
       r.promptPreview.slice(0, 500), r.sessionId, r.fellBackFrom, refusal, r.capabilities ?? null,
-      r.routeReason ?? null, r.symbol ?? null, r.account ?? null, r.identitySource ?? null, r.overrideReason ?? null,
+      r.routeReason ?? null, r.symbol ?? null, r.account ?? null, r.fence ?? null, r.identitySource ?? null, r.overrideReason ?? null,
       executionMode ?? null, reason, now, now,
     );
     return Number(info.lastInsertRowid);

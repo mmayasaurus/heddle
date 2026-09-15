@@ -23,6 +23,7 @@ import { packsFor, requestedPacks } from './packs.js';
 import { overrideReasonGate } from './override-gate.js';
 import { webRefusalReason } from './refusals.js';
 import { billingVerdict } from './billing.js';
+import { tierReadOnlyVerdict } from './tier-gate.js';
 import { resolveEnvRepoint } from './run.js';
 import type { DispatchContext, DispatchRequest, DispatchPlan, InSessionOrigin } from './types.js';
 
@@ -368,6 +369,15 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
     table,
   });
   const billingRefusal = reachesRunTarget ? billing.refusal : undefined;
+  // HED-404: the structural tier read-only gate mirrors billing's plan-level pre-gate — the SAME pure
+  // tierReadOnlyVerdict runTarget enforces with (F7 parity), gated on reachesRunTarget so an in-session
+  // preview never advertises a refusal the spawn-less run never makes. (The in-session tier question is
+  // keyed on the orchestrator's OWN account, not this headless pick, and is deferred to HED-573 — not
+  // here.) Fail-open is intrinsic to tierReadOnlyVerdict: a null account, an unreadable registry, or any
+  // non-T0 tier yields no refusal, so today's all-untiered fleet is unaffected.
+  const tierRefusal = reachesRunTarget
+    ? tierReadOnlyVerdict({ accountId: account, provider: target.provider, readOnly: route.readOnly }).refusal
+    : undefined;
   const envRepointResolution = resolveEnvRepoint(
     target.provider === 'claude' ? accountPick?.account : undefined,
     target.provider,
@@ -421,7 +431,7 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
       + `claude -p --output-format json is silent until completion, so a substantial review that overruns `
       + `SIGKILLs at its timeout with zero output (HED-511: 6/6 such dispatches died this way).`
     : undefined;
-  return { route, target, fallback, origin, execution, decision, symbol, resolutionWalk, skillsForRefusal, account, accountAdvice, accountPick, rotationAccount, claudeAccountCount, notDispatchable, reviewerPick, sameProviderReview, pinnedExcludedAccount, overrideReasonRequired, billingRefusal, envRepointRefusal, billingAdvice, capabilityRefusal, requiresWebRefusal, capabilityFitRebinds, headlessClaudeReviewRefusal };
+  return { route, target, fallback, origin, execution, decision, symbol, resolutionWalk, skillsForRefusal, account, accountAdvice, accountPick, rotationAccount, claudeAccountCount, notDispatchable, reviewerPick, sameProviderReview, pinnedExcludedAccount, overrideReasonRequired, billingRefusal, tierRefusal, envRepointRefusal, billingAdvice, capabilityRefusal, requiresWebRefusal, capabilityFitRebinds, headlessClaudeReviewRefusal };
 }
 
 /** One shared dry-run summary for `heddle route` and the `plan_dispatch` MCP tool (identical fields). */
@@ -435,11 +445,15 @@ export function summarizePlan(plan: DispatchPlan): Record<string, unknown> {
   // shows the PRIMARY (the rebound fallback is named in remaining_fallback — preview-shows-primary is the
   // HED-275 boundary, same as the `unenforceable` capabilityRefusal exclusion above).
   const previewBilling = plan.capabilityFitRebinds ? undefined : plan.billingRefusal;
+  // HED-404 preview parity: same capabilityFitRebinds skip as billing (a T0 primary that would rebind to
+  // a capability-fit fallback reaches runTarget, which gates the REBOUND account — so don't advertise the
+  // primary's tier refusal here). Ordered after billing, mirroring the runTarget gate order.
+  const previewTier = plan.capabilityFitRebinds ? undefined : plan.tierRefusal;
   return {
     task_class: plan.route.taskClass,
     symbol: plan.symbol ?? null,
     resolution_walk: plan.resolutionWalk ?? [],
-    would_run: notDispatchable || plan.decision.refusal || previewBilling || plan.envRepointRefusal || plan.sameProviderReview || plan.pinnedExcludedAccount || noDispatchableAccount || plan.headlessClaudeReviewRefusal || plan.overrideReasonRequired || plan.capabilityRefusal || plan.requiresWebRefusal ? null : `${plan.target.provider}/${plan.target.model}`,
+    would_run: notDispatchable || plan.decision.refusal || previewBilling || previewTier || plan.envRepointRefusal || plan.sameProviderReview || plan.pinnedExcludedAccount || noDispatchableAccount || plan.headlessClaudeReviewRefusal || plan.overrideReasonRequired || plan.capabilityRefusal || plan.requiresWebRefusal ? null : `${plan.target.provider}/${plan.target.model}`,
     execution: plan.execution ?? null,
     in_session: plan.execution === 'in-session-subagent',
     routed_away_for_cap: plan.decision.routedAwayForCap,
@@ -455,6 +469,8 @@ export function summarizePlan(plan: DispatchPlan): Record<string, unknown> {
       ? plan.decision.refusal
       : previewBilling
       ? previewBilling
+      : previewTier
+      ? previewTier
       : plan.envRepointRefusal
       ? plan.envRepointRefusal
       : plan.pinnedExcludedAccount
