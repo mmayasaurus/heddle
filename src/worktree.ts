@@ -432,7 +432,10 @@ export function autoWipCommit(
         gitWithEnv(cwd, ['update-ref', 'HEAD', oldHead, commitSha]);
         return { committed: false, reason: `could not reconcile the real index; rolled HEAD back to the tree as found: ${resetErr}` };
       } catch (rollbackErr) {
-        return { committed: false, reason: `auto-WIP committed HEAD ${commitSha.slice(0, 8)} but could not reconcile the real index, and rollback failed — HEAD holds the auto-WIP commit: ${resetErr}; rollback: ${gitErrorMessage(rollbackErr)}` };
+        // The CAS rollback failed because HEAD is no longer our commit — another process advanced it,
+        // so HEAD holds THAT commit, not necessarily ours (codex pass-3 accuracy nit). Do not claim
+        // which commit HEAD holds; point to manual resolution.
+        return { committed: false, reason: `could not reconcile the real index and could not roll back — HEAD advanced past the auto-WIP commit ${commitSha.slice(0, 8)} concurrently; resolve manually: ${resetErr}; rollback: ${gitErrorMessage(rollbackErr)}` };
       }
     }
 
