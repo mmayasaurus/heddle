@@ -2,8 +2,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 vi.mock('node:fs', () => ({ readFileSync: vi.fn() }));
 import { readFileSync } from 'node:fs';
 import { OpenAICompatAdapter, openAICompatInputTokenUpperBound } from '../../src/adapters/openai-compat.js';
+import type { DispatchOptions } from '../../src/types.js';
 
-const opts = { model: 'openai/gpt-oss-120b', cwd: '/tmp' };
+const opts: DispatchOptions = { model: 'openai/gpt-oss-120b', cwd: '/tmp' };
 const response = (body: unknown, ok = true, status = 200) => ({ ok, status, json: async () => body });
 
 describe('OpenAICompatAdapter', () => {
@@ -71,7 +72,7 @@ describe('OpenAICompatAdapter', () => {
     const result = await new OpenAICompatAdapter('glm').dispatch('hello', {
       ...opts, model: 'glm-5.3', maxOutputTokens: 8_000, maxOutputBytes: 16_000,
       maxModelRequests: 1, allowReasoningRetry: false,
-    } as any);
+    });
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(JSON.parse(fetch.mock.calls[0][1].body).max_completion_tokens).toBe(8_000);
     expect(result).toMatchObject({
@@ -142,6 +143,25 @@ describe('OpenAICompatAdapter', () => {
     await expect(new OpenAICompatAdapter('openrouter').dispatch('hello', { ...opts, model: 'dynamic/model', timeoutMs: 1 })).resolves.toMatchObject({
       ok: false, output: '', exitCode: null, error: expect.stringContaining('timed out'),
       incomplete: true, remoteOutcome: 'unknown',
+    });
+  });
+
+  it('classifies an abort while reading a bounded response as a timeout', async () => {
+    vi.mocked(readFileSync).mockReturnValue('ZAI_API_KEY=secret\n');
+    vi.stubGlobal('fetch', vi.fn((_url: string, init: RequestInit) => Promise.resolve({
+      ok: true,
+      status: 200,
+      body: {
+        getReader: () => ({
+          read: () => new Promise((_resolve, reject) => init.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')))),
+          cancel: async () => undefined,
+        }),
+      },
+    })));
+    await expect(new OpenAICompatAdapter('glm').dispatch('hello', {
+      ...opts, model: 'glm-5.3', maxOutputBytes: 16_000, timeoutMs: 1,
+    })).resolves.toMatchObject({
+      incomplete: true, remoteOutcome: 'unknown', error: expect.stringContaining('timed out'),
     });
   });
 

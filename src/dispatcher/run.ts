@@ -15,7 +15,7 @@ import { decideCapabilities, capabilityPolicy } from '../capabilities.js';
 import { capAwarePolicy } from '../capaware.js';
 import { WORKER_ENV } from '../identity.js';
 import { providerExecution, type Route, type RouteTarget } from '../routing.js';
-import type { WorkerResult } from '../types.js';
+import type { WorkerAdapter, WorkerResult } from '../types.js';
 import { packsFor, requestedPacks } from './packs.js';
 import { baseRecord, refusalOutcome, refuseBilling, webRefusalReason } from './refusals.js';
 import { billingVerdict } from './billing.js';
@@ -255,13 +255,33 @@ export async function runTarget(
   // Adapter construction stays BELOW admission on purpose: a bounded route must refuse
   // (oversize input, exhausted headroom) before any provider factory runs (HED-570 invariant,
   // proven by test/bounded-dispatch.test.ts). Nothing above this line uses the adapter.
-  const adapter = ctx.adapterFor(target.provider);
-  // HED-3: review rows carry the author→reviewer pair from the moment the row exists.
-  if (ctx.review) {
-    ctx.ledger.recordReview({
-      dispatchId: ledgerId, authorProvider: ctx.review.authorProvider, authorModel: ctx.review.authorModel,
-      authorDispatchId: ctx.review.authorDispatchId, reviewerProvider: target.provider, reviewerModel: target.model,
-    });
+  let adapter: WorkerAdapter;
+  try {
+    adapter = ctx.adapterFor(target.provider);
+    // HED-3: review rows carry the author→reviewer pair from the moment the row exists.
+    if (ctx.review) {
+      ctx.ledger.recordReview({
+        dispatchId: ledgerId, authorProvider: ctx.review.authorProvider, authorModel: ctx.review.authorModel,
+        authorDispatchId: ctx.review.authorDispatchId, reviewerProvider: target.provider, reviewerModel: target.model,
+      });
+    }
+  } catch (err) {
+    const error = `post-admission failure: ${err instanceof Error ? err.message : String(err)}`;
+    if (route.bounds) {
+      try { ctx.ledger.settleBoundedReservation(ledgerId, { inputTokens: null, generatedTokens: null }); } catch { /* finish must still run */ }
+    }
+    try {
+      ctx.ledger.finish(ledgerId, { ok: false, error, output: '' });
+    } catch { /* the attempted finish must not rethrow past this admitted path */ }
+    return {
+      ok: false, output: '', exitCode: null, error,
+      taskClass: route.taskClass, provider: target.provider, model: target.model, skills,
+      capabilities: caps.granted, ledgerId, usedFallback: fellBackFrom !== null,
+      orchestrator: ctx.attribution.orchestrator, identitySource: ctx.attribution.identitySource,
+      execution: providerExecution(ctx.table, target.provider), routeReason: ctx.routeReason,
+      account: ctx.account ?? null,
+      ...(boundedReceipt ? { boundedReceipt } : {}),
+    };
   }
   // Codex needs its attached MCP servers' tools pre-approved per-invocation, or headless calls
   // cancel. This makes heddle self-contained — it works even if the user's global codex config
@@ -478,16 +498,23 @@ export async function runTarget(
     }
   }
 
-  if (route.bounds && boundedReceipt) {
-    result = finalizeBoundedResult(result, boundedReceipt, route.bounds);
-    const normalized = normalizedBoundedUsage(result.usage);
-    ctx.ledger.settleBoundedReservation(ledgerId, {
-      inputTokens: normalized.inputTokens,
-      generatedTokens: normalized.generatedTokens,
-    });
+  try {
+    if (route.bounds && boundedReceipt) {
+      result = finalizeBoundedResult(result, boundedReceipt, route.bounds);
+      const normalized = normalizedBoundedUsage(result.usage);
+      ctx.ledger.settleBoundedReservation(ledgerId, {
+        inputTokens: normalized.inputTokens,
+        generatedTokens: normalized.generatedTokens,
+      });
+    }
+  } catch (err) {
+    result = { ok: false, output: '', exitCode: null, error: `post-admission failure: ${err instanceof Error ? err.message : String(err)}` };
+    if (route.bounds) {
+      try { ctx.ledger.settleBoundedReservation(ledgerId, { inputTokens: null, generatedTokens: null }); } catch { /* finish must still run */ }
+    }
   }
 
-  ctx.ledger.finish(ledgerId, {
+  try { ctx.ledger.finish(ledgerId, {
     ok: result.ok,
     // The escape note is appended to the LEDGER's error column so the row is durably self-describing
     // (the outcome keeps it in its own `escape` field, so callers never mistake it for a failure). The
@@ -500,7 +527,9 @@ export async function runTarget(
     outputTokens: result.usage?.outputTokens,
     reasoningTokens: result.usage?.reasoningOutputTokens,
     output: result.output,
-  });
+  }); } catch (err) {
+    result = { ok: false, output: '', exitCode: null, error: `post-admission failure: ${err instanceof Error ? err.message : String(err)}` };
+  }
 
   return {
     ...result,

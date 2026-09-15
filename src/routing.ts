@@ -60,6 +60,7 @@ export interface Route extends RouteTarget {
 }
 
 export interface DispatchBounds {
+  account: string;
   maxModelRequests: number;
   maxInputTokens: number;
   maxGeneratedTokens: number;
@@ -198,7 +199,11 @@ function parseDispatchBounds(node: unknown, where: string): DispatchBounds | und
   if (typeof bounds.retry !== 'boolean') {
     throw new Error(`routing table: ${where}.bounds.retry must be a boolean (got ${JSON.stringify(bounds.retry)})`);
   }
+  if (typeof bounds.account !== 'string' || bounds.account.trim().length === 0) {
+    throw new Error(`routing table: ${where}.bounds.account must be a non-empty string (got ${JSON.stringify(bounds.account)})`);
+  }
   return {
+    account: bounds.account,
     maxModelRequests: positiveInteger(bounds, 'max_model_requests', `${where}.bounds`),
     maxInputTokens: positiveInteger(bounds, 'max_input_tokens', `${where}.bounds`),
     maxGeneratedTokens: positiveInteger(bounds, 'max_generated_tokens', `${where}.bounds`),

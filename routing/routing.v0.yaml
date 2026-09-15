@@ -279,6 +279,7 @@ task_classes:
     read_only: true
     auto_assess: false
     bounds:
+      account: zai-coding-plan
       max_model_requests: 1
       max_input_tokens: 72000
       max_generated_tokens: 8000

@@ -354,8 +354,9 @@ export async function dispatch(
   // HED-601: keyed on `quarantine` (set for ANY read_only violation, review pair or not), so a non-review
   // read-only violation is not retried on the fallback either.
   // A truncated response completed a provider interaction; retrying the same prompt would truncate
-  // again, so preserve its retained output instead of spending a fallback request.
-  if (primary.ok || primary.truncated || primary.refusal || primary.quarantine) return primary;
+  // again, so preserve its retained output instead of spending a fallback request. An empty truncated
+  // output retains nothing, so a differently budgeted fallback may still be useful.
+  if (primary.ok || (primary.truncated && primary.output !== '') || primary.refusal || primary.quarantine) return primary;
   if (req.noFallback) {
     if ((target.provider === 'codex' || target.provider === 'cursor') && ctx.rotationAccount
         && classifyRotationRefusal(target.provider, primary) === 'rate-limit') {

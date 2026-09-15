@@ -47,14 +47,16 @@ export function boundedEnforcementSupport(
 }
 
 export function normalizedBoundedUsage(usage: TokenUsage | undefined): NormalizedBoundedUsage {
-  const inputTokens = usage?.inputTokens ?? null;
-  const generatedTokens = usage?.outputTokens ?? null;
+  const valid = (value: unknown): number | null => typeof value === 'number'
+    && Number.isFinite(value) && Number.isSafeInteger(value) && value >= 0 ? value : null;
+  const inputTokens = valid(usage?.inputTokens);
+  const generatedTokens = valid(usage?.outputTokens);
   return {
     inputTokens,
-    cachedInputTokens: usage?.cachedInputTokens ?? null,
-    cacheCreationInputTokens: usage?.cacheCreationInputTokens ?? null,
+    cachedInputTokens: valid(usage?.cachedInputTokens),
+    cacheCreationInputTokens: valid(usage?.cacheCreationInputTokens),
     generatedTokens,
-    reasoningTokens: usage?.reasoningOutputTokens ?? null,
+    reasoningTokens: valid(usage?.reasoningOutputTokens),
     totalTokens: inputTokens === null || generatedTokens === null ? null : inputTokens + generatedTokens,
   };
 }
@@ -165,6 +167,11 @@ export function boundedPreflight(
     return refused(route, target, req, table, 'bounded-headroom-unknown',
       'bounded dispatch requires a complete, valid account-headroom snapshot and session/request identifiers',
       ['accountHeadroom']);
+  }
+  if (admission.account !== bounds.account) {
+    return refused(route, target, req, table, 'bounded-account-mismatch',
+      `bounded admission account ${JSON.stringify(admission.account)} does not match route account ${JSON.stringify(bounds.account)}`,
+      ['accountIdentity']);
   }
   const ageMs = now - Date.parse(admission.observedAt);
   if (ageMs < 0 || ageMs > bounds.maxHeadroomAgeMs) {

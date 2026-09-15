@@ -212,7 +212,8 @@ export class OpenAICompatAdapter implements WorkerAdapter {
         } else {
           body = await response.json() as ChatResponse;
         }
-      } catch {
+      } catch (err) {
+        if (controller.signal.aborted) throw err;
         return { result: { ok: false, output: '', exitCode: null, error: `${this.provider}: invalid JSON response (HTTP ${response.status})` } };
       }
       if (!response.ok) return { result: { ok: false, output: '', exitCode: null, error: `${this.provider}: HTTP ${response.status}`, raw: body } };

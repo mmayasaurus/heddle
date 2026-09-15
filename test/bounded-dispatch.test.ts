@@ -4,7 +4,9 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { dispatch } from '../src/dispatch.js';
 import { Ledger } from '../src/ledger.js';
-import type { DispatchOptions, WorkerAdapter, WorkerResult } from '../src/types.js';
+import { normalizedBoundedUsage } from '../src/bounded-dispatch.js';
+import type { DispatchOptions, TokenUsage, WorkerAdapter, WorkerResult } from '../src/types.js';
+import type { DispatchRequest } from '../src/dispatcher/types.js';
 import { useTempResources } from './helpers.js';
 
 const TASK_CLASS = 'fdl-public-source-research';
@@ -15,7 +17,7 @@ function fakeGlm(result: WorkerResult = {
   output: '{"finding":"bounded"}',
   exitCode: null,
   raw: { id: 'provider-request-1', usage: { prompt_tokens: 10, completion_tokens: 5 } },
-  usage: { inputTokens: 10, outputTokens: 5, reasoningOutputTokens: 2, cacheCreationInputTokens: 3, requestId: 'provider-request-1' } as any,
+  usage: { inputTokens: 10, outputTokens: 5, reasoningOutputTokens: 2, cacheCreationInputTokens: 3, requestId: 'provider-request-1' },
 }): { adapter: WorkerAdapter; calls: Array<{ prompt: string; opts: DispatchOptions }> } {
   const calls: Array<{ prompt: string; opts: DispatchOptions }> = [];
   const adapter: WorkerAdapter = {
@@ -40,7 +42,7 @@ function admission(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function boundedRequest(cwd: string, overrides: Record<string, unknown> = {}) {
+function boundedRequest(cwd: string, overrides: Partial<DispatchRequest> = {}): DispatchRequest {
   return {
     taskClass: TASK_CLASS,
     prompt: 'analyze this packet',
@@ -49,7 +51,7 @@ function boundedRequest(cwd: string, overrides: Record<string, unknown> = {}) {
     noFallback: true,
     boundedAdmission: admission(),
     ...overrides,
-  } as any;
+  };
 }
 
 function boundedRouting(sessionTokenCap = 2_400_000, fallback = false): string {
@@ -69,6 +71,7 @@ task_classes:
     skills: []
     edits_code: false
     bounds:
+      account: zai-coding-plan
       max_model_requests: 1
       max_input_tokens: 72000
       max_generated_tokens: 8000
@@ -112,7 +115,8 @@ describe('bounded FDL dispatch admission', () => {
       tempLedger(), () => { factoryCalls += 1; return fake.adapter; },
     );
     expect(outcome.refusal?.code).toBe('bounded-unsupported-bound');
-    expect((outcome as any).boundedReceipt.refusedDimensions).toEqual(expect.arrayContaining(['modelRequests', 'generatedTokens']));
+    expect(outcome.boundedReceipt).toBeDefined();
+    expect(outcome.boundedReceipt!.refusedDimensions).toEqual(expect.arrayContaining(['modelRequests', 'generatedTokens']));
     expect(fake.calls).toHaveLength(0);
     expect(factoryCalls).toBe(0);
   });
@@ -133,6 +137,41 @@ describe('bounded FDL dispatch admission', () => {
     expect(fake.calls).toHaveLength(0);
   });
 
+  it('refuses a caller account that differs from the bounded route account', async () => {
+    const outcome = await dispatch(
+      boundedRequest(tempDir(), { boundedAdmission: admission({ account: 'other-account' }) }),
+      tempLedger(), () => fakeGlm().adapter,
+    );
+    expect(outcome.refusal?.code).toBe('bounded-account-mismatch');
+    expect(outcome.boundedReceipt?.refusedDimensions).toEqual(['accountIdentity']);
+  });
+
+  it('finishes and settles a reservation when adapter construction fails after admission', async () => {
+    const dir = tempDir();
+    const ledgerPath = join(dir, 'ledger.db');
+    const ledger = new Ledger(ledgerPath);
+    const failed = await dispatch(boundedRequest(dir), ledger, () => { throw new Error('adapter unavailable'); });
+    expect(failed).toMatchObject({ ok: false, error: 'post-admission failure: adapter unavailable' });
+    const db = new DatabaseSync(ledgerPath);
+    expect(db.prepare('SELECT ok, finished_at FROM dispatches WHERE id = ?').get(failed.ledgerId))
+      .toMatchObject({ ok: 0, finished_at: expect.any(String) });
+    expect(db.prepare('SELECT actual_total_tokens, settled_at FROM bounded_reservations WHERE dispatch_id = ?').get(failed.ledgerId))
+      .toMatchObject({ actual_total_tokens: null, settled_at: expect.any(String) });
+    db.close();
+    const next = await dispatch(
+      boundedRequest(dir, { boundedAdmission: admission({ requestId: 'after-adapter-failure' }) }),
+      ledger, () => fakeGlm().adapter,
+    );
+    expect(next.ok).toBe(true);
+  });
+
+  it('normalizes only finite safe non-negative integer provider usage', () => {
+    for (const value of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1, '5'] as unknown[]) {
+      expect(normalizedBoundedUsage({ inputTokens: value, outputTokens: value } as TokenUsage))
+        .toMatchObject({ inputTokens: null, generatedTokens: null, totalTokens: null });
+    }
+  });
+
   it('atomically refuses an exhausted session-token budget before a second provider call', async () => {
     const dir = tempDir();
     const routingPath = join(dir, 'routing.yaml');
@@ -143,7 +182,7 @@ describe('bounded FDL dispatch admission', () => {
       ok: true,
       output: '{"finding":"uses the complete envelope"}',
       exitCode: null,
-      usage: { inputTokens: 72_000, outputTokens: 8_000, reasoningOutputTokens: 2_000, cacheCreationInputTokens: 3_000 } as any,
+      usage: { inputTokens: 72_000, outputTokens: 8_000, reasoningOutputTokens: 2_000, cacheCreationInputTokens: 3_000 },
     });
     const first = await dispatch(boundedRequest(dir), ledger, () => fake.adapter);
     expect(first.ok).toBe(true);
@@ -160,7 +199,7 @@ describe('bounded FDL dispatch admission', () => {
     const observedAt = new Date(Date.now() - 1_000).toISOString();
     const fake = fakeGlm({
       ok: true, output: '{"finding":"spent"}', exitCode: null,
-      usage: { inputTokens: 72_000, outputTokens: 8_000 } as any,
+      usage: { inputTokens: 72_000, outputTokens: 8_000 },
     });
     const first = await dispatch(
       boundedRequest(tempDir(), { prompt: 'x'.repeat(71_900), boundedAdmission: admission({ requestId: 'spent-first', remainingTokens: 100_000, observedAt }) }),
@@ -202,7 +241,8 @@ describe('bounded FDL dispatch admission', () => {
       model: 'glm-5.3', maxOutputTokens: 8_000, maxModelRequests: 1,
       allowReasoningRetry: false, timeoutMs: 150_000, readOnly: true,
     });
-    expect((outcome as any).boundedReceipt).toMatchObject({
+    expect(outcome.boundedReceipt).toBeDefined();
+    expect(outcome.boundedReceipt!).toMatchObject({
       status: 'completed',
       provider: 'glm',
       model: 'glm-5.3',
@@ -243,6 +283,7 @@ describe('bounded FDL dispatch admission', () => {
     expect(outcome.ok).toBe(false);
     expect(outcome.output).toBe(output);
     expect(outcome.incomplete).toBe(true);
-    expect((outcome as any).boundedReceipt.status).toBe('incomplete');
+    expect(outcome.boundedReceipt).toBeDefined();
+    expect(outcome.boundedReceipt!.status).toBe('incomplete');
   });
 });

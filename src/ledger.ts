@@ -455,6 +455,7 @@ export class Ledger {
       if (!Number.isFinite(observedMs)) {
         return refuse('bounded-headroom-unknown', 'account headroom timestamp is invalid');
       }
+      const observedAtIso = new Date(observedMs).toISOString();
       if (headroomAgeMs < 0 || headroomAgeMs > bounds.maxHeadroomAgeMs) {
         return refuse('bounded-headroom-stale',
           `account headroom became stale before reservation (age ${headroomAgeMs}ms; maximum ${bounds.maxHeadroomAgeMs}ms)`);
@@ -480,10 +481,14 @@ export class Ledger {
         return refuse('max-children',
           `orchestrator ${r.orchestrator} already has ${inFlight} worker(s) in flight (cap ${structuralCap.max})`);
       }
+      // A bounded dispatch cannot outlive bounds.timeoutMs. Orphaned reservations stop occupying
+      // concurrency after that window plus grace, but their tokens remain outstanding conservatively
+      // until manual settlement; recovery policy is a follow-up ticket.
+      const concurrencyCutoff = new Date(nowMs - (Math.max(structuralCap.staleAfterMs, bounds.timeoutMs) + 60_000)).toISOString();
       const boundedInFlight = this.db.prepare(`
         SELECT COUNT(*) AS n FROM bounded_reservations br JOIN dispatches d ON d.id = br.dispatch_id
-        WHERE br.account = ? AND d.finished_at IS NULL
-      `).get(reservation.account) as { n: number };
+        WHERE br.account = ? AND d.finished_at IS NULL AND br.admitted_at >= ?
+      `).get(reservation.account, concurrencyCutoff) as { n: number };
       if (Number(boundedInFlight.n) >= bounds.maxConcurrency) {
         return refuse('bounded-aggregate-exhausted',
           `account ${reservation.account} already has ${boundedInFlight.n} bounded dispatch(es) in flight (cap ${bounds.maxConcurrency})`);
@@ -516,7 +521,7 @@ export class Ledger {
         SELECT COALESCE(SUM(COALESCE(br.actual_total_tokens, br.reserved_total_tokens)), 0) AS tokens
         FROM bounded_reservations br JOIN dispatches d ON d.id = br.dispatch_id
         WHERE br.account = ? AND (d.finished_at IS NULL OR br.admitted_at >= ?)
-      `).get(reservation.account, reservation.observedAt) as { tokens: number };
+      `).get(reservation.account, observedAtIso) as { tokens: number };
       if (Number(outstanding.tokens) + reservedTotalTokens > reservation.remainingTokens) {
         return refuse('bounded-aggregate-exhausted',
           `account ${reservation.account} cannot reserve ${reservedTotalTokens} tokens: snapshot has ` +
@@ -531,7 +536,7 @@ export class Ledger {
            reserved_total_tokens, admitted_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
-        id, reservation.requestId, reservation.sessionId, reservation.account, reservation.observedAt,
+        id, reservation.requestId, reservation.sessionId, reservation.account, observedAtIso,
         reservation.remainingTokens, reservation.inputTokens, bounds.maxGeneratedTokens,
         reservedTotalTokens, now,
       );

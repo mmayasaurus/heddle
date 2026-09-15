@@ -73,6 +73,36 @@ task_classes:
     }
   });
 
+  it('fails over after a truncated provider result retains no output', async () => {
+    const dir = tempDir();
+    const routingPath = join(dir, 'routing.yaml');
+    writeFileSync(routingPath, `version: 0
+policy: {structural_caps: {max_children_per_orchestrator: 8, in_flight_stale_after_ms: 10800000}}
+providers:
+  glm: {auth: zai-coding-plan-subscription, execution: headless, models: [glm-5.3]}
+  codex: {auth: chatgpt-subscription, execution: headless, models: [gpt-5.6-luna]}
+task_classes:
+  truncation-fallback:
+    provider: glm
+    model: glm-5.3
+    fallback: {provider: codex, model: gpt-5.6-luna}
+    read_only: false
+    edits_code: false
+`);
+    const prior = process.env.HEDDLE_ROUTING;
+    process.env.HEDDLE_ROUTING = routingPath;
+    try {
+      const primary = fakeAdapter({ ok: false, output: '', exitCode: null, truncated: true, incomplete: true });
+      const fallback = fakeAdapter({ ok: true, output: 'fallback', exitCode: null });
+      const outcome = await dispatch({ taskClass: 'truncation-fallback', prompt: 'x', cwd: dir }, tempLedger(), (provider) => provider === 'glm' ? primary.adapter : fallback.adapter);
+      expect(outcome).toMatchObject({ ok: true, output: 'fallback', usedFallback: true });
+      expect(fallback.calls).toHaveLength(1);
+    } finally {
+      if (prior === undefined) delete process.env.HEDDLE_ROUTING;
+      else process.env.HEDDLE_ROUTING = prior;
+    }
+  });
+
   it('enforces a class opt-in gate before invoking an explicitly selected route', async () => {
     const fake = fakeAdapter();
     await expect(dispatch(
