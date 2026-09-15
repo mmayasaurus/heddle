@@ -83,6 +83,18 @@ describe('buildWorkerEnv — subscription-billing worker isolation (HED-30 allow
       }
     });
 
+    it('strips lower/mixed-case fixed-list vars too (Windows case-insensitivity bypass — PR #192 review)', () => {
+      process.env.heddle_comms_operator_token = 'sneaky-token';
+      process.env.Heddle_Comms_Role = 'operator';
+      process.env.claude_code_oauth_token = 'sneaky-oauth';
+      const { env, stripped } = buildWorkerEnv();
+      expect(env.heddle_comms_operator_token).toBeUndefined();
+      expect(env.Heddle_Comms_Role).toBeUndefined();
+      expect(env.claude_code_oauth_token).toBeUndefined();
+      expect(stripped).toEqual(expect.arrayContaining(
+        ['heddle_comms_operator_token', 'Heddle_Comms_Role', 'claude_code_oauth_token']));
+    });
+
     it('does NOT strip the CLAUDE_CONFIG_DIR / CODEX_HOME selectors by prefix', () => {
       process.env.CLAUDE_CONFIG_DIR = '/parent/.claude';
       process.env.CODEX_HOME = '/parent/.codex';

@@ -137,13 +137,17 @@ export function buildWorkerEnv(opts: WorkerEnvOptions = {}): {
   const allowedOverrides = new Set([...OVERRIDE_ALLOWLIST, ...Object.keys(envRepointOverrides)]);
 
   // Fixed strips in one pass: billing switches + orchestrator identity/auth + the inherited credential.
-  for (const key of [
+  // Case-INSENSITIVE like the namespace pass below: Windows env names are case-insensitive but the
+  // copied object keeps their casing, so a lowercase `heddle_comms_operator_token` would survive an
+  // exact-name delete yet still be read as HEDDLE_COMMS_OPERATOR_TOKEN (PR #192 review — qodo/codacy/codeant).
+  const fixedStrips = new Set<string>([
     ...BILLING_SWITCH_VARS,
     ...PARENT_IDENTITY_VARS,
     ...OPERATOR_ONLY_VARS,
     ...INHERITED_CREDENTIAL_VARS,
-  ]) {
-    if (env[key] !== undefined) {
+  ].map((k) => k.toUpperCase()));
+  for (const key of Object.keys(env)) {
+    if (fixedStrips.has(key.toUpperCase())) {
       delete env[key];
       stripped.push(key);
     }
