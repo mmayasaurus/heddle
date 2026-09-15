@@ -48,6 +48,9 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _linear_token_cache
+
 FLEET = pathlib.Path(os.path.expanduser("~/.claude/spinventory-fleet"))
 CREDS = FLEET / "linear-agents.json"
 TEAM_KEY = os.environ.get("LIN_TEAM", "SPI").strip() or "SPI"  # export LIN_TEAM=HED for heddle work
@@ -99,22 +102,16 @@ def load_creds():
 
 
 def get_token(key):
-    cache = FLEET / f"token-{key}.json"
-    if cache.exists():
-        tok = json.load(open(cache))
-        age = time.time() - cache.stat().st_mtime
-        if age < tok.get("expires_in", 0) - 86400:
-            return tok["access_token"]
-    a = load_creds()["agents"][key]
-    body = urllib.parse.urlencode({
-        "grant_type": "client_credentials", "client_id": a["client_id"],
-        "client_secret": a["client_secret"], "scope": SCOPE}).encode()
-    req = urllib.request.Request("https://api.linear.app/oauth/token", data=body,
-                                 headers={"Content-Type": "application/x-www-form-urlencoded"})
-    tok = json.load(urllib.request.urlopen(req))
-    cache.write_text(json.dumps(tok))
-    os.chmod(cache, 0o600)
-    return tok["access_token"]
+    def mint():
+        a = load_creds()["agents"][key]
+        body = urllib.parse.urlencode({
+            "grant_type": "client_credentials", "client_id": a["client_id"],
+            "client_secret": a["client_secret"], "scope": SCOPE}).encode()
+        req = urllib.request.Request("https://api.linear.app/oauth/token", data=body,
+                                     headers={"Content-Type": "application/x-www-form-urlencoded"})
+        return json.load(urllib.request.urlopen(req))
+
+    return _linear_token_cache.get_or_mint_token(FLEET, key, mint)
 
 
 # ---------- api ----------

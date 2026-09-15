@@ -11,6 +11,11 @@ const BIN_FILES = [
   { name: 'tool-charlie.mjs', mode: 0o755 },
 ];
 
+// The real canon fleet/bin currently ships this many installable files (see fleet/MANIFEST.sha256). This
+// exact-count contract re-breaks on every file-adding re-vendor (HED-664 added _linear_token_cache.py);
+// HED-666 tracks enumerating the canon dynamically — as `heddle upgrade` already does — instead of a hardcode.
+const CANON_BIN_FILE_COUNT = 22;
+
 function fixture(base: string) {
   const canonicalDir = join(base, 'canonical-bin');
   const homeDir = join(base, 'home');
@@ -55,10 +60,10 @@ describe('fleet bin', () => {
     const installed = await runCli(['fleet', 'install-bin'], { home });
     expect(installed.code).toBe(0);
     expect(installed.stdout).toContain(`target: ${targetDir}`);
-    expect(readdirSync(targetDir)).toHaveLength(21);
+    expect(readdirSync(targetDir)).toHaveLength(CANON_BIN_FILE_COUNT);
     const installedJson = await runCli(['fleet', 'install-bin', '--json'], { home });
     expect(JSON.parse(installedJson.stdout)).toEqual(expect.objectContaining({ dryRun: false, targetDir, files: expect.any(Array) }));
-    expect(JSON.parse(installedJson.stdout).files).toHaveLength(21);
+    expect(JSON.parse(installedJson.stdout).files).toHaveLength(CANON_BIN_FILE_COUNT);
     writeFileSync(join(targetDir, 'lin.sh'), 'drift\n');
     const drift = await runCli(['fleet', 'bin-diff', '--json'], { home });
     expect(drift.code).toBe(1);
@@ -72,7 +77,7 @@ describe('fleet bin', () => {
     expect(dryRun.code).toBe(0);
     expect(dryRun.stdout).toContain(`target: ${join(dryRunHome, '.heddle', 'fleet', 'bin')}`);
     const dryRunLines = dryRun.stdout.split('\n').slice(1).filter(Boolean);
-    expect(dryRunLines).toHaveLength(21);
+    expect(dryRunLines).toHaveLength(CANON_BIN_FILE_COUNT);
     expect(dryRunLines.every((line) => line.startsWith('would create '))).toBe(true);
     const dryRunJson = await runCli(['fleet', 'install-bin', '--dry-run', '--json'], { home: dryRunHome });
     expect(dryRunJson.code).toBe(0);
