@@ -76,6 +76,22 @@ describe('canonicalStep', () => {
     expect(fleetMock.install).not.toHaveBeenCalled();
   });
 
+  it('normalizes a whitespace-padded $HEDDLE_CANONICAL identically in setup and init-project', async () => {
+    const homeDir = home();
+    const canonical = join(seedCanon(homeDir), '..');
+    vi.stubEnv('HEDDLE_CANONICAL', `  ${canonical}  `);
+
+    await expect(canonicalStep.run(context(homeDir), io([], []))).resolves.toMatchObject({ status: 'done' });
+
+    // setup records the trimmed, canonicalized path …
+    expect(JSON.parse(readFileSync(join(homeDir, '.heddle', 'canonical.json'), 'utf8'))).toEqual({ canonical: realpathSync.native(canonical) });
+    // … and init-project, with the SAME padded env still set, resolves to that same path (no divergence).
+    const target = join(homeDir, 'project');
+    mkdirSync(target);
+    expect(planInstall({ dir: target, homeDir, name: 'toy', team: 'NEW', agents: 'Z', room: '#toy', launcher: 'resume-toy.sh' }).options.canonical)
+      .toBe(realpathSync.native(canonical));
+  });
+
   it('rejects an invalid environment override before dry-run reporting', async () => {
     const homeDir = home();
     const partialCanonical = join(seedCanon(homeDir, hooks.slice(0, -1)), '..');

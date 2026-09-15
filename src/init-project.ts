@@ -330,7 +330,10 @@ function resolveTarget(input: InstallOptions): { homeDir: string; dir: string } 
 function resolveCanonical(input: InstallOptions, homeDir: string): string {
   const canonicalConfig = join(homeDir, '.heddle', 'canonical.json');
   const configCanonical = existsSync(canonicalConfig) ? readJson(canonicalConfig, 'canonical.json')?.canonical : undefined;
-  const canonicalSource = valueFor('--canonical', input.canonical) ?? process.env.HEDDLE_CANONICAL ?? configCanonical;
+  // Trim $HEDDLE_CANONICAL and treat an empty/whitespace value as unset, matching how the setup
+  // wizard's canonical step normalizes the same variable — otherwise a whitespace-padded env makes
+  // setup record a clean path while init-project (env still set) rejects the raw one (HED-640 review).
+  const canonicalSource = valueFor('--canonical', input.canonical) ?? (process.env.HEDDLE_CANONICAL?.trim() || undefined) ?? configCanonical;
   if (!canonicalSource) throw new Error('canonical is required: pass --canonical <path>, set HEDDLE_CANONICAL, or create ~/.heddle/canonical.json');
   const { canonical, missing } = validateCanonical(canonicalSource);
   if (missing.length) throw new Error(`canonical ${canonical} is missing required discipline hooks: ${missing.join(', ')}`);
