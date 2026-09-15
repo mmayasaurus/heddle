@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { lstatSync, readFileSync } from 'node:fs';
+import { lstatSync, readFileSync, readlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { isToolRuntimePath } from './tool-runtime.js';
 
@@ -139,7 +139,7 @@ export function parentCheckoutOf(cwd: string): WorktreeContext | null {
 /** HEAD + every dirty path's status AND content digest. */
 export interface CheckoutFingerprint {
   head: string;
-  /** path → "<XY>:<content digest>" — a sha256 prefix, or '<missing>' (gone), '<special>' (non-regular file: FIFO/socket/device/symlink/dir), or '<large:bytes>' (over the hash cap). */
+  /** path → "<XY>:<content digest>" — a sha256 prefix, or '<missing>' (gone), 'symlink:<hash>' (link target text, not followed), '<special>' (FIFO/socket/device/dir), or '<large:bytes:mtimeMs>' (over the hash cap). */
   entries: Map<string, string>;
 }
 
@@ -187,12 +187,23 @@ export function checkoutFingerprint(root: string): CheckoutFingerprint | null {
       try {
         // HED-625: lstat FIRST — never readFileSync a non-regular path. A worker-created FIFO would
         // block the event loop forever (a pipe with no writer never returns), and a huge file would
-        // spike memory. lstat (not stat) so a symlink is classed <special>, never followed to whatever
-        // it points at. Presence + these markers still change when the underlying dirt does.
-        const st = lstatSync(join(root, path));
-        if (!st.isFile()) digest = '<special>';                                       // FIFO / socket / device / symlink / dir
-        else if (st.size > MAX_FINGERPRINT_HASH_BYTES) digest = `<large:${st.size}>`;  // size change still detected
-        else digest = createHash('sha256').update(readFileSync(join(root, path))).digest('hex').slice(0, 16);
+        // spike memory. lstat (not stat) so a symlink is classified here, never followed to whatever it
+        // points at. Each marker still CHANGES when the underlying dirt does, so escapedPaths keeps
+        // detecting a retargeted symlink or a rewritten large file at an already-dirty path.
+        const fullPath = join(root, path);
+        const st = lstatSync(fullPath);
+        if (st.isSymbolicLink()) {
+          // Hash the link TARGET TEXT — readlink never opens the target, so no fifo/device hang; a
+          // dangling or racing readlink throws → fall through to <special>.
+          try { digest = `symlink:${createHash('sha256').update(readlinkSync(fullPath)).digest('hex').slice(0, 16)}`; }
+          catch { digest = '<special>'; }
+        } else if (!st.isFile()) {
+          digest = '<special>';                                     // FIFO / socket / device / directory
+        } else if (st.size > MAX_FINGERPRINT_HASH_BYTES) {
+          digest = `<large:${st.size}:${Math.trunc(st.mtimeMs)}>`;  // size+mtime: an in-place same-length rewrite still changes the marker
+        } else {
+          digest = createHash('sha256').update(readFileSync(fullPath)).digest('hex').slice(0, 16);
+        }
       }
       catch { /* deleted, or unreadable — the status letters still carry the change */ }
       entries.set(path, `${status}:${digest}`);
