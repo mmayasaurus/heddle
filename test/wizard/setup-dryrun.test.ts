@@ -187,7 +187,12 @@ describe('heddle setup — fresh-machine validation harness (HED-571)', () => {
   });
 
   it('no secret leaks (HED-400 #1): a key referenced by env-var NAME never lands in the transcript or on disk', async () => {
-    const SECRET_VALUE = 'sk-hed571-DO-NOT-LEAK-9f3a2b';
+    // A unique, deliberately NON-credential-shaped sentinel. This test file SHIPS, and the release
+    // ship-set scrub (src/release/scrub.ts) rejects any shipped file whose contents match a credential
+    // pattern (e.g. /\bsk-…/) — so a realistic `sk-…` value here would redden release-standalone.test.ts
+    // even though gitleaks (higher-entropy rules) passes it. The value's SHAPE is irrelevant to what this
+    // proves: the wizard treats it as opaque and only ever persists the env-var NAME. Keep it non-secret-shaped.
+    const SECRET_VALUE = 'HED571-SENTINEL-VALUE-DO-NOT-LEAK-9f3a2b';
     process.env.HED571_SENTINEL_KEY = SECRET_VALUE;
     // Add a custom (env-repoint-style) provider — a matrix-independent flow that references an API key by
     // the NAME of an exported env var, never by value (the wizard only checks the var EXISTS).
