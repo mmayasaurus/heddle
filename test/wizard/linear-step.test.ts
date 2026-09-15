@@ -202,6 +202,63 @@ describe('linearStep', () => {
     expect(runner.calls).toEqual([]);
   });
 
+  it('rejects a blank registered team before spawning', async () => {
+    const { homeDir, targetDir } = registered(['A'], '   ');
+    const runner = new StubLinearRunner();
+
+    const result = await linearStep(runner).run(context(homeDir, targetDir), io([true]));
+
+    expect(result.status).toBe('failed');
+    expect(result.detail).toMatch(/team key must not be blank/i);
+    expect(runner.calls).toEqual([]);
+  });
+
+  it('rejects a leading-dash registered agent before spawning', async () => {
+    const { homeDir, targetDir } = registered(['-A'], 'HED');
+    const runner = new StubLinearRunner();
+
+    const result = await linearStep(runner).run(context(homeDir, targetDir), io([true]));
+
+    expect(result.status).toBe('failed');
+    expect(runner.calls).toEqual([]);
+  });
+
+  it('does not check the team when every roster agent fails', async () => {
+    const { homeDir, targetDir } = registered(['A', 'B']);
+    const runner = new StubLinearRunner({
+      agents: {
+        A: { ok: false, error: 'unknown agent key A' },
+        B: { ok: false, error: 'unknown agent key B' },
+      },
+    });
+
+    const result = await linearStep(runner).run(context(homeDir, targetDir), io([true]));
+
+    expect(result.status).toBe('failed');
+    expect(runner.calls).toEqual(['whoami:A', 'whoami:B']);
+    expect(result.detail).toMatch(/No roster agent verified/i);
+  });
+
+  it('uses the first verified agent for the team check', async () => {
+    const { homeDir, targetDir } = registered(['A', 'B']);
+    const runner = new StubLinearRunner({ agents: { A: { ok: false, error: 'unknown agent key A' } } });
+
+    const result = await linearStep(runner).run(context(homeDir, targetDir), io([true]));
+
+    expect(result.status).toBe('failed');
+    expect(runner.calls).toEqual(['whoami:A', 'whoami:B', 'team:HED:B']);
+  });
+
+  it('does not let a throwing reporter change a verified result', async () => {
+    const { homeDir, targetDir } = registered(['A']);
+    const throwingIo: WizardIO = {
+      prompter: new ScriptedPrompter([true]),
+      report: () => { throw new Error('report boom'); },
+    };
+
+    await expect(linearStep(new StubLinearRunner()).run(context(homeDir, targetDir), throwingIo)).resolves.toMatchObject({ status: 'done' });
+  });
+
   it('returns a JSON-serializable WizardStepResult shape', async () => {
     const { homeDir, targetDir } = registered(['A']);
     const result = await linearStep(new StubLinearRunner()).run(context(homeDir, targetDir), io([true]));
@@ -220,10 +277,11 @@ describe('LinShLinearRunner', () => {
     const runner = new LinShLinearRunner('/synthetic-home');
 
     await runner.whoami('A');
-    await runner.team('HED', 'A');
+    await runner.team('SYN', 'A');
 
     expect(mockExecFileSync).toHaveBeenNthCalledWith(1, join('/synthetic-home', '.heddle', 'fleet', 'bin', 'lin.sh'), ['--agent', 'A', 'whoami'], expect.objectContaining({ timeout: 15_000, encoding: 'utf8' }));
-    expect(mockExecFileSync).toHaveBeenNthCalledWith(2, join('/synthetic-home', '.heddle', 'fleet', 'bin', 'lin.sh'), ['--agent', 'A', 'list', '--limit', '1'], expect.objectContaining({ env: expect.objectContaining({ LIN_TEAM: 'HED' }), timeout: 15_000, encoding: 'utf8' }));
+    expect(mockExecFileSync).toHaveBeenNthCalledWith(2, join('/synthetic-home', '.heddle', 'fleet', 'bin', 'lin.sh'), ['--agent', 'A', 'list', '--limit', '1'], expect.objectContaining({ env: expect.objectContaining({ LIN_TEAM: 'SYN' }), timeout: 15_000, encoding: 'utf8' }));
+    expect((mockExecFileSync.mock.calls[0][2] as { env: NodeJS.ProcessEnv }).env.LIN_TEAM).not.toBe('SYN');
   });
 
   it('refuses unsafe agents and blank teams without spawning', async () => {

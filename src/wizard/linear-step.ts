@@ -118,7 +118,11 @@ async function enteredProject(io: WizardIO): Promise<LinearProject | null> {
   return { linearTeam: teamKey, agentIds };
 }
 
-/** A project-scoped, verification-only onboarding step; it never writes project or credential data. */
+/**
+ * A project-scoped, verification-only onboarding step. It writes no project or credential data
+ * itself, but its live whoami/list probes cause lin.sh to mint a token cache (a side effect), which
+ * is why dry-run skips them; do not drop that gate.
+ */
 export function linearStep(injectedRunner?: LinearRunner): WizardStep {
   return {
     id: 'linear',
