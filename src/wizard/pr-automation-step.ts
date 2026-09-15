@@ -269,6 +269,35 @@ function expandHome(input: string): string {
   return input;
 }
 
+/**
+ * HED-624 offer-to-add-repo: when the wizard reaches PR automation with no project directory (setup ran
+ * outside a repo, or an empty --target), offer to enter a git repository path — the operator's ask to "add a
+ * repo if they haven't already, in case they started the wizard in the wrong place". Returns the resolved
+ * repository toplevel, or a `skip` summary the caller turns into a skipped step result: dry-run discloses and
+ * skips; a blank entry or three bad paths skip. Nothing is written either way.
+ */
+async function resolveTargetByOffer(ctx: WizardContext, io: WizardIO): Promise<{ dir: string } | { skip: string }> {
+  if (ctx.dryRun) {
+    io.report('dry-run — PR automation: no project repository selected; a real run would offer to enter a git repository path, then confirm before scaffolding CI review workflows. Nothing was prompted or written.');
+    return { skip: 'dry-run — PR automation: no repository; a real run would offer a path, then confirm' };
+  }
+  // Validate each entry as a git repository with the SAME fail-safe helper cli.ts uses to auto-derive, so a
+  // typed path is accepted identically to a detected one (and normalized to the repo toplevel, so .github/
+  // lands at the root even if a subdirectory was entered; a leading ~ is expanded first). Re-prompt on a bad
+  // path, capped at three attempts; a blank entry — or exhausting the cap — skips with nothing written.
+  let entered = '';
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const question = attempt === 0
+      ? 'No project repository selected. Enter a path to the git repository to set up PR automation in (press Enter to skip):'
+      : `Not a git repository: ${entered}. Enter a path to an existing git repository (Enter to skip):`;
+    entered = (await io.prompter.text(question, '')).trim();
+    if (!entered) return { skip: 'PR automation: no repository provided' };
+    const resolved = gitRepositoryFor(expandHome(entered))?.topLevel;
+    if (resolved) return { dir: resolved };
+  }
+  return { skip: 'PR automation: no git repository entered' };
+}
+
 export function prAutomationStep(): WizardStep {
   return {
     id: 'pr-automation',
@@ -287,30 +316,13 @@ export function prAutomationStep(): WizardStep {
 
       let targetDir = ctx.targetDir;
       if (!targetDir) {
-        // HED-624 (offer-to-add-repo): the wizard reached PR automation with no project directory — the
-        // operator ran `heddle setup` outside a repo (or passed an empty --target). Offer to point it at a
-        // repository rather than silently skipping (the operator's ask: "give the user the option to add a repo
-        // if they haven't already, in case they started the wizard wrong or something").
-        if (ctx.dryRun) {
-          io.report('dry-run — PR automation: no project repository selected; a real run would offer to enter a git repository path, then confirm before scaffolding CI review workflows. Nothing was prompted or written.');
-          return skip('dry-run — PR automation: no repository; a real run would offer a path, then confirm');
-        }
-        // Validate each entry as a git repository with the SAME fail-safe helper cli.ts uses to auto-derive,
-        // so a typed path is accepted identically to a detected one (and normalized to the repo toplevel, so
-        // .github/ lands at the root even if a subdirectory was entered). Re-prompt on a bad path, capped at
-        // three attempts; a blank entry — or exhausting the attempts — skips with nothing written, the same
-        // no-write outcome as declining the confirm (one "no PR automation" path).
-        let entered = '';
-        for (let attempt = 0; attempt < 3; attempt += 1) {
-          const question = attempt === 0
-            ? 'No project repository selected. Enter a path to the git repository to set up PR automation in (press Enter to skip):'
-            : `Not a git repository: ${entered}. Enter a path to an existing git repository (Enter to skip):`;
-          entered = (await io.prompter.text(question, '')).trim();
-          if (!entered) return skip('PR automation: no repository provided');
-          const resolved = gitRepositoryFor(expandHome(entered))?.topLevel;
-          if (resolved) { targetDir = resolved; break; }
-        }
-        if (!targetDir) return skip('PR automation: no git repository entered');
+        // HED-624 (offer-to-add-repo): reached with no project directory (setup ran outside a repo, or an
+        // empty --target). resolveTargetByOffer owns that whole interaction — dry-run disclosure or the capped
+        // path prompt — returning either a skip summary (flows straight out, nothing written) or the resolved
+        // repo toplevel, which continues into the same confirm + scaffold path below.
+        const offered = await resolveTargetByOffer(ctx, io);
+        if ('skip' in offered) return skip(offered.skip);
+        targetDir = offered.dir;
       }
 
       const paths = targetPaths(targetDir);
