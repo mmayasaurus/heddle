@@ -12,6 +12,7 @@
  * once Y adds its one-line `buildSteps` registration (HED-564 protocol). The policy's consumer-wiring
  * (HED-446 picker, HED-452 rotation) is deferred.
  */
+import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { loadAccountRegistry, type Account } from '../accounts.js';
@@ -99,20 +100,49 @@ export async function runSpreadPolicy(opts: SpreadPolicyOptions, deps: SpreadPol
 }
 
 // ── HED-579: the spread policy as a wizard step ──────────────────────────────────────────────────
-// A thin WizardStep adapter over runSpreadPolicy that ALSO persists the captured policy, so `heddle
-// setup` can run it inline (accounts → model-economy → spread → …) and the finish screen reports its
-// outcome. The step owns its own write via the HED-564 seam (policyPath + atomicWriteFile — which
-// mkdir -p's ~/.heddle/policy itself). Kept in this module (not setup.ts) so the step stays on a
-// disjoint file per the HED-564 wire-in protocol; setup.ts adds one buildSteps line to register it.
+// A WizardStep adapter over runSpreadPolicy that ALSO persists the captured policy, so `heddle setup`
+// can run it inline (accounts → model-economy → spread → …) and the finish screen reports its outcome.
+// The step owns its own write via the HED-564 seam (policyPath + atomicWriteFile — which mkdir -p's
+// ~/.heddle/policy itself). Kept in this module (not setup.ts) so the step stays on a disjoint file per
+// the HED-564 wire-in protocol; setup.ts adds one buildSteps line to register it. Its fail-vs-skip and
+// merge-preserving-write discipline deliberately mirror the meters step (src/wizard/meters-step.ts).
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Read + validate an existing spread policy so a re-run MERGES into it rather than replacing the whole
+ * file (WizardStep contract: run() must be idempotent + merge-preserving). Returns {} when the file is
+ * absent (a first run); throws on a read/parse error or a non-object root so the caller can FAIL loudly
+ * rather than clobber a corrupt policy — the ENOENT-vs-error discipline metersStep uses. The caller
+ * overwrites only the spread-owned fields, so unknown top-level fields a future consumer/migration adds
+ * are preserved; there is no per-field shape to walk (unlike the per-account map metersStep validates).
+ */
+function readPriorSpreadPolicy(path: string): Record<string, unknown> {
+  let raw: string;
+  try {
+    raw = readFileSync(path, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return {};
+    throw error;
+  }
+  const parsed: unknown = JSON.parse(raw);
+  if (!isPlainObject(parsed)) throw new Error('spread policy is not a JSON object');
+  return parsed;
+}
 
 /**
  * The spread/rotation step (HED-474 core, wrapped for HED-579). Prompts for the participating Claude
  * accounts and a per-account concurrent cap, previews the exact even split (all via runSpreadPolicy),
- * then writes the resulting policy to `<homeDir>/.heddle/policy/spread.json`.
+ * then MERGE-PRESERVINGLY writes the resulting policy to `<homeDir>/.heddle/policy/spread.json`.
  *
- * Under `heddle setup --dry-run` it prompts for NOTHING and writes NOTHING — it reports what a real run
- * would do and returns 'skipped'. (Spread is NOT read-only, so 'skipped' is the correct dry-run status
- * per the WizardStep contract, not 'done'; this mirrors the accounts step.)
+ * Status: 'done' on a saved policy; 'skipped' for a genuine no-op (no Claude accounts, none selected, or
+ * the operator declined — runSpreadPolicy reports which); 'failed' for a corrupt account registry or a
+ * corrupt/unwritable existing policy, so `heddle setup` forces repair instead of masquerading as done.
+ * Under `heddle setup --dry-run` it prompts for NOTHING and writes NOTHING — reports what a real run
+ * would do and returns 'skipped' (spread WRITES a file so it is not read-only; 'skipped' is the correct
+ * dry-run status per the contract, not 'done'). Fail/skip/dry-run semantics mirror the meters step.
  */
 export const spreadStep: WizardStep = {
   id: 'spread',
@@ -124,21 +154,42 @@ export const spreadStep: WizardStep = {
     }
     // Mirror runAccountsAdd's registry-path precedence (explicit HEDDLE_ACCOUNTS env, else the
     // home-derived default) so BOTH steps read/write the SAME registry under `heddle setup --home <dir>`.
-    // Passing it explicitly also stops runSpreadPolicy from falling back to the process user's real
-    // homedir() when ctx.homeDir differs — the split-install trap accounts-add.ts warns about.
     const registryPath = process.env.HEDDLE_ACCOUNTS ?? join(ctx.homeDir, '.heddle', 'accounts.json');
+    // FAIL (not skip) on a corrupt/unreadable registry so setup forces repair rather than reporting "all
+    // done or skipped". loadAccountRegistry returns an EMPTY registry for a MISSING file — a genuine
+    // no-op that runSpreadPolicy reports as 'skipped' below — and throws ONLY for malformed/invalid
+    // content, so this catch fires only on real corruption. (runSpreadPolicy re-reads and would swallow
+    // the error into a no-op by design, to stay optional standalone; the wizard's fail-vs-skip decision
+    // lives here in the step, above it — mirroring metersStep — and the extra small-file read is its cost.)
+    try {
+      loadAccountRegistry(registryPath);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      io.report(`✗ spread: ${message}`);
+      return { id: 'spread', status: 'failed', summary: `could not read the account registry: ${message}` };
+    }
     const { policy } = await runSpreadPolicy({ registryPath }, { prompter: io.prompter, report: io.report });
     if (policy.accounts.length === 0) {
-      // runSpreadPolicy already reported WHY it produced no policy (no Claude accounts, none selected,
-      // the operator declined to save, or a corrupt registry) — nothing to persist. NOTE (HED-579): the
-      // core returns this same empty policy for all four cases, so a corrupt registry also reports
-      // 'skipped' rather than 'failed'. Left as-is: the core already emits the ⚠ registry-read error and
-      // `heddle doctor` (the last step) re-checks the registry, and distinguishing would need a reason
-      // field on SpreadPolicyResult that would break the core's result-equality tests. Revisit if doctor
-      // ever cannot surface the corrupt-registry case.
+      // Genuine no-op — runSpreadPolicy already reported which (no Claude accounts, none selected, or the
+      // operator declined). A corrupt registry was already caught above as 'failed'.
       return { id: 'spread', status: 'skipped', summary: 'spread — no policy saved' };
     }
-    atomicWriteFile(policyPath(ctx.homeDir, 'spread'), `${JSON.stringify(policy, null, 2)}\n`);
+    // Merge-preserving write (WizardStep contract): preserve any unknown top-level fields a future
+    // consumer/migration added to spread.json and overwrite only the spread-owned fields; FAIL on a
+    // malformed existing file rather than clobber it.
+    const policyFile = policyPath(ctx.homeDir, 'spread');
+    let prior: Record<string, unknown>;
+    try {
+      prior = readPriorSpreadPolicy(policyFile);
+    } catch {
+      return { id: 'spread', status: 'failed', summary: 'existing spread policy is corrupt — fix or remove ~/.heddle/policy/spread.json' };
+    }
+    try {
+      atomicWriteFile(policyFile, `${JSON.stringify({ ...prior, ...policy }, null, 2)}\n`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return { id: 'spread', status: 'failed', summary: `could not write the spread policy: ${message}` };
+    }
     return {
       id: 'spread',
       status: 'done',

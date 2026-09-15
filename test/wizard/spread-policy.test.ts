@@ -222,15 +222,55 @@ describe('spreadStep', () => {
     expect(existsSync(policyFileIn(registryHome))).toBe(false);
   });
 
-  it('replaces the prior policy on a re-run (single-owner file, not a merge)', async () => {
+  it('replaces the spread-owned fields on a re-run (deselected accounts do not linger)', async () => {
     const home = tempDir();
     seedRegistryUnderHome(home, threeClaudeAccounts);
     // First run: all three accounts, cap 2.
     await spreadStep.run(makeCtx(home), makeIo(new ScriptedPrompter([true, true, true, '7', '2', true])).io);
-    // Second run: only acct1, cap 1 — must fully REPLACE the first policy, not merge the account lists.
+    // Second run: only acct1, cap 1 — the owned fields must fully REPLACE, not union the account lists.
     await spreadStep.run(makeCtx(home), makeIo(new ScriptedPrompter([true, false, false, '1', '1', true])).io);
     expect(JSON.parse(readFileSync(policyFileIn(home), 'utf8'))).toEqual({
       strategy: 'even-spread', provider: 'claude', accounts: ['acct1'], capPerAccount: 1,
     });
+  });
+
+  it('reports failed (not skipped) and writes no policy when the account registry is corrupt', async () => {
+    const home = tempDir();
+    mkdirSync(join(home, '.heddle'), { recursive: true });
+    writeFileSync(join(home, '.heddle', 'accounts.json'), '{ not valid json');
+    // Empty script: the corrupt-registry pre-check fails BEFORE any prompt, so nothing is consumed.
+    const { io } = makeIo(new ScriptedPrompter([]));
+    const result = await spreadStep.run(makeCtx(home), io);
+    expect(result.status).toBe('failed');
+    expect(existsSync(policyFileIn(home))).toBe(false);
+  });
+
+  it('merge-preserves unknown fields in an existing spread.json and overwrites only the owned fields', async () => {
+    const home = tempDir();
+    seedRegistryUnderHome(home, threeClaudeAccounts);
+    mkdirSync(join(home, '.heddle', 'policy'), { recursive: true });
+    // A prior policy carrying extra fields a future consumer/migration might add.
+    writeFileSync(policyFileIn(home), JSON.stringify({
+      strategy: 'even-spread', provider: 'claude', accounts: ['old'], capPerAccount: 9,
+      schemaVersion: 2, note: 'keep me',
+    }));
+    const { io } = makeIo(new ScriptedPrompter([true, false, false, '1', '1', true]));
+    const result = await spreadStep.run(makeCtx(home), io);
+    expect(result.status).toBe('done');
+    expect(JSON.parse(readFileSync(policyFileIn(home), 'utf8'))).toEqual({
+      strategy: 'even-spread', provider: 'claude', accounts: ['acct1'], capPerAccount: 1, // owned fields updated
+      schemaVersion: 2, note: 'keep me', // unknown fields preserved
+    });
+  });
+
+  it('fails without clobbering a corrupt existing spread.json', async () => {
+    const home = tempDir();
+    seedRegistryUnderHome(home, threeClaudeAccounts);
+    mkdirSync(join(home, '.heddle', 'policy'), { recursive: true });
+    writeFileSync(policyFileIn(home), 'not json at all');
+    const { io } = makeIo(new ScriptedPrompter([true, true, true, '3', '1', true]));
+    const result = await spreadStep.run(makeCtx(home), io);
+    expect(result.status).toBe('failed');
+    expect(readFileSync(policyFileIn(home), 'utf8')).toBe('not json at all'); // left exactly as it was
   });
 });
