@@ -212,56 +212,68 @@ function diffPath(raw: string): string | null {
   return /^[ab]\//.test(p) ? p.slice(2) : p;
 }
 
+interface HunkBody {
+  oldRem: number;
+  newRem: number;
+  inBody: boolean;
+}
+
+/** Append a half-open range to a path's range list. */
+function pushRange(map: CitationRanges, path: string, range: [number, number]): void {
+  const list = map.get(path);
+  if (list) list.push(range);
+  else map.set(path, [range]);
+}
+
+/** Advance hunk-body counters for one line. Returns true when the line was consumed as a body line; false when
+ *  it is not a body line — a short/malformed hunk has ended and the caller must reprocess it as a header. A
+ *  body line whose text merely begins with `+`/`-`/` ` (e.g. `+++ counter;`) is content, never a header. */
+function advanceHunkBody(line: string, body: HunkBody): boolean {
+  const c = line.charAt(0);
+  if (c === '+') body.newRem -= 1;
+  else if (c === '-') body.oldRem -= 1;
+  else if (c === ' ') { body.oldRem -= 1; body.newRem -= 1; }
+  else if (c === '\\') { /* "\ No newline at end of file" — counts to neither side */ }
+  else { body.inBody = false; return false; }
+  if (body.oldRem <= 0 && body.newRem <= 0) body.inBody = false;
+  return true;
+}
+
+/** Record a hunk header's OLD/NEW declared ranges and return the body counters left to consume. Ranges come
+ *  from the header counts, so a body shorter/longer than declared (synthetic diffs) still records correctly. */
+function recordHunkRanges(hunk: RegExpExecArray, oldPath: string | null, newPath: string | null, sides: DiffSides): HunkBody {
+  const os = Number(hunk[1]);
+  const oc = hunk[2] === undefined ? 1 : Number(hunk[2]); // `-os` with no comma ⇒ oc=1
+  const ns = Number(hunk[3]);
+  const nc = hunk[4] === undefined ? 1 : Number(hunk[4]); // `+ns` with no comma ⇒ nc=1
+  if (oldPath && Number.isFinite(os) && Number.isFinite(oc) && oc > 0) pushRange(sides.oldSide, oldPath, [os, os + oc]);
+  if (newPath && Number.isFinite(ns) && Number.isFinite(nc) && nc > 0) pushRange(sides.newSide, newPath, [ns, ns + nc]);
+  const oldRem = Number.isFinite(oc) ? oc : 0;
+  const newRem = Number.isFinite(nc) ? nc : 0;
+  return { oldRem, newRem, inBody: oldRem > 0 || newRem > 0 };
+}
+
 /**
  * Parse a unified diff into per-file OLD-side and NEW-side half-open line ranges (`[start, start+count)`).
- * A STATEFUL hunk-body scanner consumes each hunk's declared line counts, so hunk-body content whose text
- * merely begins with `+++ `, `--- `, or `@@` is treated as an added/deleted/context line, never as a header
- * (fixes the "`+++ counter;` read as a file header" class of bug). Ranges are taken from the `@@` header
- * itself, so a body shorter/longer than declared (synthetic diffs) still records the correct declared range.
+ * A STATEFUL hunk-body scanner (`advanceHunkBody`) consumes each hunk's declared line counts, so hunk-body
+ * content whose text merely begins with `+++ `, `--- `, or `@@` is treated as an added/deleted/context line,
+ * never as a file header (fixes the "`+++ counter;` read as a header" class of bug).
  */
 function parseDiffSides(diff: string): DiffSides {
-  const oldSide: CitationRanges = new Map();
-  const newSide: CitationRanges = new Map();
-  const push = (map: CitationRanges, path: string, range: [number, number]): void => {
-    const list = map.get(path);
-    if (list) list.push(range);
-    else map.set(path, [range]);
-  };
+  const sides: DiffSides = { oldSide: new Map(), newSide: new Map() };
   const hunkRe = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
+  const body: HunkBody = { oldRem: 0, newRem: 0, inBody: false };
   let oldPath: string | null = null;
   let newPath: string | null = null;
-  let oldRem = 0;
-  let newRem = 0;
-  let inBody = false;
   for (const line of diff.split(/\r?\n/)) {
-    if (inBody) {
-      const c = line.charAt(0);
-      if (c === '+') newRem -= 1;
-      else if (c === '-') oldRem -= 1;
-      else if (c === ' ') { oldRem -= 1; newRem -= 1; }
-      else if (c === '\\') { /* "\ No newline at end of file" — counts to neither side */ }
-      else inBody = false; // a non-body line ends a short/malformed hunk; fall through and reprocess as header
-      if (inBody) {
-        if (oldRem <= 0 && newRem <= 0) inBody = false;
-        continue;
-      }
-    }
+    if (body.inBody && advanceHunkBody(line, body)) continue;
     if (line.startsWith('diff --git ')) { oldPath = null; newPath = null; continue; }
     if (line.startsWith('--- ')) { oldPath = diffPath(line.slice(4)); continue; }
     if (line.startsWith('+++ ')) { newPath = diffPath(line.slice(4)); continue; }
     const hunk = hunkRe.exec(line);
-    if (!hunk) continue;
-    const os = Number(hunk[1]);
-    const oc = hunk[2] === undefined ? 1 : Number(hunk[2]); // `-os` with no comma ⇒ oc=1
-    const ns = Number(hunk[3]);
-    const nc = hunk[4] === undefined ? 1 : Number(hunk[4]); // `+ns` with no comma ⇒ nc=1
-    if (oldPath && Number.isFinite(os) && Number.isFinite(oc) && oc > 0) push(oldSide, oldPath, [os, os + oc]);
-    if (newPath && Number.isFinite(ns) && Number.isFinite(nc) && nc > 0) push(newSide, newPath, [ns, ns + nc]);
-    oldRem = Number.isFinite(oc) ? oc : 0;
-    newRem = Number.isFinite(nc) ? nc : 0;
-    inBody = oldRem > 0 || newRem > 0;
+    if (hunk) Object.assign(body, recordHunkRanges(hunk, oldPath, newPath, sides));
   }
-  return { oldSide, newSide };
+  return sides;
 }
 
 /**
@@ -272,7 +284,8 @@ function parseDiffSides(diff: string): DiffSides {
  */
 function extractCitations(output: string): ParsedCitation[] {
   const citations: ParsedCitation[] = [];
-  const citationRe = /([^\s:,;()[\]{}"'`]+):(\d+)(?:\s*-\s*(\d+))?/g;
+  // Backtick is written as \x60 (not a literal `) so a naive tokenizer never reads it as a template-literal start.
+  const citationRe = /([^\s:,;()[\]{}"'\x60]+):(\d+)(?:\s*-\s*(\d+))?/g;
   for (const match of output.matchAll(citationRe)) {
     const path = match[1] ?? '';
     if (!/[A-Za-z]/.test(path)) continue;
