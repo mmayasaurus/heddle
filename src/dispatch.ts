@@ -273,11 +273,20 @@ export async function dispatch(
     if (!barrier.blocked) return null;
     const refusal = {
       code: 'fallback-blocked-dirty-tree' as const,
-      reason: `failed primary leg ${failedLeg.provider}/${failedLeg.model} (dispatch #${failedLeg.ledgerId}) left checkout dirt: ${(barrier.dirt ?? []).join(', ')}`,
+      reason: `failed leg ${failedLeg.provider}/${failedLeg.model} (dispatch #${failedLeg.ledgerId}) left checkout dirt: ${(barrier.dirt ?? []).join(', ')}`,
       instruction: `Commit or discard the changes in ${req.cwd}, then re-dispatch.`,
     };
-    return refusalOutcome(ctx, req, route.taskClass, routeTarget, skillsForRefusal, refusal,
-      { fellBackFrom: failedLeg.provider, extra: { usedFallback: true } });
+    return refusalOutcome(ctx, req, route.taskClass, routeTarget, skillsForRefusal, refusal, {
+      fellBackFrom: failedLeg.provider,
+      // A leg that escaped its worktree or destroyed work and THEN failed must not have that warning
+      // dropped when the barrier refuses the fallback — the tree is still dirty and someone has to
+      // know (the non-barrier fallback paths below preserve these; PR #28 / PR #40).
+      extra: {
+        usedFallback: true,
+        ...(failedLeg.destroyed ? { destroyed: failedLeg.destroyed } : {}),
+        ...(failedLeg.escape ? { escape: failedLeg.escape } : {}),
+      },
+    });
   };
   let primary = await runTarget(target, req, ctx, route, plan.decision.routedAwayForCap ? `${route.provider}/${route.model}` : null);
   // Capability-fit fallback: when the PRIMARY provider merely lacks the knob (`unenforceable`) and

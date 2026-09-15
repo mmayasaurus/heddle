@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { writeFileSync } from 'node:fs';
+import { rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { dispatch, type AdapterFactory, type DispatchRequest } from '../src/dispatch.js';
@@ -192,6 +192,22 @@ describe('fallback commit barrier', () => {
     } finally { restore(); }
   });
 
+  it('blocks the fallback when the failed leg made the checkout unreadable', async () => {
+    // preFp is captured on a valid repo; the leg destroys .git, so the post-leg fingerprint is null.
+    // escapedPaths reports that as "undecidable" (null) — the barrier must NOT let a wrecked tree pass.
+    const root = gitRepo(tempDir); const restore = installRouting(tempDir);
+    const harness = adapterHarness({
+      codex: () => { rmSync(join(root, '.git'), { recursive: true, force: true }); return failure(); },
+      cursor: success,
+    });
+    try {
+      const outcome = await dispatch(request(root), tempLedger(), harness.factory);
+      expect(outcome.refusal?.code).toBe('fallback-blocked-dirty-tree');
+      expect(outcome.refusal?.reason).toContain('unreadable');
+      expect(harness.calls.map((call) => call.provider)).toEqual(['codex']);
+    } finally { restore(); }
+  });
+
   it('blocks class fallback when a failed account-failover leg created dirt', async () => {
     const root = gitRepo(tempDir); const restore = installRouting(tempDir); const ledger = tempLedger();
     const harness = adapterHarness({
@@ -233,6 +249,9 @@ describe('fallback commit barrier', () => {
       const outcome = await dispatch(request(root), tempLedger(), harness.factory);
       expect(outcome.refusal?.code).toBe('fallback-blocked-dirty-tree');
       expect(outcome.refusal?.reason).toContain('HEAD moved');
+      // A warning on the failed leg (here the moved HEAD → HED-127 destroyed-work) must survive the
+      // barrier refusal, not be dropped — the parent tree is still wrecked and someone has to know.
+      expect(outcome.destroyed).toBeTruthy();
       expect(git(root, 'log', '-1', '--format=%s').trim()).toBe('worker moved head');
       // No auto-WIP commit is ever made now (refuse-only): just init + the worker's own commit.
       expect(git(root, 'rev-list', '--count', 'HEAD').trim()).toBe('2');

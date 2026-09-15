@@ -209,8 +209,10 @@ export function escapedPaths(
 /**
  * Block a fallback from inheriting checkout dirt created by a failed dispatch leg: any dirt that
  * appeared since `preFp` — a new/changed/cleared path, or a moved HEAD — blocks the re-dispatch. A
- * null fingerprint (non-git or unreadable cwd) or a clean tree passes: no claim is made in either
- * direction, matching escapedPaths.
+ * clean tree passes, and a checkout that was non-git before the leg (preFp null) passes: there is
+ * nothing to protect, matching escapedPaths. But a checkout that WAS readable and is now unreadable
+ * (postFp null with a non-null preFp — e.g. the leg destroyed `.git`) is the ultimate dirt and
+ * blocks: `escapedPaths` reports that as "undecidable" (null), which must never pass a wrecked tree.
  *
  * Refuse-with-report ONLY. The opt-in that auto-committed the leg's dirt so the fallback could
  * proceed was cut before merge: git add/commit cannot isolate one leg's contribution at path
@@ -220,7 +222,11 @@ export function escapedPaths(
 export function fallbackBarrier(
   cwd: string, preFp: CheckoutFingerprint | null,
 ): { blocked: boolean; dirt: string[] | null } {
-  const dirt = escapedPaths(preFp, checkoutFingerprint(cwd));
+  const postFp = checkoutFingerprint(cwd);
+  if (preFp !== null && postFp === null) {
+    return { blocked: true, dirt: ['checkout unreadable after the leg ran (git repository destroyed or inaccessible)'] };
+  }
+  const dirt = escapedPaths(preFp, postFp);
   if (dirt === null || dirt.length === 0) return { blocked: false, dirt };
   return { blocked: true, dirt };
 }
