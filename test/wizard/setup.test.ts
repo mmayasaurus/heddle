@@ -136,6 +136,56 @@ describe('runSetup orchestrator', () => {
     expect(sawDryRun).toBe(true);
   });
 
+  it('applies a step\'s published selectedTargetDir to ctx.targetDir before a later step\'s applies() (HED-624)', async () => {
+    // The propagation mechanism, hermetically: a step (like pr-automation's offer-to-add-repo) resolves a
+    // repo mid-run and publishes it via selectedTargetDir; runSetup writes it to ctx.targetDir (marked
+    // derived) BEFORE the next step's applies() runs, so a target-gated step (like cd-automation) runs on it.
+    let sawTarget: string | undefined;
+    let sawDerived: boolean | undefined;
+    let gatedRan = false;
+    const publisher: WizardStep = {
+      id: 'publisher',
+      title: 'PUBLISHER',
+      run: async () => ({ id: 'publisher', status: 'done', summary: 'resolved a repo', selectedTargetDir: '/picked/repo' }),
+    };
+    const targetGated: WizardStep = {
+      id: 'consumer',
+      title: 'CONSUMER',
+      applies: (ctx) => !!ctx.targetDir,
+      run: async (ctx) => {
+        gatedRan = true;
+        sawTarget = ctx.targetDir;
+        sawDerived = ctx.targetDirDerived;
+        return { id: 'consumer', status: 'done', summary: 'ran on the published target' };
+      },
+    };
+    const results = await runSetup(baseCtx(), makeIO(), [publisher, targetGated]);
+    expect(gatedRan).toBe(true);
+    expect(sawTarget).toBe('/picked/repo');
+    expect(sawDerived).toBe(true); // an offer-entered target is not an explicit --target
+    expect(results.map((r) => r.id)).toEqual(['publisher', 'consumer']);
+  });
+
+  it('a target-gated step stays skipped when NO earlier step publishes a target (control for HED-624)', async () => {
+    // Proves the propagation above is load-bearing: without a published selectedTargetDir, the gate's
+    // applies() sees no targetDir and runSetup records it not-applicable — the exact bug the qodo HIGH named.
+    let gatedRan = false;
+    const noPublish: WizardStep = {
+      id: 'no-publish',
+      title: 'NO-PUBLISH',
+      run: async () => ({ id: 'no-publish', status: 'done', summary: 'resolved nothing new' }),
+    };
+    const targetGated: WizardStep = {
+      id: 'consumer',
+      title: 'CONSUMER',
+      applies: (ctx) => !!ctx.targetDir,
+      run: async () => { gatedRan = true; return { id: 'consumer', status: 'done', summary: 'ran' }; },
+    };
+    const results = await runSetup(baseCtx(), makeIO(), [noPublish, targetGated]);
+    expect(gatedRan).toBe(false);
+    expect(results.find((r) => r.id === 'consumer')?.summary).toContain('not applicable');
+  });
+
   it('reports a finish screen that lists every step outcome', async () => {
     const io = makeIO();
     await runSetup(baseCtx(), io, [step('a', { summary: 'a done' }), step('b', { status: 'skipped', summary: 'b skipped' })]);
@@ -186,10 +236,10 @@ describe('accountsStep adapter', () => {
   it('buildSteps wires the full walkthrough in order with the doctor finish-gate last', () => {
     const runner = {} as CliRunner;
     const ids = buildSteps({ runner }).map((s) => s.id);
-    // Walkthrough order (HED-564): canonical → accounts → model-economy → spread → meters → rules → permissions → pr-automation → doctor.
+    // Walkthrough order (HED-564): canonical → accounts → model-economy → spread → meters → rules → permissions → pr-automation → cd-automation → doctor.
     // buildSteps({ runner }) with no catalogRoot defaults it to resolveCatalogRoot() (the bundled
     // catalog), so this also proves the default path constructs without throwing.
-    expect(ids).toEqual(['canonical', 'accounts', 'model-economy', 'spread', 'meters', 'rules', 'permissions', 'pr-automation', 'doctor']);
+    expect(ids).toEqual(['canonical', 'accounts', 'model-economy', 'spread', 'meters', 'rules', 'permissions', 'pr-automation', 'cd-automation', 'doctor']);
     // Doctor is the finish gate — it must ALWAYS be last so it verifies AFTER every write-step ran.
     expect(ids[ids.length - 1]).toBe('doctor');
   });
@@ -225,8 +275,10 @@ describe('composed walkthrough (buildSteps -> runSetup)', () => {
     // rules/permissions self-handle dry-run in their own module, doctor via dryRunGate, and pr-automation —
     // which now APPLIES even without a --target so it can offer to add a repo (HED-624) — takes its no-target
     // dry-run branch: it DISCLOSES that a real run would offer a repo path then confirm, and returns skipped
-    // without prompting or writing (the exhausted prompter above would throw if it prompted). toEqual pins the
-    // exact composed order + shape.
+    // without prompting or writing (the exhausted prompter above would throw if it prompted). cd-automation
+    // (HED-603) is git-target-gated via applies() and there is no --target here, so runSetup records it
+    // 'not applicable in this context' (its dry-run branch is covered by the module's own tests). toEqual pins
+    // the exact composed order + shape.
     expect(results).toEqual([
       { id: 'canonical', status: 'skipped', summary: expect.stringContaining('dry-run') },
       { id: 'accounts', status: 'skipped', summary: expect.stringContaining('dry-run') },
@@ -236,6 +288,7 @@ describe('composed walkthrough (buildSteps -> runSetup)', () => {
       { id: 'rules', status: 'skipped', summary: expect.stringContaining('dry-run') },
       { id: 'permissions', status: 'skipped', summary: expect.stringContaining('dry-run') },
       { id: 'pr-automation', status: 'skipped', summary: expect.stringContaining('a real run would offer a path, then confirm') },
+      { id: 'cd-automation', status: 'skipped', summary: expect.stringContaining('not applicable') },
       { id: 'doctor', status: 'skipped', summary: expect.stringContaining('dry-run') },
     ]);
     const text = lines.join('\n');

@@ -290,14 +290,17 @@ describe('prAutomationStep', () => {
     expect(result.summary).toBe('PR automation: no git repository entered');
   });
 
-  it('no target: a bad path then a real repo reaches the confirm; declining writes nothing (HED-624)', async () => {
+  it('no target: a bad path then a real repo reaches the confirm; declining writes nothing but still publishes the chosen repo (HED-624)', async () => {
     const notRepo = tempDir();
     const repo = tempDir();
     execFileSync('git', ['init', '-q', repo]);
+    const toplevel = execFileSync('git', ['-C', repo, 'rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim();
     const result = await prAutomationStep().run(context(undefined), io([notRepo, repo, false]));
     expect(result.status).toBe('skipped');
     expect(result.summary).toBe('PR automation: declined');
     expect(existsSync(join(repo, '.github', 'workflows', 'gate.yml'))).toBe(false);
+    // Declining PR CI still publishes the repo the operator chose, so a later step (cd-automation) acts on it.
+    expect(result.selectedTargetDir).toBe(toplevel);
   });
 
   it('no target: entering a SUBDIRECTORY normalizes to the repo toplevel and scaffolds there on confirm (HED-624)', async () => {
@@ -311,6 +314,9 @@ describe('prAutomationStep', () => {
     // .github lands at the repo TOPLEVEL, not under the entered subdirectory (gitRepositoryFor normalization).
     expect(existsSync(join(toplevel, '.github', 'workflows', 'gate.yml'))).toBe(true);
     expect(existsSync(join(subdir, '.github'))).toBe(false);
+    // The published target is the normalized repo TOPLEVEL (not the entered subdirectory) — what a later
+    // target-gated step (cd-automation) then receives via runSetup.
+    expect(result.selectedTargetDir).toBe(toplevel);
   });
 
   it('renderGate throws (fail-closed) on a defaultBranch that fails SAFE_BRANCH (HED-616)', () => {

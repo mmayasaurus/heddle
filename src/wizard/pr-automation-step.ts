@@ -307,7 +307,14 @@ export function prAutomationStep(): WizardStep {
     // target (undefined, or an empty --target), apply anyway so run() can OFFER to enter a repo path.
     applies: (ctx: WizardContext): boolean => !ctx.targetDir || existsSync(join(ctx.targetDir, '.git')),
     async run(ctx: WizardContext, io: WizardIO): Promise<WizardStepResult> {
-      const skip = (summary: string): WizardStepResult => ({ id: 'pr-automation', status: 'skipped', summary });
+      // HED-624: when the operator resolves a repo at the offer prompt below (setup ran outside a repo),
+      // publish it on EVERY result via selectedTargetDir so runSetup propagates it to ctx.targetDir for later
+      // target-gated steps (cd-automation). Unset until the offer resolves — an explicit or auto-derived
+      // --target is already on ctx, so it needs no republish; this covers only the offer-entered path. Declining
+      // PR CI still publishes: the operator chose their project, and the downstream step confirms on its own.
+      let offeredDir: string | undefined;
+      const publish = (result: WizardStepResult): WizardStepResult => (offeredDir ? { ...result, selectedTargetDir: offeredDir } : result);
+      const skip = (summary: string): WizardStepResult => publish({ id: 'pr-automation', status: 'skipped', summary });
       // needsConfirm keys on the ORIGINAL context, before the offer loop can set a target below: an explicit
       // --target (a real, non-derived targetDir) is the silent opt-in; a DERIVED target or one entered at the
       // offer prompt both confirm before writing (the operator's Option B — "detection or manual entry, the
@@ -323,6 +330,7 @@ export function prAutomationStep(): WizardStep {
         const offered = await resolveTargetByOffer(ctx, io);
         if ('skip' in offered) return skip(offered.skip);
         targetDir = offered.dir;
+        offeredDir = offered.dir; // publish this repo downstream (see selectedTargetDir note above)
       }
 
       const paths = targetPaths(targetDir);
@@ -353,15 +361,15 @@ export function prAutomationStep(): WizardStep {
           written.length > 0 ? `wrote ${written.join(', ')}` : '',
           existing.length > 0 ? `already present ${existing.join(', ')}` : '',
         ].filter(Boolean).join('; ');
-        return {
+        return publish({
           id: 'pr-automation',
           status: 'done',
           summary: `PR automation: ${preset.label}; ${changes || 'no files changed'}`,
-        };
+        });
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
         io.report(`PR automation failed: ${detail}`);
-        return { id: 'pr-automation', status: 'failed', summary: `PR automation: ${preset.label}; failed to write workflows` };
+        return publish({ id: 'pr-automation', status: 'failed', summary: `PR automation: ${preset.label}; failed to write workflows` });
       }
     },
   };
