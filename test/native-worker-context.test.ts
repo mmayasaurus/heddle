@@ -108,6 +108,8 @@ describe('native worker context through actual MCP subprocesses', () => {
   const tempLedger = () => trackLedger(new Ledger(join(tempDir(), 'private', 'ledger.db')));
 
   for (const row of clients) {
+    // Native Windows ACL provisioning plus both MCP subprocesses took 29.8s in CI.
+    // Budget this aggregate case without changing individual production or subprocess deadlines.
     it(`${row.provider} overrides installed parent identity, shares the broker/ledger, and refuses nesting`, async () => {
       await ensureBuilt();
       const cwd = tempDir(), home = tempDir(), commsDb = join(tempDir(), 'private', 'comms.db');
@@ -170,7 +172,7 @@ describe('native worker context through actual MCP subprocesses', () => {
       const log = new CommsLog(commsDb, { readOnly: true });
       try { expect(log.participant('U.1')).toMatchObject({ parent: 'U', dispatchId: outcome.ledgerId }); }
       finally { log.close(); }
-    });
+    }, process.platform === 'win32' ? 60_000 : 30_000);
   }
 
   it('refuses another process while a native context is owned and accepts a clean retry', async () => {
