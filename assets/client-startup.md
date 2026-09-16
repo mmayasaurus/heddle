@@ -41,8 +41,10 @@ After this integration is installed, start the client normally from the project 
 controls. `heddle launch` is optional installation plus launch and can rewrite local settings;
 do not use it merely to open an existing copied worktree.
 Copied generated configs follow a linked Git worktree at runtime after Heddle verifies the shared
-repository. In a linked worktree, a valid explicit agent identity must match that worktree's own
-`.fleet-agent` when present; an unreadable owner or a conflict denies tools. Shared-root launchers
+repository, including commands run in its subdirectories. In a linked worktree, a valid explicit
+agent identity must match the nearest valid `.fleet-agent` between the working directory and
+the checkout root; an unreadable owner or a conflict denies tools. Native hooks inherit the
+nearest `rules` directory within that checkout unless `HEDDLE_RULES_DIR` is set. Shared-root launchers
 can select their normal named identities. Do not rerun `init-client` merely because you entered a linked worktree. A parent CLI
 still running at the shared root must pass your own worktree as explicit `cwd` to dispatch and
 code tools; creating a worktree does not move an already running server.

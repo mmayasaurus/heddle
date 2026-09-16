@@ -1,12 +1,12 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { cpSync, mkdirSync, readFileSync, realpathSync, renameSync, symlinkSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { parse as parseToml, stringify as stringifyToml } from 'smol-toml';
 import { describe, expect, it } from 'vitest';
 import { FLEET_CLIENTS, planClientInstall, type FleetClient } from '../src/client-config.js';
-import { resolveClientWorkspace, sameClientWorkspace } from '../src/client-workspace.js';
+import { clientWorkspaceDirectories, resolveClientWorkspace, sameClientWorkspace } from '../src/client-workspace.js';
 import { nativeClientIntegrationInstalled } from '../src/mcp.js';
 import { applyInstall } from '../src/init-project.js';
 import { useTempResources } from './helpers.js';
@@ -41,7 +41,7 @@ describe('copied native configuration in linked worktrees', () => {
     return config[client === 'codex' ? 'mcp_servers' : client === 'opencode' ? 'mcp' : 'mcpServers']!;
   }
 
-  it('accepts only exact linked-family roots, pins workers, and refuses conflicting identity', () => {
+  it('keeps config ownership at exact linked-family roots, pins workers, and refuses conflicting identity', () => {
     const { canonical, linked, root } = fixture();
     const foreign = join(root, 'foreign'); mkdirSync(foreign);
     execFileSync('git', ['init', '-q'], { cwd: foreign });
@@ -65,9 +65,49 @@ describe('copied native configuration in linked worktrees', () => {
     }
   });
 
+  it('checks the nearest valid in-checkout owner when installed or launched in a subdirectory', () => {
+    const { canonical, linked } = fixture();
+    const sub = join(linked, 'subdir'), canonicalSub = join(canonical, 'subdir');
+    mkdirSync(sub); mkdirSync(canonicalSub);
+    for (const configured of [canonical, linked, sub]) {
+      expect(() => resolveClientWorkspace(configured, [sub], { HEDDLE_AGENT: 'different-seat' })).toThrow('conflicts');
+      expect(resolveClientWorkspace(configured, [sub], { HEDDLE_AGENT: 'linked-seat' })).toBe(sub);
+    }
+    expect(resolveClientWorkspace(canonicalSub, [canonicalSub], { HEDDLE_AGENT: 'launcher-seat' })).toBe(canonicalSub);
+    expect(resolveClientWorkspace(canonical, [canonicalSub], { HEDDLE_AGENT: 'launcher-seat' })).toBe(canonicalSub);
+    writeFileSync(join(sub, '.fleet-agent'), '#invalid-room');
+    expect(() => resolveClientWorkspace(sub, [], { HEDDLE_AGENT: 'different-seat' })).toThrow('conflicts');
+    writeFileSync(join(sub, '.fleet-agent'), 'nested-seat');
+    expect(resolveClientWorkspace(sub, [], { HEDDLE_AGENT: 'nested-seat' })).toBe(sub);
+    expect(() => resolveClientWorkspace(sub, [], { HEDDLE_AGENT: 'linked-seat' })).toThrow('conflicts');
+    writeFileSync(join(sub, '.fleet-agent'), 'x'.repeat(257));
+    expect(() => resolveClientWorkspace(sub, [], { HEDDLE_AGENT: 'nested-seat' })).toThrow('owner could not be verified');
+  });
+
+  it('does not borrow outer repository identity or policy for a nested repository', () => {
+    const { canonical, linked, git } = fixture();
+    const nested = join(linked, 'nested'), sub = join(nested, 'subdir');
+    mkdirSync(sub, { recursive: true });
+    git(nested, ['init', '-q']);
+    expect(resolveClientWorkspace(canonical, [sub], {})).toBe(canonical);
+    expect(resolveClientWorkspace(canonical, [sub], { HEDDLE_WORKER: '1' }, sub)).toBe(canonical);
+    expect(clientWorkspaceDirectories(sub)).toEqual([sub, nested]);
+  });
+
+  it('canonicalizes case aliases before bounding the directory walk on case-insensitive filesystems', ({ skip }) => {
+    const { canonical, linked, root } = fixture();
+    const sub = join(linked, 'SubDir'); mkdirSync(sub);
+    const alias = join(root, 'LINKED', 'subdir');
+    if (!existsSync(alias)) skip();
+    expect(clientWorkspaceDirectories(alias)).toEqual([sub, linked]);
+    expect(resolveClientWorkspace(canonical, [alias], { HEDDLE_AGENT: 'linked-seat' })).toBe(sub);
+    expect(() => resolveClientWorkspace(alias, [], { HEDDLE_AGENT: 'different-seat' })).toThrow('conflicts');
+  });
+
   it.each(FLEET_CLIENTS)('%s copied configs bind actual stdio with trailing-space paths and invalid env identity without tracked changes', async (client) => {
     await ensureBuilt();
     const { canonical, linked, root, git } = fixture(' ');
+    const sub = join(linked, 'subdir'); mkdirSync(sub);
     const before = git(linked, ['status', '--porcelain', '--untracked-files=all']);
     const configBefore = readFileSync(join(linked, files[client]), 'utf8');
     const def = servers(linked, client)['heddle-comms'];
@@ -80,7 +120,7 @@ describe('copied native configuration in linked worktrees', () => {
     const args = Array.isArray(def.command) ? def.command.slice(1) : def.args;
     const peer = new Client({ name: 'linked-test', version: '1' });
     try {
-      await peer.connect(new StdioClientTransport({ command, args, env: childEnvironment, cwd: linked, stderr: 'pipe' }));
+      await peer.connect(new StdioClientTransport({ command, args, env: childEnvironment, cwd: sub, stderr: 'pipe' }));
       const result = await peer.callTool({ name: 'comms_whoami', arguments: {} }) as { content: { text: string }[] };
       expect(JSON.parse(result.content[0].text)).toMatchObject({ identity: 'linked-seat', bindingSource: 'fleet-file' });
     } catch (error) { throw new Error(`linked ${client} stdio failed: ${String(error)}`); }
@@ -88,13 +128,13 @@ describe('copied native configuration in linked worktrees', () => {
     const worker = new Client({ name: 'pinned-worker-test', version: '1' });
     try {
       await worker.connect(new StdioClientTransport({ command, args,
-        env: { ...childEnvironment, HEDDLE_WORKER: '1' }, cwd: linked, stderr: 'pipe' }));
+        env: { ...childEnvironment, HEDDLE_WORKER: '1' }, cwd: sub, stderr: 'pipe' }));
       const result = await worker.callTool({ name: 'comms_whoami', arguments: {} }) as { content: { text: string }[] };
       expect(JSON.parse(result.content[0].text)).toMatchObject({ identity: 'canonical-seat', bindingSource: 'fleet-file' });
     } catch (error) { throw new Error(`pinned ${client} worker stdio failed: ${String(error)}`); }
     finally { await worker.close().catch(() => undefined); }
     const conflict = spawnSync(process.execPath, [join(PROJECT_ROOT, 'dist/client-mcp.js'), 'heddle-comms', canonical],
-      { cwd: linked, env: { ...childEnvironment, HEDDLE_AGENT: 'conflicting-seat' }, encoding: 'utf8', timeout: 10000 });
+      { cwd: sub, env: { ...childEnvironment, HEDDLE_AGENT: 'conflicting-seat' }, encoding: 'utf8', timeout: 10000 });
     expect(conflict.status).toBe(1);
     expect(conflict.stderr).toContain('identity conflicts');
     expect(readFileSync(join(linked, files[client]), 'utf8')).toBe(configBefore);
@@ -110,10 +150,12 @@ describe('copied native configuration in linked worktrees', () => {
       mkdirSync(join(dir, 'rules'));
       writeFileSync(join(dir, 'rules/cwd-check.yaml'), 'id: cwd-check\nevent: PreToolUse\nmatch:\n  tool: Bash\naction: block\nenforce: true\nmessage: selected {{cwd}}\nfail_open: true\n');
     }
+    const sub = join(linked, 'subdir'); mkdirSync(sub);
+    writeFileSync(join(sub, 'rules'), 'A regular file must not shadow the worktree rules directory.');
     const { env } = childEnv({ home: root });
     for (const client of FLEET_CLIENTS) {
       const before = readFileSync(join(linked, client === 'codex' || client === 'cursor' ? `.${client}/hooks.json` : files[client]), 'utf8');
-      for (const [payloadCwd, selected, worker] of [[linked, linked, false], [root, canonical, false], [linked, canonical, true]] as const) {
+      for (const [payloadCwd, selected, worker] of [[linked, linked, false], [sub, sub, false], [root, canonical, false], [linked, canonical, true]] as const) {
         const result = spawnSync(process.execPath, [join(PROJECT_ROOT, 'dist/client-hook.js'), client, 'PreToolUse', canonical], {
           cwd: canonical, env: { ...env, ...(worker ? { HEDDLE_WORKER: '1' } : {}) }, encoding: 'utf8', timeout: 10000,
           input: JSON.stringify({ cwd: payloadCwd, tool_name: 'exec_command', tool_input: { cmd: 'probe' } }),
@@ -200,20 +242,40 @@ describe('copied native configuration in linked worktrees', () => {
       writeFileSync(join(dir, 'rules/worker-cwd.yaml'), `id: worker-cwd\nevent: PreToolUse\nmatch:\n  tool: Bash\naction: block\nenforce: true\nmessage: ${label} {{cwd}} {{agent}}\nfail_open: true\n`);
     }
     const { env } = childEnv({ home: root, env: { HEDDLE_WORKER: '1', HEDDLE_AGENT: 'linked-seat.1', HEDDLE_PARENT: 'linked-seat' } });
+    const sub = join(linked, 'subdir'); mkdirSync(sub);
     for (const client of FLEET_CLIENTS) {
-      for (const payloadCwd of [canonical, linked, other]) {
+      for (const [actualCwd, payloadCwd] of [[linked, canonical], [sub, linked], [sub, other]]) {
         const result = spawnSync(process.execPath, [join(PROJECT_ROOT, 'dist/client-hook.js'), client, 'PreToolUse', canonical, 'canonical-seat'], {
-          cwd: linked, env, encoding: 'utf8', timeout: 10000,
+          cwd: actualCwd, env, encoding: 'utf8', timeout: 10000,
           input: JSON.stringify({ cwd: payloadCwd, tool_name: 'exec_command', tool_input: { cmd: 'probe' } }),
         });
         expect(result.status, result.stderr).toBe(0);
-        expect(result.stdout, result.stderr).toContain(`linked-policy ${linked} linked-seat.1`);
+        expect(result.stdout, result.stderr).toContain(`linked-policy ${actualCwd} linked-seat.1`);
         expect(result.stdout).not.toContain('canonical-policy');
         expect(result.stdout).not.toContain('other-policy');
       }
     }
     // MCP callers do not supply a hook invocation cwd: their materialized arguments stay pinned.
     expect(resolveClientWorkspace(canonical, [linked, other], env)).toBe(canonical);
+  });
+
+  it('uses explicit rule overrides and nearest subdirectory rules without losing the actual cwd', async () => {
+    await ensureBuilt();
+    const { canonical, linked, root } = fixture();
+    const sub = join(linked, 'subdir'); mkdirSync(sub);
+    for (const [dir, label] of [[linked, 'root'], [sub, 'nested'], [root, 'override']]) {
+      mkdirSync(join(dir, 'rules'));
+      writeFileSync(join(dir, 'rules/selection.yaml'), `id: selection\nevent: PreToolUse\nmatch:\n  tool: Bash\naction: block\nenforce: true\nmessage: ${label} {{cwd}}\nfail_open: true\n`);
+    }
+    const { env } = childEnv({ home: root });
+    for (const override of [false, true]) {
+      const result = spawnSync(process.execPath, [join(PROJECT_ROOT, 'dist/client-hook.js'), 'codex', 'PreToolUse', canonical], {
+        cwd: sub, env: { ...env, ...(override ? { HEDDLE_RULES_DIR: join(root, 'rules') } : {}) }, encoding: 'utf8', timeout: 10000,
+        input: JSON.stringify({ tool_name: 'exec_command', tool_input: { cmd: 'probe' } }),
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(JSON.parse(result.stdout).hookSpecificOutput).toMatchObject({ permissionDecision: 'deny', permissionDecisionReason: `${override ? 'override' : 'nested'} ${sub}` });
+    }
   });
 
   it('keeps generated-entry verification strict for foreign commands, worker copies and symlinks', () => {
