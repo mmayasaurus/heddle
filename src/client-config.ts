@@ -1,4 +1,4 @@
-import { accessSync, constants, existsSync, lstatSync, readFileSync, realpathSync } from 'node:fs';
+import { accessSync, closeSync, constants, existsSync, fstatSync, lstatSync, openSync, readFileSync, readSync, realpathSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -40,7 +40,7 @@ function checkedJson(raw: string, path: string): Record<string, unknown> {
   catch { throw new Error(`invalid JSON configuration in ${path} (contents omitted)`); }
 }
 
-export function clientFileSource(path: string): string | null {
+export function clientFileSource(path: string, maxBytes?: number): string | null {
   // Do not follow a config symlink or a symlinked parent into another checkout/user config.
   for (let part = path; ; part = dirname(part)) {
     try {
@@ -50,7 +50,23 @@ export function clientFileSource(path: string): string | null {
     }
     if (dirname(part) === part) break;
   }
-  return existsSync(path) ? readFileSync(path, 'utf8') : null;
+  if (!existsSync(path)) return null;
+  if (maxBytes === undefined) return readFileSync(path, 'utf8');
+  const before = lstatSync(path);
+  if (!before.isFile() || before.size > maxBytes) throw new Error('client marker is not a bounded regular file');
+  // POSIX flags prevent following a replaced leaf or blocking on a FIFO. Compare descriptor
+  // identity too, including on Windows where O_NONBLOCK/O_NOFOLLOW are zero.
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
+  try {
+    const stat = fstatSync(fd);
+    if (stat.dev !== before.dev || stat.ino !== before.ino) throw new Error('client marker changed while opening');
+    if (!stat.isFile() || stat.size > maxBytes) throw new Error('client marker is not a bounded regular file');
+    const bytes = Buffer.alloc(maxBytes + 1);
+    let used = 0, count: number;
+    while (used < bytes.length && (count = readSync(fd, bytes, used, bytes.length - used, used)) > 0) used += count;
+    if (used > maxBytes) throw new Error('client marker exceeds its read limit');
+    return bytes.toString('utf8', 0, used);
+  } finally { closeSync(fd); }
 }
 
 /** Check likely permission failures before a composed install changes any Claude files. */

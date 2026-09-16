@@ -2,6 +2,7 @@ import { realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { gitRepositoryFor } from './worktree.js';
 import { clientFileSource } from './client-config.js';
+import { parseAddress } from './comms/address.js';
 
 /** A copied native config may follow a linked checkout, never an unrelated clone or subdirectory. */
 export function sameClientWorkspace(configured: string, candidate: string): boolean {
@@ -15,11 +16,20 @@ export function sameClientWorkspace(configured: string, candidate: string): bool
   } catch { return false; } // Missing/unreadable Git identity cannot authorize a different workspace.
 }
 
-export class ClientWorkspaceIdentityConflict extends Error {
+export class ClientWorkspaceIdentityError extends Error {
+  constructor(message: string) { super(message); this.name = 'ClientWorkspaceIdentityError'; }
+}
+
+export class ClientWorkspaceIdentityConflict extends ClientWorkspaceIdentityError {
   constructor() {
     super('native client identity conflicts with the selected worktree owner');
     this.name = 'ClientWorkspaceIdentityConflict';
   }
+}
+
+function clientAgentAddress(value: string | null | undefined): string | undefined {
+  const address = value?.trim(), kind = address ? parseAddress(address)?.kind : null;
+  return kind === 'agent' || kind === 'child' ? address : undefined;
 }
 
 /** Runtime-only binding keeps tracked native config and its permissions unchanged in worktrees. */
@@ -33,9 +43,18 @@ export function resolveClientWorkspace(configured: string, candidates: unknown[]
   }
   const candidate = candidates.find((value): value is string => typeof value === 'string' && sameClientWorkspace(fallback, value));
   const cwd = candidate ? realpathSync(candidate) : fallback;
-  if (cwd === fallback) return cwd; // Preserve existing same-workspace launcher identity precedence.
-  const bound = env.HEDDLE_AGENT?.trim() || env.FLEET_AGENT?.trim();
-  const owner = clientFileSource(join(cwd, '.fleet-agent'))?.trim();
+  if (cwd === fallback) {
+    const repository = gitRepositoryFor(cwd);
+    if (!repository) return cwd; // Standalone installs retain explicit launcher identity precedence.
+    try {
+      if (repository.mainRoot && realpathSync(repository.mainRoot) === cwd) return cwd; // Shared project root.
+    } catch { throw new ClientWorkspaceIdentityError('native client checkout identity could not be verified'); }
+    if (!repository.mainRoot) throw new ClientWorkspaceIdentityError('native client checkout identity could not be verified');
+  }
+  const bound = [env.HEDDLE_AGENT, env.FLEET_AGENT, env.HEDDLE_COMMS_ADDRESS].map(clientAgentAddress).find(Boolean);
+  let owner: string | undefined;
+  try { owner = clientAgentAddress(clientFileSource(join(cwd, '.fleet-agent'), 256)); }
+  catch { throw new ClientWorkspaceIdentityError('native client worktree owner could not be verified'); }
   if (bound && owner && bound !== owner) throw new ClientWorkspaceIdentityConflict();
   return cwd;
 }

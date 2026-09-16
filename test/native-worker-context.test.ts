@@ -1,7 +1,8 @@
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { execFileSync } from 'node:child_process';
+import { once } from 'node:events';
+import { execFileSync, spawn } from 'node:child_process';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -375,7 +376,7 @@ describe('native worker context through actual MCP subprocesses', () => {
       }, opts));
       try {
         if (restore) restore();
-        else expect(() => materializeWorkerMcp(cwd, 'cursor', [], { dispatchId: 1 }, context)).toThrow(/symlink/);
+        else expect(() => materializeWorkerMcp(cwd, 'cursor', [], { dispatchId: 1 }, context)).toThrow(/symlink|unverified Heddle MCP/);
         expect(readFileSync(kind === 'directory' ? join(moved, 'mcp.json') : moved, 'utf8')).toBe(snapshot);
         if (kind !== 'sidecar') expect(existsSync(sidecar)).toBe(phase === 'restore');
       } finally { spy.mockRestore(); }
@@ -439,6 +440,69 @@ describe('native worker context through actual MCP subprocesses', () => {
     config.mcpServers.heddle.env.HEDDLE_AGENT = 'U.1';
     writeFileSync(path, JSON.stringify(config));
     expect(() => nativeClientIntegrationInstalled(cwd, 'cursor', true)).toThrow(/unverified Heddle MCP entries/);
+  });
+
+  it('waits for an interprocess native config write before detecting ownership', async () => {
+    await ensureBuilt();
+    const cwd = realpathSync(tempDir()), path = join(cwd, '.cursor', 'mcp.json');
+    const original = install(cwd, 'cursor', path);
+    const writer = spawn(process.execPath, ['--input-type=module', '-e', `
+import { readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { withFileLock } from ${JSON.stringify(pathToFileURL(join(PROJECT_ROOT, 'dist/matlock.js')).href)};
+const path = process.argv[1], original = readFileSync(path, 'utf8');
+withFileLock(join(dirname(path), '.heddle-mcp.lock'), () => {
+  try {
+    writeFileSync(path, '{"mcpServers":');
+    process.stdout.write('locked\\n');
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 600);
+  } finally { writeFileSync(path, original); }
+}, { required: true });
+`, path], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const exited = once(writer, 'exit');
+    try {
+      await Promise.race([once(writer.stdout, 'data'), exited.then(() => { throw new Error('writer exited before locking'); })]);
+      expect(nativeClientIntegrationInstalled(cwd, 'cursor', true)).toBe(true);
+      expect(readFileSync(path, 'utf8')).toBe(original);
+      const [code] = await exited;
+      expect(code).toBe(0);
+      expect(nativeClientIntegrationInstalled(cwd, 'cursor', true)).toBe(true);
+    } catch (error) { throw new Error(`native ownership snapshot race failed: ${String(error)}`); }
+    finally {
+      if (writer.exitCode === null) { writer.kill('SIGTERM'); await exited.catch(() => undefined); }
+    }
+  });
+
+  it('does not need write access to a lock in an uninitialized native workspace', () => {
+    const cwd = tempDir();
+    const lock = vi.spyOn(matlock, 'withFileLock').mockImplementation(() => { throw new Error('not writable'); });
+    for (const row of clients) expect(nativeClientIntegrationInstalled(cwd, row.provider, true)).toBe(false);
+    expect(lock).not.toHaveBeenCalled();
+  });
+
+  it('refuses incoherent native snapshots after taking the lock but preserves legacy discovery', () => {
+    const cwd = tempDir(), path = join(cwd, '.cursor', 'mcp.json');
+    install(cwd, 'cursor', path);
+    writeFileSync(path, '{"mcpServers":');
+    expect(() => nativeClientIntegrationInstalled(cwd, 'cursor', true)).toThrow(/unverified Heddle MCP/);
+    const sidecar = join(dirname(path), '.heddle-mcp-refs.json');
+    writeFileSync(sidecar, JSON.stringify({ refs: { '1': ['heddle', 'heddle-comms'] } }));
+    for (const config of [{}, { mcpServers: { memtrace: { command: 'memtrace' } } }]) {
+      writeFileSync(path, JSON.stringify(config));
+      expect(() => nativeClientIntegrationInstalled(cwd, 'cursor', true)).toThrow(/unverified Heddle MCP/);
+    }
+    writeFileSync(sidecar, JSON.stringify({ refs: { '1': ['memtrace'] } }));
+    expect(nativeClientIntegrationInstalled(cwd, 'cursor', true)).toBe(false);
+  });
+
+  it('never downgrades native detection when its required ownership lock stays busy', () => {
+    const cwd = tempDir(), path = join(cwd, '.cursor', 'mcp.json');
+    install(cwd, 'cursor', path);
+    mkdirSync(join(dirname(path), '.heddle-mcp.lock'));
+    writeFileSync(path, '{"mcpServers":');
+    for (const strict of [true, false]) {
+      expect(() => nativeClientIntegrationInstalled(cwd, 'cursor', strict)).toThrow(/required file lock/);
+    }
   });
 
   it('requires both owned wrapper entries before recognizing native initialization', () => {

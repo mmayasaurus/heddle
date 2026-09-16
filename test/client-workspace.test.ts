@@ -14,11 +14,13 @@ import { childEnv, ensureBuilt, PROJECT_ROOT } from './helpers/cli.js';
 
 const files = { codex: '.codex/config.toml', cursor: '.cursor/mcp.json', gemini: '.gemini/settings.json', opencode: 'opencode.json' };
 const provider = (client: FleetClient) => client === 'gemini' ? 'gemini-cli' : client;
+type NativeServer = { command: string | string[]; args?: string[]; env?: Record<string, string>; environment?: Record<string, string> };
+type NativeConfig = Partial<Record<'mcp_servers' | 'mcpServers' | 'mcp', Record<string, NativeServer>>>;
 
 describe('copied native configuration in linked worktrees', () => {
   const { tempDir } = useTempResources('heddle-client-workspace-');
-  function fixture() {
-    const root = realpathSync(tempDir()), canonical = join(root, 'canonical'), linked = join(root, 'linked');
+  function fixture(suffix = '') {
+    const root = realpathSync(tempDir()), canonical = join(root, 'canonical' + suffix), linked = join(root, 'linked' + suffix);
     mkdirSync(canonical);
     const git = (cwd: string, args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
     git(canonical, ['init', '-q']);
@@ -35,8 +37,8 @@ describe('copied native configuration in linked worktrees', () => {
   }
   function servers(dir: string, client: FleetClient) {
     const raw = readFileSync(join(dir, files[client]), 'utf8');
-    const config = client === 'codex' ? parseToml(raw) : JSON.parse(raw);
-    return config[client === 'codex' ? 'mcp_servers' : client === 'opencode' ? 'mcp' : 'mcpServers'] as Record<string, any>;
+    const config = (client === 'codex' ? parseToml(raw) : JSON.parse(raw)) as NativeConfig;
+    return config[client === 'codex' ? 'mcp_servers' : client === 'opencode' ? 'mcp' : 'mcpServers']!;
   }
 
   it('accepts only exact linked-family roots, pins workers, and refuses conflicting identity', () => {
@@ -51,6 +53,10 @@ describe('copied native configuration in linked worktrees', () => {
     expect(resolveClientWorkspace(canonical, [canonical], { HEDDLE_AGENT: 'launcher-seat' })).toBe(canonical);
     expect(resolveClientWorkspace(canonical, [linked], { HEDDLE_WORKER: '1', HEDDLE_AGENT: 'worker.1' })).toBe(canonical);
     expect(() => resolveClientWorkspace(canonical, [linked], { HEDDLE_AGENT: 'different-seat' })).toThrow('conflicts');
+    expect(resolveClientWorkspace(canonical, [linked], { HEDDLE_AGENT: 'invalid value', FLEET_AGENT: 'linked-seat' })).toBe(linked);
+    expect(resolveClientWorkspace(canonical, [linked], { HEDDLE_AGENT: 'operator', FLEET_AGENT: '#room' })).toBe(linked);
+    expect(() => resolveClientWorkspace(canonical, [linked], { HEDDLE_COMMS_ADDRESS: 'different-seat' })).toThrow('conflicts');
+    expect(() => resolveClientWorkspace(linked, [linked], { HEDDLE_AGENT: 'different-seat' })).toThrow('conflicts');
     for (const client of FLEET_CLIENTS) {
       expect(nativeClientIntegrationInstalled(linked, provider(client), true)).toBe(true);
       const file = join(foreign, files[client]); mkdirSync(join(file, '..'), { recursive: true });
@@ -59,28 +65,29 @@ describe('copied native configuration in linked worktrees', () => {
     }
   });
 
-  it.each(FLEET_CLIENTS)('%s copied configs bind actual stdio to linked cwd without any tracked changes', async (client) => {
+  it.each(FLEET_CLIENTS)('%s copied configs bind actual stdio with trailing-space paths and invalid env identity without tracked changes', async (client) => {
     await ensureBuilt();
-    const { canonical, linked, root, git } = fixture();
+    const { canonical, linked, root, git } = fixture(' ');
     const before = git(linked, ['status', '--porcelain', '--untracked-files=all']);
     const configBefore = readFileSync(join(linked, files[client]), 'utf8');
     const def = servers(linked, client)['heddle-comms'];
     const env = client === 'opencode' ? def.environment : def.env;
+    expect(env).toBeDefined();
     // Cursor's documented empty-default expansion occurs before its sanitized child launch.
-    const expanded = Object.fromEntries(Object.entries(env).map(([key, value]) => [key, String(value).replace(/\$\{[A-Z_]+:-\}/g, '')]));
-    const { env: childEnvironment } = childEnv({ home: root, env: { ...expanded, HEDDLE_COMMS_DB: join(root, 'comms.db') } });
+    const expanded = Object.fromEntries(Object.entries(env ?? {}).map(([key, value]) => [key, String(value).replace(/\$\{[A-Z_]+:-\}/g, '')]));
+    const { env: childEnvironment } = childEnv({ home: root, env: { ...expanded, HEDDLE_AGENT: 'invalid identity', HEDDLE_COMMS_DB: join(root, 'comms.db') } });
+    const command = Array.isArray(def.command) ? def.command[0] : def.command;
+    const args = Array.isArray(def.command) ? def.command.slice(1) : def.args;
     const peer = new Client({ name: 'linked-test', version: '1' });
     try {
-      await peer.connect(new StdioClientTransport({ command: client === 'opencode' ? def.command[0] : def.command,
-        args: client === 'opencode' ? def.command.slice(1) : def.args, env: childEnvironment, cwd: linked, stderr: 'pipe' }));
+      await peer.connect(new StdioClientTransport({ command, args, env: childEnvironment, cwd: linked, stderr: 'pipe' }));
       const result = await peer.callTool({ name: 'comms_whoami', arguments: {} }) as { content: { text: string }[] };
       expect(JSON.parse(result.content[0].text)).toMatchObject({ identity: 'linked-seat', bindingSource: 'fleet-file' });
     } catch (error) { throw new Error(`linked ${client} stdio failed: ${String(error)}`); }
     finally { await peer.close().catch(() => undefined); }
     const worker = new Client({ name: 'pinned-worker-test', version: '1' });
     try {
-      await worker.connect(new StdioClientTransport({ command: client === 'opencode' ? def.command[0] : def.command,
-        args: client === 'opencode' ? def.command.slice(1) : def.args,
+      await worker.connect(new StdioClientTransport({ command, args,
         env: { ...childEnvironment, HEDDLE_WORKER: '1' }, cwd: linked, stderr: 'pipe' }));
       const result = await worker.callTool({ name: 'comms_whoami', arguments: {} }) as { content: { text: string }[] };
       expect(JSON.parse(result.content[0].text)).toMatchObject({ identity: 'canonical-seat', bindingSource: 'fleet-file' });
@@ -118,7 +125,7 @@ describe('copied native configuration in linked worktrees', () => {
     }
   });
 
-  it('identity conflicts deny PreToolUse for every client without turning other events into permissions or Stop loops', async () => {
+  it.each(['payload', 'process', 'direct'] as const)('identity conflicts deny PreToolUse for every client via %s cwd without permission or Stop loops', async (mode) => {
     await ensureBuilt();
     const { canonical, linked, root } = fixture();
     for (const dir of [canonical, linked]) {
@@ -128,9 +135,10 @@ describe('copied native configuration in linked worktrees', () => {
     const { env } = childEnv({ home: root, env: { HEDDLE_AGENT: 'canonical-seat' } });
     for (const client of FLEET_CLIENTS) {
       for (const event of ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'Stop']) {
-        const result = spawnSync(process.execPath, [join(PROJECT_ROOT, 'dist/client-hook.js'), client, event, canonical], {
-          cwd: canonical, env, encoding: 'utf8', timeout: 10000,
-          input: JSON.stringify({ cwd: linked, tool_name: 'exec_command', tool_input: { cmd: 'probe' } }),
+        const configured = mode === 'direct' ? linked : canonical;
+        const result = spawnSync(process.execPath, [join(PROJECT_ROOT, 'dist/client-hook.js'), client, event, configured], {
+          cwd: mode === 'payload' ? canonical : linked, env, encoding: 'utf8', timeout: 10000,
+          input: JSON.stringify({ ...(mode === 'payload' ? { cwd: linked } : {}), tool_name: 'exec_command', tool_input: { cmd: 'probe' } }),
         });
         expect(result.status, result.stderr).toBe(0);
         expect(result.stderr).toContain('identity conflicts');
@@ -149,6 +157,36 @@ describe('copied native configuration in linked worktrees', () => {
           expect(output.hookSpecificOutput ?? {}).not.toHaveProperty('permissionDecision');
         }
       }
+    }
+  });
+
+  it.each(FLEET_CLIENTS)('%s denies unsafe worktree owner metadata instead of failing open or timing out', async (client) => {
+    await ensureBuilt();
+    const { canonical, linked, root } = fixture();
+    const owner = join(linked, '.fleet-agent');
+    renameSync(owner, owner + '.preserved');
+    const { env } = childEnv({ home: root, env: { HEDDLE_AGENT: 'canonical-seat' } });
+    const kinds = ['symlink', 'directory', 'oversized', ...(process.platform === 'win32' ? [] : ['fifo'])];
+    for (const kind of kinds) {
+      if (kind === 'symlink') symlinkSync(owner + '.preserved', owner);
+      else if (kind === 'directory') mkdirSync(owner);
+      else if (kind === 'oversized') writeFileSync(owner, 'x'.repeat(257));
+      else execFileSync('mkfifo', [owner]);
+      for (const configured of [canonical, linked]) {
+        const result = spawnSync(process.execPath, [join(PROJECT_ROOT, 'dist/client-hook.js'), client, 'PreToolUse', configured], {
+          cwd: linked, env, encoding: 'utf8', timeout: 5000,
+          input: JSON.stringify({ tool_name: 'exec_command', tool_input: { cmd: 'probe' } }),
+        });
+        expect(result.status, `${kind}: ${result.stderr}`).toBe(0);
+        expect(result.error).toBeUndefined();
+        expect(result.stderr).toContain('owner could not be verified');
+        const output = JSON.parse(result.stdout);
+        if (client === 'codex') expect(output.hookSpecificOutput.permissionDecision).toBe('deny');
+        else if (client === 'cursor') expect(output.permission).toBe('deny');
+        else if (client === 'gemini') expect(output.decision).toBe('deny');
+        else expect(output.deny).toContain('owner could not be verified');
+      }
+      renameSync(owner, owner + '.' + kind);
     }
   });
 
@@ -181,15 +219,16 @@ describe('copied native configuration in linked worktrees', () => {
   it('keeps generated-entry verification strict for foreign commands, worker copies and symlinks', () => {
     const { canonical, linked } = fixture();
     for (const client of FLEET_CLIENTS) {
-      const file = join(linked, files[client]), raw = readFileSync(file, 'utf8'), config = client === 'codex' ? parseToml(raw) : JSON.parse(raw);
-      const serialize = (value: any) => client === 'codex' ? stringifyToml(value) : JSON.stringify(value);
+      const file = join(linked, files[client]), raw = readFileSync(file, 'utf8');
+      const config = (client === 'codex' ? parseToml(raw) : JSON.parse(raw)) as NativeConfig;
+      const serialize = (value: NativeConfig) => client === 'codex' ? stringifyToml(value) : JSON.stringify(value);
       const key = client === 'codex' ? 'mcp_servers' : client === 'opencode' ? 'mcp' : 'mcpServers';
       const envKey = client === 'opencode' ? 'environment' : 'env';
-      config[key].heddle[envKey].HEDDLE_WORKER = '1';
+      config[key]!.heddle[envKey]!.HEDDLE_WORKER = '1';
       writeFileSync(file, serialize(config));
       expect(() => nativeClientIntegrationInstalled(linked, provider(client), true)).toThrow('unverified');
-      const modified = client === 'codex' ? parseToml(raw) : JSON.parse(raw);
-      modified[key].heddle.command = client === 'opencode' ? ['foreign'] : 'foreign';
+      const modified = (client === 'codex' ? parseToml(raw) : JSON.parse(raw)) as NativeConfig;
+      modified[key]!.heddle.command = client === 'opencode' ? ['foreign'] : 'foreign';
       writeFileSync(file, serialize(modified));
       expect(() => nativeClientIntegrationInstalled(linked, provider(client), true)).toThrow('unverified');
       writeFileSync(file, raw);

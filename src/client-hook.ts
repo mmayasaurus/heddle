@@ -5,7 +5,7 @@ import { homedir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { clientInbox, evaluateClientHook, renderClientHook, type ClientEvent } from './client-hooks.js';
 import { clientStartupInstructions, parseFleetClients } from './client-config.js';
-import { ClientWorkspaceIdentityConflict, resolveClientWorkspace } from './client-workspace.js';
+import { ClientWorkspaceIdentityError, resolveClientWorkspace } from './client-workspace.js';
 import { resolveCommsIdentity } from './comms/server.js';
 
 const EVENTS = new Set(['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'Stop']);
@@ -67,8 +67,8 @@ async function main(): Promise<void> {
   let cwd: string;
   try { cwd = resolveClientWorkspace(configuredCwd, [raw.cwd, process.cwd()], env, process.cwd()); }
   catch (error) {
-    if (!(error instanceof ClientWorkspaceIdentityConflict)) throw error;
-    // A known identity mismatch is a policy refusal, not an unexpected fail-open hook error.
+    if (!(error instanceof ClientWorkspaceIdentityError)) throw error;
+    // A known identity mismatch or unreadable owner is a policy refusal, not an unexpected hook error.
     process.stderr.write(`heddle native hook: ${error.message}\n`);
     const conflict = event === 'PreToolUse' ? { context: '', deny: error.message } : { context: error.message };
     // Stop context would request another turn; report only stderr at that boundary.
