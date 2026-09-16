@@ -83,13 +83,16 @@ jobs:
           }
           const helperPath = join(process.env.RUNNER_TEMP, 'heddle-helper-canary.ps1');
           writeFileSync(helperPath, helper);
-          const directory = join(mkdtempSync(join(process.env.RUNNER_TEMP, 'heddle-helper-')), 'private');
-          const result = spawnSync(executable, ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', helperPath], {
-            input: JSON.stringify({ operation: 'ensure-dir', path: directory, requireOwner: true }) + '\n',
-            encoding: 'utf8', timeout: 30000, maxBuffer: 16384, windowsHide: true,
-            env: { SystemRoot: root, WINDIR: root } });
-          process.stdout.write(JSON.stringify({ mode: 'actual-helper', status: result.status, code: result.error?.code,
-            stdout: result.stdout, stderr: result.stderr }) + '\n');
+          for (const mode of ['default', 'input-none']) {
+            const directory = join(mkdtempSync(join(process.env.RUNNER_TEMP, 'heddle-helper-')), 'private');
+            const result = spawnSync(executable, ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+              ...(mode === 'input-none' ? ['-InputFormat', 'None'] : []), '-File', helperPath], {
+              input: JSON.stringify({ operation: 'ensure-dir', path: directory, requireOwner: true }) + '\n',
+              encoding: 'utf8', timeout: 30000, maxBuffer: 16384, windowsHide: true,
+              env: { SystemRoot: root, WINDIR: root } });
+            process.stdout.write(JSON.stringify({ mode: `actual-helper-${mode}`, status: result.status, code: result.error?.code,
+              stdout: result.stdout, stderr: result.stderr }) + '\n');
+          }
           NODE
       - name: Native filesystem, process, and fleet tests
         run: npx vitest run --bail=1 --reporter=verbose test/platform-process.test.ts test/platform-filesystem.test.ts test/hook-command.test.ts test/secure-fs-windows.test.ts test/client-session.test.ts test/client-hooks.test.ts test/comms/address.test.ts test/comms/log.test.ts test/comms/broker.test.ts

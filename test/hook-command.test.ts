@@ -23,6 +23,16 @@ describe('native hook shell boundary', () => {
     expect(isHeddleHookCommand('powershell.exe -EncodedCommand not-base64', prefix)).toBe(false);
   });
 
+  it('upgrades owned Windows hooks that predate explicit raw stdin handling', () => {
+    const prefix = ['node', 'hook.js', 'codex', 'Stop', 'project'];
+    const current = hookCommand([...prefix, 'codex-before', '--heddle-fleet-hook'], 'win32');
+    expect(current).toContain(' -InputFormat None ');
+    expect(isHeddleHookCommand(current, prefix)).toBe(true);
+    expect(isHeddleHookCommand(current.replace(' -InputFormat None', ''), prefix)).toBe(true);
+    const foreign = hookCommand(['node', 'foreign.js', 'codex-before', '--heddle-fleet-hook'], 'win32');
+    expect(isHeddleHookCommand(foreign.replace(' -InputFormat None', ''), prefix)).toBe(false);
+  });
+
   it('executes the generated command with literal arguments, stdin, and exit status', async () => {
     const dir = tempDir();
     const script = join(dir, 'hook child.mjs');

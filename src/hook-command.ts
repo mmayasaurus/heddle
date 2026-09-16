@@ -7,14 +7,14 @@ export function hookCommand(argv: string[], platform: NodeJS.Platform = process.
   // Client hook runners differ between cmd.exe and PowerShell. This outer command is valid in both;
   // encode the fixed PowerShell invocation so neither outer shell can expand paths or metacharacters.
   const script = `# heddle-fleet-hook-v1\n$ErrorActionPreference='Stop'\ntry { & ${argv.map((value) => `'${value.replace(/'/g, "''")}'`).join(' ')}; exit $LASTEXITCODE } catch { [Console]::Error.WriteLine('Heddle hook could not start'); exit 1 }`;
-  return `powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand ${Buffer.from(script, 'utf16le').toString('base64')}`;
+  return `powershell.exe -NoLogo -NoProfile -NonInteractive -InputFormat None -EncodedCommand ${Buffer.from(script, 'utf16le').toString('base64')}`;
 }
 
 /** Match this install's full command and a valid prior agent; preserve foreign marker-bearing hooks. */
 export function isHeddleHookCommand(command: string, argvPrefix: string[]): boolean {
   const marker = '__HEDDLE_AGENT__';
   const source = (value: string): string => {
-    const encoded = /^powershell\.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand ([A-Za-z0-9+/]+={0,2})$/.exec(value)?.[1];
+    const encoded = /^powershell\.exe -NoLogo -NoProfile -NonInteractive(?: -InputFormat None)? -EncodedCommand ([A-Za-z0-9+/]+={0,2})$/.exec(value)?.[1];
     return encoded ? Buffer.from(encoded, 'base64').toString('utf16le') : value;
   };
   for (const platform of ['linux', 'win32'] as const) {

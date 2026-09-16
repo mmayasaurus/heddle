@@ -58,6 +58,9 @@ describe('Windows secure filesystem transport', () => {
     secureWriteFile('C:\\Users\\test\\credential', 'FAKE_SECRET_SENTINEL');
     const [command, args, options] = transport.calls[0] as [string, string[], { input: string; env: object }];
     expect(command).toBe('C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe');
+    const inputFormat = args.indexOf('-InputFormat');
+    expect(args.slice(inputFormat, inputFormat + 2)).toEqual(['-InputFormat', 'None']);
+    expect(inputFormat).toBeLessThan(args.indexOf('-File'));
     expect(args.join(' ')).not.toContain('FAKE_SECRET_SENTINEL');
     expect(JSON.parse(options.input).content).toBe(Buffer.from('FAKE_SECRET_SENTINEL').toString('base64'));
     expect(JSON.stringify(options.env)).not.toContain('FAKE_INHERITED_SECRET');
@@ -82,7 +85,7 @@ describe.skipIf(!nativeWindows)('Windows native credential filesystem', () => {
   let root: string;
   const powershell = (script: string, path: string): string => {
     const result = spawnSync(join(process.env.SystemRoot!, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
-      ['-NoProfile', '-NonInteractive', '-Command', '$ErrorActionPreference="Stop"; [Console]::InputEncoding=[Text.UTF8Encoding]::new($false); $p=[Console]::In.ReadLine(); ' + script],
+      ['-NoProfile', '-NonInteractive', '-InputFormat', 'None', '-Command', '$ErrorActionPreference="Stop"; [Console]::InputEncoding=[Text.UTF8Encoding]::new($false); $p=[Console]::In.ReadLine(); ' + script],
       { input: path + '\n', encoding: 'utf8', timeout: 30_000, windowsHide: true });
     if (result.error || result.status !== 0) throw new Error(`Windows ACL test fixture failed (${(result.error as NodeJS.ErrnoException | undefined)?.code ?? result.status}): ${result.stderr}`);
     return result.stdout.trim();
@@ -98,7 +101,7 @@ describe.skipIf(!nativeWindows)('Windows native credential filesystem', () => {
     const injected = join(root, 'fault-injected-helper.ps1');
     writeFileSync(injected, helper.replace(call, fault));
     const result = spawnSync(join(process.env.SystemRoot!, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
-      ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', injected], {
+      ['-NoProfile', '-NonInteractive', '-InputFormat', 'None', '-ExecutionPolicy', 'Bypass', '-File', injected], {
         input: JSON.stringify({ operation: 'write', path: destination, requireOwner: true, content: Buffer.from('FAKE_NEW_SECRET').toString('base64') }) + '\n',
         encoding: 'utf8', timeout: 30_000, windowsHide: true,
       });

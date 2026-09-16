@@ -15,7 +15,7 @@ describe('native platform persistent fleet storage', () => {
   const { tempDir } = useTempResources('heddle-platform-storage-');
   const grantWindowsEveryoneRead = (path: string): void => {
     const result = spawnSync(join(process.env.SystemRoot!, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
-      ['-NoProfile', '-NonInteractive', '-Command', `$ErrorActionPreference='Stop';
+      ['-NoProfile', '-NonInteractive', '-InputFormat', 'None', '-Command', `$ErrorActionPreference='Stop';
         [Console]::InputEncoding=New-Object Text.UTF8Encoding($false); $p=[Console]::In.ReadLine();
         $acl=Get-Acl -LiteralPath $p; $sid=New-Object Security.Principal.SecurityIdentifier('S-1-1-0');
         $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($sid,'Read','Allow')));

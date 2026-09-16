@@ -41,7 +41,7 @@ export function windowsSecureFs(
     ...(options.boundary === undefined ? {} : { boundary: options.boundary }),
     requireOwner: options.requireOwner ?? true,
   };
-  const child = spawnSync(executable, ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', helper], {
+  const child = spawnSync(executable, ['-NoLogo', '-NoProfile', '-NonInteractive', '-InputFormat', 'None', '-ExecutionPolicy', 'Bypass', '-File', helper], {
     // One JSON line gives the helper an explicit frame; it need not wait for pipe EOF on Windows.
     input: JSON.stringify(request) + '\n', encoding: 'utf8', windowsHide: true, timeout: 30_000,
     // Base64 JSON must accommodate the runner's 32 MiB retained worker output.
