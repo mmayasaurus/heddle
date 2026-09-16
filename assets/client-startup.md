@@ -39,4 +39,8 @@ when present; their Markdown instructions can be read without Claude slash comma
 After this integration is installed, start the client normally from this assigned worktree:
 `codex`, `cursor-agent` (or `agent`), `gemini`, or `opencode`. Use the client's normal resume
 controls. `heddle launch` is optional; it combines installation, identity binding and native launch.
+Copied generated configs follow a linked Git worktree at runtime after Heddle verifies the shared
+repository. Do not rerun `init-client` merely because you entered a linked worktree. A parent CLI
+still running at the shared root must pass your own worktree as explicit `cwd` to dispatch and
+code tools; creating a worktree does not move an already running server.
 Native Gemini requires its own Google sign-in; Antigravity's login is separate.

@@ -1,12 +1,14 @@
 #!/usr/bin/env -S node --disable-warning=ExperimentalWarning
 // Native clients start stdio servers with different cwd/env conventions. Bind the workspace before
 // importing either existing server (both resolve process identity at startup).
+import { resolveClientWorkspace } from './client-workspace.js';
+
 try {
   const [server, cwd, ...extra] = process.argv.slice(2);
   if (!cwd || extra.length || !['heddle', 'heddle-comms'].includes(server)) {
     throw new Error('usage: client-mcp <heddle|heddle-comms> <workspace>');
   }
-  process.chdir(cwd);
+  process.chdir(resolveClientWorkspace(cwd, [process.cwd()]));
   process.env.HEDDLE_COMMS_TRANSPORT = 'stdio';
   process.env.HEDDLE_COMMS_PUSH = '0';
   // Do not erase HEDDLE_WORKER/parent/dispatch identity: nested dispatch restrictions still apply.

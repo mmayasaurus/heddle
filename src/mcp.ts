@@ -6,6 +6,7 @@ import { parse as parseToml } from 'smol-toml';
 import { withFileLock } from './matlock.js';
 import type { MaterializeOpts } from './skillpacks.js';
 import { ENFORCEABLE } from './capabilities.js';
+import { sameClientWorkspace } from './client-workspace.js';
 import { clientFileSource, serverDefinitions, type FleetClient } from './client-config.js';
 
 /**
@@ -71,7 +72,8 @@ export function nativeClientIntegrationInstalled(cwd: string, provider: string, 
         && args.length === definition.args.length
         && JSON.stringify(args.slice(0, -1)) === JSON.stringify(definition.args.slice(0, -1))
         && typeof args.at(-1) === 'string'
-        && realpathSync(args.at(-1)) === workspace;
+        && sameClientWorkspace(args.at(-1), workspace)
+        && (!hasNativeWorkerContext({ [name]: actual }) || realpathSync(args.at(-1)) === workspace);
     });
     if (owned) {
       // Completed-worker stamps without our ownership record must never become a new baseline.
