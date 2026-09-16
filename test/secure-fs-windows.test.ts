@@ -1,11 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { spawn, spawnSync } from 'node:child_process';
-import { closeSync, existsSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { closeSync, existsSync, openSync, readdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { acquireCredentialLock, assertSecureDir, ensureSecureDir, releaseCredentialLock, secureReadFile, secureWriteFile } from '../src/secure-fs.js';
 import { assertWindowsPrivateFile, createWindowsPrivateFile, windowsSecureFs } from '../src/secure-fs-windows.js';
+import { createPrivateTempRoot } from './helpers/private-temp.js';
 
 const nativeWindows = process.platform === 'win32';
 const transport = vi.hoisted(() => ({ active: false, calls: [] as unknown[][], response: {} as object }));
@@ -105,6 +105,7 @@ describe('Windows secure filesystem transport', () => {
 
 // These exercise actual NTFS ACLs/handles. POSIX mode-bit assertions belong in secure-fs.test.ts.
 describe.skipIf(!nativeWindows)('Windows native credential filesystem', () => {
+  let tempRoot: string;
   let root: string;
   const powershell = (script: string, path: string): string => {
     const result = spawnSync(join(process.env.SystemRoot!, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
@@ -133,15 +134,11 @@ describe.skipIf(!nativeWindows)('Windows native credential filesystem', () => {
     return JSON.parse(result.stdout) as { ok: boolean; reason?: string; code?: string; recoveryFile?: string };
   };
   beforeEach(() => {
-    root = mkdtempSync(join(tmpdir(), 'heddle-win-secure-'));
-    // Establish a fixture trust root independent of CI runner TEMP inheritance.
-    powershell(`$sid=[Security.Principal.WindowsIdentity]::GetCurrent().User;
-      $acl=New-Object Security.AccessControl.DirectorySecurity; $acl.SetOwner($sid);
-      $acl.SetAccessRuleProtection($true,$false);
-      $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($sid,'FullControl','ContainerInherit,ObjectInherit','None','Allow')));
-      [IO.Directory]::SetAccessControl($p,$acl)`, root);
+    tempRoot = createPrivateTempRoot('heddle-win-secure-');
+    root = join(tempRoot, 'private');
+    ensureSecureDir(root);
   });
-  afterEach(() => rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
+  afterEach(() => { if (tempRoot) rmSync(tempRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); });
 
   it('creates private nested directories and replaces a credential with Unicode bytes intact', () => {
     const file = join(root, 'private', 'nested', 'credential');

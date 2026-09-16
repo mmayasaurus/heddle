@@ -12,7 +12,7 @@ import { Ledger } from '../src/ledger.js';
 import { DEFAULT_MAX_STREAM_BYTES } from '../src/adapters/subprocess.js';
 
 describe('native platform persistent fleet storage', () => {
-  const { tempDir } = useTempResources('heddle-platform-storage-');
+  const { tempDir } = useTempResources('heddle-platform-storage-', { privateWindowsRoot: true });
   const grantWindowsEveryoneRead = (path: string): void => {
     const result = spawnSync(join(process.env.SystemRoot!, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
       ['-NoProfile', '-NonInteractive', '-InputFormat', 'None', '-Command', `$ErrorActionPreference='Stop';

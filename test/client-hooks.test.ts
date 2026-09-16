@@ -12,7 +12,7 @@ import { useTempResources } from './helpers.js';
 import { childEnv, ensureBuilt, PROJECT_ROOT } from './helpers/cli.js';
 
 describe('native hook lifecycle', () => {
-  const { tempDir } = useTempResources('heddle-native-hooks-');
+  const { tempDir } = useTempResources('heddle-native-hooks-', { privateWindowsRoot: true });
 
   it('preserves foreign hooks, adds all native events, and installs idempotently', () => {
     const dir = realpathSync.native(tempDir());
@@ -104,7 +104,7 @@ describe('native hook lifecycle', () => {
   it('delivers cross-client inbox messages once per session without consuming broker history', async () => {
     await ensureBuilt();
     const dir = realpathSync.native(tempDir());
-    const db = join(dir, 'comms.db'), state = join(dir, 'client-state.db');
+    const db = join(dir, 'private', 'comms.db'), state = join(dir, 'private', 'client-state.db');
     const log = new CommsLog(db);
     try {
       log.append({ from: 'claude-test', to: 'codex-test', body: 'native-message-marker' });
@@ -142,7 +142,7 @@ describe('native hook lifecycle', () => {
 
   it('binds native worker hooks to the minted child, ahead of the worktree owner', async () => {
     await ensureBuilt();
-    const dir = realpathSync.native(tempDir()), db = join(dir, 'comms.db');
+    const dir = realpathSync.native(tempDir()), db = join(dir, 'private', 'comms.db');
     writeFileSync(join(dir, '.fleet-agent'), 'codex-parent');
     const log = new CommsLog(db);
     try {

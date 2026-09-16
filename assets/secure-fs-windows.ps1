@@ -10,9 +10,10 @@
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 Set-StrictMode -Version 2.0
-[Console]::InputEncoding = New-Object Text.UTF8Encoding($false)
-[Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)
-Add-Type -AssemblyName System.Web.Extensions
+[Console]::InputEncoding = [Text.UTF8Encoding]::new($false)
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+# Avoid utility-module discovery in the deliberately restricted child environment.
+[void][Reflection.Assembly]::Load('System.Web.Extensions, Version=4.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35')
 $json = [Web.Script.Serialization.JavaScriptSerializer]::new()
 # Base64 adds one third to the runner's 32 MiB retained worker output.
 $json.MaxJsonLength = 64 * 1024 * 1024
@@ -82,8 +83,8 @@ function Assert-Directory([string] $path, [bool] $requireOwner = $true, [bool] $
 
 # Returns an in-memory descriptor; applying it to a filesystem object happens at the caller.
 function Get-PrivateAcl([bool] $directory) {
-    if ($directory) { $acl = New-Object Security.AccessControl.DirectorySecurity }
-    else { $acl = New-Object Security.AccessControl.FileSecurity }
+    if ($directory) { $acl = [Security.AccessControl.DirectorySecurity]::new() }
+    else { $acl = [Security.AccessControl.FileSecurity]::new() }
     $acl.SetOwner($sid)
     $acl.SetAccessRuleProtection($true, $false)
     if ($directory) {
@@ -114,7 +115,7 @@ function Assert-Ancestors([string] $from, [string] $boundary) {
 
 function Ensure-Directory([string] $path, [string] $boundary = '', [bool] $checkParent = $false, [bool] $private = $false) {
     if ($boundary -and !$path.StartsWith($boundary.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) { Refuse 'BOUNDARY' }
-    $missing = New-Object 'Collections.Generic.List[string]'
+    $missing = [Collections.Generic.List[string]]::new()
     $current = $path
     while ($true) {
         try { Assert-Directory $current ($current -eq $path) ($private -and $current -eq $path); break }
@@ -183,7 +184,7 @@ try {
             Assert-Directory $parent
             $stream = Open-PrivateRead $path
             try {
-                $memory = New-Object IO.MemoryStream
+                $memory = [IO.MemoryStream]::new()
                 try { $stream.CopyTo($memory); $result.content = [Convert]::ToBase64String($memory.ToArray()) }
                 finally { $memory.Dispose() }
                 if ($request.operation -eq 'inspect-lock') {

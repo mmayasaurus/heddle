@@ -40,76 +40,26 @@ jobs:
         run: npm run typecheck
       - name: Build
         run: npm run build
-      - name: Diagnose Windows PowerShell transport
-        if: runner.os == 'Windows'
-        shell: bash
-        run: |
-          node --input-type=module <<'NODE'
-          import { spawnSync } from 'node:child_process';
-          import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
-          import { join } from 'node:path';
-          const root = process.env.SystemRoot;
-          const executable = join(root, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
-          const script = join(process.env.RUNNER_TEMP, 'heddle-transport-canary.ps1');
-          // Fixed non-secret canary only; never run these diagnostics with credential input.
-          writeFileSync(script, `[Console]::Error.WriteLine('started');
-          [Console]::InputEncoding=[Text.UTF8Encoding]::new($false);
-          [Console]::Error.WriteLine('input-encoding-set');
-          [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);
-          [Console]::Error.WriteLine('output-encoding-set');
-          $line=[Console]::In.ReadLine();
-          [Console]::Error.WriteLine('input-read');
-          [Console]::Out.Write($line);`);
-          for (const mode of ['default', 'input-none', 'full-environment']) {
-            const args = ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
-              ...(mode === 'input-none' ? ['-InputFormat', 'None'] : []), '-File', script];
-            const result = spawnSync(executable, args, { input: 'HEddle_CANARY\n', encoding: 'utf8',
-              timeout: 30000, maxBuffer: 16384, windowsHide: true,
-              env: mode === 'full-environment' ? process.env : { SystemRoot: root, WINDIR: root } });
-            process.stdout.write(JSON.stringify({ mode, status: result.status, code: result.error?.code,
-              stdout: result.stdout, stderr: result.stderr }) + '\n');
-          }
-          const original = readFileSync('assets/secure-fs-windows.ps1', 'utf8');
-          for (const mode of ['input-none', 'native-encoding', 'full-environment', 'early-read']) {
-            let helper = original;
-            const replaceOnce = (before, after) => {
-              if (helper.split(before).length !== 2) throw new Error('ambiguous canary instrumentation');
-              helper = helper.replace(before, after);
-            };
-            if (mode === 'native-encoding') {
-              replaceOnce('[Console]::InputEncoding = New-Object Text.UTF8Encoding($false)', '[Console]::InputEncoding = [Text.UTF8Encoding]::new($false)');
-              replaceOnce('[Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)', '[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)');
-            }
-            replaceOnce('$request = $json.DeserializeObject([Console]::In.ReadLine())',
-              (mode === 'early-read' ? '' : '$requestLine = [Console]::In.ReadLine();\n') + '$request = $json.DeserializeObject($requestLine)');
-            if (mode === 'early-read') {
-              helper = "$requestLine = [IO.StreamReader]::new([Console]::OpenStandardInput(), [Text.UTF8Encoding]::new($false)).ReadLine(); [Console]::Error.WriteLine('early-read-complete');\n" + helper;
-            }
-            const stages = [
-              ['Set-StrictMode -Version 2.0', 'strict-mode'],
-              [mode === 'native-encoding' ? '[Console]::InputEncoding = [Text.UTF8Encoding]::new($false)' : '[Console]::InputEncoding = New-Object Text.UTF8Encoding($false)', 'input-encoding'],
-              [mode === 'native-encoding' ? '[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)' : '[Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)', 'output-encoding'],
-              ['Add-Type -AssemblyName System.Web.Extensions', 'assembly'],
-              ['$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User', 'identity'],
-              ...(mode === 'early-read' ? [] : [['$requestLine = [Console]::In.ReadLine()', 'read-line']]),
-              ['$request = $json.DeserializeObject($requestLine)', 'deserialize'],
-              ['Ensure-Directory $path $boundary $true $true', 'directory'],
-            ];
-            for (const [statement, stage] of stages) {
-              replaceOnce(statement, `[Console]::Error.WriteLine('before-${stage} '+[DateTime]::UtcNow.ToString('o')); ${statement}; [Console]::Error.WriteLine('after-${stage} '+[DateTime]::UtcNow.ToString('o'))`);
-            }
-            helper = "[Console]::Error.WriteLine('entered '+[DateTime]::UtcNow.ToString('o'));\n" + helper;
-            const helperPath = join(process.env.RUNNER_TEMP, `heddle-helper-${mode}.ps1`);
-            writeFileSync(helperPath, helper);
-            const directory = join(mkdtempSync(join(process.env.RUNNER_TEMP, 'heddle-helper-')), 'private');
-            const started = Date.now();
-            const result = spawnSync(executable, ['-NoLogo', '-NoProfile', '-NonInteractive', '-InputFormat', 'None', '-ExecutionPolicy', 'Bypass', '-File', helperPath], {
-              input: JSON.stringify({ operation: 'ensure-dir', path: directory, requireOwner: true }) + '\n',
-              encoding: 'utf8', timeout: 30000, maxBuffer: 16384, windowsHide: true,
-              env: mode === 'full-environment' ? process.env : { SystemRoot: root, WINDIR: root } });
-            process.stdout.write(JSON.stringify({ mode: `actual-helper-${mode}`, elapsedMs: Date.now() - started, status: result.status, code: result.error?.code,
-              stdout: result.stdout, stderr: result.stderr }) + '\n');
-          }
-          NODE
       - name: Native filesystem, process, and fleet tests
         run: npx vitest run --bail=1 --reporter=verbose test/platform-process.test.ts test/platform-filesystem.test.ts test/hook-command.test.ts test/secure-fs-windows.test.ts test/client-session.test.ts test/client-hooks.test.ts test/comms/address.test.ts test/comms/log.test.ts test/comms/broker.test.ts
+
+  native-cli:
+    name: native CLI launch (windows-2025)
+    runs-on: windows-2025
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install and build Heddle
+        run: npm ci && npm run build
+      - name: Launch four pinned native CLIs through Heddle
+        run: node scripts/verify-windows-clients.mjs

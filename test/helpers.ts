@@ -6,8 +6,9 @@ import { join } from 'node:path';
 import { Ledger } from '../src/ledger.js';
 import type { BoundIdentity } from '../src/identity.js';
 import type { DispatchOptions, WorkerAdapter, WorkerResult } from '../src/types.js';
+import { createPrivateTempRoot } from './helpers/private-temp.js';
 
-export function useTempResources(prefix = 'heddle-test-') {
+export function useTempResources(prefix = 'heddle-test-', opts: { privateWindowsRoot?: boolean } = {}) {
   const dirs: string[] = [];
   const ledgers: Ledger[] = [];
 
@@ -28,7 +29,7 @@ export function useTempResources(prefix = 'heddle-test-') {
   });
 
   function tempDir(): string {
-    const dir = mkdtempSync(join(tmpdir(), prefix));
+    const dir = opts.privateWindowsRoot ? createPrivateTempRoot(prefix) : mkdtempSync(join(tmpdir(), prefix));
     dirs.push(dir);
     return dir;
   }
