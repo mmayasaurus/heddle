@@ -1,0 +1,49 @@
+import { execFileSync } from 'node:child_process';
+import { writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { describe, expect, it } from 'vitest';
+import { hookCommand, isHeddleHookCommand } from '../src/hook-command.js';
+import { useTempResources } from './helpers.js';
+
+describe('native hook shell boundary', () => {
+  const { tempDir } = useTempResources('heddle-hook-command-');
+  const args = ['a b', "it's linen", '%PATH%', '$HOME', 'a&b|c', 'linen 🧶', '--heddle-fleet-hook'];
+
+  it('recognizes owned commands on both platforms while preserving foreign commands', () => {
+    const prefix = ['node', 'hook.js', 'codex', 'Stop', "a b/it's linen"];
+    for (const platform of ['darwin', 'linux', 'win32'] as const) {
+      for (const agent of ['', 'codex-before', 'codex-after']) {
+        expect(isHeddleHookCommand(hookCommand([...prefix, agent, '--heddle-fleet-hook'], platform), prefix)).toBe(true);
+      }
+      expect(isHeddleHookCommand(hookCommand(['node', 'foreign.js', 'codex-before', '--heddle-fleet-hook'], platform), prefix)).toBe(false);
+      expect(isHeddleHookCommand(hookCommand([...prefix, "bad'; command", '--heddle-fleet-hook'], platform), prefix)).toBe(false);
+    }
+    expect(isHeddleHookCommand('user-hook --heddle-fleet-hook', prefix)).toBe(false);
+    expect(isHeddleHookCommand('powershell.exe -EncodedCommand not-base64', prefix)).toBe(false);
+  });
+
+  it('executes the generated command with literal arguments, stdin, and exit status', () => {
+    const dir = tempDir();
+    const script = join(dir, 'hook child.mjs');
+    writeFileSync(script, 'import {readFileSync} from "node:fs";process.stdout.write(JSON.stringify({args:process.argv.slice(2),input:readFileSync(0,"utf8")}));');
+    const command = hookCommand([process.execPath, script, ...args]);
+    const shells = process.platform === 'win32'
+      ? [{ bin: 'cmd.exe', args: ['/d', '/s', '/c', command] }, { bin: 'powershell.exe', args: ['-NoProfile', '-NonInteractive', '-Command', command] }]
+      : [{ bin: '/bin/sh', args: ['-c', command] }];
+    for (const shell of shells) {
+      const output = execFileSync(shell.bin, shell.args, { input: '{"hook":"input"}', encoding: 'utf8', timeout: 15_000 });
+      expect(JSON.parse(output.trim())).toEqual({ args, input: '{"hook":"input"}' });
+    }
+    writeFileSync(script, 'process.exit(7);');
+    for (const shell of shells) {
+      try { execFileSync(shell.bin, shell.args, { stdio: 'pipe', timeout: 15_000 }); throw new Error('expected nonzero exit'); }
+      catch (error) { expect((error as { status?: number }).status).toBe(7); }
+    }
+  });
+
+  it.runIf(process.platform === 'win32')('reports a missing executable as failure instead of a successful hook', () => {
+    const command = hookCommand([join(tempDir(), 'missing.exe'), '--heddle-fleet-hook']);
+    try { execFileSync('cmd.exe', ['/d', '/s', '/c', command], { stdio: 'pipe', timeout: 15_000 }); throw new Error('expected failure'); }
+    catch (error) { expect((error as { status?: number }).status).toBe(1); }
+  });
+});

@@ -1,5 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { ensureSecureDir, secureWriteFile } from './secure-fs.js';
+import { prepareWindowsDatabase } from './windows-database.js';
 import { basename, dirname, isAbsolute, join } from 'node:path';
 import { homedir } from 'node:os';
 import { makePsProbe, type OwnerProbe } from './ledger-ps.js';
@@ -311,7 +313,8 @@ export class Ledger {
   private outputDir: string;
 
   constructor(readonly path: string = DEFAULT_LEDGER_PATH) {
-    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    if (process.platform === 'win32') prepareWindowsDatabase(path);
+    else mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     // mkdirSync's mode applies only to a dir it CREATES; force 0700 on a pre-existing dir too
     // (best-effort — skip if we do not own it).
     try { chmodSync(dirname(path), 0o700); } catch { /* not owned by us — leave it */ }
@@ -641,6 +644,11 @@ export class Ledger {
     const path = join(this.outputDir, filename);
     const tempPath = join(this.outputDir, `.${id}.${process.pid}.${Date.now()}.tmp`);
     try {
+      if (process.platform === 'win32') {
+        ensureSecureDir(this.outputDir);
+        secureWriteFile(path, output);
+        return filename;
+      }
       mkdirSync(this.outputDir, { recursive: true });
       // Unreviewed model output can quote source, secrets in error text, or customer data; shared machines must not expose it.
       // The mode is applied at creation, and the rename preserves it.

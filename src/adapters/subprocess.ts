@@ -1,5 +1,10 @@
-import { spawn, type ChildProcess } from 'node:child_process';
+import { execFileSync, spawn as nativeSpawn, type ChildProcess } from 'node:child_process';
+import crossSpawn from 'cross-spawn';
+import { join } from 'node:path';
 import { buildWorkerEnv } from '../env.js';
+
+// cross-spawn preserves Node's stdio contract, but its types omit Node's pipe-specific overloads.
+const spawn = process.platform === 'win32' ? crossSpawn as typeof nativeSpawn : nativeSpawn;
 
 // The largest persisted worker result is ~34 KB; raw stream-json includes tool blocks, so 32 MiB
 // leaves a >100× margin for legitimate output while bounding runaway stdout/stderr to ~64 MiB.
@@ -17,9 +22,19 @@ let exitHandlersInstalled = false;
 // SIGKILL the child's whole process group, falling back to a direct child kill on ANY failure. A
 // process.kill(-pid) failure is ambiguous: the group may be gone (child already dead — child.kill is
 // then a silent no-op) OR the child may have left its group via setpgid and still be alive under its
-// own pid (child.kill then actually kills it). So the fallback is unconditional. Windows and a missing
-// pid have no process-group semantics / no pid to negate — they can only do the direct kill.
-function killGroupOrChild(child: ChildProcess): void {
+// own pid (child.kill then actually kills it). So the fallback is unconditional. Windows uses taskkill
+// to include descendants; without a pid or that OS utility, fall back to the direct child.
+export function killGroupOrChild(child: ChildProcess): void {
+  if (process.platform === 'win32' && child.pid !== undefined && process.env.SystemRoot) {
+    try {
+      // npm .cmd shims add a shell parent. Killing only that parent leaves the actual worker alive.
+      execFileSync(join(process.env.SystemRoot, 'System32', 'taskkill.exe'), ['/PID', String(child.pid), '/T', '/F'],
+        { stdio: 'ignore', windowsHide: true, timeout: 5000 });
+      return;
+    } catch {
+      // Already gone or taskkill unavailable: still attempt to terminate the direct child below.
+    }
+  }
   if (process.platform !== 'win32' && child.pid !== undefined) {
     try {
       process.kill(-child.pid, 'SIGKILL');
@@ -36,7 +51,6 @@ function killGroupOrChild(child: ChildProcess): void {
 }
 
 function reapAll(): void {
-  // Full Windows process-tree reaping (taskkill /T) is out of scope; killGroupOrChild is child-only there.
   for (const child of liveChildren) killGroupOrChild(child);
 }
 

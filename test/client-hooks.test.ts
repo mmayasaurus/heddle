@@ -7,6 +7,7 @@ import { clientToolPayload, evaluateClientHook, renderClientHook } from '../src/
 import { CommsLog } from '../src/comms/log.js';
 import { codexClientFlags, planClientInstall } from '../src/client-config.js';
 import { applyInstall } from '../src/init-project.js';
+import { isHeddleHookCommand } from '../src/hook-command.js';
 import { useTempResources } from './helpers.js';
 import { childEnv, ensureBuilt, PROJECT_ROOT } from './helpers/cli.js';
 
@@ -25,7 +26,8 @@ describe('native hook lifecycle', () => {
     const codex = JSON.parse(readFileSync(join(dir, '.codex/hooks.json'), 'utf8'));
     expect(codex.hooks.PostToolUse[0]).toEqual(original.hooks.PostToolUse[0]);
     expect(JSON.parse(readFileSync(join(dir, '.cursor/hooks.json'), 'utf8')).hooks.preToolUse[0].command).toBe('user-hook --heddle-fleet-hook');
-    expect(codex.hooks.Stop[0].hooks[0].command).toContain('--heddle-fleet-hook');
+    expect(isHeddleHookCommand(codex.hooks.Stop[0].hooks[0].command,
+      [process.execPath, '--disable-warning=ExperimentalWarning', join(PROJECT_ROOT, 'dist', 'client-hook.js'), 'codex', 'Stop', dir])).toBe(true);
     const gemini = JSON.parse(readFileSync(join(dir, '.gemini/settings.json'), 'utf8'));
     expect(gemini.hooks.AfterAgent[0].hooks[0].timeout).toBe(5000);
     expect(readFileSync(join(dir, '.opencode/plugins/heddle-fleet.js'), 'utf8')).not.toContain('__HEDDLE_');
@@ -56,10 +58,12 @@ describe('native hook lifecycle', () => {
     const dir = realpathSync.native(tempDir());
     applyInstall(planClientInstall({ dir, clients: ['codex'], agent: 'codex-before' }));
     applyInstall(planClientInstall({ dir, clients: ['codex'], agent: 'codex-after' }));
-    const config = readFileSync(join(dir, '.codex/hooks.json'), 'utf8');
-    expect(config).not.toContain('codex-before');
-    expect(config).toContain('codex-after');
-    expect(JSON.parse(config).hooks.SessionStart).toHaveLength(1);
+    const config = JSON.parse(readFileSync(join(dir, '.codex/hooks.json'), 'utf8'));
+    expect(config.hooks.SessionStart).toHaveLength(1);
+    const command = config.hooks.SessionStart[0].hooks[0].command as string;
+    const source = process.platform === 'win32' ? Buffer.from(command.split(' ').at(-1)!, 'base64').toString('utf16le') : command;
+    expect(source).not.toContain('codex-before');
+    expect(source).toContain('codex-after');
   });
 
   it('never restarts interrupted turns or continuation loops', () => {

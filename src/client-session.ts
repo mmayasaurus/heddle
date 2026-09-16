@@ -1,7 +1,8 @@
-import { spawn } from 'node:child_process';
+import spawn from 'cross-spawn';
 import { realpathSync } from 'node:fs';
 import { resolveIdentity } from './identity.js';
 import { parseAddress } from './comms/address.js';
+import { killGroupOrChild } from './adapters/subprocess.js';
 import { applyInstall } from './init-project.js';
 import { codexClientFlags, planClientInstall, type FleetClient } from './client-config.js';
 
@@ -55,7 +56,12 @@ export async function runClientSession(options: ClientSessionOptions): Promise<n
   process.stderr.write(`heddle: ${plan.agent} → ${plan.client} in ${plan.dir}. Review new native hooks/MCP servers in the client's trust controls.\n`);
   return new Promise<number>((resolve) => {
     const child = spawn(plan.bin, plan.args, { cwd: plan.dir, env, stdio: 'inherit' });
-    const forward = (signal: NodeJS.Signals) => { try { child.kill(signal); } catch { /* already exited */ } };
+    const forward = (signal: NodeJS.Signals) => {
+      try {
+        if (process.platform === 'win32') killGroupOrChild(child);
+        else child.kill(signal);
+      } catch { /* already exited */ }
+    };
     const interrupt = () => forward('SIGINT'), terminate = () => forward('SIGTERM'), hangup = () => forward('SIGHUP');
     process.on('SIGINT', interrupt); process.on('SIGTERM', terminate); process.on('SIGHUP', hangup);
     const cleanup = () => { process.off('SIGINT', interrupt); process.off('SIGTERM', terminate); process.off('SIGHUP', hangup); };

@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync } from 'node:fs';
+import { ensureSecureDir } from '../secure-fs.js';
 import { dirname } from 'node:path';
 import { parseAddress } from './address.js';
 import { CommsLog, DEFAULT_COMMS_PATH, DEFAULT_ROOM } from './log.js';
@@ -30,8 +31,13 @@ export function bootstrapComms(opts: CommsBootstrapOptions = {}): CommsBootstrap
   // Provision the comms dir owner-only, but only when THIS call creates it: mkdir-recursive never
   // re-modes an existing directory, so a machine's existing ~/.heddle keeps its mode and only a
   // fresh (e.g. a new pack user's) one is hardened to 0700. The operator token is 0600 regardless.
-  mkdirSync(dirname(commsDbPath), { recursive: true, mode: 0o700 });
-  mkdirSync(dirname(operatorTokenPath), { recursive: true, mode: 0o700 });
+  if (process.platform === 'win32') {
+    ensureSecureDir(dirname(commsDbPath));
+    ensureSecureDir(dirname(operatorTokenPath));
+  } else {
+    mkdirSync(dirname(commsDbPath), { recursive: true, mode: 0o700 });
+    mkdirSync(dirname(operatorTokenPath), { recursive: true, mode: 0o700 });
+  }
   const existed = existsSync(commsDbPath);
   const log = new CommsLog(commsDbPath);
 
