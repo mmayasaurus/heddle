@@ -42,13 +42,20 @@ export interface UsagePollSystemdReport {
 // systemd.syntax quoting, plus literal percent escaping for systemd.unit specifiers.
 // ExecStart uses the ':' prefix to disable dollar expansion without invoking a shell.
 function unitString(value: string): string {
-  if (/[\x00-\x1f\x7f]/.test(value)) throw new Error('systemd paths must not contain control characters');
+  validateUnitValue(value);
   return `"${value.replaceAll('\\', '\\\\').replaceAll('"', '\\"').replaceAll('%', '%%')}"`;
+}
+
+function validateUnitValue(value: string): void {
+  for (const character of value) {
+    const code = character.charCodeAt(0);
+    if (code < 32 || code === 127) throw new Error('systemd paths must not contain control characters');
+  }
 }
 
 function absolutePath(value: string, label: string): string {
   if (!isAbsolute(value)) throw new Error(`${label} must be an absolute path`);
-  unitString(value);
+  validateUnitValue(value);
   return resolve(value);
 }
 
@@ -136,28 +143,7 @@ function planFile(path: string, contents: string): SystemdFileAction {
   return { path, contents, action: 'update' };
 }
 
-/** Opt-in installer; dry-run is portable and never contacts systemd or writes files. */
-export function installUsagePollSystemd(
-  options: UsagePollSystemdOptions = {}, deps: UsagePollSystemdDeps = {},
-): UsagePollSystemdReport {
-  const dryRun = options.dryRun === true;
-  if (!dryRun && (deps.platform ?? process.platform) !== 'linux') {
-    throw new Error('systemd usage polling requires Linux; use --dry-run to preview on another OS');
-  }
-  const home = absolutePath(deps.homeDir ?? homedir(), 'Home directory');
-  const env = deps.env ?? process.env;
-  const configHome = absolutePath(env.XDG_CONFIG_HOME || join(home, '.config'), 'XDG_CONFIG_HOME');
-  const node = absolutePath(deps.nodeBin ?? process.execPath, 'Node executable');
-  const cli = absolutePath(deps.cliJs ?? fileURLToPath(new URL('cli.js', import.meta.url)), 'CLI entry point');
-  const rendered = renderUsagePollSystemd({ nodeBin: node, cliJs: cli, homeDir: home,
-    startIntervalSecs: options.startIntervalSecs ?? DEFAULT_POLL_INTERVAL_SECS, env });
-  const unitDir = join(configHome, 'systemd', 'user');
-  const files = [planFile(join(unitDir, USAGE_POLL_SERVICE), rendered.service),
-    planFile(join(unitDir, USAGE_POLL_TIMER), rendered.timer)];
-  const commands = [['daemon-reload'], ['enable', USAGE_POLL_TIMER], ['restart', USAGE_POLL_TIMER],
-    ['is-active', USAGE_POLL_TIMER]];
-  if (dryRun) return { dryRun, activated: false, files, commands };
-
+function stableRuntime(node: string, cli: string): { nodeBin: string; cliJs: string } {
   // Resolve symlinks before rejecting disposable worktrees, then bake the resolved runtime paths.
   const resolvedNode = realpathSync(node);
   const resolvedCli = realpathSync(cli);
@@ -167,11 +153,10 @@ export function installUsagePollSystemd(
   accessSync(resolvedNode, constants.X_OK);
   accessSync(resolvedCli, constants.R_OK);
   if (!lstatSync(resolvedCli).isFile()) throw new Error('CLI entry point must be a regular file');
-  const stable = renderUsagePollSystemd({ nodeBin: resolvedNode, cliJs: resolvedCli, homeDir: home,
-    startIntervalSecs: options.startIntervalSecs ?? DEFAULT_POLL_INTERVAL_SECS, env });
-  files[0] = planFile(files[0].path, stable.service);
+  return { nodeBin: resolvedNode, cliJs: resolvedCli };
+}
 
-  const run = deps.systemctl ?? systemctl;
+function checkExistingUnits(files: SystemdFileAction[], run: (args: string[]) => string): void {
   for (const kind of ['service', 'timer']) {
     const unit = `${WINDOW_KEEPER_LABEL}.${kind}`;
     if (unitState(run, unit).LoadState !== 'not-found') {
@@ -185,8 +170,10 @@ export function installUsagePollSystemd(
       throw new Error(`refusing to shadow a unit from another path or with drop-ins: ${unit}`);
     }
   }
+}
 
-  // Validate both files before writing either. Keep old managed contents for operator recovery.
+function writeUnits(files: SystemdFileAction[]): void {
+  // Both files have been validated. Keep old managed contents for operator recovery.
   for (const file of files) {
     if (file.action === 'update') {
       file.backupPath = `${file.path}.backup-${randomUUID()}`;
@@ -194,6 +181,9 @@ export function installUsagePollSystemd(
     }
   }
   for (const file of files) if (file.action !== 'unchanged') secureWriteFile(file.path, file.contents);
+}
+
+function activateTimer(commands: string[][], run: (args: string[]) => string, unitDir: string): void {
   try {
     for (const command of commands) {
       const output = run(command);
@@ -203,5 +193,36 @@ export function installUsagePollSystemd(
     const reason = error instanceof Error ? error.message : String(error);
     throw new Error(`systemd units were written in ${unitDir}, but activation was not verified: ${reason}; inspect systemctl --user status ${USAGE_POLL_TIMER} before retrying`, { cause: error });
   }
+}
+
+/** Opt-in installer; dry-run is portable and never contacts systemd or writes files. */
+export function installUsagePollSystemd(
+  options: UsagePollSystemdOptions = {}, deps: UsagePollSystemdDeps = {},
+): UsagePollSystemdReport {
+  const dryRun = options.dryRun === true;
+  if (!dryRun && (deps.platform ?? process.platform) !== 'linux') {
+    throw new Error('systemd usage polling requires Linux; use --dry-run to preview on another OS');
+  }
+  const home = absolutePath(deps.homeDir ?? homedir(), 'Home directory');
+  const env = deps.env ?? process.env;
+  const configHome = absolutePath(env.XDG_CONFIG_HOME || join(home, '.config'), 'XDG_CONFIG_HOME');
+  const node = absolutePath(deps.nodeBin ?? process.execPath, 'Node executable');
+  const cli = absolutePath(deps.cliJs ?? fileURLToPath(new URL('cli.js', import.meta.url)), 'CLI entry point');
+  const renderOptions = { nodeBin: node, cliJs: cli, homeDir: home,
+    startIntervalSecs: options.startIntervalSecs ?? DEFAULT_POLL_INTERVAL_SECS, env };
+  const rendered = renderUsagePollSystemd(renderOptions);
+  const unitDir = join(configHome, 'systemd', 'user');
+  const files = [planFile(join(unitDir, USAGE_POLL_SERVICE), rendered.service),
+    planFile(join(unitDir, USAGE_POLL_TIMER), rendered.timer)];
+  const commands = [['daemon-reload'], ['enable', USAGE_POLL_TIMER], ['restart', USAGE_POLL_TIMER],
+    ['is-active', USAGE_POLL_TIMER]];
+  if (dryRun) return { dryRun, activated: false, files, commands };
+
+  const stable = renderUsagePollSystemd({ ...renderOptions, ...stableRuntime(node, cli) });
+  files[0] = planFile(files[0].path, stable.service);
+  const run = deps.systemctl ?? systemctl;
+  checkExistingUnits(files, run);
+  writeUnits(files);
+  activateTimer(commands, run, unitDir);
   return { dryRun, activated: true, files, commands };
 }
