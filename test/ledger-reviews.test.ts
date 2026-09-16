@@ -1,5 +1,6 @@
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { DatabaseSync } from 'node:sqlite';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Ledger } from '../src/ledger.js';
 import { useTempResources } from './helpers.js';
 
@@ -16,6 +17,120 @@ describe('ledger adversarial reviews', () => {
   function review(db: Ledger, id: number, author: string, reviewer: string): void {
     db.recordReview({ dispatchId: id, authorProvider: author, authorModel: 'author-model', authorDispatchId: null, reviewerProvider: reviewer, reviewerModel: 'reviewer-model' });
   }
+
+  afterEach(() => vi.useRealTimers());
+
+  it('finds only same-cwd workers that overlap the captured run window', () => {
+    const db = ledger();
+    vi.useFakeTimers();
+    const STALE = 3 * 60 * 60 * 1000;
+    const at = (value: string): void => { vi.setSystemTime(new Date(value)); };
+    const startAt = (cwd: string, atTime: string): number => {
+      at(atTime);
+      return db.start({ orchestrator: null, taskClass: 'worker', provider: 'cursor', model: 'm', skills: null, issue: null, pr: null, cwd, promptPreview: 'p', sessionId: null, fellBackFrom: null });
+    };
+    const cwd = '/tmp/shared';
+    const finishedDuring = startAt(cwd, '2026-01-01T00:00:00.000Z');
+    const subject = startAt(cwd, '2026-01-01T00:00:02.000Z');
+    at('2026-01-01T00:00:03.000Z'); db.finish(finishedDuring, { ok: true });
+    at('2026-01-01T00:00:04.000Z');
+    expect(db.overlappingByCwd(cwd, subject, { windowEnd: '2026-01-01T00:00:04.000Z', staleAfterMs: STALE })).toBe(true);
+    db.finish(subject, { ok: true });
+
+    const laterSubject = startAt(cwd, '2026-01-01T00:00:04.500Z');
+    const startedAfterWindow = startAt(cwd, '2026-01-01T00:00:05.000Z');
+    at('2026-01-01T00:00:06.000Z');
+    expect(db.overlappingByCwd(cwd, laterSubject, { windowEnd: '2026-01-01T00:00:04.000Z', staleAfterMs: STALE })).toBe(false);
+    expect(db.overlappingByCwd(cwd, laterSubject, { windowEnd: '2026-01-01T00:00:06.000Z', staleAfterMs: STALE })).toBe(true);
+    const otherCwd = startAt('/tmp/other', '2026-01-01T00:00:06.000Z');
+    expect(db.overlappingByCwd('/tmp/other', otherCwd, { windowEnd: '2026-01-01T00:00:06.000Z', staleAfterMs: STALE })).toBe(false);
+
+    at('2026-01-01T00:00:07.000Z'); db.finish(startedAfterWindow, { ok: true }); db.finish(laterSubject, { ok: true });
+    const afterAllPeers = startAt(cwd, '2026-01-01T00:00:08.000Z');
+    at('2026-01-01T00:00:09.000Z');
+    expect(db.overlappingByCwd(cwd, afterAllPeers, { windowEnd: '2026-01-01T00:00:09.000Z', staleAfterMs: STALE })).toBe(false);
+  });
+
+  it('excludes stale unfinished peers but counts a live unfinished peer', () => {
+    const db = ledger();
+    vi.useFakeTimers();
+    const STALE = 3 * 60 * 60 * 1000;
+    const cwd = '/tmp/shared';
+    const startAt = (atTime: string): number => {
+      vi.setSystemTime(new Date(atTime));
+      return db.start({ orchestrator: null, taskClass: 'worker', provider: 'cursor', model: 'm', skills: null, issue: null, pr: null, cwd, promptPreview: 'p', sessionId: null, fellBackFrom: null });
+    };
+    const subject = startAt('2026-01-01T10:00:00.000Z');
+    startAt('2026-01-01T06:00:00.000Z');
+    vi.setSystemTime(new Date('2026-01-01T10:00:01.000Z'));
+    expect(db.overlappingByCwd(cwd, subject, { windowEnd: '2026-01-01T10:00:01.000Z', staleAfterMs: STALE })).toBe(false);
+
+    startAt('2026-01-01T09:59:30.000Z');
+    vi.setSystemTime(new Date('2026-01-01T10:00:01.000Z'));
+    expect(db.overlappingByCwd(cwd, subject, { windowEnd: '2026-01-01T10:00:01.000Z', staleAfterMs: STALE })).toBe(true);
+  });
+
+  it('excludes refusal and classifier rows from same-cwd overlap', () => {
+    const db = ledger();
+    vi.useFakeTimers();
+    const STALE = 3 * 60 * 60 * 1000;
+    const cwd = '/tmp/shared';
+    vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
+    const subject = db.start({ orchestrator: null, taskClass: 'worker', provider: 'cursor', model: 'm', skills: null, issue: null, pr: null, cwd, promptPreview: 'p', sessionId: null, fellBackFrom: null });
+    db.refuse(
+      { orchestrator: null, taskClass: 'worker', provider: 'cursor', model: 'm', skills: null, issue: null, pr: null, cwd, promptPreview: 'p', sessionId: null, fellBackFrom: null },
+      'max-children', 'cap reached',
+    );
+    db.recordClassification({ orchestrator: null, identitySource: null, kind: 'auto-effort', provider: 'codex', model: 'm', cwd, promptPreview: 'p', ok: true });
+    vi.setSystemTime(new Date('2026-01-01T00:00:01.000Z'));
+    expect(db.overlappingByCwd(cwd, subject, { windowEnd: '2026-01-01T00:00:01.000Z', staleAfterMs: STALE })).toBe(false);
+  });
+
+  it('excludes a recently-started swept orphan (outcome set)', () => {
+    const db = ledger();
+    vi.useFakeTimers();
+    const STALE = 3 * 60 * 60 * 1000;
+    const cwd = '/tmp/shared';
+    vi.setSystemTime(new Date('2026-01-01T10:00:00.000Z'));
+    const subject = db.start({ orchestrator: null, taskClass: 'worker', provider: 'cursor', model: 'm', skills: null, issue: null, pr: null, cwd, promptPreview: 'p', sessionId: null, fellBackFrom: null });
+    vi.setSystemTime(new Date('2026-01-01T09:57:00.000Z'));
+    const peer = db.start({ orchestrator: null, taskClass: 'worker', provider: 'cursor', model: 'm', skills: null, issue: null, pr: null, cwd, promptPreview: 'p', sessionId: null, fellBackFrom: null });
+    db.closeIfInFlight(peer, 'orphan sweep: owner gone', { outcome: 'orphaned', now: new Date('2026-01-01T10:00:00.500Z') });
+    vi.setSystemTime(new Date('2026-01-01T10:00:01.000Z'));
+    expect(db.overlappingByCwd(cwd, subject, { windowEnd: '2026-01-01T10:00:01.000Z', staleAfterMs: STALE })).toBe(false);
+  });
+
+  it('counts a legacy NULL-execution_mode worker', () => {
+    const path = join(tempDir(), 'ledger.db');
+    const db = trackLedger(new Ledger(path));
+    vi.useFakeTimers();
+    const STALE = 3 * 60 * 60 * 1000;
+    const cwd = '/tmp/shared';
+    vi.setSystemTime(new Date('2026-01-01T00:00:02.000Z'));
+    const subject = db.start({ orchestrator: null, taskClass: 'worker', provider: 'cursor', model: 'm', skills: null, issue: null, pr: null, cwd, promptPreview: 'p', sessionId: null, fellBackFrom: null });
+    vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
+    const peer = db.start({ orchestrator: null, taskClass: 'worker', provider: 'cursor', model: 'm', skills: null, issue: null, pr: null, cwd, promptPreview: 'p', sessionId: null, fellBackFrom: null });
+    vi.setSystemTime(new Date('2026-01-01T00:00:03.000Z')); db.finish(peer, { ok: true });
+    const raw = new DatabaseSync(path);
+    raw.prepare('UPDATE dispatches SET execution_mode = NULL WHERE id = ?').run(peer);
+    raw.close();
+    vi.setSystemTime(new Date('2026-01-01T00:00:04.000Z'));
+    expect(db.overlappingByCwd(cwd, subject, { windowEnd: '2026-01-01T00:00:04.000Z', staleAfterMs: STALE })).toBe(true);
+  });
+
+  it('counts a genuine ok=0 finished peer', () => {
+    const db = ledger();
+    vi.useFakeTimers();
+    const STALE = 3 * 60 * 60 * 1000;
+    const cwd = '/tmp/shared';
+    vi.setSystemTime(new Date('2026-01-01T00:00:02.000Z'));
+    const subject = db.start({ orchestrator: null, taskClass: 'worker', provider: 'cursor', model: 'm', skills: null, issue: null, pr: null, cwd, promptPreview: 'p', sessionId: null, fellBackFrom: null });
+    vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
+    const peer = db.start({ orchestrator: null, taskClass: 'worker', provider: 'cursor', model: 'm', skills: null, issue: null, pr: null, cwd, promptPreview: 'p', sessionId: null, fellBackFrom: null });
+    vi.setSystemTime(new Date('2026-01-01T00:00:03.000Z')); db.finish(peer, { ok: false });
+    vi.setSystemTime(new Date('2026-01-01T00:00:04.000Z'));
+    expect(db.overlappingByCwd(cwd, subject, { windowEnd: '2026-01-01T00:00:04.000Z', staleAfterMs: STALE })).toBe(true);
+  });
 
   it('upserts reviewer identity without erasing the existing mandate or scored outcome', () => {
     const db = ledger(); const id = finished(db);
