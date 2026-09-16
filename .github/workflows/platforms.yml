@@ -69,28 +69,45 @@ jobs:
             process.stdout.write(JSON.stringify({ mode, status: result.status, code: result.error?.code,
               stdout: result.stdout, stderr: result.stderr }) + '\n');
           }
-          let helper = readFileSync('assets/secure-fs-windows.ps1', 'utf8');
-          const stages = [
-            ['Add-Type -AssemblyName System.Web.Extensions', 'assembly'],
-            ['$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User', 'identity'],
-            ['$request = $json.DeserializeObject([Console]::In.ReadLine())', 'request'],
-            ['Ensure-Directory $path $boundary $true $true', 'directory'],
-          ];
-          for (const [statement, stage] of stages) {
-            if (helper.split(statement).length !== 2) throw new Error('ambiguous canary instrumentation');
-            helper = helper.replace(statement,
-              `[Console]::Error.WriteLine('before-${stage}'); ${statement}; [Console]::Error.WriteLine('after-${stage}')`);
-          }
-          const helperPath = join(process.env.RUNNER_TEMP, 'heddle-helper-canary.ps1');
-          writeFileSync(helperPath, helper);
-          for (const mode of ['default', 'input-none']) {
+          const original = readFileSync('assets/secure-fs-windows.ps1', 'utf8');
+          for (const mode of ['input-none', 'native-encoding', 'full-environment', 'early-read']) {
+            let helper = original;
+            const replaceOnce = (before, after) => {
+              if (helper.split(before).length !== 2) throw new Error('ambiguous canary instrumentation');
+              helper = helper.replace(before, after);
+            };
+            if (mode === 'native-encoding') {
+              replaceOnce('[Console]::InputEncoding = New-Object Text.UTF8Encoding($false)', '[Console]::InputEncoding = [Text.UTF8Encoding]::new($false)');
+              replaceOnce('[Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)', '[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)');
+            }
+            replaceOnce('$request = $json.DeserializeObject([Console]::In.ReadLine())',
+              (mode === 'early-read' ? '' : '$requestLine = [Console]::In.ReadLine();\n') + '$request = $json.DeserializeObject($requestLine)');
+            if (mode === 'early-read') {
+              helper = "$requestLine = [IO.StreamReader]::new([Console]::OpenStandardInput(), [Text.UTF8Encoding]::new($false)).ReadLine(); [Console]::Error.WriteLine('early-read-complete');\n" + helper;
+            }
+            const stages = [
+              ['Set-StrictMode -Version 2.0', 'strict-mode'],
+              [mode === 'native-encoding' ? '[Console]::InputEncoding = [Text.UTF8Encoding]::new($false)' : '[Console]::InputEncoding = New-Object Text.UTF8Encoding($false)', 'input-encoding'],
+              [mode === 'native-encoding' ? '[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)' : '[Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)', 'output-encoding'],
+              ['Add-Type -AssemblyName System.Web.Extensions', 'assembly'],
+              ['$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User', 'identity'],
+              ...(mode === 'early-read' ? [] : [['$requestLine = [Console]::In.ReadLine()', 'read-line']]),
+              ['$request = $json.DeserializeObject($requestLine)', 'deserialize'],
+              ['Ensure-Directory $path $boundary $true $true', 'directory'],
+            ];
+            for (const [statement, stage] of stages) {
+              replaceOnce(statement, `[Console]::Error.WriteLine('before-${stage} '+[DateTime]::UtcNow.ToString('o')); ${statement}; [Console]::Error.WriteLine('after-${stage} '+[DateTime]::UtcNow.ToString('o'))`);
+            }
+            helper = "[Console]::Error.WriteLine('entered '+[DateTime]::UtcNow.ToString('o'));\n" + helper;
+            const helperPath = join(process.env.RUNNER_TEMP, `heddle-helper-${mode}.ps1`);
+            writeFileSync(helperPath, helper);
             const directory = join(mkdtempSync(join(process.env.RUNNER_TEMP, 'heddle-helper-')), 'private');
-            const result = spawnSync(executable, ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
-              ...(mode === 'input-none' ? ['-InputFormat', 'None'] : []), '-File', helperPath], {
+            const started = Date.now();
+            const result = spawnSync(executable, ['-NoLogo', '-NoProfile', '-NonInteractive', '-InputFormat', 'None', '-ExecutionPolicy', 'Bypass', '-File', helperPath], {
               input: JSON.stringify({ operation: 'ensure-dir', path: directory, requireOwner: true }) + '\n',
               encoding: 'utf8', timeout: 30000, maxBuffer: 16384, windowsHide: true,
-              env: { SystemRoot: root, WINDIR: root } });
-            process.stdout.write(JSON.stringify({ mode: `actual-helper-${mode}`, status: result.status, code: result.error?.code,
+              env: mode === 'full-environment' ? process.env : { SystemRoot: root, WINDIR: root } });
+            process.stdout.write(JSON.stringify({ mode: `actual-helper-${mode}`, elapsedMs: Date.now() - started, status: result.status, code: result.error?.code,
               stdout: result.stdout, stderr: result.stderr }) + '\n');
           }
           NODE

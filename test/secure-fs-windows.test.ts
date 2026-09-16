@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { acquireCredentialLock, assertSecureDir, ensureSecureDir, releaseCredentialLock, secureReadFile, secureWriteFile } from '../src/secure-fs.js';
-import { assertWindowsPrivateFile, createWindowsPrivateFile } from '../src/secure-fs-windows.js';
+import { assertWindowsPrivateFile, createWindowsPrivateFile, windowsSecureFs } from '../src/secure-fs-windows.js';
 
 const nativeWindows = process.platform === 'win32';
 const transport = vi.hoisted(() => ({ active: false, calls: [] as unknown[][], response: {} as object }));
@@ -77,6 +77,29 @@ describe('Windows secure filesystem transport', () => {
     transport.response = { status: 0, stdout: JSON.stringify({ ok: false, code: 'EIO', reason: 'RECOVERY', recoveryFile: 'FAKE_SECRET_BAD_DIAGNOSTIC' }), stderr: '' };
     try { secureWriteFile('C:\\Users\\test\\credential', 'FAKE_SECRET'); }
     catch (error) { expect(String(error)).not.toContain('FAKE_SECRET_BAD_DIAGNOSTIC'); }
+  });
+
+  it('refuses malformed replies and missing read or lock metadata without leaking response fields', () => {
+    vi.stubEnv('SystemRoot', 'C:\\Windows');
+    transport.active = true;
+    for (const stdout of ['not JSON', 'null', '[]', '{}', '{"ok":"true"}']) {
+      transport.response = { status: 0, stdout };
+      expect(() => windowsSecureFs('read', 'C:\\private\\file')).toThrow(/invalid response/);
+    }
+    transport.response = { status: 0, stdout: '{"ok":true}' };
+    expect(() => windowsSecureFs('read', 'C:\\private\\file')).toThrow(/invalid read response/);
+    for (const mtimeMs of [null, '1', undefined]) {
+      transport.response = { status: 0, stdout: JSON.stringify({ ok: true, content: '', mtimeMs }) };
+      expect(() => windowsSecureFs('inspect-lock', 'C:\\private\\file')).toThrow(/invalid lock metadata/);
+    }
+    for (const content of [null, 1, { secret: 'FAKE_SECRET' }]) {
+      transport.response = { status: 0, stdout: JSON.stringify({ ok: true, content }) };
+      expect(() => windowsSecureFs('assert-dir', 'C:\\private')).toThrow(/invalid response/);
+    }
+    for (const reason of ['FAKE_SECRET', 'toString', '__proto__', { toString: 'FAKE_SECRET' }]) {
+      transport.response = { status: 0, stdout: JSON.stringify({ ok: false, code: 'FAKE_SECRET', reason }) };
+      expect(() => windowsSecureFs('read', 'C:\\private\\file')).toThrowError(expect.objectContaining({ code: 'EIO', message: 'Windows secure filesystem: operation failed' }));
+    }
   });
 });
 

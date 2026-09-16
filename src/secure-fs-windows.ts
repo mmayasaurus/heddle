@@ -13,6 +13,12 @@ interface WindowsResult {
   content?: string;
   mtimeMs?: number;
 }
+interface WindowsResponse extends WindowsResult {
+  ok?: boolean;
+  code?: string;
+  reason?: string;
+  recoveryFile?: string;
+}
 const reasons: Record<string, string> = {
   ACL: 'unsafe ACL or foreign ownership',
   REPARSE: 'reparse point (symlink or junction)',
@@ -50,21 +56,35 @@ export function windowsSecureFs(
     env: { SystemRoot: systemRoot, WINDIR: systemRoot },
   });
   if (child.error || child.status !== 0) throw new Error('Windows secure filesystem helper failed');
-  let result: { ok?: boolean; code?: string; reason?: string; content?: string; mtimeMs?: number; recoveryFile?: string };
+  return decodeWindowsResponse(operation, parseWindowsResponse(child.stdout));
+}
+
+function parseWindowsResponse(stdout: string): WindowsResponse {
+  let result: WindowsResponse;
   try {
-    result = JSON.parse(child.stdout.replace(/^\uFEFF/, '').trim());
+    result = JSON.parse(stdout.replace(/^\uFEFF/, '').trim());
     if (!result || typeof result !== 'object' || typeof result.ok !== 'boolean') throw new Error();
   } catch {
     throw new Error('Windows secure filesystem helper returned an invalid response');
   }
-  if (!result.ok) {
-    // The helper generates this basename internally. Only that narrow format may reach diagnostics;
-    // never surface an arbitrary child-provided path or exception message beside credential failures.
-    const recovery = result.reason === 'RECOVERY' && typeof result.recoveryFile === 'string' && /^\.[a-f0-9]{32}\.tmp$/.test(result.recoveryFile)
-      ? `; recovery file retained in credential directory: ${result.recoveryFile}` : '';
-    const error: NodeJS.ErrnoException = new Error(`Windows secure filesystem: ${reasons[result.reason ?? ''] ?? reasons.IO}${recovery}`);
-    error.code = ['ENOENT', 'EEXIST', 'EACCES', 'EBUSY', 'EINVAL', 'EIO'].includes(result.code ?? '') ? result.code : 'EIO';
-    throw error;
+  return result;
+}
+
+function windowsResponseError(result: WindowsResponse): NodeJS.ErrnoException {
+  // The helper generates this basename internally. Only that narrow format may reach diagnostics;
+  // never surface an arbitrary child-provided path or exception message beside credential failures.
+  const recovery = result.reason === 'RECOVERY' && typeof result.recoveryFile === 'string' && /^\.[a-f0-9]{32}\.tmp$/.test(result.recoveryFile)
+    ? `; recovery file retained in credential directory: ${result.recoveryFile}` : '';
+  const reason = typeof result.reason === 'string' && Object.hasOwn(reasons, result.reason) ? reasons[result.reason] : reasons.IO;
+  const error: NodeJS.ErrnoException = new Error(`Windows secure filesystem: ${reason}${recovery}`);
+  error.code = ['ENOENT', 'EEXIST', 'EACCES', 'EBUSY', 'EINVAL', 'EIO'].includes(result.code ?? '') ? result.code : 'EIO';
+  return error;
+}
+
+function decodeWindowsResponse(operation: WindowsOperation, result: WindowsResponse): WindowsResult {
+  if (!result.ok) throw windowsResponseError(result);
+  if (result.content !== undefined && typeof result.content !== 'string') {
+    throw new Error('Windows secure filesystem helper returned an invalid response');
   }
   if ((operation === 'read' || operation === 'inspect-lock') && typeof result.content !== 'string') {
     throw new Error('Windows secure filesystem helper returned an invalid read response');
