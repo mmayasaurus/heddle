@@ -36,7 +36,7 @@ check `check_workers` and `heddle ledger show <dispatch-id> --json` for the orig
 The same terminal command supports longer-than-default dispatches in the other clients.
 Apply the project's existing startup, handoff and closeout workflows under .claude/commands
 when present; their Markdown instructions can be read without Claude slash commands.
-After this integration is installed, start the client normally from this assigned worktree:
+After this integration is installed, start the client normally from the project directory or your own linked worktree:
 `codex`, `cursor-agent` (or `agent`), `gemini`, or `opencode`. Use the client's normal resume
 controls. `heddle launch` is optional installation plus launch and can rewrite local settings;
 do not use it merely to open an existing copied worktree.
