@@ -27,6 +27,29 @@ describe('adversarial review helpers', () => {
     });
   });
 
+  it('treats native Gemini and OpenCode upstreams as their actual review family', () => {
+    const geminiRoute = {
+      taskClass: 'r', provider: 'gemini-cli', model: 'gemini-3.1-pro-preview',
+      editsCode: false, dispatchable: true, readOnly: true, autoAssess: false,
+      reviewerPool: [
+        { provider: 'gemini', model: 'gemini-3.1-pro-high' },
+        { provider: 'opencode', model: 'opencode/nemotron-3-ultra-free' },
+      ],
+    } as any;
+    expect(pickReviewer(geminiRoute, 'gemini', undefined, 'gemini-3.1-pro-high'))
+      .toMatchObject({ provider: 'opencode', model: 'opencode/nemotron-3-ultra-free' });
+
+    const claudeRoute = {
+      ...geminiRoute, provider: 'opencode', model: 'anthropic/claude-opus-4-6',
+      reviewerPool: [
+        { provider: 'claude', model: 'opus' },
+        { provider: 'codex', model: 'gpt-5.6-terra' },
+      ],
+    } as any;
+    expect(pickReviewer(claudeRoute, 'claude', undefined, 'opus'))
+      .toMatchObject({ provider: 'codex' });
+  });
+
   it('rejects reviewer pools that contain no model family different from the author', () => {
     const path = join(tempDir(), 'routing.yaml');
     writeFileSync(path, `providers:\n  cursor: {}\ntask_classes:\n  only-author:\n    provider: cursor\n    model: m\n    reviewer_pool:\n      - { provider: cursor, model: m }\n  empty-pool:\n    provider: cursor\n    model: m\n`);

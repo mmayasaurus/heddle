@@ -4,7 +4,7 @@
  * src/dispatch.ts (HED-282).
  */
 import { materializeAgentsMd, readPack, composePacks } from '../skillpacks.js';
-import { materializeWorkerMcp, validateWorkerMcp, codexMcpFlags, claudeMcpConfigFile, webCapable } from '../mcp.js';
+import { materializeWorkerMcp, validateWorkerMcp, codexMcpFlags, claudeMcpConfigFile, webCapable, nativeClientIntegrationInstalled } from '../mcp.js';
 import { isInProcessHttpProvider, isOpenAICompatProvider, openAICompatInputTokenUpperBound, readSecretsEnvValue } from '../adapters/openai-compat.js';
 import { assessResult, type ResultAssessment } from '../classify.js';
 import { snapshotWorktree, sameSnapshot, diffInstruction, embeddedDiff, READ_ONLY_MANDATE } from '../review.js';
@@ -24,6 +24,10 @@ import type { DispatchContext, DispatchRequest, DispatchOutcome, DispatchRefusal
 import { validateEnvRepoint, type AccountEnvRepoint } from '../accounts.js';
 import { redactSecrets } from '../redact.js';
 import { createBoundedReceipt, finalizeBoundedResult, normalizedBoundedUsage } from '../bounded-dispatch.js';
+import { codexClientFlags } from '../client-config.js';
+import { CommsLog, DEFAULT_COMMS_PATH } from '../comms/log.js';
+import { DEFAULT_PROJECTS_PATH } from '../projects.js';
+import { resolve } from 'node:path';
 
 export type EnvRepointResolution =
   | { kind: 'none' }
@@ -295,17 +299,6 @@ export async function runTarget(
       ...(boundedReceipt ? { boundedReceipt } : {}),
     };
   }
-  // Codex needs its attached MCP servers' tools pre-approved per-invocation, or headless calls
-  // cancel. This makes heddle self-contained — it works even if the user's global codex config
-  // hasn't pre-approved the server.
-  const extraFlags = [
-    ...(target.extraFlags ?? []),
-    ...(target.provider === 'codex' && mcp.length ? codexMcpFlags(mcp) : []),
-    // Cursor, like codex, blocks headless MCP calls without approval: --approve-mcps clears the
-    // server, --force (Run Everything) clears the per-call gate that otherwise rejects tool calls.
-    ...(target.provider === 'cursor' && mcp.length ? ['--approve-mcps', '--force'] : []),
-  ];
-
   // Worker stamps: how a subprocess (and any heddle server/CLI started inside it) knows it is a
   // worker, which dispatch it is, and who its parent is — the basis of the depth-1 cap and of
   // comms lineage (HED-65). Merged over the caller's account-selection env; buildWorkerEnv() still
@@ -315,6 +308,15 @@ export async function runTarget(
     [WORKER_ENV.DISPATCH_ID]: String(ledgerId),
   };
   if (ctx.attribution.orchestrator) stamps[WORKER_ENV.PARENT] = ctx.attribution.orchestrator;
+
+  // An init-client worktree already has Heddle's native MCP pair. Bind this admitted dispatch to a
+  // durable child address and override those two project entries for the life of the worker. Native
+  // clients vary in which parent env vars they forward to MCP subprocesses (Cursor drops arbitrary
+  // vars), so every identity/path value is explicit in the server definition as well as the CLI env.
+  // The installed-config probe is the opt-in boundary: generic dispatches do not touch comms.db.
+  let nativeIntegration = false;
+  let nativeMcpEnv: Record<string, string> | undefined;
+  let extraFlags: string[] = [];
 
   // Materialize → run → restore, all inside one guarded region (HED-19): whatever was written is
   // restored even if a later step throws, and the ledger row is ALWAYS finished.
@@ -340,6 +342,39 @@ export async function runTarget(
   let escapeReport: DispatchOutcome['escape'];
   let result: WorkerResult;
   try {
+    nativeIntegration = nativeClientIntegrationInstalled(req.cwd, target.provider);
+    if (nativeIntegration) {
+      const parent = ctx.attribution.orchestrator;
+      if (!parent) throw new Error('native client worker integration requires a bound orchestrator identity');
+      const log = new CommsLog(process.env.HEDDLE_COMMS_DB || DEFAULT_COMMS_PATH);
+      let child: string;
+      try {
+        child = log.mintChild(parent, { dispatchId: ledgerId, label: `${target.provider} worker` }).address;
+      } finally {
+        log.close();
+      }
+      Object.assign(stamps, {
+        HEDDLE_COMMS_ADDRESS: child,
+        HEDDLE_COMMS_DB: resolve(process.env.HEDDLE_COMMS_DB || DEFAULT_COMMS_PATH),
+        HEDDLE_LEDGER_DB: resolve(ctx.ledger.path),
+        HEDDLE_PROJECTS: resolve(process.env.HEDDLE_PROJECTS || DEFAULT_PROJECTS_PATH),
+      });
+      nativeMcpEnv = {
+        ...stamps,
+        HEDDLE_AGENT: child,
+        FLEET_AGENT: child,
+        HEDDLE_COMMS_ADDRESS: child,
+      };
+    }
+    // Codex needs inline server definitions because --ignore-user-config also ignores project MCP;
+    // Cursor needs both headless approval flags. The generated native pair is present even when the
+    // task did not request an additional discovery server, so approval/definition is keyed on either.
+    extraFlags = [
+      ...(target.extraFlags ?? []),
+      ...(target.provider === 'codex' && mcp.length ? codexMcpFlags(mcp) : []),
+      ...(target.provider === 'codex' && nativeMcpEnv ? codexClientFlags(req.cwd, undefined, nativeMcpEnv) : []),
+      ...(target.provider === 'cursor' && (mcp.length || nativeIntegration) ? ['--approve-mcps', '--force'] : []),
+    ];
     let systemPromptAppend: string | undefined;
     let mcpConfigPath: string | undefined;
     if (isClaude) {
@@ -364,8 +399,10 @@ export async function runTarget(
       // assumption (documented): every dispatcher targeting one cwd shares the default ledger;
       // split-ledger fleets into one worktree are outside the supported model.
       const matOpts = { dispatchId: ledgerId, isLive: (id: string) => ctx.ledger.isInFlight(Number(id), ctx.caps.staleAfterMs) };
-      restoreSkills = materializeAgentsMd(req.cwd, skills, matOpts);
-      restoreMcp = materializeWorkerMcp(req.cwd, target.provider, mcp, matOpts);
+      restoreSkills = materializeAgentsMd(
+        req.cwd, skills, matOpts, target.provider === 'gemini-cli' ? 'GEMINI.md' : 'AGENTS.md',
+      );
+      restoreMcp = materializeWorkerMcp(req.cwd, target.provider, mcp, matOpts, nativeMcpEnv);
     }
     // The mandate baseline is taken AFTER materialization and compared BEFORE restore (in finally):
     // injected files are part of the baseline, so a reviewer that edits AGENTS.md/.mcp.json is
@@ -411,7 +448,9 @@ export async function runTarget(
       mcpConfigPath,
       readOnly: route.readOnly,
       skipPermissions: req.skipPermissions,
-      mcpServers: isClaude ? mcp : undefined,
+      mcpServers: isClaude || target.provider === 'gemini-cli'
+        ? [...mcp, ...(nativeIntegration ? ['heddle', 'heddle-comms'] : [])]
+        : undefined,
       maxOutputTokens: route.bounds?.maxGeneratedTokens,
       maxOutputBytes: route.bounds?.maxOutputBytes,
       maxModelRequests: route.bounds?.maxModelRequests,

@@ -1,0 +1,180 @@
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { afterEach, describe, expect, it } from 'vitest';
+import { stringify as stringifyToml } from 'smol-toml';
+import { dispatch } from '../src/dispatch.js';
+import { defaultAdapterFor } from '../src/dispatcher/adapters.js';
+import { billingVerdict } from '../src/dispatcher/billing.js';
+import { materializeWorkerMcp, nativeClientIntegrationInstalled, validateWorkerMcp, webCapable } from '../src/mcp.js';
+import { modelFamily, sameModelFamily } from '../src/model-family.js';
+import { directRoute, loadRouting, type RoutingTable } from '../src/routing.js';
+import { modelFamilyPack } from '../src/skillpacks.js';
+import { serverDefinitions } from '../src/client-config.js';
+import { CommsLog } from '../src/comms/log.js';
+import type { WorkerAdapter } from '../src/types.js';
+import { IDENTITIES, useTempResources } from './helpers.js';
+
+const savedCommsDb = process.env.HEDDLE_COMMS_DB;
+afterEach(() => {
+  if (savedCommsDb === undefined) delete process.env.HEDDLE_COMMS_DB;
+  else process.env.HEDDLE_COMMS_DB = savedCommsDb;
+});
+
+function installedConfig(dir: string, client: 'codex' | 'cursor' | 'gemini' | 'opencode', agent = 'U'): string {
+  const definitions = serverDefinitions(dir, client, agent);
+  if (client === 'codex') return stringifyToml({ mcp_servers: definitions });
+  if (client === 'opencode') {
+    const mcp = Object.fromEntries(Object.entries(definitions).map(([name, def]) => [name, {
+      type: 'local', command: [def.command, ...def.args], environment: def.env, enabled: true,
+    }]));
+    return JSON.stringify({ mcp });
+  }
+  return JSON.stringify({ mcpServers: definitions });
+}
+
+function writeConfig(path: string, content: string): void {
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, content);
+}
+
+describe('native provider policy', () => {
+  const { tempDir, tempLedger } = useTempResources('heddle-native-provider-policy-');
+  const table = loadRouting();
+
+  it('registers additive adapters without changing legacy gemini/agy', () => {
+    expect(defaultAdapterFor('gemini').name).toBe('agy');
+    expect(defaultAdapterFor('gemini-cli').provider).toBe('gemini-cli');
+    expect(defaultAdapterFor('opencode').provider).toBe('opencode');
+  });
+
+  it('admits only declared native catalogs and blocks OpenCode laundering', () => {
+    expect(directRoute(table, 'gemini-cli', 'gemini-3.1-pro-preview').provider).toBe('gemini-cli');
+    expect(directRoute(table, 'opencode', 'opencode/nemotron-3-ultra-free').provider).toBe('opencode');
+    expect(() => directRoute(table, 'opencode', 'anthropic/claude-opus-4-6')).toThrow(/direct-subscription family/);
+    expect(() => directRoute(table, 'opencode', 'openai/gpt-5.6')).toThrow(/direct-subscription family/);
+    expect(() => directRoute(table, 'opencode', 'openrouter/some-paid-model')).toThrow(/not in the verified model catalog/);
+  });
+
+  it('classifies native billing from the strict catalog instead of degrading unregistered', () => {
+    for (const provider of ['gemini-cli', 'opencode']) {
+      expect(billingVerdict({ accountId: null, provider, caps: undefined, permitPayPerToken: false, table }))
+        .toEqual({});
+    }
+  });
+
+  it('normalizes harnesses to the actual model family for review diversity', () => {
+    expect(modelFamily('gemini-cli', 'gemini-3.1-pro-preview')).toBe('gemini');
+    expect(sameModelFamily('gemini', 'gemini-3.1-pro-high', 'gemini-cli', 'gemini-3.1-pro-preview')).toBe(true);
+    expect(sameModelFamily('claude', 'opus', 'opencode', 'anthropic/claude-opus-4-6')).toBe(true);
+    expect(sameModelFamily('codex', 'gpt-5.6-terra', 'opencode', 'openai/gpt-5.6')).toBe(true);
+    expect(sameModelFamily('codex', 'gpt-5.6-terra', 'opencode', 'opencode/nemotron-3-ultra-free')).toBe(false);
+    expect(modelFamilyPack('gemini-cli')).toBe('family-gemini');
+  });
+
+  it('treats native Gemini grounding as web capable', () => {
+    expect(webCapable('gemini-cli', [])).toBe(true);
+  });
+
+  it('materializes loadable Gemini and OpenCode MCP config and restores exact bytes', () => {
+    const geminiDir = tempDir();
+    const geminiPath = join(geminiDir, '.gemini', 'settings.json');
+    validateWorkerMcp('gemini-cli', ['memtrace']);
+    const restoreGemini = materializeWorkerMcp(geminiDir, 'gemini-cli', ['memtrace'], { dispatchId: 1 });
+    expect(JSON.parse(readFileSync(geminiPath, 'utf8')).mcpServers.memtrace).toEqual({ command: 'memtrace', args: ['mcp'] });
+    restoreGemini();
+    expect(() => readFileSync(geminiPath, 'utf8')).toThrow();
+
+    const openCodeDir = tempDir();
+    const openCodePath = join(openCodeDir, 'opencode.json');
+    writeFileSync(openCodePath, '{"theme":"heddle"}\n');
+    validateWorkerMcp('opencode', ['memtrace']);
+    const restoreOpenCode = materializeWorkerMcp(openCodeDir, 'opencode', ['memtrace'], { dispatchId: 2 });
+    expect(JSON.parse(readFileSync(openCodePath, 'utf8'))).toMatchObject({
+      theme: 'heddle', mcp: { memtrace: { type: 'local', command: ['memtrace', 'mcp'], enabled: true } },
+    });
+    restoreOpenCode();
+    expect(readFileSync(openCodePath, 'utf8')).toBe('{"theme":"heddle"}\n');
+  });
+
+  it('overlays initialized native MCP entries with per-worker identity and restores concurrent definitions', () => {
+    const dir = tempDir();
+    const path = join(dir, '.cursor', 'mcp.json');
+    writeConfig(path, installedConfig(dir, 'cursor'));
+    expect(nativeClientIntegrationInstalled(dir, 'cursor')).toBe(true);
+
+    const first = materializeWorkerMcp(dir, 'cursor', [], { dispatchId: 11 }, {
+      HEDDLE_WORKER: '1', HEDDLE_DISPATCH_ID: '11', HEDDLE_PARENT: 'U', HEDDLE_COMMS_ADDRESS: 'U.1',
+      HEDDLE_AGENT: 'U.1', FLEET_AGENT: 'U.1',
+    });
+    const second = materializeWorkerMcp(dir, 'cursor', [], { dispatchId: 12 }, {
+      HEDDLE_WORKER: '1', HEDDLE_DISPATCH_ID: '12', HEDDLE_PARENT: 'U', HEDDLE_COMMS_ADDRESS: 'U.2',
+      HEDDLE_AGENT: 'U.2', FLEET_AGENT: 'U.2',
+    });
+    expect(JSON.parse(readFileSync(path, 'utf8')).mcpServers.heddle.env).toMatchObject({
+      HEDDLE_WORKER: '1', HEDDLE_DISPATCH_ID: '12', HEDDLE_AGENT: 'U.2', HEDDLE_COMMS_ADDRESS: 'U.2',
+    });
+    second();
+    expect(JSON.parse(readFileSync(path, 'utf8')).mcpServers.heddle.env.HEDDLE_AGENT).toBe('U.1');
+    first();
+    expect(readFileSync(path, 'utf8')).toBe(installedConfig(dir, 'cursor'));
+  });
+
+  it('mints a real child and supplies sanitized worker MCP env on an initialized direct route', async () => {
+    const dir = tempDir();
+    const commsDb = join(tempDir(), 'comms.db');
+    process.env.HEDDLE_COMMS_DB = commsDb;
+    const path = join(dir, 'opencode.json');
+    const original = installedConfig(dir, 'opencode');
+    writeConfig(path, original);
+    let captured: any;
+    const adapter: WorkerAdapter = {
+      name: 'capture-opencode', provider: 'opencode',
+      dispatch: async (_prompt, opts) => {
+        captured = { opts, config: JSON.parse(readFileSync(path, 'utf8')) };
+        return { ok: true, output: 'done', exitCode: 0, sessionId: 'ses_test' };
+      },
+    };
+    const ledger = tempLedger();
+    const outcome = await dispatch({
+      provider: 'opencode', model: 'opencode/nemotron-3-ultra-free', prompt: 'work', cwd: dir,
+      overrideReason: 'native worker integration regression', identity: IDENTITIES.boundU,
+    }, ledger, () => adapter);
+    expect(outcome.ok).toBe(true);
+    expect(captured.opts.env).toMatchObject({
+      HEDDLE_WORKER: '1', HEDDLE_PARENT: 'U', HEDDLE_COMMS_ADDRESS: 'U.1',
+    });
+    expect(captured.config.mcp.heddle.environment).toMatchObject({
+      HEDDLE_WORKER: '1', HEDDLE_PARENT: 'U', HEDDLE_AGENT: 'U.1', FLEET_AGENT: 'U.1',
+      HEDDLE_COMMS_ADDRESS: 'U.1', HEDDLE_COMMS_DB: commsDb,
+    });
+    expect(captured.config.mcp.heddle.environment).not.toHaveProperty('OPENAI_API_KEY');
+    expect(readFileSync(path, 'utf8')).toBe(original);
+    const log = new CommsLog(commsDb, { readOnly: true });
+    try {
+      expect(log.participant('U.1')).toMatchObject({ parent: 'U', dispatchId: outcome.ledgerId });
+    } finally {
+      log.close();
+    }
+  });
+
+  it('recognizes generated native integration configs for all four worker providers', () => {
+    const rows = [
+      ['codex', 'codex', '.codex/config.toml'],
+      ['cursor', 'cursor', '.cursor/mcp.json'],
+      ['gemini-cli', 'gemini', '.gemini/settings.json'],
+      ['opencode', 'opencode', 'opencode.json'],
+    ] as const;
+    for (const [provider, client, relative] of rows) {
+      const dir = tempDir();
+      writeConfig(join(dir, relative), installedConfig(dir, client));
+      expect(nativeClientIntegrationInstalled(dir, provider)).toBe(true);
+    }
+  });
+
+  it('fails closed when OpenCode JSONC prevents safe additive materialization', () => {
+    const dir = tempDir();
+    writeFileSync(join(dir, 'opencode.jsonc'), '{}');
+    expect(() => materializeWorkerMcp(dir, 'opencode', ['memtrace'], { dispatchId: 3 }))
+      .toThrow(/opencode\.jsonc.*cannot safely materialize/i);
+  });
+});

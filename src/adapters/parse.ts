@@ -30,5 +30,5 @@ export function failIfTruncated(result: WorkerResult, stdoutTruncated: boolean, 
   const error = result.error
     ? `${note}; ${result.error}`
     : stderr.trim().length ? `${note}; stderr tail: ${stderr.slice(-400)}` : note;
-  return { ...result, ok: false, error };
+  return { ...result, ok: false, error, incomplete: true, truncated: true };
 }

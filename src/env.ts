@@ -84,6 +84,7 @@ const VENDOR_CREDENTIAL_PREFIXES = [
   'ANTHROPIC_', 'OPENAI_', 'GEMINI_', 'GOOGLE_', 'GCLOUD_', 'VERTEXAI_', 'VERTEX_',
   'CLAUDE_CODE_USE_', 'CURSOR_', 'AWS_', 'BEDROCK_', 'FOUNDRY_', 'ZAI_', 'GLM_',
   'GROQ_', 'CEREBRAS_', 'OPENROUTER_',
+  'OPENCODE_',
 ] as const;
 
 /**
@@ -95,7 +96,8 @@ const VENDOR_CREDENTIAL_PREFIXES = [
  */
 const OVERRIDE_ALLOWLIST = new Set<string>([
   ...ACCOUNT_SELECTOR_VARS,
-  'HEDDLE_WORKER', 'HEDDLE_DISPATCH_ID', 'HEDDLE_PARENT',
+  'HEDDLE_WORKER', 'HEDDLE_DISPATCH_ID', 'HEDDLE_PARENT', 'HEDDLE_COMMS_ADDRESS',
+  'HEDDLE_COMMS_DB', 'HEDDLE_LEDGER_DB', 'HEDDLE_PROJECTS',
 ]);
 
 export interface WorkerEnvOptions {
@@ -119,7 +121,7 @@ const ENV_REPOINT_KEYS = ['ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN'] as const
 /**
  * Build the environment for a worker subprocess: the parent env minus every billing-switch variable
  * AND every vendor-credential namespace (HED-30), plus an ALLOW-LISTED set of overrides (account
- * selectors + worker stamps only — a parent-identity override is silently dropped, any OTHER override
+ * selectors + worker stamps and broker paths only — a parent-identity override is silently dropped, any OTHER override
  * is refused). Returns the env and a list of what was stripped, so the dispatch ledger can record that
  * a subscription-billing guard actually fired.
  */
@@ -172,7 +174,7 @@ export function buildWorkerEnv(opts: WorkerEnvOptions = {}): {
       throw new Error(
         `refusing to set "${key}" on a worker: overrides are allow-listed (HED-30) — only account ` +
           `selectors (${[...ACCOUNT_SELECTOR_VARS].join(', ')}) and the worker stamps ` +
-          `(HEDDLE_WORKER, HEDDLE_DISPATCH_ID, HEDDLE_PARENT) may be set.` +
+          `(HEDDLE_WORKER, HEDDLE_DISPATCH_ID, HEDDLE_PARENT, HEDDLE_COMMS_ADDRESS) and broker paths may be set.` +
           (isSwitch ? ' This is a vendor billing/endpoint switch — use an account selector instead.' : ''),
       );
     }

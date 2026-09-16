@@ -33,6 +33,8 @@ export const ENFORCEABLE: Record<string, readonly Capability[]> = {
   codex: ['net', 'browse', 'exec-privileged'],
   cursor: [],
   gemini: [],
+  'gemini-cli': [],
+  opencode: [],
   // HTTP OpenAI-compat providers have no sandbox/network/browse knob heddle can pass, so every
   // requested capability is refused as unenforceable (menial read-only by construction).
   groq: [],

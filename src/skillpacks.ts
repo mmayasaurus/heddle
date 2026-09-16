@@ -100,6 +100,7 @@ export const MANDATORY_PACKS = ['worker-role', 'worker-hygiene'] as const;
 export const MODEL_FAMILY_PACKS: Record<string, string> = {
   codex: 'family-codex',
   gemini: 'family-gemini',
+  'gemini-cli': 'family-gemini',
   cursor: 'family-cursor',
   claude: 'family-claude',
 };
@@ -400,8 +401,13 @@ function stripDeadBlocks(content: string, ownId: string, isLive?: (id: string) =
  * dispatch's insertion: the file ends byte-identical for the surviving content whatever order
  * overlapping dispatches finish in, and is deleted only when nothing but whitespace remains.
  */
-export function materializeAgentsMd(cwd: string, packNames: string[], opts: MaterializeOpts): () => void {
-  const target = join(cwd, 'AGENTS.md');
+export function materializeAgentsMd(
+  cwd: string, packNames: string[], opts: MaterializeOpts, instructionFile = 'AGENTS.md',
+): () => void {
+  if (instructionFile !== 'AGENTS.md' && instructionFile !== 'GEMINI.md') {
+    throw new Error(`unsupported worker instruction file "${instructionFile}"`);
+  }
+  const target = join(cwd, instructionFile);
   if (packNames.length === 0) return () => { /* nothing written */ };
   const ownId = String(opts.dispatchId);
 
@@ -437,7 +443,7 @@ export function materializeAgentsMd(cwd: string, packNames: string[], opts: Mate
       try {
         const current = readFileSync(target, 'utf8');
         if (!current.includes(inserted)) {
-          process.stderr.write(`heddle: dispatch #${ownId}'s AGENTS.md block was edited during the run — leaving it in place (${target})\n`);
+          process.stderr.write(`heddle: dispatch #${ownId}'s ${instructionFile} block was edited during the run — leaving it in place (${target})\n`);
           return;
         }
         const next = current.replace(inserted, '');
@@ -446,7 +452,7 @@ export function materializeAgentsMd(cwd: string, packNames: string[], opts: Mate
         if (deletable && next.trim() === '') unlinkSync(target);
         else writeFileSync(target, next, 'utf8');
       } catch (err) {
-        process.stderr.write(`heddle: AGENTS.md restore for dispatch #${ownId} failed (${err instanceof Error ? err.message : String(err)}) — left as is\n`);
+        process.stderr.write(`heddle: ${instructionFile} restore for dispatch #${ownId} failed (${err instanceof Error ? err.message : String(err)}) — left as is\n`);
       }
     });
   };

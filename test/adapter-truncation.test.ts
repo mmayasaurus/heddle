@@ -10,6 +10,8 @@ import { AgyAdapter } from '../src/adapters/agy.js';
 import { ClaudeAdapter } from '../src/adapters/claude.js';
 import { CodexAdapter } from '../src/adapters/codex.js';
 import { CursorAdapter } from '../src/adapters/cursor.js';
+import { GeminiCliAdapter } from '../src/adapters/gemini-cli.js';
+import { OpenCodeAdapter } from '../src/adapters/opencode.js';
 
 const mockedRun = vi.mocked(run);
 const baseRun = { stderr: '', exitCode: 0, timedOut: false, idleTimedOut: false, stdoutTruncated: false, stderrTruncated: false };
@@ -21,6 +23,15 @@ const codexOutput = [
   JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'codex response' } }),
 ].join('\n');
 const agyOutput = JSON.stringify({ event: 'result', result: { status: 'SUCCESS', response: 'agy response', conversation_id: 'agy-session', usage: { input_tokens: 1, output_tokens: 1 } } });
+const geminiCliOutput = [
+  JSON.stringify({ type: 'init', session_id: 'gemini-cli-session', model: 'gemini-3.1-pro-preview' }),
+  JSON.stringify({ type: 'message', role: 'assistant', content: 'gemini response', delta: true }),
+  JSON.stringify({ type: 'result', status: 'success', stats: { input_tokens: 1, output_tokens: 1 } }),
+].join('\n');
+const openCodeOutput = [
+  JSON.stringify({ type: 'text', sessionID: 'opencode-session', part: { type: 'text', text: 'opencode response' } }),
+  JSON.stringify({ type: 'step_finish', sessionID: 'opencode-session', part: { type: 'step-finish', reason: 'stop', tokens: { input: 1, output: 1, reasoning: 0, cache: { read: 0, write: 0 } } } }),
+].join('\n');
 
 describe('subprocess adapter truncation handling', () => {
   it('reports a distinct Claude idle-watchdog failure', async () => {
@@ -41,6 +52,8 @@ describe('subprocess adapter truncation handling', () => {
     ['claude', new ClaudeAdapter(), claudeOutput, { model: 'sonnet', cwd: '/tmp' }],
     ['codex', new CodexAdapter(), codexOutput, { model: 'gpt-5.6-terra', cwd: '/tmp' }],
     ['agy', new AgyAdapter(), agyOutput, { model: 'gemini-3.6-flash-low', cwd: '/tmp' }],
+    ['gemini-cli', new GeminiCliAdapter(), geminiCliOutput, { model: 'gemini-3.1-pro-preview', cwd: '/tmp' }],
+    ['opencode', new OpenCodeAdapter(), openCodeOutput, { model: 'opencode/nemotron-3-ultra-free', cwd: '/tmp' }],
   ] as const)('%s turns an otherwise successful truncated stream into a failure', async (_name, adapter, stdout, options) => {
     mockedRun.mockResolvedValueOnce({ ...baseRun, stdout, stdoutTruncated: true, stderrTruncated: false });
 
@@ -52,6 +65,8 @@ describe('subprocess adapter truncation handling', () => {
     expect(result.raw).toBeDefined();
     expect(result.usage).toBeDefined();
     expect(result.sessionId).toBeDefined();
+    expect(result.incomplete).toBe(true);
+    expect(result.truncated).toBe(true);
   });
 
   it.each([
@@ -59,6 +74,8 @@ describe('subprocess adapter truncation handling', () => {
     ['claude', new ClaudeAdapter(), claudeOutput, { model: 'sonnet', cwd: '/tmp' }],
     ['codex', new CodexAdapter(), codexOutput, { model: 'gpt-5.6-terra', cwd: '/tmp' }],
     ['agy', new AgyAdapter(), agyOutput, { model: 'gemini-3.6-flash-low', cwd: '/tmp' }],
+    ['gemini-cli', new GeminiCliAdapter(), geminiCliOutput, { model: 'gemini-3.1-pro-preview', cwd: '/tmp' }],
+    ['opencode', new OpenCodeAdapter(), openCodeOutput, { model: 'opencode/nemotron-3-ultra-free', cwd: '/tmp' }],
   ] as const)('%s preserves successful parsing when the stream is not truncated', async (_name, adapter, stdout, options) => {
     mockedRun.mockResolvedValueOnce({ ...baseRun, stdout, stdoutTruncated: false, stderrTruncated: false });
 
@@ -72,6 +89,8 @@ describe('subprocess adapter truncation handling', () => {
     ['claude', new ClaudeAdapter(), claudeOutput, { model: 'sonnet', cwd: '/tmp' }],
     ['codex', new CodexAdapter(), codexOutput, { model: 'gpt-5.6-terra', cwd: '/tmp' }],
     ['agy', new AgyAdapter(), agyOutput, { model: 'gemini-3.6-flash-low', cwd: '/tmp' }],
+    ['gemini-cli', new GeminiCliAdapter(), geminiCliOutput, { model: 'gemini-3.1-pro-preview', cwd: '/tmp' }],
+    ['opencode', new OpenCodeAdapter(), openCodeOutput, { model: 'opencode/nemotron-3-ultra-free', cwd: '/tmp' }],
   ] as const)('%s preserves successful parsing when only stderr is truncated', async (_name, adapter, stdout, options) => {
     mockedRun.mockResolvedValueOnce({ ...baseRun, stdout, stdoutTruncated: false, stderrTruncated: true });
 
@@ -85,6 +104,8 @@ describe('subprocess adapter truncation handling', () => {
     ['claude', new ClaudeAdapter(), claudeOutput, { model: 'sonnet', cwd: '/tmp' }],
     ['codex', new CodexAdapter(), codexOutput, { model: 'gpt-5.6-terra', cwd: '/tmp' }],
     ['agy', new AgyAdapter(), agyOutput, { model: 'gemini-3.6-flash-low', cwd: '/tmp' }],
+    ['gemini-cli', new GeminiCliAdapter(), geminiCliOutput, { model: 'gemini-3.1-pro-preview', cwd: '/tmp' }],
+    ['opencode', new OpenCodeAdapter(), openCodeOutput, { model: 'opencode/nemotron-3-ultra-free', cwd: '/tmp' }],
   ] as const)('%s attaches the stderr tail when a truncated success carries stderr diagnostics', async (_name, adapter, stdout, options) => {
     // A truncated stdout that STILL parsed to success has no error of its own, so failIfTruncated
     // must surface the stderr tail as the only diagnostic (round-1 finding B). Guards that branch:

@@ -52,12 +52,12 @@ export interface DispatchOptions {
    * adapter's constructed default (heddle's own workers keep skipping, so the fleet is unchanged);
    * `false` KEEPS the CLI's interactive prompts (for a permission-preserving consumer such as an
    * external orchestrator whose policy forbids --dangerously-skip-permissions); `true` forces skipping.
-   * Honored today by the agy adapter (maps to --dangerously-skip-permissions); other adapters express
-   * their permission posture differently (claude uses --tools / --strict-mcp-config) and ignore it.
+   * Honored by the agy and OpenCode adapters (maps to --dangerously-skip-permissions); other adapters
+   * express their permission posture differently (claude uses --tools / --strict-mcp-config) and ignore it.
    * This is a permission-PROMPT toggle ONLY — it never widens heddle's capability caps or refusal
-   * semantics, which stay default-deny regardless of this flag. NOTE: with `false`, an agy run that has
-   * no interactive terminal to answer the prompts will hang (see AgyAdapter LANDMINES); the opt-out is
-   * for consumers that run agy interactively.
+   * semantics, which stay default-deny regardless of this flag. NOTE: with `false`, a headless agy or
+   * OpenCode run has no interactive terminal to answer prompts; the opt-out is for consumers that
+   * provide an external permission path.
    */
   skipPermissions?: boolean;
   /** Names of the MCP servers in mcpConfigPath — claude allowlists them as `mcp__<name>`. */
@@ -120,6 +120,6 @@ export interface WorkerResult {
 
 export interface WorkerAdapter {
   readonly name: string;
-  readonly provider: 'codex' | 'cursor' | 'claude' | 'gemini' | 'groq' | 'cerebras' | 'openrouter' | 'glm' | 'local';
+  readonly provider: 'codex' | 'cursor' | 'claude' | 'gemini' | 'gemini-cli' | 'opencode' | 'groq' | 'cerebras' | 'openrouter' | 'glm' | 'local';
   dispatch(prompt: string, opts: DispatchOptions): Promise<WorkerResult>;
 }

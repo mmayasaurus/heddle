@@ -32,6 +32,7 @@ describe('buildWorkerEnv — subscription-billing worker isolation (HED-30 allow
       process.env.FOUNDRY_API_KEY = 'x';                     // FOUNDRY_ prefix
       process.env.ZAI_API_KEY = 'x';                         // ZAI_ prefix
       process.env.GLM_FOO = 'x';                             // GLM_ prefix
+      process.env.OPENCODE_CONFIG_CONTENT = '{"provider":{"paid":{}}}';
       process.env.ANTHROPIC_SOMETHING_BRAND_NEW = 'x'; // future var the exact denylist never listed
       process.env.CODEX_API_KEY = 'x';                  // explicit list (no bare CODEX_ prefix — CODEX_HOME is a selector)
       process.env.PATH = '/usr/bin';
@@ -41,7 +42,8 @@ describe('buildWorkerEnv — subscription-billing worker isolation (HED-30 allow
         'OPENAI_ORGANIZATION', 'GOOGLE_GENAI_USE_VERTEXAI', 'GOOGLE_CLOUD_PROJECT', 'VERTEXAI_PROJECT',
         'AWS_BEARER_TOKEN_BEDROCK', 'CURSOR_BASE_URL', 'GEMINI_BASE_URL', 'GCLOUD_ACCESS_TOKEN',
         'CLAUDE_CODE_USE_NEW_BACKEND', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'BEDROCK_BASE_URL',
-        'VERTEX_PROJECT', 'FOUNDRY_API_KEY', 'ZAI_API_KEY', 'GLM_FOO', 'ANTHROPIC_SOMETHING_BRAND_NEW', 'CODEX_API_KEY']) {
+        'VERTEX_PROJECT', 'FOUNDRY_API_KEY', 'ZAI_API_KEY', 'GLM_FOO', 'OPENCODE_CONFIG_CONTENT',
+        'ANTHROPIC_SOMETHING_BRAND_NEW', 'CODEX_API_KEY']) {
         expect(env[k], `${k} must be stripped`).toBeUndefined();
         expect(stripped).toContain(k);
       }
@@ -108,7 +110,7 @@ describe('buildWorkerEnv — subscription-billing worker isolation (HED-30 allow
     it('allows every account selector + worker stamp', () => {
       const { env } = buildWorkerEnv({ overrides: {
         CODEX_HOME: '/a', CLAUDE_CONFIG_DIR: '/b', CLAUDE_CODE_OAUTH_TOKEN: 't', CURSOR_API_KEY: 'k',
-        HEDDLE_WORKER: '1', HEDDLE_DISPATCH_ID: '42', HEDDLE_PARENT: 'U',
+        HEDDLE_WORKER: '1', HEDDLE_DISPATCH_ID: '42', HEDDLE_PARENT: 'U', HEDDLE_COMMS_ADDRESS: 'U.1',
       } });
       expect(env.CODEX_HOME).toBe('/a');
       expect(env.CLAUDE_CONFIG_DIR).toBe('/b');
@@ -117,6 +119,7 @@ describe('buildWorkerEnv — subscription-billing worker isolation (HED-30 allow
       expect(env.HEDDLE_WORKER).toBe('1');
       expect(env.HEDDLE_DISPATCH_ID).toBe('42');
       expect(env.HEDDLE_PARENT).toBe('U');
+      expect(env.HEDDLE_COMMS_ADDRESS).toBe('U.1');
     });
 
     it('REFUSES a billing/endpoint switch override, with the account-selector hint', () => {

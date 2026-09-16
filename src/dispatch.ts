@@ -3,6 +3,7 @@ import { loadRouting, providerExecution, structuralCaps, type RouteTarget } from
 import { withMandatoryPacks } from './skillpacks.js';
 import { classifyEffort } from './classify.js';
 import { normalizeProvider } from './review.js';
+import { sameModelFamily } from './model-family.js';
 import { fleetPauseStatus } from './fleet-pause.js';
 import { resolveIdentity, attributeDispatch } from './identity.js';
 import { readProviderCaps } from './usage.js';
@@ -449,7 +450,7 @@ export async function dispatch(
   // Primary failed and the table names a fallback — try it, recording the origin so the ledger
   // shows which routes actually hold up in practice. A fallback that is itself in-session (custom
   // tables) gets the same structured refusal instead of a throw.
-  if (route.reviewerPool && normalizeProvider(fallback.provider) === normalizeProvider(req.authorProvider)) return primary; // never review with the author's family
+  if (route.reviewerPool && sameModelFamily(fallback.provider, fallback.model, req.authorProvider, req.authorModel)) return primary; // never review with the author's family
   const fbExecution = fallback.provider === 'claude'
     ? (req.inSession ? 'in-session-subagent' : 'headless')
     : providerExecution(table, fallback.provider);
