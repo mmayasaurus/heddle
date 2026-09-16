@@ -1,4 +1,5 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, linkSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -8,6 +9,7 @@ import { resolveCatalogRoot } from './rules/lifecycle.js';
 import { loadRules } from './rules/load.js';
 import { RuleIdPattern } from './rules/schema.js';
 import type { HookRuleSelection } from './wizard/hooks-choose.js';
+import { checkClientParentWritable, clientFileSource, clientInstallSteps, type FleetClient } from './client-config.js';
 
 const WIRED_HOOKS = ['agent-identity.py', 'agent-preflight.py', 'remind-owned-prs.py', 'require-memtrace-first.py', 'delegation-nudge.py', 'require-pr-sweep.py'] as const;
 const OPTIONAL_HOOKS = ['protect-workspace.py', 'require-vault-search.py', 'auto-reindex-vault.py'] as const;
@@ -18,6 +20,7 @@ export interface InstallOptions {
   dir: string; canonical?: string; name?: string; team?: string; agents?: string; room?: string; launcher?: string;
   enforceMemtrace?: boolean; dryRun?: boolean; homeDir?: string; showContent?: boolean;
   hookRules?: HookRuleSelection[]; hookCatalogRoot?: string;
+  clients?: FleetClient[]; clientAgent?: string;
 }
 export interface InstallStep {
   step: string; path: string; action: 'ok' | 'create' | 'update' | 'skip' | 'would-create' | 'would-update'; reason?: string; content?: string; bytes?: number; expectedContent?: string | null;
@@ -25,6 +28,8 @@ export interface InstallStep {
    *  chmods the file to it after the atomic write; when unset, an existing file's mode is preserved and
    *  a new file takes the umask default (HED-671, enabling the HED-669 launcher-gen step). */
   mode?: number;
+  /** Publish a new immutable backup without ever replacing an existing path. */
+  exclusive?: boolean;
 }
 export interface InstallPlan { options: Required<Pick<InstallOptions, 'dir' | 'canonical' | 'name' | 'homeDir'>> & InstallOptions; steps: InstallStep[]; }
 export interface InstallReport { steps: InstallStep[]; humanSteps: string[]; }
@@ -65,20 +70,23 @@ function jsonIndent(source: string | undefined): string | number {
   // mis-count this 3-line function as spanning to end-of-file. Behaviour is unchanged.
   return source?.match(/\n([ \t]+)\u0022/)?.[1] ?? 2;
 }
-let atomicWriteSequence = 0;
-function atomicWriteFile(path: string, content: string, mode?: number): void {
-  const temporary = join(dirname(path), `.${basename(path)}.${process.pid}.${atomicWriteSequence++}.tmp`);
+function atomicWriteFile(path: string, content: string, mode?: number, exclusive = false, beforeReplace?: () => void): void {
+  const temporary = join(dirname(path), `.${basename(path)}.${randomUUID()}.tmp`);
+  let created = false;
   try {
-    writeFileSync(temporary, content);
+    writeFileSync(temporary, content, { flag: 'wx', mode: 0o600 });
+    created = true;
     // An explicit mode (e.g. an executable launcher) wins; else preserve an existing file's mode
     // (masked to 0o7777 so only permission + setuid/setgid/sticky bits reach chmod, never S_IFMT
     // file-type bits). A brand-new file with no explicit mode keeps the umask default (unchanged
     // pre-HED-671 behaviour).
-    const targetMode = mode ?? (existsSync(path) ? statSync(path).mode & 0o7777 : undefined);
-    if (targetMode !== undefined) chmodSync(temporary, targetMode);
-    renameSync(temporary, path);
+    const targetMode = mode ?? (existsSync(path) ? statSync(path).mode & 0o7777 : 0o666 & ~process.umask());
+    chmodSync(temporary, targetMode);
+    beforeReplace?.();
+    if (exclusive) linkSync(temporary, path);
+    else renameSync(temporary, path);
   } finally {
-    try { if (existsSync(temporary)) unlinkSync(temporary); } catch { /* preserve the original write/rename failure */ }
+    try { if (created && existsSync(temporary)) unlinkSync(temporary); } catch { /* preserve the original write/rename failure */ }
   }
 }
 function stepFor(path: string, step: string, content: string, dryRun: boolean, exists = existsSync(path)): InstallStep {
@@ -513,7 +521,18 @@ export function planInstall(input: InstallOptions): InstallPlan {
   const dryRun = input.dryRun === true;
   const hookCatalogRoot = input.hookCatalogRoot ?? resolveCatalogRoot();
   const steps = [canonicalStep(canonical), renderSettingsStep(dir, canonical, input.hookRules ?? [], hookCatalogRoot, dryRun), ...renderRulesSteps(dir, canonical, dryRun), ...renderHookRulesSteps(dir, input.hookRules ?? [], hookCatalogRoot, dryRun), renderMcpStep(dir, dryRun), renderIgnoreStep(dir, dryRun), renderGateStep(dir, dryRun), ...renderLifecycleCommandSteps(dir, dryRun), registryStep(input, dir, state, details, dryRun), enforceMarkerStep(input, dir, homeDir, dryRun)];
+  if (input.clients) steps.push(...clientInstallSteps({ dir, clients: input.clients, agent: input.clientAgent, dryRun }));
   return { options: { ...input, dir, canonical, name: details.name, homeDir }, steps };
+}
+
+function isClientStep(step: InstallStep): boolean {
+  return step.step.startsWith('client:') || step.step.startsWith('client-instructions:');
+}
+
+function checkInstallSnapshot(step: InstallStep): void {
+  if (step.expectedContent === undefined) return;
+  const current = isClientStep(step) ? clientFileSource(step.path) : existsSync(step.path) ? readFileSync(step.path, 'utf8') : null;
+  if (current !== step.expectedContent) throw new Error(`${step.step} changed underneath this install plan — re-run the installer`);
 }
 
 export function applyInstall(plan: InstallPlan, dryRun = false): InstallReport {
@@ -527,13 +546,12 @@ export function applyInstall(plan: InstallPlan, dryRun = false): InstallReport {
   // race tracked as HED-418.
   if (!skipWrites) {
     for (const step of plan.steps) {
-      if (step.expectedContent === undefined) continue;
-      const current = existsSync(step.path) ? readFileSync(step.path, 'utf8') : null;
-      if (current !== step.expectedContent) throw new Error(`${step.step} changed underneath this install plan — re-run heddle init-project`);
+      checkInstallSnapshot(step);
+      if (isClientStep(step) && step.action !== 'ok') checkClientParentWritable(step.path);
     }
   }
   for (const step of plan.steps) {
-    if (skipWrites || !step.content) continue;
+    if (skipWrites || step.content === undefined) continue;
     if (step.action === 'ok') {
       // Content already matches, so no rewrite — but re-apply an explicit mode if it has drifted: a
       // launcher whose bytes are intact yet lost its execute bit (an external chmod, or a fresh clone
@@ -544,8 +562,10 @@ export function applyInstall(plan: InstallPlan, dryRun = false): InstallReport {
       continue;
     }
     if (step.action === 'skip') continue;
+    if (isClientStep(step)) checkInstallSnapshot(step);
     mkdirSync(dirname(step.path), { recursive: true });
-    atomicWriteFile(step.path, step.content, step.mode);
+    if (isClientStep(step)) checkInstallSnapshot(step);
+    atomicWriteFile(step.path, step.content, step.mode, step.exclusive, isClientStep(step) ? () => checkInstallSnapshot(step) : undefined);
   }
   const root = plan.options.dir;
   return { steps: plan.steps, humanSteps: [`watch_directory(path=${root}, repo_id=${basename(root)})`, 'confirm index freshness', 'Linear team/labels — HED-299 ws3'] };
@@ -554,7 +574,14 @@ export function applyInstall(plan: InstallPlan, dryRun = false): InstallReport {
 export function redactReport(report: InstallReport, showContent: boolean, homeDir: string): InstallReport {
   if (showContent) return report;
   const heddleDir = resolve(homeDir, '.heddle');
-  return { ...report, steps: report.steps.map(({ content, ...step }) => content && isAncestorOrEqual(heddleDir, resolve(step.path))
-    ? { ...step, bytes: Buffer.byteLength(content) }
-    : { ...step, ...(content ? { content } : {}) }) };
+  return { ...report, steps: report.steps.map((original) => {
+    const { content, ...step } = original;
+    if (isClientStep(step)) {
+      delete step.expectedContent;
+      return { ...step, ...(content !== undefined ? { bytes: Buffer.byteLength(content) } : {}) };
+    }
+    return content && isAncestorOrEqual(heddleDir, resolve(step.path))
+      ? { ...step, bytes: Buffer.byteLength(content) }
+      : { ...step, ...(content ? { content } : {}) };
+  }) };
 }

@@ -207,6 +207,68 @@ The wired hooks establish identity and preflight checks at session start; remind
 
 After initialization, add or change project rules with `heddle rule list`, `heddle rule propose`, `heddle rule ratify`, and `heddle rule test`, or re-run `init-project` with `--hook-rules` and `--enforce`. The installer does not overwrite an existing seeded project rule.
 
+### Codex, Cursor, Gemini CLI, and OpenCode fleet sessions
+
+Add any of these clients to an existing agent worktree without changing Claude's configuration:
+
+```sh
+heddle init-client /path/to/agent-worktree --clients codex,cursor,gemini,opencode --agent my-agent --dry-run
+heddle init-client /path/to/agent-worktree --clients codex,cursor,gemini,opencode --agent my-agent
+```
+
+Choose only the clients you use. Each active session needs its own assigned identity and worktree.
+`--agent` binds both MCP servers to that identity; omit it to use the launching process's
+`HEDDLE_AGENT`/`FLEET_AGENT` or the worktree's `.fleet-agent`. The installer does not invent an
+identity, edit accounts, change CLI permissions, or start an agent. Launch `codex`, `agent`
+(Cursor), `gemini`, or `opencode` in that worktree and approve the Heddle MCP servers with the
+client's native trust controls. Verify `comms_whoami` and `check_workers` before working.
+
+| Client | Native configuration | Startup instructions |
+| --- | --- | --- |
+| Codex CLI | `.codex/config.toml` | `AGENTS.md` |
+| Cursor CLI | `.cursor/mcp.json` | `AGENTS.md` |
+| Gemini CLI | `.gemini/settings.json` | `GEMINI.md` |
+| OpenCode | `opencode.json` | `AGENTS.md` |
+
+Existing configuration and instruction text are preserved; changed files receive a
+`.heddle-backup` copy (numbered if needed). Conflicting MCP entries or malformed config stop
+the plan before writes. OpenCode projects already using `opencode.jsonc` must add the entries
+there manually; the installer refuses to shadow that file. `--json` reports paths and actions,
+never configuration contents. The generated commands reference this Heddle installation and
+the selected worktree; rerun installation when setting up a different worktree.
+
+All clients share Heddle's existing orchestration tools, broker, rooms, trust tiers and durable
+message history. Standard MCP clients send with `post_message` and poll `check_inbox` using
+`since_id`; use a separate `read_transcript` cursor per room. The installed startup instructions
+specify polling at startup/resume, between work units, after long operations and before the
+final response. Messages persist while a client is offline, but polling does not interrupt a
+running turn and queued messages are not read receipts. Claude retains its existing channel
+push and hooks. Claude hook enforcement is not emulated in the other clients; they receive
+the shared project-policy and lifecycle instructions.
+
+Codex, Gemini and OpenCode MCP entries allow 660 seconds for tool calls. Cursor CLI
+2026.09.10 has a fixed 60-second MCP call timeout; use the existing terminal command
+`heddle dispatch --class <class> --agent <verified-identity> --task '<task>' --json`
+for delegated work in Cursor. Collect the terminal result and check the ledger before
+retrying any timed-out dispatch. Messaging and the short orchestration tools remain available
+through MCP in all four clients.
+
+Installation validates all snapshots before writing and rechecks native targets at replacement.
+Backups are created exclusively. Installation is not a multi-file filesystem transaction: a disk
+failure may leave earlier steps applied, and an uncooperative local writer racing the final
+check/rename is outside its guarantees. Stop concurrent configuration editors during installation;
+after an I/O failure, fix the cause and rerun the idempotent installer.
+
+On a fresh project, `init-project ... --clients codex,cursor,gemini,opencode [--agent my-agent]`
+composes the same client steps with normal project initialization. Omitting `--clients` retains
+the existing Claude setup behavior. Native Gemini CLI and OpenCode here are fleet-session hosts;
+the existing `gemini` worker route still uses Antigravity (`agy`), and no new OpenCode worker
+route is added.
+
+The native formats follow [Codex MCP configuration](https://developers.openai.com/codex/mcp/),
+[Cursor CLI MCP](https://cursor.com/docs/cli/mcp), [Gemini CLI MCP](https://geminicli.com/docs/tools/mcp-server/)
+and [OpenCode MCP](https://opencode.ai/docs/mcp-servers/).
+
 ## Skill packs
 
 A skill pack is a Markdown instruction bundle attached to a dispatched worker. Heddle searches `HEDDLE_PACKS`, then `~/.heddle/packs`, then the built-in `skills/` directory; an earlier pack with the same name shadows a later one.
