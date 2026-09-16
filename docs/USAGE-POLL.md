@@ -1,5 +1,77 @@
 # Keeper-less usage polling (`io.heddle.usage-poll-claude`)
 
+## Linux: systemd user timer
+
+From a stable Heddle installation after `npm run build`:
+
+```sh
+node dist/usage-poll-systemd-bin.js --dry-run
+node dist/usage-poll-systemd-bin.js --start-interval 300
+```
+
+The first command previews both unit files and the activation commands without writing anything or
+contacting systemd. Preview also works on macOS. The second command is Linux-only: it installs
+`io.heddle.usage-poll-claude.service` and `.timer` in `$XDG_CONFIG_HOME/systemd/user` (default
+`~/.config/systemd/user`), reloads the user manager, enables and restarts the timer, then checks that
+the timer is active. `--json` returns the same plan/result as structured data. This standalone entry
+point does not change client configuration, the macOS launcher, or the launchd installer below.
+
+The service reuses `usage poll-claude`; it does not implement another poller. It runs shortly after
+timer activation, then 300 seconds after each poll finishes by default. The user timer does not start
+another copy while its service is running. The installation needs Node, Heddle's built CLI, and a
+running systemd user manager. It does not use sudo, install a system service, or enable user lingering.
+On systems where the user manager stops at logout, polling stops with it.
+
+The installer pins the resolved Node and CLI paths, home directory, account-registry path, and usage
+output directory. `HEDDLE_ACCOUNTS`, `HEDDLE_USAGE_DIR`, and `XDG_CONFIG_HOME` overrides must be absolute
+paths; explicitly empty account or usage paths are rejected instead of silently selecting defaults.
+Credentials are read by the existing poller; no credential values are copied into the units.
+Run from a stable installation: activation refuses executables under `.worktrees`, including symlinks
+into one. Re-run the installer if the installed Node or Heddle path changes.
+
+Both unit files are validated before writing. Unrelated existing units, symlinked files, units loaded
+from another location, and systemd drop-ins are refused. Changed Heddle-managed files are backed up
+beside the original before replacement. A configured `io.heddle.window-keeper.service` or `.timer`
+also blocks installation. This check cannot discover arbitrary cron jobs or custom schedulers: keep
+only one producer for the same usage directory. Activation failures are reported without claiming
+the timer is active. Preview resolves Node
+and CLI symlinks so its file contents and change actions match installation, but does not check
+executable permissions or contact the user manager.
+
+A shared installer lock prevents concurrent Heddle installations. Files and manager state are checked
+again under the lock, and manager state is rechecked after reload before enabling or starting the timer.
+Do not edit units or run another scheduler administration tool during installation; those tools do not
+participate in Heddle's lock. The two unit files are not one atomic filesystem transaction: a disk error
+can leave a partial update, but the installer then runs no activation commands and reports the failure.
+Fix the filesystem error and rerun to reconcile the units, or inspect the saved `.backup-*` files.
+
+Consumers must read the same account registry and usage directory as the poller. The desktop dashboard
+currently reads the default `~/.heddle/accounts.json` and `~/.heddle/usage` locations; use the defaults
+with that dashboard. Custom paths are for headless consumers configured to read those paths.
+Keep the default 300-second interval unless the consumers' freshness policy is also configured for a
+longer interval. The dashboard's `HEDDLE_OAUTH_CACHE_SECS` setting is separate from this installer;
+without matching freshness settings, a deliberately slow poll can leave usage marked stale between runs.
+
+Inspect and stop the timer with:
+
+```sh
+systemctl --user status io.heddle.usage-poll-claude.timer
+journalctl --user -u io.heddle.usage-poll-claude.service
+systemctl --user disable --now io.heddle.usage-poll-claude.timer
+```
+
+Disabling the timer prevents future polls; it does not cancel a poll already running. A timer being
+active does not prove successful authentication or fresh usage data: inspect the service journal and
+the sidecars after the first poll. Automated tests cover isolated installation, failure handling, and
+preview behavior; the Linux test also runs `systemd-analyze verify` without starting a service. Live
+provider login and scheduled polling still need verification on the target Linux machine.
+
+The unit format follows the upstream [systemd service](https://github.com/systemd/systemd/blob/main/man/systemd.service.xml),
+[timer](https://github.com/systemd/systemd/blob/main/man/systemd.timer.xml), and
+[environment](https://github.com/systemd/systemd/blob/main/man/systemd.exec.xml) documentation.
+
+## macOS: launchd job
+
 On a machine that runs the heddle **window-keeper**, the keeper already polls Claude OAuth usage on a
 schedule and writes the per-account `claude-<id>.oauth-usage.json` sidecars that headless routing and
 `account pick` read. A **keeper-less machine** — the headless pack, no dashboard — has no scheduled
