@@ -109,6 +109,32 @@ describe('copied native configuration in linked worktrees', () => {
     }
   });
 
+  it('worker hooks use actual linked process cwd and ignore payload redirection to another worktree', async () => {
+    await ensureBuilt();
+    const { canonical, linked, root, git } = fixture();
+    const other = join(root, 'other');
+    git(canonical, ['worktree', 'add', '-qb', 'other', other]);
+    for (const [dir, label] of [[canonical, 'canonical-policy'], [linked, 'linked-policy'], [other, 'other-policy']]) {
+      mkdirSync(join(dir, 'rules'));
+      writeFileSync(join(dir, 'rules/worker-cwd.yaml'), `id: worker-cwd\nevent: PreToolUse\nmatch:\n  tool: Bash\naction: block\nenforce: true\nmessage: ${label} {{cwd}}\nfail_open: true\n`);
+    }
+    const { env } = childEnv({ home: root, env: { HEDDLE_WORKER: '1', HEDDLE_AGENT: 'linked-seat.1', HEDDLE_PARENT: 'linked-seat' } });
+    for (const client of FLEET_CLIENTS) {
+      for (const payloadCwd of [canonical, linked, other]) {
+        const result = spawnSync(process.execPath, [join(PROJECT_ROOT, 'dist/client-hook.js'), client, 'PreToolUse', canonical, 'canonical-seat'], {
+          cwd: linked, env, encoding: 'utf8', timeout: 10000,
+          input: JSON.stringify({ cwd: payloadCwd, tool_name: 'exec_command', tool_input: { cmd: 'probe' } }),
+        });
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.stdout, result.stderr).toContain(`linked-policy ${linked}`);
+        expect(result.stdout).not.toContain('canonical-policy');
+        expect(result.stdout).not.toContain('other-policy');
+      }
+    }
+    // MCP callers do not supply a hook invocation cwd: their materialized arguments stay pinned.
+    expect(resolveClientWorkspace(canonical, [linked, other], env)).toBe(canonical);
+  });
+
   it('keeps generated-entry verification strict for foreign commands, worker copies and symlinks', () => {
     const { canonical, linked } = fixture();
     for (const client of FLEET_CLIENTS) {

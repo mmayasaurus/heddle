@@ -64,7 +64,7 @@ async function main(): Promise<void> {
   catch { throw new Error('invalid hook input JSON (contents omitted)'); }
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('hook input must be an object');
   const env: NodeJS.ProcessEnv = { ...process.env, HEDDLE_COMMS_TRANSPORT: 'stdio', ...(agent && process.env.HEDDLE_WORKER !== '1' ? { HEDDLE_AGENT: agent, FLEET_AGENT: agent } : {}) };
-  const cwd = resolveClientWorkspace(configuredCwd, [raw.cwd, process.cwd()], env);
+  const cwd = resolveClientWorkspace(configuredCwd, [raw.cwd, process.cwd()], env, process.cwd());
   const result = evaluateClientHook(event, raw, cwd, env);
   // These clients support nonblocking context after tools, not in their before-tool response.
   // Re-evaluate nudges with the same arguments; enforced denials remain before-tool only.
