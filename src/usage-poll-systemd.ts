@@ -4,7 +4,7 @@ import { accessSync, constants, lstatSync, readFileSync, realpathSync } from 'no
 import { homedir } from 'node:os';
 import { isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { secureWriteFile } from './secure-fs.js';
+import { acquireCredentialLock, releaseCredentialLock, secureWriteFile } from './secure-fs.js';
 import { DEFAULT_POLL_INTERVAL_SECS, USAGE_POLL_LABEL, WINDOW_KEEPER_LABEL } from './usage-poll-launchd.js';
 
 export const USAGE_POLL_SERVICE = `${USAGE_POLL_LABEL}.service`;
@@ -72,8 +72,8 @@ export function renderUsagePollSystemd(opts: {
   // Pin both defaults as well as overrides: the user manager may retain a different shell's env.
   const env = {
     HOME: home,
-    HEDDLE_ACCOUNTS: absolutePath(opts.env?.HEDDLE_ACCOUNTS || join(home, '.heddle', 'accounts.json'), 'HEDDLE_ACCOUNTS'),
-    HEDDLE_USAGE_DIR: absolutePath(opts.env?.HEDDLE_USAGE_DIR || join(home, '.heddle', 'usage'), 'HEDDLE_USAGE_DIR'),
+    HEDDLE_ACCOUNTS: absolutePath(opts.env?.HEDDLE_ACCOUNTS ?? join(home, '.heddle', 'accounts.json'), 'HEDDLE_ACCOUNTS'),
+    HEDDLE_USAGE_DIR: absolutePath(opts.env?.HEDDLE_USAGE_DIR ?? join(home, '.heddle', 'usage'), 'HEDDLE_USAGE_DIR'),
   };
   return {
     service: `${MANAGED}[Unit]
@@ -113,6 +113,9 @@ function systemctl(args: string[]): string {
     if (args[0] === 'show' && err.status === 1 && /^LoadState=not-found$/m.test(err.stdout ?? '')) {
       return err.stdout!;
     }
+    if (args[0] === 'is-active' && err.status === 3) {
+      throw new Error('timer did not become active', { cause: error });
+    }
     throw new Error(`systemctl --user ${args.join(' ')} failed (${err.code ?? err.status ?? 'unknown'}); check the user service manager and retry`, { cause: error });
   }
 }
@@ -143,17 +146,25 @@ function planFile(path: string, contents: string): SystemdFileAction {
   return { path, contents, action: 'update' };
 }
 
-function stableRuntime(node: string, cli: string): { nodeBin: string; cliJs: string } {
-  // Resolve symlinks before rejecting disposable worktrees, then bake the resolved runtime paths.
-  const resolvedNode = realpathSync(node);
-  const resolvedCli = realpathSync(cli);
-  if ([resolvedNode, resolvedCli].some((path) => path.split(sep).includes('.worktrees'))) {
+function validateRuntime(node: string, cli: string): void {
+  // Both paths have already been resolved, including during portable previews.
+  if ([node, cli].some((path) => path.split(sep).includes('.worktrees'))) {
     throw new Error('refusing to schedule an executable inside a disposable .worktrees directory; use a stable installation');
   }
-  accessSync(resolvedNode, constants.X_OK);
-  accessSync(resolvedCli, constants.R_OK);
-  if (!lstatSync(resolvedCli).isFile()) throw new Error('CLI entry point must be a regular file');
-  return { nodeBin: resolvedNode, cliJs: resolvedCli };
+  accessSync(node, constants.X_OK);
+  accessSync(cli, constants.R_OK);
+  if (!lstatSync(cli).isFile()) throw new Error('CLI entry point must be a regular file');
+}
+
+function sameUnitPath(actual: string, expected: string): boolean {
+  if (actual === expected) return true;
+  if (!actual) return false;
+  try {
+    return realpathSync(actual) === realpathSync(expected);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw error;
+  }
 }
 
 function checkExistingUnits(files: SystemdFileAction[], run: (args: string[]) => string): void {
@@ -166,7 +177,7 @@ function checkExistingUnits(files: SystemdFileAction[], run: (args: string[]) =>
   for (const file of files) {
     const unit = file.path === files[0].path ? USAGE_POLL_SERVICE : USAGE_POLL_TIMER;
     const state = unitState(run, unit);
-    if (state.LoadState === 'loaded' && (state.FragmentPath !== file.path || state.DropInPaths)) {
+    if (state.LoadState === 'loaded' && (!sameUnitPath(state.FragmentPath, file.path) || state.DropInPaths)) {
       throw new Error(`refusing to shadow a unit from another path or with drop-ins: ${unit}`);
     }
   }
@@ -174,24 +185,47 @@ function checkExistingUnits(files: SystemdFileAction[], run: (args: string[]) =>
 
 function writeUnits(files: SystemdFileAction[]): void {
   // Both files have been validated. Keep old managed contents for operator recovery.
-  for (const file of files) {
-    if (file.action === 'update') {
-      file.backupPath = `${file.path}.backup-${randomUUID()}`;
-      secureWriteFile(file.backupPath, readFileSync(file.path, 'utf8'));
+  try {
+    for (const file of files) {
+      if (file.action === 'update') {
+        file.backupPath = `${file.path}.backup-${randomUUID()}`;
+        secureWriteFile(file.backupPath, readFileSync(file.path, 'utf8'));
+      }
     }
+    for (const file of files) if (file.action !== 'unchanged') secureWriteFile(file.path, file.contents);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new Error(`systemd unit write failed; files may be partially updated, but no activation commands ran: ${reason}; fix the filesystem error and rerun the installer (previous managed files are preserved in .backup-* files)`, { cause: error });
   }
-  for (const file of files) if (file.action !== 'unchanged') secureWriteFile(file.path, file.contents);
 }
 
-function activateTimer(commands: string[][], run: (args: string[]) => string, unitDir: string): void {
+function activateTimer(commands: string[][], run: (args: string[]) => string, unitDir: string, files: SystemdFileAction[]): void {
   try {
     for (const command of commands) {
       const output = run(command);
+      // A reload can expose new drop-ins or a scheduler that was absent during preflight.
+      if (command[0] === 'daemon-reload') checkExistingUnits(files, run);
       if (command[0] === 'is-active' && output.trim() !== 'active') throw new Error('timer did not become active');
     }
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     throw new Error(`systemd units were written in ${unitDir}, but activation was not verified: ${reason}; inspect systemctl --user status ${USAGE_POLL_TIMER} before retrying`, { cause: error });
+  }
+}
+
+function installUnits(unitDir: string, rendered: { service: string; timer: string }, run: (args: string[]) => string, commands: string[][]): SystemdFileAction[] {
+  const lockPath = join(unitDir, '.heddle-usage-poll-install.lock');
+  if (!acquireCredentialLock(lockPath).ok) throw new Error(`another systemd installer holds ${lockPath}; retry after it finishes`);
+  try {
+    // Re-read files and manager state under the shared lock; earlier plans may be stale.
+    const files = [planFile(join(unitDir, USAGE_POLL_SERVICE), rendered.service),
+      planFile(join(unitDir, USAGE_POLL_TIMER), rendered.timer)];
+    checkExistingUnits(files, run);
+    writeUnits(files);
+    activateTimer(commands, run, unitDir, files);
+    return files;
+  } finally {
+    releaseCredentialLock(lockPath);
   }
 }
 
@@ -208,7 +242,8 @@ export function installUsagePollSystemd(
   const configHome = absolutePath(env.XDG_CONFIG_HOME || join(home, '.config'), 'XDG_CONFIG_HOME');
   const node = absolutePath(deps.nodeBin ?? process.execPath, 'Node executable');
   const cli = absolutePath(deps.cliJs ?? fileURLToPath(new URL('cli.js', import.meta.url)), 'CLI entry point');
-  const renderOptions = { nodeBin: node, cliJs: cli, homeDir: home,
+  const runtime = { nodeBin: realpathSync(node), cliJs: realpathSync(cli) };
+  const renderOptions = { ...runtime, homeDir: home,
     startIntervalSecs: options.startIntervalSecs ?? DEFAULT_POLL_INTERVAL_SECS, env };
   const rendered = renderUsagePollSystemd(renderOptions);
   const unitDir = join(configHome, 'systemd', 'user');
@@ -218,11 +253,8 @@ export function installUsagePollSystemd(
     ['is-active', USAGE_POLL_TIMER]];
   if (dryRun) return { dryRun, activated: false, files, commands };
 
-  const stable = renderUsagePollSystemd({ ...renderOptions, ...stableRuntime(node, cli) });
-  files[0] = planFile(files[0].path, stable.service);
+  validateRuntime(runtime.nodeBin, runtime.cliJs);
   const run = deps.systemctl ?? systemctl;
   checkExistingUnits(files, run);
-  writeUnits(files);
-  activateTimer(commands, run, unitDir);
-  return { dryRun, activated: true, files, commands };
+  return { dryRun, activated: true, files: installUnits(unitDir, rendered, run, commands), commands };
 }

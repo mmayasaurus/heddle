@@ -1,10 +1,11 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, test, vi } from 'vitest';
 import { useTempResources } from './helpers.js';
 import { installUsagePollSystemd, renderUsagePollSystemd, USAGE_POLL_SERVICE, USAGE_POLL_TIMER } from '../src/usage-poll-systemd.js';
 import { WINDOW_KEEPER_LABEL } from '../src/usage-poll-launchd.js';
+import * as secureFs from '../src/secure-fs.js';
 
 const absent = 'LoadState=not-found\nFragmentPath=\nDropInPaths=\n';
 const { tempDir } = useTempResources('heddle-systemd-test-');
@@ -16,7 +17,7 @@ function fixture() {
   return { homeDir, cliJs, nodeBin: process.execPath, platform: 'linux' as const, env: {}, systemctl };
 }
 
-describe('Linux usage poll installer', () => {
+describe('systemd unit rendering', () => {
   test('renders a shell-free poller with literal paths and only the intended environment', () => {
     const units = renderUsagePollSystemd({ nodeBin: '/opt/a b/node', cliJs: '/opt/$HOME/%i/"quoted"/cli.js',
       homeDir: '/home/test', startIntervalSecs: 420, env: {
@@ -33,6 +34,9 @@ describe('Linux usage poll installer', () => {
     expect(units.timer).toContain(`Unit=${USAGE_POLL_SERVICE}`);
   });
 
+});
+
+describe('portable systemd previews', () => {
   test('preview works on macOS without writing or contacting the manager, honoring XDG_CONFIG_HOME', () => {
     const deps = fixture();
     const config = join(deps.homeDir, 'custom-config');
@@ -51,6 +55,22 @@ describe('Linux usage poll installer', () => {
     expect(existsSync(join(deps.homeDir, '.config'))).toBe(false);
   });
 
+  test('preview resolves executable symlinks exactly as installation does', () => {
+    const deps = fixture();
+    const alias = join(deps.homeDir, 'cli-alias.js');
+    symlinkSync(deps.cliJs, alias);
+    const linked = { ...deps, cliJs: alias };
+    const preview = installUsagePollSystemd({ dryRun: true }, linked);
+    expect(preview.files[0].contents).not.toContain('cli-alias.js');
+    const installed = installUsagePollSystemd({}, linked);
+    expect(preview.files).toEqual(installed.files);
+    const after = installUsagePollSystemd({ dryRun: true }, linked);
+    expect(after.files.map(file => file.action)).toEqual(['unchanged', 'unchanged']);
+  });
+
+});
+
+describe('systemd installer input validation', () => {
   test.each([0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1])('rejects invalid interval %s before any side effect', (interval) => {
     const deps = fixture();
     expect(() => installUsagePollSystemd({ startIntervalSecs: interval }, deps)).toThrow(/positive safe integer/);
@@ -64,6 +84,16 @@ describe('Linux usage poll installer', () => {
     expect(() => installUsagePollSystemd({ dryRun: true }, { ...deps, env: { XDG_CONFIG_HOME: 'relative' } })).toThrow(/absolute/);
   });
 
+  test.each(['HEDDLE_ACCOUNTS', 'HEDDLE_USAGE_DIR'])('rejects an explicit empty %s instead of changing the data source', (name) => {
+    const deps = fixture();
+    expect(() => installUsagePollSystemd({}, { ...deps, env: { [name]: '' } })).toThrow(`${name} must be an absolute path`);
+    expect(existsSync(join(deps.homeDir, '.config'))).toBe(false);
+    expect(deps.systemctl).not.toHaveBeenCalled();
+  });
+
+});
+
+describe('systemd unit installation and updates', () => {
   test('installs both units before activating; repeat installation is idempotent', () => {
     const deps = fixture();
     const report = installUsagePollSystemd({}, deps);
@@ -72,7 +102,7 @@ describe('Linux usage poll installer', () => {
       expect(readFileSync(file.path, 'utf8')).toBe(file.contents);
       expect(statSync(file.path).mode & 0o777).toBe(0o600);
     }
-    expect(deps.systemctl.mock.calls.map(([args]) => args).slice(-4)).toEqual([
+    expect(deps.systemctl.mock.calls.map(([args]) => args).filter(args => args[0] !== 'show')).toEqual([
       ['daemon-reload'], ['enable', USAGE_POLL_TIMER], ['restart', USAGE_POLL_TIMER], ['is-active', USAGE_POLL_TIMER],
     ]);
     deps.systemctl.mockImplementation(args => {
@@ -95,6 +125,71 @@ describe('Linux usage poll installer', () => {
     expect(readFileSync(after.files[1].path, 'utf8')).toContain('OnUnitInactiveSec=600s');
   });
 
+});
+
+describe('systemd installer concurrency and recovery', () => {
+  test('an existing installer lock prevents unit changes and activation', () => {
+    const deps = fixture();
+    const dir = join(deps.homeDir, '.config/systemd/user');
+    const lock = join(dir, '.heddle-usage-poll-install.lock');
+    expect(secureFs.acquireCredentialLock(lock).ok).toBe(true);
+    try {
+      expect(() => installUsagePollSystemd({}, deps)).toThrow(/another systemd installer/);
+      expect(existsSync(join(dir, USAGE_POLL_SERVICE))).toBe(false);
+      expect(existsSync(join(dir, USAGE_POLL_TIMER))).toBe(false);
+      expect(deps.systemctl.mock.calls.every(([args]) => args[0] === 'show')).toBe(true);
+      expect(readFileSync(lock, 'utf8')).toBe(String(process.pid));
+    } finally {
+      secureFs.releaseCredentialLock(lock);
+    }
+  });
+
+  test('partial write failures preserve backups, skip activation, release the lock, and allow recovery', () => {
+    const deps = fixture();
+    const before = installUsagePollSystemd({}, deps);
+    const dir = join(deps.homeDir, '.config/systemd/user');
+    const updated = { ...deps, env: { HEDDLE_ACCOUNTS: join(deps.homeDir, 'other-accounts.json') } };
+    const originalWrite = secureFs.secureWriteFile;
+    const fault = vi.spyOn(secureFs, 'secureWriteFile').mockImplementation((path, contents, opts) => {
+      if (path === before.files[1].path) throw new Error('synthetic disk failure');
+      originalWrite(path, contents, opts);
+    });
+    deps.systemctl.mockClear();
+    try {
+      expect(() => installUsagePollSystemd({ startIntervalSecs: 600 }, updated)).toThrow(/partially updated.*no activation commands ran/);
+    } finally {
+      fault.mockRestore();
+    }
+    expect(deps.systemctl.mock.calls.every(([args]) => args[0] === 'show')).toBe(true);
+    expect(existsSync(join(dir, '.heddle-usage-poll-install.lock'))).toBe(false);
+    expect(readFileSync(before.files[0].path, 'utf8')).toContain('other-accounts.json');
+    expect(readFileSync(before.files[1].path, 'utf8')).toBe(before.files[1].contents);
+    const backups = readdirSync(dir).filter(name => name.includes('.backup-')).map(name => readFileSync(join(dir, name), 'utf8'));
+    expect(backups).toContain(before.files[0].contents);
+    expect(backups).toContain(before.files[1].contents);
+    const recovered = installUsagePollSystemd({ startIntervalSecs: 600 }, updated);
+    expect(recovered.activated).toBe(true);
+    expect(readFileSync(recovered.files[1].path, 'utf8')).toContain('OnUnitInactiveSec=600s');
+  });
+
+});
+
+describe('systemd manager conflict checks', () => {
+  test('a drop-in discovered after reload prevents enabling or starting the timer', () => {
+    const deps = fixture();
+    let reloaded = false;
+    deps.systemctl.mockImplementation(args => {
+      if (args[0] === 'daemon-reload') { reloaded = true; return ''; }
+      if (reloaded && args[1] === USAGE_POLL_SERVICE) {
+        return `LoadState=loaded\nFragmentPath=${join(deps.homeDir, '.config/systemd/user', USAGE_POLL_SERVICE)}\nDropInPaths=/extra.conf\n`;
+      }
+      return absent;
+    });
+    expect(() => installUsagePollSystemd({}, deps)).toThrow(/activation was not verified.*drop-ins/);
+    expect(deps.systemctl.mock.calls.some(([args]) => args[0] === 'enable' || args[0] === 'restart')).toBe(false);
+    expect(existsSync(join(deps.homeDir, '.config/systemd/user/.heddle-usage-poll-install.lock'))).toBe(false);
+  });
+
   test.each(['service', 'timer'])('refuses a configured window-keeper %s without writing or activating', (kind) => {
     const deps = fixture();
     deps.systemctl.mockImplementation(args => args[1] === `${WINDOW_KEEPER_LABEL}.${kind}` ? 'LoadState=loaded\n' : absent);
@@ -112,6 +207,30 @@ describe('Linux usage poll installer', () => {
     expect(existsSync(join(deps.homeDir, '.config'))).toBe(false);
   });
 
+});
+
+describe('systemd canonical unit paths', () => {
+  test('accepts the same loaded unit through a symlinked config ancestor', () => {
+    const deps = fixture();
+    const config = join(deps.homeDir, 'config-target');
+    const unitDir = join(config, 'systemd/user');
+    mkdirSync(unitDir, { recursive: true });
+    symlinkSync(config, join(deps.homeDir, '.config'));
+    let reloaded = false;
+    deps.systemctl.mockImplementation(args => {
+      if (args[0] === 'daemon-reload') { reloaded = true; return ''; }
+      if (args[0] === 'is-active') return 'active\n';
+      if (args[0] !== 'show' || !reloaded || args[1].includes(WINDOW_KEEPER_LABEL)) return absent;
+      return `LoadState=loaded\nFragmentPath=${realpathSync(join(unitDir, args[1]))}\nDropInPaths=\n`;
+    });
+    const report = installUsagePollSystemd({}, deps);
+    expect(report.activated).toBe(true);
+    expect(readFileSync(join(unitDir, USAGE_POLL_SERVICE), 'utf8')).toBe(report.files[0].contents);
+    expect(installUsagePollSystemd({}, deps).files.map(file => file.action)).toEqual(['unchanged', 'unchanged']);
+  });
+});
+
+describe('systemd filesystem conflict checks', () => {
   test('does not overwrite unrelated units or symlinked unit files', () => {
     const deps = fixture();
     const dir = join(deps.homeDir, '.config/systemd/user');
@@ -149,6 +268,9 @@ describe('Linux usage poll installer', () => {
     expect(deps.systemctl).not.toHaveBeenCalled();
   });
 
+});
+
+describe('systemd activation failures and command arguments', () => {
   test.each(['daemon-reload', 'enable', 'restart', 'is-active'])('reports %s failure without claiming activation', (failure) => {
     const deps = fixture();
     deps.systemctl.mockImplementation(args => {
@@ -174,6 +296,9 @@ describe('Linux usage poll installer', () => {
     }
   });
 
+});
+
+describe('systemd subprocess and Linux parser integration', () => {
   test('real subprocess boundary accepts explicit not-found but refuses a failed user bus', () => {
     const deps = fixture();
     const bin = join(deps.homeDir, 'bin');
@@ -185,6 +310,11 @@ describe('Linux usage poll installer', () => {
     try {
       process.env.PATH = bin;
       expect(installUsagePollSystemd({}, { ...deps, systemctl: undefined }).activated).toBe(true);
+      writeFileSync(fake, '#!/bin/sh\ncase "$2" in\nshow) printf "LoadState=not-found\\n"; exit 1;;\nis-active) echo inactive; exit 3;;\nesac\n');
+      const inactive = fixture();
+      expect(() => installUsagePollSystemd({}, { ...inactive, systemctl: undefined }))
+        .toThrow(/activation was not verified.*timer did not become active/);
+      expect(existsSync(join(inactive.homeDir, '.config/systemd/user/.heddle-usage-poll-install.lock'))).toBe(false);
       writeFileSync(fake, '#!/bin/sh\necho "Failed to connect to bus" >&2\nexit 1\n');
       const other = fixture();
       expect(() => installUsagePollSystemd({}, { ...other, systemctl: undefined })).toThrow(/systemctl.*failed/);

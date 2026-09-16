@@ -24,7 +24,8 @@ On systems where the user manager stops at logout, polling stops with it.
 
 The installer pins the resolved Node and CLI paths, home directory, account-registry path, and usage
 output directory. `HEDDLE_ACCOUNTS`, `HEDDLE_USAGE_DIR`, and `XDG_CONFIG_HOME` overrides must be absolute
-paths. Credentials are read by the existing poller; no credential values are copied into the units.
+paths; explicitly empty account or usage paths are rejected instead of silently selecting defaults.
+Credentials are read by the existing poller; no credential values are copied into the units.
 Run from a stable installation: activation refuses executables under `.worktrees`, including symlinks
 into one. Re-run the installer if the installed Node or Heddle path changes.
 
@@ -32,8 +33,24 @@ Both unit files are validated before writing. Unrelated existing units, symlinke
 from another location, and systemd drop-ins are refused. Changed Heddle-managed files are backed up
 beside the original before replacement. A configured `io.heddle.window-keeper.service` or `.timer`
 also blocks installation. This check cannot discover arbitrary cron jobs or custom schedulers: keep
-only one producer for the same usage directory. Preview does not verify runtime prerequisites;
-activation failures are reported without claiming the timer is active.
+only one producer for the same usage directory. Activation failures are reported without claiming
+the timer is active. Preview resolves Node
+and CLI symlinks so its file contents and change actions match installation, but does not check
+executable permissions or contact the user manager.
+
+A shared installer lock prevents concurrent Heddle installations. Files and manager state are checked
+again under the lock, and manager state is rechecked after reload before enabling or starting the timer.
+Do not edit units or run another scheduler administration tool during installation; those tools do not
+participate in Heddle's lock. The two unit files are not one atomic filesystem transaction: a disk error
+can leave a partial update, but the installer then runs no activation commands and reports the failure.
+Fix the filesystem error and rerun to reconcile the units, or inspect the saved `.backup-*` files.
+
+Consumers must read the same account registry and usage directory as the poller. The desktop dashboard
+currently reads the default `~/.heddle/accounts.json` and `~/.heddle/usage` locations; use the defaults
+with that dashboard. Custom paths are for headless consumers configured to read those paths.
+Keep the default 300-second interval unless the consumers' freshness policy is also configured for a
+longer interval. The dashboard's `HEDDLE_OAUTH_CACHE_SECS` setting is separate from this installer;
+without matching freshness settings, a deliberately slow poll can leave usage marked stale between runs.
 
 Inspect and stop the timer with:
 

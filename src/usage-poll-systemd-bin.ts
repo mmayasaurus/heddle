@@ -24,7 +24,7 @@ try {
         if (report.dryRun) process.stdout.write(`${file.contents}\n`);
       }
       for (const command of report.commands) process.stdout.write(`${report.dryRun ? 'would run' : 'ran'}: systemctl --user ${command.join(' ')}\n`);
-      process.stdout.write(report.activated ? 'Timer active; use journalctl --user -u io.heddle.usage-poll-claude.service to inspect poll results.\n' : 'Preview only; executable paths and user-manager state are checked when installing.\n');
+      process.stdout.write(report.activated ? 'Timer active; use journalctl --user -u io.heddle.usage-poll-claude.service to inspect poll results.\n' : 'Preview only; executable permissions and user-manager state are checked when installing.\n');
     }
   }
 } catch (error) {
