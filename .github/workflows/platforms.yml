@@ -40,5 +40,35 @@ jobs:
         run: npm run typecheck
       - name: Build
         run: npm run build
+      - name: Diagnose Windows PowerShell transport
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import { spawnSync } from 'node:child_process';
+          import { writeFileSync } from 'node:fs';
+          import { join } from 'node:path';
+          const root = process.env.SystemRoot;
+          const executable = join(root, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+          const script = join(process.env.RUNNER_TEMP, 'heddle-transport-canary.ps1');
+          // Fixed non-secret canary only; never run these diagnostics with credential input.
+          writeFileSync(script, `[Console]::Error.WriteLine('started');
+          [Console]::InputEncoding=[Text.UTF8Encoding]::new($false);
+          [Console]::Error.WriteLine('input-encoding-set');
+          [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);
+          [Console]::Error.WriteLine('output-encoding-set');
+          $line=[Console]::In.ReadLine();
+          [Console]::Error.WriteLine('input-read');
+          [Console]::Out.Write($line);`);
+          for (const mode of ['default', 'input-none', 'full-environment']) {
+            const args = ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+              ...(mode === 'input-none' ? ['-InputFormat', 'None'] : []), '-File', script];
+            const result = spawnSync(executable, args, { input: 'HEddle_CANARY\n', encoding: 'utf8',
+              timeout: 30000, maxBuffer: 16384, windowsHide: true,
+              env: mode === 'full-environment' ? process.env : { SystemRoot: root, WINDIR: root } });
+            process.stdout.write(JSON.stringify({ mode, status: result.status, code: result.error?.code,
+              stdout: result.stdout, stderr: result.stderr }) + '\n');
+          }
+          NODE
       - name: Native filesystem, process, and fleet tests
         run: npx vitest run --bail=1 --reporter=verbose test/platform-process.test.ts test/platform-filesystem.test.ts test/hook-command.test.ts test/secure-fs-windows.test.ts test/client-session.test.ts test/client-hooks.test.ts test/comms/address.test.ts test/comms/log.test.ts test/comms/broker.test.ts
