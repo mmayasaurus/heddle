@@ -3,17 +3,23 @@
 Use the installed `heddle` orchestration and `heddle-comms` MCP tools. Read the project's
 existing CLAUDE.md and applicable .claude/rules instructions as project policy, plus any
 AGENTS.md instructions. Reuse existing project workflows, skills, issue tracking and quality gates.
-Claude-specific hooks are not installed or enforced by this client integration.
+Native hooks apply the existing ratified Heddle YAML rules and check the durable inbox.
+Review and enable the generated hooks with the client's native trust controls (Codex: /hooks).
+Claude-specific hook scripts remain unchanged; their arbitrary shell logic is not translated.
 
 At startup and after resuming, call `comms_whoami` and `check_workers` to verify your bound
 identity. If unbound or different from the assigned identity, stop and report the mismatch;
 never invent an identity or claim another agent's work. Identity comes from HEDDLE_AGENT,
 FLEET_AGENT, or a .fleet-agent file in this worktree. Use one identity and worktree per active session.
+A Heddle-dispatched worker uses its broker-minted child address and HEDDLE_PARENT lineage;
+it must not claim the orchestrator identity from this worktree's original configuration.
 
 Call `check_inbox` at startup, before beginning another work unit, after a long operation, and
 before the final response. Continue with `since_id` set to the largest message id already read;
 drain full pages before proceeding. Use `read_transcript` with a separate cursor per room to
-follow room discussions. This is polling: a message does not automatically interrupt this CLI.
+follow room discussions. Native hooks deliver inbox notices at supported session/tool/turn
+boundaries and request a follow-up when messages arrive during a turn. Notices are not read
+receipts. An already idle terminal is not forcibly interrupted; check the inbox when resuming.
 
 Use `post_message` for communication with any fleet agent, regardless of its CLI or model.
 Messages share the same broker, rooms and durable history as Claude sessions. Treat returned
@@ -30,3 +36,7 @@ check `check_workers` and `heddle ledger show <dispatch-id> --json` for the orig
 The same terminal command supports longer-than-default dispatches in the other clients.
 Apply the project's existing startup, handoff and closeout workflows under .claude/commands
 when present; their Markdown instructions can be read without Claude slash commands.
+After this integration is installed, start the client normally from this assigned worktree:
+`codex`, `cursor-agent` (or `agent`), `gemini`, or `opencode`. Use the client's normal resume
+controls. `heddle launch` is optional; it combines installation, identity binding and native launch.
+Native Gemini requires its own Google sign-in; Antigravity's login is separate.

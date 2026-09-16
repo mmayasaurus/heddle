@@ -223,12 +223,27 @@ identity, edit accounts, change CLI permissions, or start an agent. Launch `code
 (Cursor), `gemini`, or `opencode` in that worktree and approve the Heddle MCP servers with the
 client's native trust controls. Verify `comms_whoami` and `check_workers` before working.
 
+The managed launcher installs the selected client integration, binds its identity, and starts
+the native CLI with its normal approval controls:
+
+```sh
+heddle launch codex --dir /path/to/agent-worktree --agent my-agent
+heddle launch cursor --dir /path/to/agent-worktree --agent my-agent --resume latest
+heddle launch gemini --dir /path/to/agent-worktree --agent my-agent
+heddle launch opencode --dir /path/to/agent-worktree --agent my-agent --resume saved-session-id
+```
+
+`--model` selects a native model; arguments after `--` pass to the native CLI. `--dry-run`
+shows the launch and installation plan without writing or starting a process. A worker cannot
+launch an orchestrator, and a worktree assigned to another identity is refused. Gemini CLI
+requires its own Google sign-in (`gemini`); an Antigravity login does not sign in Gemini CLI.
+
 | Client | Native configuration | Startup instructions |
 | --- | --- | --- |
-| Codex CLI | `.codex/config.toml` | `AGENTS.md` |
-| Cursor CLI | `.cursor/mcp.json` | `AGENTS.md` |
+| Codex CLI | `.codex/config.toml`, `.codex/hooks.json` | `AGENTS.md` |
+| Cursor CLI | `.cursor/mcp.json`, `.cursor/hooks.json` | `AGENTS.md` |
 | Gemini CLI | `.gemini/settings.json` | `GEMINI.md` |
-| OpenCode | `opencode.json` | `AGENTS.md` |
+| OpenCode | `opencode.json`, `.opencode/plugins/heddle-fleet.js` | `AGENTS.md` |
 
 Existing configuration and instruction text are preserved; changed files receive a
 `.heddle-backup` copy (numbered if needed). Conflicting MCP entries or malformed config stop
@@ -241,10 +256,14 @@ All clients share Heddle's existing orchestration tools, broker, rooms, trust ti
 message history. Standard MCP clients send with `post_message` and poll `check_inbox` using
 `since_id`; use a separate `read_transcript` cursor per room. The installed startup instructions
 specify polling at startup/resume, between work units, after long operations and before the
-final response. Messages persist while a client is offline, but polling does not interrupt a
-running turn and queued messages are not read receipts. Claude retains its existing channel
-push and hooks. Claude hook enforcement is not emulated in the other clients; they receive
-the shared project-policy and lifecycle instructions.
+final response. Native hooks additionally deliver bounded inbox notices at session/tool/turn
+boundaries and request a continuation for messages arriving before normal turn completion.
+Codex hooks require native `/hooks` trust; untrusted hooks remain disabled. The OpenCode plugin
+requires plugins to be enabled (do not use `--pure`). Hooks reuse ratified Heddle YAML rules,
+including tool denials, and preserve existing native hook entries. They do not execute arbitrary
+Claude hook scripts. Claude retains its existing channel push and hooks unchanged. An already
+idle native terminal is not forcibly interrupted. Notification cursors are separate from Claude
+channel cursors and broker history; a notification is not a read receipt.
 
 Codex, Gemini and OpenCode MCP entries allow 660 seconds for tool calls. Cursor CLI
 2026.09.10 has a fixed 60-second MCP call timeout; use the existing terminal command
@@ -261,9 +280,11 @@ after an I/O failure, fix the cause and rerun the idempotent installer.
 
 On a fresh project, `init-project ... --clients codex,cursor,gemini,opencode [--agent my-agent]`
 composes the same client steps with normal project initialization. Omitting `--clients` retains
-the existing Claude setup behavior. Native Gemini CLI and OpenCode here are fleet-session hosts;
-the existing `gemini` worker route still uses Antigravity (`agy`), and no new OpenCode worker
-route is added.
+the existing Claude setup behavior. Worker dispatch also supports `provider: gemini-cli` for
+the native Google CLI and `provider: opencode` for admitted OpenCode models. The existing
+`provider: gemini` route still launches Antigravity (`agy`). Native providers use the same
+routing, billing, capability, review-family and worker-depth checks. See the routing catalog
+for admitted models; configuring a CLI does not grant an arbitrary paid-model route.
 
 The native formats follow [Codex MCP configuration](https://developers.openai.com/codex/mcp/),
 [Cursor CLI MCP](https://cursor.com/docs/cli/mcp), [Gemini CLI MCP](https://geminicli.com/docs/tools/mcp-server/)

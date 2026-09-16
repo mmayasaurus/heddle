@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { isBillingClass, BILLING_CLASSES } from './accounts.js';
+import { modelFamily } from './model-family.js';
 
 /**
  * Routing table loader — task class → provider/model/effort/skills, with fallbacks and the
@@ -284,6 +285,31 @@ function assertRoutableTarget(table: RoutingTable, provider: string, model: stri
   if (provider === 'cursor' && isNeverViaCursor(table, model)) {
     throw new Error(`${subject} model "${model}" is a direct-subscription family — never route it through Cursor (policy.never_via_cursor)`);
   }
+  assertNativeHarnessPolicy(table, provider, model, subject);
+}
+
+function assertNativeHarnessPolicy(table: RoutingTable, provider: string, model: string, subject: string): void {
+  const cfg = providerConfig(table, provider);
+  if (!cfg) return;
+  if (provider === 'opencode') {
+    const slash = model.indexOf('/');
+    if (slash <= 0 || slash === model.length - 1) {
+      throw new Error(`${subject} OpenCode model "${model}" must use provider/model form`);
+    }
+    const family = modelFamily(provider, model);
+    if (family && directSubscriptionFamilies(table).includes(family)) {
+      throw new Error(
+        `${subject} model "${model}" is a direct-subscription family (${family}) — route it through ` +
+        `that provider's official native adapter, not through OpenCode (policy.never_via_cursor)`,
+      );
+    }
+  }
+  if (cfg.strict_model_catalog === true) {
+    const models = Array.isArray(cfg.models) ? cfg.models.filter((entry): entry is string => typeof entry === 'string') : [];
+    if (!models.includes(model)) {
+      throw new Error(`${subject} model "${model}" is not in the verified model catalog for provider "${provider}"`);
+    }
+  }
 }
 
 export function resolveRoute(table: RoutingTable, taskClass: string): Route {
@@ -381,14 +407,19 @@ export const FAMILY_PREFIXES: Record<string, string[]> = {
   gemini: ['gemini-'],
 };
 
-export function neverViaCursorPrefixes(table: RoutingTable): string[] {
+function directSubscriptionFamilies(table: RoutingTable): string[] {
   const raw = (table.policy as any)?.never_via_cursor;
+  return Array.isArray(raw) && raw.length > 0 && raw.every((x) => typeof x === 'string')
+    ? (raw as string[]).map((family) => family.toLowerCase())
+    : Object.keys(FAMILY_PREFIXES);
+}
+
+export function neverViaCursorPrefixes(table: RoutingTable): string[] {
   // Fail SAFE: only a NON-EMPTY, all-string list is honored as tuning; a missing / non-array / EMPTY /
   // non-string-containing never_via_cursor defaults to ALL known direct-subscription families (refuse
   // them), NEVER [] — an empty or malformed list would silently disable the billing guard at route
   // resolution (codeant #63; the empty-list and non-string holes, cubic #63).
-  const fams = Array.isArray(raw) && raw.length > 0 && raw.every((x) => typeof x === 'string')
-    ? (raw as string[]) : Object.keys(FAMILY_PREFIXES);
+  const fams = directSubscriptionFamilies(table);
   // Case-fold each family and use an OWN-property lookup: a synthesized `${f}-` for an unknown family
   // must be lowercased (else an uppercase policy family like `Groq` yields `Groq-` and never matches the
   // lowercased model — cubic #63), and `FAMILY_PREFIXES[f]` for a prototype key like `toString` must not
@@ -571,5 +602,6 @@ export function directRoute(
   if (provider === 'cursor' && isNeverViaCursor(table, model)) {
     throw new Error(`model "${model}" is a direct-subscription family — never route it through Cursor (policy.never_via_cursor)`);
   }
+  assertNativeHarnessPolicy(table, provider, model, 'direct route');
   return { taskClass: `direct:${provider}/${model}`, provider, model, skills, mcp, editsCode: false, requiresWeb: false, dispatchable: true, readOnly: false, autoAssess: false };
 }

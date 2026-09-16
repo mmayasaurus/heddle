@@ -146,6 +146,26 @@ providers:
       - gemini-3.5-flash-high
       - gemini-3.1-pro-low            # ✅ model-echo verified via stream-json
       - gemini-3.1-pro-high
+  gemini-cli:
+    auth: google-subscription
+    billing_class: subscription-quota
+    execution: headless               # native Google Gemini CLI; distinct from gemini/agy
+    strict_model_catalog: true         # direct routes must use a verified native model below
+    models: [gemini-3.1-pro-preview]
+    last_verified: 2026-09-15          # Gemini CLI 0.35.3 argv/output contract; auth pending operator login
+  opencode:
+    auth: opencode-free
+    billing_class: free-tier
+    execution: headless               # native OpenCode CLI `run --format json`
+    strict_model_catalog: true         # prevents unclassified upstream/API-key spend through the harness
+    models:                            # `opencode models opencode`, OpenCode 1.14.41, 2026-09-15
+      - opencode/big-pickle
+      - opencode/ling-3.0-flash-fin-free
+      - opencode/mimo-v2.5-free
+      - opencode/muse-spark-1.2-contributor-free
+      - opencode/muse-spark-1.3-contributor-free
+      - opencode/nemotron-3-ultra-free
+      - opencode/nemotron-3.5-lightning-free
   ollama-cloud:
     status: excluded                  # PR reviewer fleet only
 

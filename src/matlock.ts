@@ -22,8 +22,9 @@ function sleepSync(ms: number): void {
 
 /** Run `fn` holding the lock directory. On timeout the mutation proceeds UNLOCKED with a stderr
  *  note — a stuck peer must not deadlock dispatches; the marker/sidecar formats keep even an
- *  unlocked overlap from destroying non-heddle content. */
-export function withFileLock<T>(lockDir: string, fn: () => T): T {
+ *  unlocked overlap from destroying non-heddle content. Native identity writes require the lock:
+ *  required mode never proceeds unlocked or steals a lock based only on its age. */
+export function withFileLock<T>(lockDir: string, fn: () => T, opts: { required?: boolean } = {}): T {
   const deadline = Date.now() + WAIT_MS;
   let locked = false;
   while (!locked && Date.now() <= deadline) {
@@ -32,13 +33,14 @@ export function withFileLock<T>(lockDir: string, fn: () => T): T {
       locked = true;
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'EEXIST') {
+        if (opts.required) throw err;
         // The parent directory is gone or unwritable — a lock is impossible; run the mutation
         // unlocked and let IT surface the real error (never spin on a hopeless mkdir).
         break;
       }
       try {
         const age = Date.now() - statSync(lockDir).mtimeMs;
-        if (age > STALE_MS) {
+        if (age > STALE_MS && !opts.required) {
           // Steal by ATOMIC RENAME: of two racers that both saw the stale mtime, exactly one
           // rename succeeds — an rmdir here could delete the WINNER's freshly-created lock and
           // let both proceed (gitar, #17). pid+time make the husk name unique (the two racers
@@ -56,6 +58,9 @@ export function withFileLock<T>(lockDir: string, fn: () => T): T {
       } catch { continue; /* lock vanished between mkdir and stat — retry (deadline-bounded) */ }
       sleepSync(SPIN_MS);
     }
+  }
+  if (!locked && opts.required) {
+    throw new Error(`required file lock ${lockDir} is busy — refusing an unlocked native identity mutation`);
   }
   if (!locked && Date.now() > deadline) {
     process.stderr.write(`heddle: file lock ${lockDir} busy for ${WAIT_MS}ms — proceeding unlocked\n`);

@@ -4,6 +4,7 @@ import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Route } from './routing.js';
 import { isToolRuntimePath } from './tool-runtime.js';
+import { sameModelFamily } from './model-family.js';
 
 /**
  * heddle-transient paths and spans are EXCLUDED from the mandate digest (HED-56 × HED-3): a peer
@@ -87,16 +88,16 @@ export function pickReviewer(
    *  re-lookup would inspect the WRONG entry when the pool has duplicate (provider,model) rows with
    *  different mcp, and could reject a usable reviewer using a sibling's list (codeant #111). */
   usable: (provider: string, model: string, mcp?: string[]) => string | null = () => null,
+  authorModel?: string,
 ): ReviewerPick | null {
   const authorProvider = normalizeProvider(authorProviderRaw);
   if (!authorProvider) return null;
-  // BOTH sides are normalized: YAML casing ("Cursor ") must not dodge the same-family guard.
-  if (normalizeProvider(route.provider) !== authorProvider) return null;
+  if (!sameModelFamily(route.provider, route.model, authorProvider, authorModel)) return null;
   const pool = route.reviewerPool ?? [];
   const skipped: string[] = [];
   for (let i = 0; i < pool.length; i++) {
     const provider = normalizeProvider(pool[i].provider);
-    if (!provider || provider === authorProvider) continue;
+    if (!provider || sameModelFamily(provider, pool[i].model, authorProvider, authorModel)) continue;
     const unusableReason = usable(provider, pool[i].model, pool[i].mcp);
     if (unusableReason) { skipped.push(`${provider}/${pool[i].model}: ${unusableReason}`); continue; }
     return { provider, model: pool[i].model, ...(pool[i].mcp === undefined ? {} : { mcp: pool[i].mcp }), reason: `pool:${i + 1} (author is ${authorProvider})` };

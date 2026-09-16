@@ -33,7 +33,7 @@ const IDENTITY = resolveIdentity();
 // long-lived MCP server polled by check_workers/recent_dispatches would otherwise accumulate them.
 let LEDGER: Ledger | undefined;
 function ledger(): Ledger {
-  return (LEDGER ??= new Ledger());
+  return (LEDGER ??= new Ledger(process.env.HEDDLE_LEDGER_DB || undefined));
 }
 
 function text(obj: unknown) {
@@ -60,7 +60,7 @@ server.tool(
   {
     prompt: z.string().describe('The sub-task instructions for the worker.'),
     task_class: z.string().optional().describe('Routing task class (see list_task_classes) — supplies policy. Alone: the table\'s route. With provider+model: the named route under this class\'s policy.'),
-    provider: z.string().optional().describe('Explicit route: claude | codex | cursor | gemini (the agy CLI). Requires model (both or neither). Without task_class = direct path. "claude" runs a headless claude -p worker on the best registry account (in_session:true instead returns the structured claude-in-session refusal to run it as your own Agent-tool subagent).'),
+    provider: z.string().optional().describe('Explicit route: claude | codex | cursor | gemini (the agy CLI) | gemini-cli | opencode. Requires model (both or neither). Without task_class = direct path. "claude" runs a headless claude -p worker on the best registry account (in_session:true instead returns the structured claude-in-session refusal to run it as your own Agent-tool subagent).'),
     model: z.string().optional().describe('Explicit route: model id for provider (e.g. cursor-grok-4.6-high).'),
     override_reason: z.string().optional().describe('REQUIRED when you pass provider+model WITHOUT a task_class: say what about THIS task needs this exact model that its routing class does not give you (a bench, a probe, a specific-capability call). Recorded on the ledger row so routing can be tuned from evidence. Must be a real justification — a bare cliché or the route\'s own name is rejected ("proven", "faster", "gpt-5.6-terra" do not pass); a specific sentence does.'),
     cwd: z.string().optional().describe('Working directory for the worker (default: server cwd).'),
@@ -76,8 +76,8 @@ server.tool(
     resume: z.string().optional().describe('Resume a prior worker session by its sessionId.'),
     codex_home: z.string().optional().describe('Account selection for codex workers (CODEX_HOME path).'),
     opt_in: z.boolean().optional().describe('Required for task classes gated behind explicit opt-in, and to grant the exec-privileged capability.'),
-    author_provider: z.string().optional().describe('adversarial-review: the provider that AUTHORED the change (claude | codex | cursor | gemini). The reviewer will be a DIFFERENT provider (reviewer_pool); recorded on the review row for pair scoring.'),
-    author_model: z.string().optional().describe('adversarial-review: the model that authored the change, if known (recorded for pair scoring).'),
+    author_provider: z.string().optional().describe('adversarial-review: the provider that AUTHORED the change (claude | codex | cursor | gemini | gemini-cli | opencode). The reviewer must use a DIFFERENT model family (reviewer_pool); recorded on the review row for pair scoring.'),
+    author_model: z.string().optional().describe('adversarial-review: the model that authored the change; required for OpenCode so its underlying family can be excluded (recorded for pair scoring).'),
     author_dispatch_id: z.number().optional().describe('adversarial-review: ledger id of the dispatch that produced the change, if any (lineage).'),
     diff_base: z.string().optional().describe('adversarial-review: a git ref; heddle prepends "review `git diff <ref>...HEAD`" to your prompt.'),
     in_session: z.boolean().optional().describe('Claude classes: return the in-session (Agent tool) instruction instead of spawning a headless claude worker.'),
@@ -120,7 +120,7 @@ server.tool(
         authorDispatchId: a.author_dispatch_id,
         diffBase: a.diff_base,
         identity: IDENTITY,
-      });
+      }, ledger());
       const { raw, ...summary } = res;
       return text(summary);
     } catch (err) {
@@ -144,6 +144,7 @@ server.tool(
     in_session: z.boolean().optional(),
     account_pin: z.string().optional(),
     author_provider: z.string().optional(),
+    author_model: z.string().optional(),
     override_reason: z.string().optional().describe('Same rule as dispatch_worker: a bare provider+model with no task_class is reported as WOULD REFUSE unless you say why it bypasses the routing table.'),
     cwd: z.string().optional().describe('Working directory the dispatch would use (default: server cwd) — the quality gate is resolved per repository from it (HED-389), so pass the cwd you will pass to dispatch_worker.'),
   },
@@ -154,7 +155,7 @@ server.tool(
       const plan = planDispatch({
         taskClass: a.task_class, provider: a.provider, model: a.model, prompt: '(dry run)',
         cwd: a.cwd ?? process.cwd(), optIn: a.opt_in, overrideReason: a.override_reason, env: Object.keys(env).length ? env : undefined, identity: IDENTITY,
-        inSession: a.in_session, accountPin: a.account_pin, authorProvider: a.author_provider,
+        inSession: a.in_session, accountPin: a.account_pin, authorProvider: a.author_provider, authorModel: a.author_model,
       });
       return text(summarizePlan(plan));
     } catch (err) {

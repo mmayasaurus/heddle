@@ -72,12 +72,11 @@ export interface DispatchRequest {
   /**
    * Per-dispatch request to keep the worker CLI's own interactive permission prompts. Undefined =
    * the adapter's constructed default (heddle's headless workers keep skipping, so the fleet is
-   * unchanged); `false` keeps agy's prompts (omits --dangerously-skip-permissions); `true` forces
-   * skipping. Honored today only by the agy adapter (gemini routes); GLM/HTTP and claude ignore it.
+   * unchanged); `false` keeps the native prompts (omits --dangerously-skip-permissions); `true`
+   * forces skipping. Honored by agy (gemini routes) and OpenCode; GLM/HTTP and claude ignore it.
    * Permission-PROMPT toggle ONLY — it never widens capability caps or refusal semantics, which
-   * stay default-deny. NOTE: with `false`, a headless agy run with no interactive terminal to
-   * answer the prompts will hang (see the AgyAdapter LANDMINES / DispatchOptions.skipPermissions
-   * doc).
+   * stay default-deny. NOTE: with `false`, a headless agy or OpenCode run has no interactive terminal
+   * to answer prompts unless its consumer supplies an external permission path.
    */
   skipPermissions?: boolean;
   /** Capabilities to GRANT the worker (allowlist: net, browse, exec-privileged). Default: none. */

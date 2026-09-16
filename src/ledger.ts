@@ -310,7 +310,7 @@ export class Ledger {
   private db: DatabaseSync;
   private outputDir: string;
 
-  constructor(path: string = DEFAULT_LEDGER_PATH) {
+  constructor(readonly path: string = DEFAULT_LEDGER_PATH) {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     // mkdirSync's mode applies only to a dir it CREATES; force 0700 on a pre-existing dir too
     // (best-effort — skip if we do not own it).

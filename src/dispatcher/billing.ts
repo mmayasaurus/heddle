@@ -183,9 +183,11 @@ function classify(account: Account, caps: ProviderCaps | undefined, permitPayPer
 export function billingVerdict(input: BillingGateInput): BillingVerdict {
   const { accountId, caps, provider, permitPayPerToken } = input;
 
-  // Keyed openai-compat pools have no registry account; provider-level classification is their spend input.
+  // Providers with a strict routing catalog may have no registry account; their provider-level
+  // billing class is authoritative because every admitted model belongs to that verified catalog.
   if (accountId === null) {
-    if (isOpenAICompatProvider(provider)) {
+    const config = input.table.providers?.[provider] as Record<string, unknown> | undefined;
+    if (isOpenAICompatProvider(provider) || config?.strict_model_catalog === true) {
       const pc = providerBillingClass(input.table, provider);
       if (pc) return classifyProvider(pc, permitPayPerToken, provider);
     }

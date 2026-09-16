@@ -80,6 +80,39 @@ describe('mixed CLI fleet over real stdio MCP servers', () => {
       await Promise.all(peers.map((peer) => peer.close().catch(() => undefined)));
     }
   }, 60_000);
+  it('reuses a no-agent Cursor config for distinct launcher identities and unset file fallback after env sanitization', async () => {
+    await ensureBuilt();
+    const { peers, connect, call } = connections(realpathSync.native(tempDir()));
+    try {
+      const dir = realpathSync.native(tempDir());
+      writeFileSync(join(dir, '.fleet-agent'), 'file-test');
+      applyInstall(planClientInstall({ dir, clients: ['cursor'] }));
+      const raw = readFileSync(join(dir, '.cursor/mcp.json'), 'utf8');
+      const definition = JSON.parse(raw).mcpServers['heddle-comms'];
+      const cases: Array<{ launcher: Record<string, string>; identity: string }> = [
+        { launcher: { HEDDLE_AGENT: 'cursor-one', FLEET_AGENT: 'ignored-parent' }, identity: 'cursor-one' },
+        { launcher: { FLEET_AGENT: 'cursor-two' }, identity: 'cursor-two' },
+        { launcher: {}, identity: 'file-test' },
+      ];
+      for (const { launcher, identity } of cases) {
+        // Native Cursor interpolation (set + unset behavior verified with `mcp list-tools`),
+        // then its sanitized subprocess boundary: no ambient launcher env reaches the wrapper.
+        const env = Object.fromEntries(Object.entries(definition.env as Record<string, string>).map(([key, value]) =>
+          [key, value.replace(/\$\{([A-Z_]+):-\}/g, (_match, name: string) => launcher[name] ?? '')]));
+        const peer = await connect(identity, definition.command, definition.args, env);
+        expect(await call(peer, 'comms_whoami')).toMatchObject({ identity });
+        if (peers.length > 1) {
+          await call(peer, 'post_message', { to: 'cursor-one', body: `from ${identity}` });
+          expect(await call(peers[0], 'check_inbox')).toEqual(expect.arrayContaining([
+            expect.objectContaining({ from: identity, body: `from ${identity}` }),
+          ]));
+        }
+      }
+      expect(readFileSync(join(dir, '.cursor/mcp.json'), 'utf8')).toBe(raw);
+    } finally {
+      await Promise.all(peers.map((peer) => peer.close().catch(() => undefined)));
+    }
+  });
   it('resolves file identity in the intended workspace even when spawned elsewhere', async () => {
     await ensureBuilt();
     const { peers, connect, call } = connections(realpathSync.native(tempDir()));

@@ -26,6 +26,7 @@ import { billingVerdict } from './billing.js';
 import { tierReadOnlyVerdict } from './tier-gate.js';
 import { resolveEnvRepoint } from './run.js';
 import type { DispatchContext, DispatchRequest, DispatchPlan, InSessionOrigin } from './types.js';
+import { sameModelFamily } from '../model-family.js';
 
 // The billing/overage decision (HED-395) lives in ./billing.ts (billingVerdict) — the SAME pure
 // function runTarget enforces with, so this preview and the authoritative spawn-time gate can never
@@ -111,7 +112,7 @@ export function capabilityFitFallbackEligible(
 ): fallback is RouteTarget {
   if (req.noFallback || !fallback) return false;
   // HED-3: a review class's fallback is never the author's own family.
-  if (route.reviewerPool && normalizeProvider(fallback.provider) === normalizeProvider(req.authorProvider)) return false;
+  if (route.reviewerPool && sameModelFamily(fallback.provider, fallback.model, req.authorProvider, req.authorModel)) return false;
   // The fallback provider must actually enforce every requested capability (class defaults ∪ caller's) —
   // the SAME union and decideCapabilities the runtime rebind (and runTarget) use, so plan and run agree.
   const fallbackCapabilities = [...new Set([...(fallback.capabilities ?? []), ...(req.capabilities ?? [])])];
@@ -229,7 +230,7 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
             if (effMcp.length > 0 && !mcpAttachable(provider, effMcp)) return 'cannot attach the class mcp';
             if (Array.isArray(cfg.models) && cfg.models.length && !cfg.models.includes(model)) return 'model not in provider list';
             return null;
-          })
+          }, req.authorModel)
         : null;
       if (pick) {
         reviewerPick = pick;
@@ -240,7 +241,7 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
     }
     // HED-3 review classes: the author's family never reviews — not as the named route, not as the
     // class fallback, and (below, after cap-aware routing) not as the effective target.
-    if (route.reviewerPool && fallback && normalizeProvider(fallback.provider) === author) fallback = undefined;
+    if (route.reviewerPool && fallback && sameModelFamily(fallback.provider, fallback.model, author, req.authorModel)) fallback = undefined;
   }
 
   // Cap-aware routing (HED-67): may swap target→fallback, or refuse a metered pool. Explicit routes
@@ -293,7 +294,7 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
   // route-away): a review class never runs on the author's family. author_provider is REQUIRED for
   // review classes — an orchestrator reviewing its own edits passes 'claude'.
   if (route.reviewerPool && !notDispatchable) {
-    if (author && !table.providers[author]) {
+    if (author && !providerConfig(table, author)) {
       throw new Error(
         `task class "${route.taskClass}": author_provider "${author}" is not a known provider ` +
         `(${Object.keys(table.providers).join(', ')}) — a typo here would silently disable the ` +
@@ -306,8 +307,14 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
         `own edits, "claude"): the reviewer must be a different model family, and the pair is what the ledger scores.`,
       );
     }
-    if (target.provider === author) {
-      sameProviderReview = `task class "${route.taskClass}" requires a reviewer from a DIFFERENT provider than the ` +
+    if (author === 'opencode' && !req.authorModel) {
+      throw new Error(
+        `task class "${route.taskClass}" requires author_model when author_provider is "opencode" ` +
+        `because OpenCode fronts multiple model families.`,
+      );
+    }
+    if (sameModelFamily(target.provider, target.model, author, req.authorModel)) {
+      sameProviderReview = `task class "${route.taskClass}" requires a reviewer from a DIFFERENT model family than the ` +
         `author (${author}); the effective route ${target.provider}/${target.model} is the author's own family` +
         (origin === 'explicit' ? ' (named explicitly)' : decision.routedAwayForCap ? ' (cap-aware route-away landed there)' : '') + '.';
     }

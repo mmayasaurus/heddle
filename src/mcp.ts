@@ -1,9 +1,12 @@
-import { readFileSync, existsSync, writeFileSync, unlinkSync, mkdirSync, mkdtempSync, rmSync, renameSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { readFileSync, existsSync, writeFileSync, unlinkSync, mkdirSync, mkdtempSync, rmSync, renameSync, realpathSync } from 'node:fs';
+import { join, dirname, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
+import { isDeepStrictEqual } from 'node:util';
+import { parse as parseToml } from 'smol-toml';
 import { withFileLock } from './matlock.js';
 import type { MaterializeOpts } from './skillpacks.js';
 import { ENFORCEABLE } from './capabilities.js';
+import { clientFileSource, serverDefinitions, type FleetClient } from './client-config.js';
 
 /**
  * Worker MCP attachment — grants a cross-provider worker the code-discovery tools its task needs.
@@ -16,12 +19,74 @@ import { ENFORCEABLE } from './capabilities.js';
  * uniform across providers, so shipping it blind would violate the no-guessing rule.
  */
 /**
- * Servers heddle can MATERIALIZE into a worker's own project config (cursor/agy). memtrace has a
+ * Servers heddle can MATERIALIZE into a worker's own project config. memtrace has a
  * uniform stdio invocation; serena's context differs per host so it is not materialized here.
  */
 export const WORKER_MCP_SERVERS: Record<string, { command: string; args: string[] }> = {
   memtrace: { command: 'memtrace', args: ['mcp'] },
 };
+
+const NATIVE_CLIENT_BY_PROVIDER: Record<string, FleetClient | undefined> = {
+  codex: 'codex', cursor: 'cursor', 'gemini-cli': 'gemini', opencode: 'opencode',
+};
+
+/**
+ * True only when this worktree has Heddle's generated native MCP pair for the provider. Dispatch
+ * uses this as the opt-in boundary for minting a durable child identity: ordinary worker runs must
+ * not create comms participants merely because a provider happens to be native.
+ */
+export function nativeClientIntegrationInstalled(cwd: string, provider: string, refuseUnverified = false): boolean {
+  const client = NATIVE_CLIENT_BY_PROVIDER[provider];
+  if (!client) return false;
+  const relative = {
+    codex: '.codex/config.toml', cursor: '.cursor/mcp.json', gemini: '.gemini/settings.json', opencode: 'opencode.json',
+  }[client];
+  let path = join(resolve(cwd), relative);
+  let namedEntries = false;
+  try {
+    // Match installation: workspace aliases (/tmp, /var, selected project links) are valid,
+    // while config files/directories below the canonical workspace must not be symlinks.
+    const workspace = realpathSync(cwd);
+    path = join(workspace, relative);
+    if (!existsSync(path)) return false;
+    let raw: string | null;
+    try { raw = clientFileSource(path); }
+    catch {
+      namedEntries = true; // The client follows this config; ownership cannot be verified safely.
+      throw new Error('unverifiable native configuration path');
+    }
+    if (raw === null) return false;
+    const config = (client === 'codex' ? parseToml(raw) : JSON.parse(raw)) as Record<string, any>;
+    const servers = config[client === 'codex' ? 'mcp_servers' : client === 'opencode' ? 'mcp' : 'mcpServers'];
+    if (!servers || typeof servers !== 'object' || Array.isArray(servers)) return false;
+    namedEntries = ['heddle', 'heddle-comms'].some((name) => Object.hasOwn(servers, name));
+    const expected = serverDefinitions(cwd, client);
+    const owned = ['heddle', 'heddle-comms'].every((name) => {
+      const actual = servers[name];
+      const definition = expected[name];
+      if (!actual || typeof actual !== 'object') return false;
+      const command = client === 'opencode' ? actual.command?.[0] : actual.command;
+      const args = client === 'opencode' && Array.isArray(actual.command) ? actual.command.slice(1) : actual.args;
+      return command === definition.command && Array.isArray(args)
+        && args.length === definition.args.length
+        && JSON.stringify(args.slice(0, -1)) === JSON.stringify(definition.args.slice(0, -1))
+        && typeof args.at(-1) === 'string'
+        && realpathSync(args.at(-1)) === workspace;
+    });
+    if (owned) {
+      // Completed-worker stamps without our ownership record must never become a new baseline.
+      if (refuseUnverified && hasNativeWorkerContext(servers) && !existsSync(sidecarPath(path))) {
+        throw new Error('stale native worker identity without an ownership sidecar');
+      }
+      return true;
+    }
+  } catch { /* Unreadable or unrelated configuration is not an initialized native integration. */ }
+  if (namedEntries && refuseUnverified) throw new Error(
+    `unverified Heddle MCP entries in ${path} — refusing a native worker that could inherit an orchestrator identity; ` +
+    'run from the Heddle installation referenced by these entries or repair the configuration',
+  );
+  return false;
+}
 
 /**
  * Full self-contained CODEX MCP server definitions. Codex workers run with `--ignore-user-config`
@@ -42,7 +107,7 @@ const CODEX_MCP_DEFS: Record<string, { command: string; args: string[] }> = {
 export function codexMcpFlags(serverNames: string[]): string[] {
   const flags: string[] = [];
   for (const n of serverNames) {
-    const def = CODEX_MCP_DEFS[n];
+    const def = Object.hasOwn(CODEX_MCP_DEFS, n) ? CODEX_MCP_DEFS[n] : undefined;
     if (!def) {
       throw new Error(`unknown codex MCP server "${n}". Known: ${Object.keys(CODEX_MCP_DEFS).join(', ')}`);
     }
@@ -56,7 +121,7 @@ export function codexMcpFlags(serverNames: string[]): string[] {
 export function resolveMcpServers(names: string[]): Record<string, { command: string; args: string[] }> {
   const out: Record<string, { command: string; args: string[] }> = {};
   for (const n of names) {
-    const s = WORKER_MCP_SERVERS[n];
+    const s = Object.hasOwn(WORKER_MCP_SERVERS, n) ? WORKER_MCP_SERVERS[n] : undefined;
     if (!s) {
       throw new Error(
         `unknown worker MCP server "${n}". Available: ${Object.keys(WORKER_MCP_SERVERS).join(', ')}.` +
@@ -99,7 +164,8 @@ export function mcpAttachable(provider: string, servers: string[]): boolean {
  * member (cubic #63 was this exact landmine on this exact table). */
 export function webCapable(provider: string, grantedCapabilities: string[]): boolean {
   const enforceable = Object.hasOwn(ENFORCEABLE, provider) ? ENFORCEABLE[provider] : []; // own-property: a `toString` etc. isn't the prototype method (cubic #63); Object.hasOwn matches routing.ts (codacy #76)
-  return provider === 'gemini' || (grantedCapabilities.includes('browse') && enforceable.includes('browse'));
+  return provider === 'gemini' || provider === 'gemini-cli'
+    || (grantedCapabilities.includes('browse') && enforceable.includes('browse'));
 }
 
 /** Provider-level attachability probe (the canonical `memtrace` server) — the drift-guard anchor and
@@ -119,6 +185,7 @@ export function validateWorkerMcp(provider: string, serverNames: string[]): void
   if (provider === 'codex') { codexMcpFlags(serverNames); return; }
   if (provider === 'claude') { resolveMcpServers(serverNames); return; } // written to a temp --mcp-config file at run time
   if (provider === 'cursor') { resolveMcpServers(serverNames); return; } // materialized into .cursor/mcp.json
+  if (provider === 'gemini-cli' || provider === 'opencode') { resolveMcpServers(serverNames); return; }
   if (provider === 'gemini') {
     throw new Error(
       'worker MCP attachment for the gemini provider (agy/Antigravity CLI) is not implemented yet: the ' +
@@ -133,7 +200,7 @@ export function validateWorkerMcp(provider: string, serverNames: string[]): void
   // (and materializeWorkerMcp's default no-op), so a class-default mcp on it is DROPPED, not kept-but-
   // never-attached (qodo/cubic #67). resolveRoute rejects unknown providers upstream; this keeps the
   // gate correct in isolation and makes workerMcpSupported (which probes it) right for them too.
-  throw new Error(`worker MCP attachment is not supported for provider "${provider}" (supported: codex, claude, cursor)`);
+  throw new Error(`worker MCP attachment is not supported for provider "${provider}" (supported: codex, claude, cursor, gemini-cli, opencode)`);
 }
 
 /**
@@ -160,11 +227,19 @@ export function claudeMcpConfigFile(serverNames: string[]): { path: string; clea
  *   writes no per-task file for codex.
  * - claude: no-op — its MCP is a temp `--mcp-config` file written by claudeMcpConfigFile, never the worktree.
  * - cursor: project `.cursor/mcp.json` (mcpServers key — verified format).
- * - gemini/agy: project `.agents/mcp_config.json` — format NOT yet verified against agy docs, so
- *   this path throws rather than write a guessed schema. (Tracked follow-up.)
+ * - gemini-cli: project `.gemini/settings.json` (mcpServers key).
+ * - opencode: project `opencode.json` (mcp key; local command arrays).
+ * - gemini/agy: project `.agents/mcp_config.json` is still unverified, so this path throws rather
+ *   than write a guessed schema.
  */
-export function materializeWorkerMcp(cwd: string, provider: string, serverNames: string[], opts: MaterializeOpts): () => void {
-  if (serverNames.length === 0) return () => { /* nothing to attach */ };
+export function materializeWorkerMcp(
+  cwd: string, provider: string, serverNames: string[], opts: MaterializeOpts,
+  nativeWorkerEnv?: Record<string, string>,
+): () => void {
+  const nativeClient = nativeWorkerEnv && nativeClientIntegrationInstalled(cwd, provider, true)
+    ? NATIVE_CLIENT_BY_PROVIDER[provider]
+    : undefined;
+  if (serverNames.length === 0 && !nativeClient) return () => { /* nothing to attach */ };
 
   // Codex servers and their tool approval come from codexMcpFlags inline `-c` overrides (including
   // default_tools_approval_mode="approve"), so there is nothing to materialize here. Codex server
@@ -175,10 +250,30 @@ export function materializeWorkerMcp(cwd: string, provider: string, serverNames:
   // keeps it consistent with validateWorkerMcp, which lists claude as supported (codacy #68).
   if (provider === 'codex' || provider === 'claude') return () => { /* no-op */ };
 
+  if (nativeClient) cwd = realpathSync(cwd);
   const servers = resolveMcpServers(serverNames);
+  const nativeServers = nativeClient
+    ? serverDefinitions(cwd, nativeClient, undefined, nativeWorkerEnv)
+    : {};
+  const allServers = { ...servers, ...nativeServers };
   switch (provider) {
     case 'cursor':
-      return writeMergedMcpJson(join(cwd, '.cursor', 'mcp.json'), servers, opts);
+      return writeMergedMcpJson(join(cwd, '.cursor', 'mcp.json'), allServers, opts);
+    case 'gemini-cli':
+      return writeMergedMcpJson(join(cwd, '.gemini', 'settings.json'), allServers, opts);
+    case 'opencode': {
+      if (existsSync(join(cwd, 'opencode.jsonc'))) {
+        throw new Error('opencode.jsonc exists; heddle cannot safely materialize a competing opencode.json worker MCP config');
+      }
+      const definitions = Object.fromEntries(Object.entries(allServers).map(([name, def]) => [name, {
+        type: 'local', command: [def.command, ...def.args],
+        ...('env' in def && def.env ? { environment: def.env } : {}),
+        enabled: true,
+        ...(nativeServers[name] ? { timeout: 660_000 }
+          : 'timeout' in def && typeof def.timeout === 'number' ? { timeout: def.timeout } : {}),
+      }]));
+      return writeMergedMcpJson(join(cwd, 'opencode.json'), allServers, opts, 'mcp', definitions);
+    }
     case 'gemini':
       throw new Error(
         'worker MCP attachment for the gemini provider (agy/Antigravity CLI) is not implemented yet: the ' +
@@ -188,15 +283,16 @@ export function materializeWorkerMcp(cwd: string, provider: string, serverNames:
     default:
       // No attachment path — throw rather than a silent no-op that keeps mcp in the list but never
       // attaches it (qodo/cubic #67). validateWorkerMcp rejects this first in the dispatch flow.
-      throw new Error(`worker MCP attachment is not supported for provider "${provider}" (supported: codex, claude, cursor)`);
+      throw new Error(`worker MCP attachment is not supported for provider "${provider}" (supported: codex, claude, cursor, gemini-cli, opencode)`);
   }
 }
 
 /**
  * The sidecar that makes a JSON config concurrency-safe (JSON carries no comment markers, so the
  * AGENTS.md per-block trick does not transfer — HED-56). It records the PRE-heddle file content
- * once (`original`, captured by the first attaching dispatch) and one server list per live
- * dispatch (`refs`). Every mutation rebuilds the merged file from original + all live refs, so the
+ * once (`original`, captured by the first attaching dispatch) and one server list + definition map
+ * per live dispatch. Definitions are per-ref because each native worker has its own child identity.
+ * Every mutation rebuilds the merged file from original + all live refs, so the
  * merged view is order-independent; the LAST ref out restores the original bytes (or deletes a
  * file heddle created) and removes the sidecar. Dead refs (crashed dispatches, per the liveness
  * oracle) are dropped on the next mutation.
@@ -204,6 +300,8 @@ export function materializeWorkerMcp(cwd: string, provider: string, serverNames:
 interface McpSidecar {
   original: string | null;
   refs: Record<string, string[]>;
+  /** Definitions are per dispatch because native worker identity/address is per dispatch. */
+  definitions: Record<string, Record<string, unknown>>;
 }
 
 function sidecarPath(path: string): string {
@@ -213,21 +311,45 @@ function sidecarPath(path: string): string {
 /** Missing sidecar → null (fresh state). A CORRUPT sidecar is different: treating it as missing
  *  would silently drop other live dispatches' refs — it is preserved under a .corrupt-<ts> name
  *  (never deleted) and surfaced, and the caller starts fresh from the current file. */
-function readSidecar(path: string): McpSidecar | null {
+function readSidecar(path: string, required = false): McpSidecar | null {
   const sc = sidecarPath(path);
   if (!existsSync(sc)) return null;
   try {
     const raw = JSON.parse(readFileSync(sc, 'utf8')) as McpSidecar;
     if (raw && typeof raw === 'object' && raw.refs && typeof raw.refs === 'object' && !Array.isArray(raw.refs)) {
-      const refs: Record<string, string[]> = {};
+      if (required && (!Object.hasOwn(raw, 'original') || (raw.original !== null && typeof raw.original !== 'string')
+        || !raw.definitions || typeof raw.definitions !== 'object' || Array.isArray(raw.definitions))) {
+        throw new Error('invalid native ownership metadata');
+      }
+      const refs: Record<string, string[]> = Object.create(null);
       for (const [id, list] of Object.entries(raw.refs)) {
         // shape-validate each entry: server lists are arrays of strings
         if (Array.isArray(list) && list.every((x) => typeof x === 'string')) refs[id] = list;
+        else if (required) throw new Error('invalid native ownership ref');
       }
-      return { original: typeof raw.original === 'string' ? raw.original : null, refs };
+      const definitions: Record<string, Record<string, unknown>> = Object.create(null);
+      if (raw.definitions && typeof raw.definitions === 'object' && !Array.isArray(raw.definitions)) {
+        for (const [id, value] of Object.entries(raw.definitions)) {
+          if (value && typeof value === 'object' && !Array.isArray(value)) {
+            definitions[id] = value as Record<string, unknown>;
+          }
+        }
+      }
+      if (required) {
+        for (const [id, names] of Object.entries(refs)) {
+          const owned = definitions[id];
+          if (!owned || Object.keys(owned).length !== names.length || names.some((name) =>
+            !Object.hasOwn(owned, name) || !owned[name] || typeof owned[name] !== 'object' || Array.isArray(owned[name])
+            || ((name === 'heddle' || name === 'heddle-comms') && !hasNativeWorkerContext({ [name]: owned[name] })))) {
+            throw new Error('incomplete native ownership definitions');
+          }
+        }
+      }
+      return { original: typeof raw.original === 'string' ? raw.original : null, refs, definitions };
     }
     throw new Error('unexpected shape');
   } catch (err) {
+    if (required) throw new Error(`native MCP ownership sidecar ${sc} is unreadable — refusing to replace an unknown active identity`);
     const quarantine = `${sc}.corrupt-${Date.now()}`;
     try { renameSync(sc, quarantine); } catch { /* even the rename failed — leave it */ }
     process.stderr.write(`heddle: MCP sidecar ${sc} was unreadable (${err instanceof Error ? err.message : String(err)}) — preserved as ${quarantine}; starting fresh\n`);
@@ -235,29 +357,109 @@ function readSidecar(path: string): McpSidecar | null {
   }
 }
 
-function mergedContent(sidecar: McpSidecar): string {
+function mergedContent(
+  sidecar: McpSidecar, configKey: string,
+  definitions: Record<string, unknown>,
+): string {
   const base = sidecar.original !== null
-    ? (JSON.parse(sidecar.original) as { mcpServers?: Record<string, unknown> })
-    : { mcpServers: {} as Record<string, unknown> };
-  const merged: Record<string, unknown> = { ...base.mcpServers };
-  for (const list of Object.values(sidecar.refs)) {
-    for (const name of list) merged[name] = WORKER_MCP_SERVERS[name] ?? merged[name];
+    ? (JSON.parse(sidecar.original) as Record<string, unknown>)
+    : {};
+  const existing = base[configKey];
+  if (existing !== undefined && (!existing || typeof existing !== 'object' || Array.isArray(existing))) {
+    throw new Error(`${configKey} must be an object`);
   }
-  return JSON.stringify({ ...base, mcpServers: merged }, null, 2);
+  const merged: Record<string, unknown> = { ...((existing ?? {}) as Record<string, unknown>) };
+  for (const [id, list] of Object.entries(sidecar.refs)) {
+    for (const name of list) Object.defineProperty(merged, name, {
+      value: sidecar.definitions[id]?.[name] ?? definitions[name] ?? merged[name],
+      enumerable: true, configurable: true, writable: true,
+    });
+  }
+  // OpenCode adds its schema on startup when absent. Include that deterministic CLI write before
+  // runTarget snapshots a read-only worktree; actual subsequent config/file writes stay detectable.
+  const schema = configKey === 'mcp' && base.$schema === undefined
+    ? { $schema: 'https://opencode.ai/config.json' } : {};
+  return JSON.stringify({ ...schema, ...base, [configKey]: merged }, null, 2);
+}
+
+function hasNativeWorkerContext(definitions: Record<string, unknown>): boolean {
+  return ['heddle', 'heddle-comms'].some((name) => {
+    const definition = definitions[name] as { env?: Record<string, unknown>; environment?: Record<string, unknown> } | undefined;
+    return definition?.env?.HEDDLE_WORKER === '1' || definition?.environment?.HEDDLE_WORKER === '1';
+  });
+}
+
+function sameJsonContent(left: string | null, right: string): boolean {
+  if (left === right) return true;
+  if (left === null) return false;
+  try { return isDeepStrictEqual(JSON.parse(left), JSON.parse(right)); }
+  catch { return false; }
+}
+
+/** Restore generated fields only while they still equal our worker write. */
+function restoreMatchingFields(
+  actual: Record<string, unknown>, before: Record<string, unknown>, after: Record<string, unknown>,
+): void {
+  for (const [key, expected] of Object.entries(before)) {
+    const value = actual[key];
+    if ((key === 'env' || key === 'environment') && value && typeof value === 'object' && !Array.isArray(value)
+      && expected && typeof expected === 'object' && !Array.isArray(expected)) {
+      const original = after[key];
+      restoreMatchingFields(value as Record<string, unknown>, expected as Record<string, unknown>,
+        original && typeof original === 'object' && !Array.isArray(original) ? original as Record<string, unknown> : {});
+      if (!Object.hasOwn(after, key) && Object.keys(value).length === 0) delete actual[key];
+      continue;
+    }
+    if (!isDeepStrictEqual(value, expected)) continue;
+    if (Object.hasOwn(after, key)) Object.defineProperty(actual, key, {
+      value: after[key], enumerable: true, configurable: true, writable: true,
+    });
+    else delete actual[key];
+  }
+}
+
+/** Restore only entries still equal to our write; retain native CLI additions and user edits. */
+function restoreUnchangedEntries(
+  current: string | null, expected: string, next: string, configKey: string, names: string[],
+): string | null {
+  if (current === null) return null;
+  try {
+    const actual = JSON.parse(current), before = JSON.parse(expected), after = JSON.parse(next);
+    const entries = actual?.[configKey];
+    if (!entries || typeof entries !== 'object' || Array.isArray(entries)) return null;
+    for (const name of names) {
+      const expected = before[configKey]?.[name], original = after[configKey]?.[name];
+      if (isDeepStrictEqual(entries[name], expected)) {
+        if (Object.hasOwn(after[configKey] ?? {}, name)) Object.defineProperty(entries, name, {
+          value: original, enumerable: true, configurable: true, writable: true,
+        });
+        else delete entries[name];
+      } else if (entries[name] && typeof entries[name] === 'object' && !Array.isArray(entries[name])
+        && expected && typeof expected === 'object' && !Array.isArray(expected)) {
+        restoreMatchingFields(entries[name], expected,
+          original && typeof original === 'object' && !Array.isArray(original) ? original : {});
+      }
+    }
+    return JSON.stringify(actual, null, 2);
+  } catch { return null; }
 }
 
 function writeMergedMcpJson(
   path: string, servers: Record<string, { command: string; args: string[] }>, opts: MaterializeOpts,
+  configKey = 'mcpServers', definitions: Record<string, unknown> = servers,
 ): () => void {
   const ownId = String(opts.dispatchId);
+  const nativeContext = hasNativeWorkerContext(definitions);
+  const lockOptions = { required: nativeContext };
   const lock = join(dirname(path), '.heddle-mcp.lock');
   // The lock lives inside the config dir — create the dir FIRST or two fresh processes both fail
   // the lock mkdir with ENOENT and race the file unlocked.
   mkdirSync(dirname(path), { recursive: true });
 
   withFileLock(lock, () => {
-    const sidecar = readSidecar(path)
-      ?? { original: existsSync(path) ? readFileSync(path, 'utf8') : null, refs: {} };
+    if (nativeContext) { clientFileSource(path); clientFileSource(sidecarPath(path)); }
+    const sidecar = readSidecar(path, nativeContext)
+      ?? { original: existsSync(path) ? readFileSync(path, 'utf8') : null, refs: {}, definitions: {} };
     // A malformed pre-existing config must fail BEFORE any state is persisted — writing the
     // sidecar first would leave a half-mutated pair behind the crash.
     if (sidecar.original !== null) {
@@ -266,28 +468,48 @@ function writeMergedMcpJson(
       }
     }
     for (const id of Object.keys(sidecar.refs)) {
-      if (id !== ownId && opts.isLive && !opts.isLive(id)) delete sidecar.refs[id]; // dead dispatch
+      if (id !== ownId && opts.isLive && !opts.isLive(id)) {
+        delete sidecar.refs[id];
+        delete sidecar.definitions[id];
+      }
+    }
+    if (nativeContext) {
+      const owner = Object.keys(sidecar.refs).find((id) => id !== ownId &&
+        sidecar.refs[id].some((name) => name === 'heddle' || name === 'heddle-comms'));
+      if (owner) throw new Error(
+        `native worker context in ${path} is owned by active dispatch #${owner} — ` +
+        'refusing overlapping child identities; retry after that worker finishes or use a separate worktree',
+      );
     }
     sidecar.refs[ownId] = Object.keys(servers);
-    const merged = mergedContent(sidecar); // compute BEFORE persisting anything
+    sidecar.definitions[ownId] = definitions;
+    const merged = mergedContent(sidecar, configKey, definitions); // compute BEFORE persisting anything
     writeFileSync(sidecarPath(path), JSON.stringify(sidecar, null, 2), 'utf8');
     writeFileSync(path, merged, 'utf8');
-  });
+  }, lockOptions);
 
   return () => {
     withFileLock(lock, () => {
       try {
-        const sidecar = readSidecar(path);
+        if (nativeContext) { clientFileSource(path); clientFileSource(sidecarPath(path)); }
+        const sidecar = readSidecar(path, nativeContext);
         if (!sidecar || !(ownId in sidecar.refs)) return; // nothing of ours recorded — leave it
         // Tamper check: if the file no longer matches what the sidecar says heddle last wrote,
         // someone (the worker, a human) edited it mid-dispatch — NEVER rewrite or delete over
         // their bytes; drop only our ref so the bookkeeping stays truthful.
-        const expected = mergedContent(sidecar);
+        const expected = mergedContent(sidecar, configKey, definitions);
         const current = existsSync(path) ? readFileSync(path, 'utf8') : null;
-        const tampered = current !== expected;
+        // OpenCode normalizes JSON formatting on startup. Equivalent JSON still belongs to this
+        // materialization; restoring it prevents completed-worker stamps remaining in project config.
+        const tampered = nativeContext ? !sameJsonContent(current, expected) : current !== expected;
         delete sidecar.refs[ownId];
+        delete sidecar.definitions[ownId];
         if (tampered) {
-          process.stderr.write(`heddle: ${path} was edited during dispatch #${ownId} — leaving the file; removed only heddle's ref\n`);
+          if (nativeContext) {
+            const restored = restoreUnchangedEntries(current, expected, mergedContent(sidecar, configKey, definitions), configKey, Object.keys(definitions));
+            if (restored !== null) writeFileSync(path, restored, 'utf8');
+          }
+          process.stderr.write(`heddle: ${path} was edited during dispatch #${ownId} — preserving external edits; removed heddle's ref${nativeContext ? ' and restored unchanged owned fields' : ''}\n`);
           if (Object.keys(sidecar.refs).length === 0) { try { unlinkSync(sidecarPath(path)); } catch { /* already gone */ } }
           else writeFileSync(sidecarPath(path), JSON.stringify(sidecar, null, 2), 'utf8');
           return;
@@ -299,11 +521,11 @@ function writeMergedMcpJson(
           try { unlinkSync(sidecarPath(path)); } catch { /* already gone */ }
         } else {
           writeFileSync(sidecarPath(path), JSON.stringify(sidecar, null, 2), 'utf8');
-          writeFileSync(path, mergedContent(sidecar), 'utf8');
+          writeFileSync(path, mergedContent(sidecar, configKey, definitions), 'utf8');
         }
       } catch (err) {
         process.stderr.write(`heddle: MCP restore for dispatch #${ownId} failed (${err instanceof Error ? err.message : String(err)}) — left as is\n`);
       }
-    });
+    }, lockOptions);
   };
 }
