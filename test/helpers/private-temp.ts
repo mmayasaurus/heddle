@@ -3,6 +3,17 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+/** A PowerShell 7 test runner must not feed its incompatible modules to Windows PowerShell 5.1. */
+export function windowsPowerShellFixtureEnv(): NodeJS.ProcessEnv {
+  const systemRoot = process.env.SystemRoot;
+  if (!systemRoot) throw new Error('Windows fixture requires SystemRoot');
+  const modules = join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'Modules');
+  // A plain environment object is case-sensitive; Node picks one Windows spelling after sorting.
+  const inherited = Object.fromEntries(Object.entries(process.env)
+    .filter(([key]) => !['PSMODULEPATH', 'WINPSMODULEPATH'].includes(key.toUpperCase())));
+  return { ...inherited, PSModulePath: modules, WinPSModulePath: modules };
+}
+
 /** A fresh fixture trust root; never use this to repair an existing application directory. */
 export function createPrivateTempRoot(prefix: string): string {
   const root = mkdtempSync(join(tmpdir(), prefix));
@@ -20,7 +31,7 @@ export function createPrivateTempRoot(prefix: string): string {
         $acl.SetAccessRuleProtection($true,$false);
         $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($sid,'FullControl','ContainerInherit,ObjectInherit','None','Allow'));
         [IO.Directory]::SetAccessControl($p,$acl)`],
-      { input: root + '\n', encoding: 'utf8', timeout: 30_000, windowsHide: true });
+      { input: root + '\n', encoding: 'utf8', timeout: 30_000, windowsHide: true, env: windowsPowerShellFixtureEnv() });
     if (result.error || result.status !== 0) {
       throw new Error(`Windows private fixture failed (${(result.error as NodeJS.ErrnoException | undefined)?.code ?? result.status})`);
     }

@@ -96,11 +96,14 @@ export function spawnProbe(
   opts: { cwd: string; env: NodeJS.ProcessEnv; stdin: string; timeoutMs: number; maxStreamBytes?: number; shell?: boolean },
 ): Promise<{ stdout: string; stderr: string; exitCode: number | null; timedOut: boolean }> {
   return new Promise((resolve) => {
-    const child = spawn(bin, args, {
+    // Node handles explicit shell commands; cross-spawn mislabels their Windows exit 1 as ENOENT.
+    const child = (opts.shell ? nativeSpawn : spawn)(bin, args, {
       cwd: opts.cwd,
       env: opts.env,
       stdio: ['pipe', 'pipe', 'pipe'],
-      detached: true,
+      // POSIX needs a process group; Windows uses taskkill /T and avoids detached PowerShell startup failures.
+      detached: process.platform !== 'win32',
+      windowsHide: process.platform === 'win32',
       ...(opts.shell ? { shell: true } : {}),
     });
     installExitHandlers();
@@ -191,7 +194,11 @@ export function run(bin: string, args: string[], cwd: string, timeoutMs: number,
   return new Promise((resolve) => {
     // stdin 'ignore' is load-bearing — every subprocess adapter must close stdin.
     const { env } = buildWorkerEnv({ overrides: envOverrides, unset: envUnset, envRepoint });
-    const child = spawn(bin, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+    const child = spawn(bin, args, {
+      cwd, env, stdio: ['ignore', 'pipe', 'pipe'],
+      detached: process.platform !== 'win32',
+      windowsHide: process.platform === 'win32',
+    });
     installExitHandlers();
     if (child.pid !== undefined) liveChildren.add(child);
     // Decode as UTF-8 at the stream so a multi-byte char split across two chunks is not corrupted by

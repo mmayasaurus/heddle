@@ -74,9 +74,15 @@ $acl.SetOwner($sid)
 $acl.SetAccessRuleProtection($true, $false)
 $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($sid, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
 [IO.Directory]::SetAccessControl($Root, $acl)
+$actual = [IO.Directory]::GetAccessControl($Root)
+if (!$actual.AreAccessRulesProtected -or $actual.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $sid.Value -or
+    $actual.GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::Access) -ne
+    $acl.GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::Access)) { throw 'Private root ACL verification failed' }
+[Console]::Out.Write('PRIVATE_ROOT_VERIFIED')
 `;
-  await checked('private temporary root', powershell,
+  const provisioned = await checked('private temporary root', powershell,
     ['-NoLogo', '-NoProfile', '-NonInteractive', '-InputFormat', 'None', '-Command', privateRootScript], 30_000, repo, root + '\n');
+  assert.equal(provisioned.stdout.trim(), 'PRIVATE_ROOT_VERIFIED', 'Private root setup did not report verification');
   for (const path of [prefix, smokeHome, localAppData, env.APPDATA, env.TEMP, env.XDG_CONFIG_HOME,
     env.XDG_CACHE_HOME, env.XDG_DATA_HOME, env.XDG_STATE_HOME, env.CODEX_HOME, env.CURSOR_CONFIG_DIR]) {
     mkdirSync(path, { recursive: true });

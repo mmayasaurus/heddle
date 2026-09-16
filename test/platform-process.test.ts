@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import type { ChildProcess } from 'node:child_process';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
@@ -43,6 +43,41 @@ describe('native platform process execution', () => {
     const probe = await spawnProbe(shim, ['probe'], { cwd: dir, env: process.env, stdin: '', timeoutMs: 10_000 });
     expect(probe.exitCode, probe.stderr).toBe(0);
     expect(JSON.parse(probe.stdout)).toEqual(['probe']);
+  });
+
+  it.runIf(process.platform === 'win32').each(['probe', 'worker'] as const)('executes PowerShell script effects and preserves exit 7 through %s', async (mode) => {
+    const dir = join(tempDir(), 'powershell script');
+    mkdirSync(dir);
+    const marker = join(dir, 'execution marker.txt');
+    const script = join(dir, 'execution.ps1');
+    writeFileSync(script, `param([string] $Marker, [string] $Mode)
+      $ErrorActionPreference = 'Stop'
+      $value = 'worker'
+      if ($Mode -eq 'probe') { $value = [Console]::In.ReadLine() }
+      [IO.File]::WriteAllText($Marker, "executed:$value")
+      [Console]::Out.Write("executed:$value")
+      [Console]::Error.Write('intentional-exit')
+      exit 7`);
+    expect(process.env.SystemRoot).toBeTruthy();
+    const powershell = join(process.env.SystemRoot!, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+    const args = ['-NoLogo', '-NoProfile', '-NonInteractive', '-InputFormat', 'None', '-ExecutionPolicy', 'Bypass', '-File', script, marker, mode];
+    const result = mode === 'probe'
+      ? await spawnProbe(powershell, args, { cwd: dir, env: process.env, stdin: 'probe-input\n', timeoutMs: 10_000 })
+      : await run(powershell, args, dir, 10_000);
+    expect(result.exitCode, result.stderr).toBe(7);
+    expect(result.timedOut).toBe(false);
+    const expected = mode === 'probe' ? 'executed:probe-input' : 'executed:worker';
+    expect(result.stdout).toBe(expected);
+    expect(result.stderr).toBe('intentional-exit');
+    expect(readFileSync(marker, 'utf8')).toBe(expected);
+  }, 20_000);
+
+  it.runIf(process.platform === 'win32')('preserves an intentional shell exit 1 without reporting a missing executable', async () => {
+    const result = await spawnProbe('echo shell-executed&exit /b 1', [], {
+      cwd: tempDir(), env: process.env, stdin: '', timeoutMs: 10_000, shell: true,
+    });
+    expect(result).toMatchObject({ exitCode: 1, timedOut: false, stderr: '' });
+    expect(result.stdout.trim()).toBe('shell-executed');
   });
 
   it.runIf(process.platform === 'win32')('reaps the worker and its descendant when a cmd launcher times out', async () => {

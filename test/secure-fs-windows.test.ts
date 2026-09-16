@@ -6,7 +6,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { acquireCredentialLock, assertSecureDir, ensureSecureDir, releaseCredentialLock, secureReadFile, secureWriteFile } from '../src/secure-fs.js';
 import { assertWindowsPrivateFile, createWindowsPrivateFile, windowsSecureFs } from '../src/secure-fs-windows.js';
 import { CommsLog } from '../src/comms/log.js';
-import { createPrivateTempRoot } from './helpers/private-temp.js';
+import { createPrivateTempRoot, windowsPowerShellFixtureEnv } from './helpers/private-temp.js';
 
 const nativeWindows = process.platform === 'win32';
 const transport = vi.hoisted(() => ({ active: false, calls: [] as unknown[][], response: {} as object }));
@@ -111,7 +111,7 @@ describe.skipIf(!nativeWindows)('Windows native credential filesystem', () => {
   const powershell = (script: string, path: string): string => {
     const result = spawnSync(join(process.env.SystemRoot!, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
       ['-NoProfile', '-NonInteractive', '-InputFormat', 'None', '-Command', '$ErrorActionPreference="Stop"; [Console]::InputEncoding=[Text.UTF8Encoding]::new($false); $p=[Console]::In.ReadLine(); ' + script],
-      { input: path + '\n', encoding: 'utf8', timeout: 30_000, windowsHide: true });
+      { input: path + '\n', encoding: 'utf8', timeout: 30_000, windowsHide: true, env: windowsPowerShellFixtureEnv() });
     if (result.error || result.status !== 0) throw new Error(`Windows ACL test fixture failed (${(result.error as NodeJS.ErrnoException | undefined)?.code ?? result.status}): ${result.stderr}`);
     return result.stdout.trim();
   };

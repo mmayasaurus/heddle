@@ -10,6 +10,7 @@ import { secureReadFile, secureWriteFile, acquireCredentialLock, releaseCredenti
 import { useTempResources } from './helpers.js';
 import { Ledger } from '../src/ledger.js';
 import { DEFAULT_MAX_STREAM_BYTES } from '../src/adapters/subprocess.js';
+import { windowsPowerShellFixtureEnv } from './helpers/private-temp.js';
 
 describe('native platform persistent fleet storage', () => {
   const { tempDir } = useTempResources('heddle-platform-storage-', { privateWindowsRoot: true });
@@ -20,7 +21,7 @@ describe('native platform persistent fleet storage', () => {
         $acl=Get-Acl -LiteralPath $p; $sid=New-Object Security.Principal.SecurityIdentifier('S-1-1-0');
         $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($sid,'Read','Allow')));
         Set-Acl -LiteralPath $p -AclObject $acl`],
-      { input: path + '\n', encoding: 'utf8', timeout: 30_000, windowsHide: true });
+      { input: path + '\n', encoding: 'utf8', timeout: 30_000, windowsHide: true, env: windowsPowerShellFixtureEnv() });
     if (result.error || result.status !== 0) throw new Error('Windows ACL fixture failed');
   };
 

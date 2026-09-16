@@ -124,7 +124,9 @@ describe('native hook lifecycle', () => {
       log.append({ from: 'cursor-test', to: 'codex-test', body: 'arrived-during-turn' });
       expect(invoke('codex', 'session-one', 'Stop')).toMatchObject({ decision: 'block', reason: expect.stringContaining('arrived-during-turn') });
     } finally { log.close(); }
-  }, 30000);
+  // This performs thirteen separate hooks and native ACL validations (39s on the Windows runner).
+  // Each child still has its own 10s deadline; only this aggregate test needs a larger Windows budget.
+  }, process.platform === 'win32' ? 60_000 : 30_000);
 
   it('delivers shipped nonblocking rule nudges through native after-tool context', async () => {
     await ensureBuilt();
