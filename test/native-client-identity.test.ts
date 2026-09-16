@@ -15,10 +15,10 @@ const cases: Array<{ name: string; env: Record<string, string>; expected: string
 ];
 
 describe('native MCP identity parity', () => {
-  const { tempDir } = useTempResources('heddle-native-identity-');
+  const { tempDir } = useTempResources('heddle-native-identity-', { privateWindowsRoot: true });
   it.each(cases)('$name', async ({ env, expected, linked: useLinked, worker, unsafeMarker }) => {
     await ensureBuilt();
-    const home = realpathSync(tempDir()), canonical = join(home, 'canonical'), linked = join(home, 'linked');
+    const home = realpathSync.native(tempDir()), canonical = join(home, 'canonical'), linked = join(home, 'linked');
     mkdirSync(canonical);
     const git = (args: string[]) => execFileSync('git', args, { cwd: canonical, stdio: ['ignore', 'pipe', 'pipe'] });
     git(['init', '-q']);
@@ -36,7 +36,7 @@ describe('native MCP identity parity', () => {
     }
     const peers: Client[] = [];
     const childEnv = { PATH: process.env.PATH ?? '', HOME: home, USERPROFILE: home,
-      HEDDLE_COMMS_DB: join(home, 'comms.db'), HEDDLE_LEDGER_DB: join(home, 'ledger.db'), ...env };
+      HEDDLE_COMMS_DB: join(home, 'private', 'comms.db'), HEDDLE_LEDGER_DB: join(home, 'private', 'ledger.db'), ...env };
     try {
       for (const server of ['heddle', 'heddle-comms']) {
         const peer = new Client({ name: `${server}-identity-test`, version: '1' });

@@ -11,6 +11,7 @@ import { serverDefinitions, type FleetClient } from '../src/client-config.js';
 import { dispatch } from '../src/dispatch.js';
 import { buildWorkerEnv } from '../src/env.js';
 import { CommsLog } from '../src/comms/log.js';
+import { Ledger } from '../src/ledger.js';
 import { materializeWorkerMcp, nativeClientIntegrationInstalled } from '../src/mcp.js';
 import type { DispatchOptions, WorkerAdapter } from '../src/types.js';
 import { IDENTITIES, useTempResources } from './helpers.js';
@@ -102,13 +103,14 @@ async function call(peer: Client, name: string, args: Record<string, unknown> = 
 }
 
 describe('native worker context through actual MCP subprocesses', () => {
-  const { tempDir: tempAlias, tempLedger } = useTempResources('heddle-native-worker-context-');
-  const tempDir = () => realpathSync(tempAlias());
+  const { tempDir: tempAlias, trackLedger } = useTempResources('heddle-native-worker-context-', { privateWindowsRoot: true });
+  const tempDir = () => realpathSync.native(tempAlias());
+  const tempLedger = () => trackLedger(new Ledger(join(tempDir(), 'private', 'ledger.db')));
 
   for (const row of clients) {
     it(`${row.provider} overrides installed parent identity, shares the broker/ledger, and refuses nesting`, async () => {
       await ensureBuilt();
-      const cwd = tempDir(), home = tempDir(), commsDb = join(tempDir(), 'comms.db');
+      const cwd = tempDir(), home = tempDir(), commsDb = join(tempDir(), 'private', 'comms.db');
       process.env.HEDDLE_COMMS_DB = commsDb;
       process.env.HEDDLE_PROJECTS = join(tempDir(), 'projects.json');
       process.env.HEDDLE_AGENT = 'ambient-parent';
