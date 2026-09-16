@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { execFileSync } from 'node:child_process';
@@ -246,6 +246,21 @@ describe('native worker context through actual MCP subprocesses', () => {
     expect(calls).toBe(0);
     expect(existsSync(process.env.HEDDLE_COMMS_DB!)).toBe(false);
     expect(readFileSync(path, 'utf8')).toBe(JSON.stringify(config));
+  });
+
+  it('refuses strict native dispatch recognition through a config or config-directory symlink', () => {
+    const source = tempDir(), sourcePath = join(source, '.cursor', 'mcp.json');
+    install(source, 'cursor', sourcePath);
+    for (const linkDirectory of [false, true]) {
+      const cwd = tempDir();
+      if (linkDirectory) symlinkSync(dirname(sourcePath), join(cwd, '.cursor'), 'dir');
+      else {
+        mkdirSync(join(cwd, '.cursor'));
+        symlinkSync(sourcePath, join(cwd, '.cursor', 'mcp.json'));
+      }
+      expect(() => nativeClientIntegrationInstalled(cwd, 'cursor', true)).toThrow(/unverified Heddle MCP entries/);
+      expect(nativeClientIntegrationInstalled(cwd, 'cursor')).toBe(false);
+    }
   });
 
   it('requires both owned wrapper entries before recognizing native initialization', () => {

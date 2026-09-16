@@ -44,8 +44,11 @@ export function nativeClientIntegrationInstalled(cwd: string, provider: string, 
   const path = join(cwd, relative);
   let namedEntries = false;
   try {
-    if (!existsSync(path) || lstatSync(path).isSymbolicLink()
-      || (dirname(path) !== cwd && lstatSync(dirname(path)).isSymbolicLink())) return false;
+    if (!existsSync(path)) return false;
+    if (lstatSync(path).isSymbolicLink() || lstatSync(dirname(path)).isSymbolicLink()) {
+      namedEntries = true; // The client follows this config; ownership cannot be verified safely.
+      throw new Error('symlinked native configuration');
+    }
     const raw = readFileSync(path, 'utf8');
     const config = (client === 'codex' ? parseToml(raw) : JSON.parse(raw)) as Record<string, any>;
     const servers = config[client === 'codex' ? 'mcp_servers' : client === 'opencode' ? 'mcp' : 'mcpServers'];
@@ -68,7 +71,7 @@ export function nativeClientIntegrationInstalled(cwd: string, provider: string, 
   } catch { /* Unreadable or unrelated configuration is not an initialized native integration. */ }
   if (namedEntries && refuseUnverified) throw new Error(
     `unverified Heddle MCP entries in ${path} — refusing a native worker that could inherit an orchestrator identity; ` +
-    'refresh init-client with this Heddle installation before dispatching',
+    'run from the Heddle installation referenced by these entries or repair the configuration',
   );
   return false;
 }
