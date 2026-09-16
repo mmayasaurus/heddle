@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
@@ -12,7 +13,8 @@ import { CommsLog } from '../src/comms/log.js';
 import { materializeWorkerMcp, nativeClientIntegrationInstalled } from '../src/mcp.js';
 import type { DispatchOptions, WorkerAdapter } from '../src/types.js';
 import { IDENTITIES, useTempResources } from './helpers.js';
-import { ensureBuilt } from './helpers/build.js';
+import { ensureBuilt, PROJECT_ROOT } from './helpers/build.js';
+import { withFileLock } from '../src/matlock.js';
 
 const savedEnv = { ...process.env };
 afterEach(() => {
@@ -165,6 +167,46 @@ describe('native worker context through actual MCP subprocesses', () => {
     });
   }
 
+  it('refuses another process while a native context is owned and accepts a clean retry', async () => {
+    await ensureBuilt();
+    const cwd = tempDir(), path = join(cwd, '.cursor', 'mcp.json');
+    const original = install(cwd, 'cursor', path);
+    const context = {
+      HEDDLE_WORKER: '1', HEDDLE_DISPATCH_ID: '1', HEDDLE_PARENT: 'U',
+      HEDDLE_AGENT: 'U.1', FLEET_AGENT: 'U.1', HEDDLE_COMMS_ADDRESS: 'U.1',
+    };
+    const restore = materializeWorkerMcp(cwd, 'cursor', [], { dispatchId: 1 }, context);
+    const active = readFileSync(path, 'utf8');
+    const source = `
+      import { materializeWorkerMcp } from ${JSON.stringify(pathToFileURL(join(PROJECT_ROOT, 'dist/mcp.js')).href)};
+      try {
+        const restore = materializeWorkerMcp(${JSON.stringify(cwd)}, 'cursor', [], { dispatchId: 2 },
+          ${JSON.stringify({ ...context, HEDDLE_DISPATCH_ID: '2', HEDDLE_AGENT: 'U.2', FLEET_AGENT: 'U.2', HEDDLE_COMMS_ADDRESS: 'U.2' })});
+        restore();
+        process.stdout.write('restored');
+      } catch (error) { process.stdout.write(error.message); }
+    `;
+    const attempt = () => execFileSync(process.execPath, ['--disable-warning=ExperimentalWarning', '--input-type=module', '-e', source], {
+      cwd, encoding: 'utf8', timeout: 10_000,
+    });
+    try {
+      expect(attempt()).toMatch(/owned by active dispatch #1/);
+      expect(readFileSync(path, 'utf8')).toBe(active);
+    } finally { restore(); }
+    expect(readFileSync(path, 'utf8')).toBe(original);
+    expect(attempt()).toBe('restored');
+    expect(readFileSync(path, 'utf8')).toBe(original);
+  });
+
+  it('required native locks refuse unavailable locks without running the mutation', () => {
+    const cwd = tempDir(), lock = join(cwd, 'held.lock');
+    mkdirSync(lock);
+    let mutations = 0;
+    expect(() => withFileLock(lock, () => { mutations++; }, { required: true })).toThrow(/required file lock/);
+    expect(() => withFileLock(join(cwd, 'missing', 'lock'), () => { mutations++; }, { required: true })).toThrow();
+    expect(mutations).toBe(0);
+  });
+
   it('does not create a comms database in a generic uninitialized workspace', async () => {
     for (const row of clients) {
       const cwd = tempDir();
@@ -184,6 +226,28 @@ describe('native worker context through actual MCP subprocesses', () => {
     }
   });
 
+  it('refuses dispatch from a mismatched installation before invoking a native worker or minting a child', async () => {
+    const cwd = tempDir(), path = join(cwd, '.cursor', 'mcp.json');
+    install(cwd, 'cursor', path);
+    const config = JSON.parse(readFileSync(path, 'utf8'));
+    config.mcpServers.heddle.args[1] = '/another/heddle/dist/client-mcp.js';
+    writeFileSync(path, JSON.stringify(config));
+    process.env.HEDDLE_COMMS_DB = join(tempDir(), 'must-not-exist.db');
+    let calls = 0;
+    const outcome = await dispatch({
+      provider: 'cursor', model: 'cursor-grok-4.6-high', cwd, prompt: 'inspect stale config',
+      overrideReason: 'Verify stale installation cannot expose parent identity to workers.', identity: IDENTITIES.boundU,
+    }, tempLedger(), () => ({
+      provider: 'cursor', name: 'must-not-run',
+      async dispatch() { calls++; return { ok: true, output: 'unexpected', exitCode: 0 }; },
+    }));
+    expect(outcome.ok).toBe(false);
+    expect(outcome.error).toMatch(/unverified Heddle MCP entries/);
+    expect(calls).toBe(0);
+    expect(existsSync(process.env.HEDDLE_COMMS_DB!)).toBe(false);
+    expect(readFileSync(path, 'utf8')).toBe(JSON.stringify(config));
+  });
+
   it('requires both owned wrapper entries before recognizing native initialization', () => {
     const cwd = tempDir(), path = join(cwd, '.cursor', 'mcp.json');
     install(cwd, 'cursor', path);
@@ -191,8 +255,8 @@ describe('native worker context through actual MCP subprocesses', () => {
     config.mcpServers['heddle-comms'].command = 'foreign-server';
     writeFileSync(path, JSON.stringify(config));
     expect(nativeClientIntegrationInstalled(cwd, 'cursor')).toBe(false);
-    const restore = materializeWorkerMcp(cwd, 'cursor', [], { dispatchId: 1 }, { HEDDLE_WORKER: '1' });
+    expect(() => materializeWorkerMcp(cwd, 'cursor', [], { dispatchId: 1 }, { HEDDLE_WORKER: '1' }))
+      .toThrow(/unverified Heddle MCP entries/);
     expect(readFileSync(path, 'utf8')).toBe(JSON.stringify(config));
-    restore();
   });
 });

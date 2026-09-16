@@ -342,7 +342,7 @@ export async function runTarget(
   let escapeReport: DispatchOutcome['escape'];
   let result: WorkerResult;
   try {
-    nativeIntegration = nativeClientIntegrationInstalled(req.cwd, target.provider);
+    nativeIntegration = nativeClientIntegrationInstalled(req.cwd, target.provider, true);
     if (nativeIntegration) {
       const parent = ctx.attribution.orchestrator;
       if (!parent) throw new Error('native client worker integration requires a bound orchestrator identity');

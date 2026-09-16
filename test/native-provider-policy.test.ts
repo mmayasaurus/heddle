@@ -96,27 +96,64 @@ describe('native provider policy', () => {
     expect(readFileSync(openCodePath, 'utf8')).toBe('{"theme":"heddle"}\n');
   });
 
-  it('overlays initialized native MCP entries with per-worker identity and restores concurrent definitions', () => {
+  it('refuses overlapping native identities and permits retry after restoration', () => {
     const dir = tempDir();
     const path = join(dir, '.cursor', 'mcp.json');
-    writeConfig(path, installedConfig(dir, 'cursor'));
-    expect(nativeClientIntegrationInstalled(dir, 'cursor')).toBe(true);
-
-    const first = materializeWorkerMcp(dir, 'cursor', [], { dispatchId: 11 }, {
-      HEDDLE_WORKER: '1', HEDDLE_DISPATCH_ID: '11', HEDDLE_PARENT: 'U', HEDDLE_COMMS_ADDRESS: 'U.1',
-      HEDDLE_AGENT: 'U.1', FLEET_AGENT: 'U.1',
+    const original = installedConfig(dir, 'cursor');
+    writeConfig(path, original);
+    const context = (id: number) => ({
+      HEDDLE_WORKER: '1', HEDDLE_DISPATCH_ID: String(id), HEDDLE_PARENT: 'U',
+      HEDDLE_COMMS_ADDRESS: `U.${id}`, HEDDLE_AGENT: `U.${id}`, FLEET_AGENT: `U.${id}`,
     });
-    const second = materializeWorkerMcp(dir, 'cursor', [], { dispatchId: 12 }, {
-      HEDDLE_WORKER: '1', HEDDLE_DISPATCH_ID: '12', HEDDLE_PARENT: 'U', HEDDLE_COMMS_ADDRESS: 'U.2',
-      HEDDLE_AGENT: 'U.2', FLEET_AGENT: 'U.2',
-    });
-    expect(JSON.parse(readFileSync(path, 'utf8')).mcpServers.heddle.env).toMatchObject({
-      HEDDLE_WORKER: '1', HEDDLE_DISPATCH_ID: '12', HEDDLE_AGENT: 'U.2', HEDDLE_COMMS_ADDRESS: 'U.2',
-    });
-    second();
-    expect(JSON.parse(readFileSync(path, 'utf8')).mcpServers.heddle.env.HEDDLE_AGENT).toBe('U.1');
+    const first = materializeWorkerMcp(dir, 'cursor', [], { dispatchId: 11 }, context(11));
+    const active = readFileSync(path, 'utf8');
+    expect(() => materializeWorkerMcp(dir, 'cursor', [], { dispatchId: 12 }, context(12)))
+      .toThrow(/owned by active dispatch #11/);
+    expect(readFileSync(path, 'utf8')).toBe(active);
+    // Generic discovery refs remain shareable without replacing either native identity definition.
+    const discovery = materializeWorkerMcp(dir, 'cursor', ['memtrace'], { dispatchId: 13 });
+    expect(JSON.parse(readFileSync(path, 'utf8')).mcpServers.heddle.env.HEDDLE_AGENT).toBe('U.11');
+    discovery();
     first();
-    expect(readFileSync(path, 'utf8')).toBe(installedConfig(dir, 'cursor'));
+    expect(readFileSync(path, 'utf8')).toBe(original);
+    const second = materializeWorkerMcp(dir, 'cursor', [], { dispatchId: 12 }, context(12));
+    expect(JSON.parse(readFileSync(path, 'utf8')).mcpServers.heddle.env.HEDDLE_AGENT).toBe('U.12');
+    second();
+    expect(readFileSync(path, 'utf8')).toBe(original);
+  });
+
+  it('restores OpenCode original bytes when the CLI only reformats its native worker config', () => {
+    const dir = tempDir(), path = join(dir, 'opencode.json');
+    const original = installedConfig(dir, 'opencode');
+    writeConfig(path, original);
+    const restore = materializeWorkerMcp(dir, 'opencode', [], { dispatchId: 1 }, {
+      HEDDLE_WORKER: '1', HEDDLE_AGENT: 'U.1', HEDDLE_COMMS_ADDRESS: 'U.1',
+    });
+    writeFileSync(path, JSON.stringify(JSON.parse(readFileSync(path, 'utf8'))));
+    restore();
+    expect(readFileSync(path, 'utf8')).toBe(original);
+  });
+
+  it('clears native worker stamps while preserving OpenCode schema and unrelated additions', () => {
+    const dir = tempDir(), path = join(dir, 'opencode.json');
+    const original = installedConfig(dir, 'opencode');
+    writeConfig(path, original);
+    const restore = materializeWorkerMcp(dir, 'opencode', [], { dispatchId: 1 }, {
+      HEDDLE_WORKER: '1', HEDDLE_AGENT: 'U.1', HEDDLE_COMMS_ADDRESS: 'U.1',
+    });
+    const active = JSON.parse(readFileSync(path, 'utf8'));
+    expect(active.mcp.heddle.timeout).toBe(660_000);
+    expect(active.mcp['heddle-comms'].timeout).toBe(660_000);
+    active.$schema = 'https://opencode.ai/config.json';
+    active.theme = 'operator-theme';
+    active.mcp.custom = { type: 'local', command: ['custom-server'] };
+    writeFileSync(path, JSON.stringify(active));
+    restore();
+    const result = JSON.parse(readFileSync(path, 'utf8'));
+    expect(result).toMatchObject({ $schema: active.$schema, theme: active.theme, mcp: { custom: active.mcp.custom } });
+    expect(result.mcp.heddle).toEqual(JSON.parse(original).mcp.heddle);
+    expect(result.mcp['heddle-comms']).toEqual(JSON.parse(original).mcp['heddle-comms']);
+    expect(readFileSync(path, 'utf8')).not.toContain('HEDDLE_WORKER');
   });
 
   it('mints a real child and supplies sanitized worker MCP env on an initialized direct route', async () => {
