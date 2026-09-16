@@ -7,6 +7,7 @@ import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFile
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnProbe } from '../dist/adapters/subprocess.js';
+import { assertSecureDir } from '../dist/secure-fs.js';
 
 async function main() {
   assert.equal(process.platform, 'win32', 'Run this artifact on native Windows only');
@@ -74,15 +75,12 @@ $acl.SetOwner($sid)
 $acl.SetAccessRuleProtection($true, $false)
 $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($sid, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
 [IO.Directory]::SetAccessControl($Root, $acl)
-$actual = [IO.Directory]::GetAccessControl($Root)
-if (!$actual.AreAccessRulesProtected -or $actual.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $sid.Value -or
-    $actual.GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::Access) -ne
-    $acl.GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::Access)) { throw 'Private root ACL verification failed' }
-[Console]::Out.Write('PRIVATE_ROOT_VERIFIED')
+[Console]::Out.Write('PRIVATE_ROOT_PROVISIONED')
 `;
   const provisioned = await checked('private temporary root', powershell,
     ['-NoLogo', '-NoProfile', '-NonInteractive', '-InputFormat', 'None', '-Command', privateRootScript], 30_000, repo, root + '\n');
-  assert.equal(provisioned.stdout.trim(), 'PRIVATE_ROOT_VERIFIED', 'Private root setup did not report verification');
+  assert.equal(provisioned.stdout.trim(), 'PRIVATE_ROOT_PROVISIONED', 'Private root setup did not report completion');
+  assertSecureDir(root);
   for (const path of [prefix, smokeHome, localAppData, env.APPDATA, env.TEMP, env.XDG_CONFIG_HOME,
     env.XDG_CACHE_HOME, env.XDG_DATA_HOME, env.XDG_STATE_HOME, env.CODEX_HOME, env.CURSOR_CONFIG_DIR]) {
     mkdirSync(path, { recursive: true });

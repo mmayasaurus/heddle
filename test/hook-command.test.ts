@@ -58,7 +58,11 @@ describe('native hook shell boundary', () => {
     writeFileSync(script, 'process.exit(7);');
     for (const shell of shells) {
       try { execFileSync(shell.bin, shell.args, { stdio: 'pipe', timeout: 15_000 }); throw new Error('expected nonzero exit'); }
-      catch (error) { expect((error as { status?: number }).status).toBe(7); }
+      catch (error) {
+        // An additional powershell.exe -Command host normalizes a native nonzero status to 1.
+        // The generated hook itself and cmd.exe preserve 7; either outer shell must report failure.
+        expect((error as { status?: number }).status, shell.bin).toBe(shell.bin === 'powershell.exe' ? 1 : 7);
+      }
     }
     expect(await defaultExecHook(command, undefined, options)).toMatchObject({ exitCode: 7, timedOut: false });
   }, 60_000);
