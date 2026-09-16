@@ -5,6 +5,7 @@ import { homedir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { clientInbox, evaluateClientHook, renderClientHook, type ClientEvent } from './client-hooks.js';
 import { clientStartupInstructions, parseFleetClients } from './client-config.js';
+import { ClientWorkspaceIdentityError, resolveClientWorkspace } from './client-workspace.js';
 import { resolveCommsIdentity } from './comms/server.js';
 
 const EVENTS = new Set(['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'Stop']);
@@ -53,9 +54,9 @@ function openState(path: string): DatabaseSync {
 }
 
 async function main(): Promise<void> {
-  const [clientArg, eventArg, cwd, agent] = process.argv.slice(2);
+  const [clientArg, eventArg, configuredCwd, agent] = process.argv.slice(2);
   const clients = parseFleetClients(clientArg ?? '');
-  if (clients.length !== 1 || !EVENTS.has(eventArg) || !cwd) throw new Error('usage: client-hook <client> <event> <cwd> [agent]');
+  if (clients.length !== 1 || !EVENTS.has(eventArg) || !configuredCwd) throw new Error('usage: client-hook <client> <event> <cwd> [agent]');
   const client = clients[0], event = eventArg as ClientEvent;
   const input = await readInput();
   let raw: Record<string, unknown>;
@@ -63,6 +64,17 @@ async function main(): Promise<void> {
   catch { throw new Error('invalid hook input JSON (contents omitted)'); }
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('hook input must be an object');
   const env: NodeJS.ProcessEnv = { ...process.env, HEDDLE_COMMS_TRANSPORT: 'stdio', ...(agent && process.env.HEDDLE_WORKER !== '1' ? { HEDDLE_AGENT: agent, FLEET_AGENT: agent } : {}) };
+  let cwd: string;
+  try { cwd = resolveClientWorkspace(configuredCwd, [raw.cwd, process.cwd()], env, process.cwd()); }
+  catch (error) {
+    if (!(error instanceof ClientWorkspaceIdentityError)) throw error;
+    // A known identity mismatch or unreadable owner is a policy refusal, not an unexpected hook error.
+    process.stderr.write(`heddle native hook: ${error.message}\n`);
+    const conflict = event === 'PreToolUse' ? { context: '', deny: error.message } : { context: error.message };
+    // Stop context would request another turn; report only stderr at that boundary.
+    process.stdout.write(JSON.stringify(event === 'Stop' ? {} : renderClientHook(client, event, conflict, raw)) + '\n');
+    return;
+  }
   const result = evaluateClientHook(event, raw, cwd, env);
   // These clients support nonblocking context after tools, not in their before-tool response.
   // Re-evaluate nudges with the same arguments; enforced denials remain before-tool only.

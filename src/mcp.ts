@@ -6,6 +6,7 @@ import { parse as parseToml } from 'smol-toml';
 import { withFileLock } from './matlock.js';
 import type { MaterializeOpts } from './skillpacks.js';
 import { ENFORCEABLE } from './capabilities.js';
+import { sameClientWorkspace } from './client-workspace.js';
 import { clientFileSource, serverDefinitions, type FleetClient } from './client-config.js';
 
 /**
@@ -41,37 +42,69 @@ export function nativeClientIntegrationInstalled(cwd: string, provider: string, 
   const relative = {
     codex: '.codex/config.toml', cursor: '.cursor/mcp.json', gemini: '.gemini/settings.json', opencode: 'opencode.json',
   }[client];
-  let path = join(resolve(cwd), relative);
+  let workspace: string, path = join(resolve(cwd), relative);
+  try {
+    // Normalize workspace aliases, but never acquire a lock through symlinked config paths.
+    workspace = realpathSync(cwd);
+    path = join(workspace, relative);
+    if (!existsSync(dirname(path))) return false;
+    if (realpathSync(dirname(path)) !== dirname(path)) throw new Error('symlinked native configuration directory');
+  } catch {
+    if (refuseUnverified) throw unverifiedNativeConfig(path);
+    return false;
+  }
+  const lock = join(dirname(path), '.heddle-mcp.lock');
+  // A truly uninitialized workspace needs no writable lock directory. An in-flight writer does.
+  if (!existsSync(path) && !existsSync(sidecarPath(path)) && !existsSync(lock)) return false;
+  // Detection is called before materialization, never from inside its mutation/restore lock.
+  // A busy required lock must throw even for a non-strict probe, never downgrade to legacy mode.
+  return withFileLock(lock,
+    () => nativeClientSnapshot(workspace, path, client, refuseUnverified), { required: true });
+}
+
+function unverifiedNativeConfig(path: string): Error {
+  return new Error(`unverified Heddle MCP entries in ${path} — refusing a native worker that could inherit an orchestrator identity; ` +
+    'run from the Heddle installation referenced by these entries or repair the configuration');
+}
+
+/** Read configuration and ownership sidecar only while the shared materialization lock is held. */
+function nativeClientSnapshot(workspace: string, path: string, client: FleetClient, refuseUnverified: boolean): boolean {
   let namedEntries = false;
   try {
-    // Match installation: workspace aliases (/tmp, /var, selected project links) are valid,
-    // while config files/directories below the canonical workspace must not be symlinks.
-    const workspace = realpathSync(cwd);
-    path = join(workspace, relative);
-    if (!existsSync(path)) return false;
-    let raw: string | null;
-    try { raw = clientFileSource(path); }
+    let raw: string | null, sidecar: string | null;
+    try { raw = clientFileSource(path); sidecar = clientFileSource(sidecarPath(path)); }
     catch {
       namedEntries = true; // The client follows this config; ownership cannot be verified safely.
       throw new Error('unverifiable native configuration path');
     }
-    if (raw === null) return false;
-    const config = (client === 'codex' ? parseToml(raw) : JSON.parse(raw)) as Record<string, any>;
+    if (raw === null && sidecar === null) return false;
+    namedEntries = true; // A malformed/missing config cannot disprove native ownership.
+    if (raw === null) throw new Error('missing config with ownership sidecar');
+    const refs = sidecar === null ? undefined : JSON.parse(sidecar)?.refs;
+    const nativeOwner = refs && typeof refs === 'object' && Object.values(refs).some((names) =>
+      Array.isArray(names) && names.some((name) => name === 'heddle' || name === 'heddle-comms'));
+    const config = (client === 'codex' ? parseToml(raw) : JSON.parse(raw)) as Record<string, Record<string, Record<string, unknown>>>;
     const servers = config[client === 'codex' ? 'mcp_servers' : client === 'opencode' ? 'mcp' : 'mcpServers'];
-    if (!servers || typeof servers !== 'object' || Array.isArray(servers)) return false;
-    namedEntries = ['heddle', 'heddle-comms'].some((name) => Object.hasOwn(servers, name));
-    const expected = serverDefinitions(cwd, client);
+    namedEntries = Boolean(nativeOwner);
+    if (!servers || typeof servers !== 'object' || Array.isArray(servers)) {
+      if (namedEntries) throw new Error('native ownership sidecar has no server configuration');
+      return false;
+    }
+    namedEntries ||= ['heddle', 'heddle-comms'].some((name) => Object.hasOwn(servers, name));
+    const expected = serverDefinitions(workspace, client);
     const owned = ['heddle', 'heddle-comms'].every((name) => {
       const actual = servers[name];
       const definition = expected[name];
       if (!actual || typeof actual !== 'object') return false;
-      const command = client === 'opencode' ? actual.command?.[0] : actual.command;
-      const args = client === 'opencode' && Array.isArray(actual.command) ? actual.command.slice(1) : actual.args;
+      const commandParts = client === 'opencode' && Array.isArray(actual.command) ? actual.command : undefined;
+      const command = client === 'opencode' ? commandParts?.[0] : actual.command;
+      const args = client === 'opencode' ? commandParts?.slice(1) : actual.args;
       return command === definition.command && Array.isArray(args)
         && args.length === definition.args.length
         && JSON.stringify(args.slice(0, -1)) === JSON.stringify(definition.args.slice(0, -1))
         && typeof args.at(-1) === 'string'
-        && realpathSync(args.at(-1)) === workspace;
+        && sameClientWorkspace(args.at(-1), workspace)
+        && (!hasNativeWorkerContext({ [name]: actual }) || realpathSync(args.at(-1)) === workspace);
     });
     if (owned) {
       // Completed-worker stamps without our ownership record must never become a new baseline.
@@ -81,10 +114,7 @@ export function nativeClientIntegrationInstalled(cwd: string, provider: string, 
       return true;
     }
   } catch { /* Unreadable or unrelated configuration is not an initialized native integration. */ }
-  if (namedEntries && refuseUnverified) throw new Error(
-    `unverified Heddle MCP entries in ${path} — refusing a native worker that could inherit an orchestrator identity; ` +
-    'run from the Heddle installation referenced by these entries or repair the configuration',
-  );
+  if (namedEntries && refuseUnverified) throw unverifiedNativeConfig(path);
   return false;
 }
 

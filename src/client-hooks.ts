@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolveCommsIdentity } from './comms/server.js';
@@ -7,6 +7,7 @@ import { evaluateRules, type HookPayload } from './rules/evaluate.js';
 import { loadRules } from './rules/load.js';
 import { matchedRuleOutcome } from './rules/render.js';
 import type { FleetClient } from './client-config.js';
+import { clientWorkspaceDirectories } from './client-workspace.js';
 
 export type ClientEvent = 'SessionStart' | 'UserPromptSubmit' | 'PreToolUse' | 'PostToolUse' | 'Stop';
 export interface ClientHookResult { context: string; deny?: string; }
@@ -38,7 +39,8 @@ export function evaluateClientHook(event: ClientEvent, raw: Record<string, unkno
     return { context: '', deny: 'Heddle workers cannot spawn another agent (depth-1 limit).' };
   }
   const agent = resolveCommsIdentity({ ...env, HEDDLE_COMMS_TRANSPORT: 'stdio' }, cwd, () => {}).identity ?? '';
-  const rulesDir = env.HEDDLE_RULES_DIR ?? (existsSync(join(cwd, 'rules')) ? join(cwd, 'rules') : fileURLToPath(new URL('../rules', import.meta.url)));
+  const rulesDir = env.HEDDLE_RULES_DIR ?? clientWorkspaceDirectories(cwd).map((dir) => join(dir, 'rules'))
+    .find((dir) => statSync(dir, { throwIfNoEntry: false })?.isDirectory()) ?? fileURLToPath(new URL('../rules', import.meta.url));
   const matched = evaluateRules(loadRules(rulesDir), { event, payload, agent,
     agentRole: env.HEDDLE_WORKER === '1' ? 'worker' : 'orchestrator', isSubagent: Boolean(payload.agent_id) })
     .filter((entry) => entry.verdict === 'match');

@@ -36,7 +36,16 @@ check `check_workers` and `heddle ledger show <dispatch-id> --json` for the orig
 The same terminal command supports longer-than-default dispatches in the other clients.
 Apply the project's existing startup, handoff and closeout workflows under .claude/commands
 when present; their Markdown instructions can be read without Claude slash commands.
-After this integration is installed, start the client normally from this assigned worktree:
+After this integration is installed, start the client normally from the project directory or your own linked worktree:
 `codex`, `cursor-agent` (or `agent`), `gemini`, or `opencode`. Use the client's normal resume
-controls. `heddle launch` is optional; it combines installation, identity binding and native launch.
+controls. `heddle launch` is optional installation plus launch and can rewrite local settings;
+do not use it merely to open an existing copied worktree.
+Copied generated configs follow a linked Git worktree at runtime after Heddle verifies the shared
+repository, including commands run in its subdirectories. In a linked worktree, a valid explicit
+agent identity must match the nearest valid `.fleet-agent` between the working directory and
+the checkout root; an unreadable owner or a conflict denies tools. Native hooks inherit the
+nearest `rules` directory within that checkout unless `HEDDLE_RULES_DIR` is set. Shared-root launchers
+can select their normal named identities. Do not rerun `init-client` merely because you entered a linked worktree. A parent CLI
+still running at the shared root must pass your own worktree as explicit `cwd` to dispatch and
+code tools; creating a worktree does not move an already running server.
 Native Gemini requires its own Google sign-in; Antigravity's login is separate.

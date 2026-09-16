@@ -126,17 +126,15 @@ describe('materializeWorkerMcp — cursor touched-file safety', () => {
   });
 });
 
-describe('dispatch — a materialize failure AFTER the row opens finishes it, never orphans (HED-63)', () => {
+describe('dispatch — a configuration failure AFTER the row opens finishes it, never orphans (HED-63)', () => {
   const { tempDir, tempLedger } = useTempResources('heddle-mcp-orphan-test-');
 
-  it('a throw inside materializeWorkerMcp is caught and the row is finished ok=false, not left in flight', async () => {
+  it('a throw during native configuration detection finishes the row ok=false, not left in flight', async () => {
     const ledger = tempLedger();
     const cwd = realpathSync(tempDir());
-    // Seed a malformed .cursor/mcp.json so writeMergedMcpJson throws (mcp.ts:206-208). This passes
-    // validateWorkerMcp (cursor + memtrace is valid) and fails INSIDE the dispatch try, AFTER
-    // startUnderCap has opened the row. Force the cursor route explicitly — cursor's materialize
-    // actually writes .cursor/mcp.json (codex's is a no-op), and a task-class route can cap-fall-back
-    // to codex in a test env; a direct provider+model route needs an override reason (HED-95).
+    // A malformed .cursor/mcp.json passes validateWorkerMcp (cursor + memtrace is valid), but
+    // native configuration detection refuses it inside the dispatch try, after startUnderCap
+    // opens the row. Force Cursor so a task-class fallback cannot avoid this path (HED-95).
     mkdirSync(join(cwd, '.cursor'), { recursive: true });
     writeFileSync(join(cwd, '.cursor', 'mcp.json'), 'not-json{{ broken', 'utf8');
 
@@ -149,7 +147,7 @@ describe('dispatch — a materialize failure AFTER the row opens finishes it, ne
     // dispatch RETURNS (does not reject) — the throw was caught (dispatch.ts:427) and the row closed
     // in the finally (:429). The point of HED-63: no orphan in-flight row.
     expect(outcome.ok).toBe(false);
-    expect(String(outcome.error)).toMatch(/not valid JSON/);
+    expect(String(outcome.error)).toMatch(/unverified Heddle MCP/);
     expect(ledger.inFlight()).toEqual([]);
     const row = ledger.recent(1)[0];
     expect(row.finished_at).not.toBeNull();

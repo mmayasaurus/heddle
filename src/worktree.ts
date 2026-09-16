@@ -128,12 +128,12 @@ export interface GitRepository {
  */
 export function gitRepositoryFor(cwd: string): GitRepository | null {
   try {
-    const topLevel = git(cwd, ['rev-parse', '--show-toplevel']).trim();
+    const topLevel = git(cwd, ['rev-parse', '--show-toplevel']).replace(/\r?\n$/, '');
     if (!topLevel) return null;
     let mainRoot: string | null = null;
     try {
       const first = git(cwd, ['worktree', 'list', '--porcelain']).split('\n').find((l) => l.startsWith('worktree '));
-      mainRoot = first ? first.slice('worktree '.length).trim() || null : null;
+      mainRoot = first ? first.slice('worktree '.length) || null : null;
     } catch { /* unlistable — identity unknown; consumers treat null as "no claim", never as topLevel */ }
     let originUrl: string | null = null;
     // --local: the repository's own config file only (shared by its linked worktrees) — never a
