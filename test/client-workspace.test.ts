@@ -18,9 +18,9 @@ type NativeServer = { command: string | string[]; args?: string[]; env?: Record<
 type NativeConfig = Partial<Record<'mcp_servers' | 'mcpServers' | 'mcp', Record<string, NativeServer>>>;
 
 describe('copied native configuration in linked worktrees', () => {
-  const { tempDir } = useTempResources('heddle-client-workspace-');
+  const { tempDir } = useTempResources('heddle-client-workspace-', { privateWindowsRoot: true });
   function fixture(suffix = '') {
-    const root = realpathSync(tempDir()), canonical = join(root, 'canonical' + suffix), linked = join(root, 'linked' + suffix);
+    const root = realpathSync.native(tempDir()), canonical = join(root, 'canonical' + suffix), linked = join(root, 'linked' + suffix);
     mkdirSync(canonical);
     const git = (cwd: string, args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
     git(canonical, ['init', '-q']);
@@ -39,6 +39,12 @@ describe('copied native configuration in linked worktrees', () => {
     const raw = readFileSync(join(dir, files[client]), 'utf8');
     const config = (client === 'codex' ? parseToml(raw) : JSON.parse(raw)) as NativeConfig;
     return config[client === 'codex' ? 'mcp_servers' : client === 'opencode' ? 'mcp' : 'mcpServers']!;
+  }
+
+  function hookDenial(client: FleetClient, stdout: string): string {
+    const output = JSON.parse(stdout);
+    return client === 'codex' ? output.hookSpecificOutput.permissionDecisionReason
+      : client === 'cursor' ? output.user_message : client === 'gemini' ? output.reason : output.deny;
   }
 
   it('keeps config ownership at exact linked-family roots, pins workers, and refuses conflicting identity', () => {
@@ -104,18 +110,21 @@ describe('copied native configuration in linked worktrees', () => {
     expect(() => resolveClientWorkspace(alias, [], { HEDDLE_AGENT: 'different-seat' })).toThrow('conflicts');
   });
 
-  it.each(FLEET_CLIENTS)('%s copied configs bind actual stdio with trailing-space paths and invalid env identity without tracked changes', async (client) => {
+  it.each(FLEET_CLIENTS)('%s copied configs bind actual stdio with space-containing paths and invalid env identity without tracked changes', async (client) => {
     await ensureBuilt();
-    const { canonical, linked, root, git } = fixture(' ');
+    // Preserve trailing spaces on POSIX; exercise supported internal spaces on Windows.
+    const { canonical, linked, root, git } = fixture(process.platform === 'win32' ? ' space' : ' ');
     const sub = join(linked, 'subdir'); mkdirSync(sub);
     const before = git(linked, ['status', '--porcelain', '--untracked-files=all']);
     const configBefore = readFileSync(join(linked, files[client]), 'utf8');
+    // Git checkout may give the linked copy different line endings; preserve each file's own bytes.
+    const canonicalBefore = readFileSync(join(canonical, files[client]), 'utf8');
     const def = servers(linked, client)['heddle-comms'];
     const env = client === 'opencode' ? def.environment : def.env;
     expect(env).toBeDefined();
     // Cursor's documented empty-default expansion occurs before its sanitized child launch.
     const expanded = Object.fromEntries(Object.entries(env ?? {}).map(([key, value]) => [key, String(value).replace(/\$\{[A-Z_]+:-\}/g, '')]));
-    const { env: childEnvironment } = childEnv({ home: root, env: { ...expanded, HEDDLE_AGENT: 'invalid identity', HEDDLE_COMMS_DB: join(root, 'comms.db') } });
+    const { env: childEnvironment } = childEnv({ home: root, env: { ...expanded, HEDDLE_AGENT: 'invalid identity', HEDDLE_COMMS_DB: join(root, 'private', 'comms.db') } });
     const command = Array.isArray(def.command) ? def.command[0] : def.command;
     const args = Array.isArray(def.command) ? def.command.slice(1) : def.args;
     const peer = new Client({ name: 'linked-test', version: '1' });
@@ -140,7 +149,7 @@ describe('copied native configuration in linked worktrees', () => {
     expect(readFileSync(join(linked, files[client]), 'utf8')).toBe(configBefore);
     expect(git(linked, ['status', '--porcelain', '--untracked-files=all'])).toBe(before);
     expect(parseToml(readFileSync(join(linked, files.codex), 'utf8'))).toMatchObject({ mcp_servers: { heddle: { default_tools_approval_mode: 'approve' } } });
-    expect(readFileSync(join(canonical, files[client]), 'utf8')).toBe(configBefore);
+    expect(readFileSync(join(canonical, files[client]), 'utf8')).toBe(canonicalBefore);
   });
 
   it('scopes native hook payload cwd to the linked family while preserving copied hook bytes', async () => {
@@ -161,21 +170,21 @@ describe('copied native configuration in linked worktrees', () => {
           input: JSON.stringify({ cwd: payloadCwd, tool_name: 'exec_command', tool_input: { cmd: 'probe' } }),
         });
         expect(result.status, result.stderr).toBe(0);
-        expect(result.stdout, result.stderr).toContain(`selected ${selected}`);
+        expect(hookDenial(client, result.stdout), result.stderr).toContain(`selected ${selected}`);
       }
       expect(readFileSync(join(linked, client === 'codex' || client === 'cursor' ? `.${client}/hooks.json` : files[client]), 'utf8')).toBe(before);
     }
   });
 
-  it.each(['payload', 'process', 'direct'] as const)('identity conflicts deny PreToolUse for every client via %s cwd without permission or Stop loops', async (mode) => {
-    await ensureBuilt();
-    const { canonical, linked, root } = fixture();
-    for (const dir of [canonical, linked]) {
-      mkdirSync(join(dir, 'rules'));
-      writeFileSync(join(dir, 'rules/enforced.yaml'), 'id: enforced\nevent: PreToolUse\nmatch:\n  tool: Bash\naction: block\nenforce: true\nmessage: policy denial\nfail_open: true\n');
-    }
-    const { env } = childEnv({ home: root, env: { HEDDLE_AGENT: 'canonical-seat' } });
-    for (const client of FLEET_CLIENTS) {
+  it.each(FLEET_CLIENTS.flatMap((client) => (['payload', 'process', 'direct'] as const).map((mode) => ({ client, mode }))))(
+    '$client identity conflicts deny PreToolUse via $mode cwd without permission or Stop loops', async ({ client, mode }) => {
+      await ensureBuilt();
+      const { canonical, linked, root } = fixture();
+      for (const dir of [canonical, linked]) {
+        mkdirSync(join(dir, 'rules'));
+        writeFileSync(join(dir, 'rules/enforced.yaml'), 'id: enforced\nevent: PreToolUse\nmatch:\n  tool: Bash\naction: block\nenforce: true\nmessage: policy denial\nfail_open: true\n');
+      }
+      const { env } = childEnv({ home: root, env: { HEDDLE_AGENT: 'canonical-seat' } });
       for (const event of ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'Stop']) {
         const configured = mode === 'direct' ? linked : canonical;
         const result = spawnSync(process.execPath, [join(PROJECT_ROOT, 'dist/client-hook.js'), client, event, configured], {
@@ -199,8 +208,7 @@ describe('copied native configuration in linked worktrees', () => {
           expect(output.hookSpecificOutput ?? {}).not.toHaveProperty('permissionDecision');
         }
       }
-    }
-  });
+    });
 
   it.each(FLEET_CLIENTS)('%s denies unsafe worktree owner metadata instead of failing open or timing out', async (client) => {
     await ensureBuilt();
@@ -250,7 +258,7 @@ describe('copied native configuration in linked worktrees', () => {
           input: JSON.stringify({ cwd: payloadCwd, tool_name: 'exec_command', tool_input: { cmd: 'probe' } }),
         });
         expect(result.status, result.stderr).toBe(0);
-        expect(result.stdout, result.stderr).toContain(`linked-policy ${actualCwd} linked-seat.1`);
+        expect(hookDenial(client, result.stdout), result.stderr).toContain(`linked-policy ${actualCwd} linked-seat.1`);
         expect(result.stdout).not.toContain('canonical-policy');
         expect(result.stdout).not.toContain('other-policy');
       }

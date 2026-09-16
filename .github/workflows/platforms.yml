@@ -41,7 +41,7 @@ jobs:
       - name: Build
         run: npm run build
       - name: Native filesystem, process, and fleet tests
-        run: npx vitest run --reporter=verbose test/platform-process.test.ts test/platform-filesystem.test.ts test/hook-command.test.ts test/secure-fs-windows.test.ts test/client-session.test.ts test/client-hooks.test.ts test/comms/address.test.ts test/comms/log.test.ts test/comms/broker.test.ts
+        run: npx vitest run --reporter=verbose test/platform-process.test.ts test/platform-filesystem.test.ts test/hook-command.test.ts test/secure-fs-windows.test.ts test/client-session.test.ts test/client-hooks.test.ts test/comms/address.test.ts test/comms/log.test.ts test/comms/broker.test.ts test/client-workspace.test.ts test/native-client-identity.test.ts test/native-worker-context.test.ts test/client-marker-race.test.ts
 
   native-cli:
     name: native CLI launch (windows-2025)
