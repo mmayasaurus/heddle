@@ -56,9 +56,13 @@ export async function runClientSession(options: ClientSessionOptions): Promise<n
   process.stderr.write(`heddle: ${plan.agent} → ${plan.client} in ${plan.dir}. Review new native hooks/MCP servers in the client's trust controls.\n`);
   return new Promise<number>((resolve) => {
     const child = spawn(plan.bin, plan.args, { cwd: plan.dir, env, stdio: 'inherit' });
+    let interrupted = false;
     const forward = (signal: NodeJS.Signals) => {
       try {
-        if (process.platform === 'win32') killGroupOrChild(child);
+        if (process.platform === 'win32') {
+          if (signal === 'SIGINT') interrupted = true;
+          killGroupOrChild(child);
+        }
         else child.kill(signal);
       } catch { /* already exited */ }
     };
@@ -66,6 +70,6 @@ export async function runClientSession(options: ClientSessionOptions): Promise<n
     process.on('SIGINT', interrupt); process.on('SIGTERM', terminate); process.on('SIGHUP', hangup);
     const cleanup = () => { process.off('SIGINT', interrupt); process.off('SIGTERM', terminate); process.off('SIGHUP', hangup); };
     child.once('error', (error) => { cleanup(); process.stderr.write(`heddle: could not launch ${plan.client}: ${error.message}\n`); resolve(1); });
-    child.once('close', (code, signal) => { cleanup(); resolve(code ?? (signal === 'SIGINT' ? 130 : 1)); });
+    child.once('close', (code, signal) => { cleanup(); resolve(interrupted ? 130 : code ?? (signal === 'SIGINT' ? 130 : 1)); });
   });
 }

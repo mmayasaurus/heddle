@@ -3,7 +3,7 @@
 // pollute stdout parsing for agents, so it is suppressed at the entry point only —
 // `--disable-warning=<type>` silences just that category (`--no-warnings` would hide every
 // process warning; its `=…` suffix is ignored — verified Node 22.23, 2026-08-15).
-import { existsSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { ensureSecureDir } from './secure-fs.js';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
@@ -826,7 +826,8 @@ try {
         }
         const result = await pollClaudeUsage(accounts);
         const usageDir = process.env.HEDDLE_USAGE_DIR ?? DEFAULT_USAGE_DIR;
-        ensureSecureDir(usageDir);
+        if (process.platform === 'win32') ensureSecureDir(usageDir);
+        else mkdirSync(usageDir, { recursive: true, mode: 0o700 });
         const written: string[] = [];
         const skipped: { id: string; source: string }[] = [];
         for (const row of result.rows) {

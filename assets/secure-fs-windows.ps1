@@ -14,7 +14,8 @@ Set-StrictMode -Version 2.0
 [Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)
 Add-Type -AssemblyName System.Web.Extensions
 $json = [Web.Script.Serialization.JavaScriptSerializer]::new()
-$json.MaxJsonLength = 16 * 1024 * 1024
+# Base64 adds one third to the runner's 32 MiB retained worker output.
+$json.MaxJsonLength = 64 * 1024 * 1024
 $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User
 $trusted = @($sid.Value, 'S-1-5-18', 'S-1-5-32-544')
 
@@ -79,7 +80,8 @@ function Assert-Directory([string] $path, [bool] $requireOwner = $true, [bool] $
     }
 }
 
-function New-PrivateAcl([bool] $directory) {
+# Returns an in-memory descriptor; applying it to a filesystem object happens at the caller.
+function Get-PrivateAcl([bool] $directory) {
     if ($directory) { $acl = New-Object Security.AccessControl.DirectorySecurity }
     else { $acl = New-Object Security.AccessControl.FileSecurity }
     $acl.SetOwner($sid)
@@ -130,7 +132,7 @@ function Ensure-Directory([string] $path, [string] $boundary = '', [bool] $check
     foreach ($component in $missing) {
         # Parent was validated before descent. The framework overload applies the DACL at creation.
         # A concurrent directory creator is accepted only after validating its actual owner and ACL.
-        [void][IO.Directory]::CreateDirectory($component, (New-PrivateAcl $true))
+        [void][IO.Directory]::CreateDirectory($component, (Get-PrivateAcl $true))
         Assert-Directory $component $true $true
     }
 }
@@ -149,7 +151,7 @@ function Open-PrivateRead([string] $path, [bool] $assertOnly = $false) {
 
 function Create-PrivateFile([string] $path, [byte[]] $bytes) {
     $stream = [IO.FileStream]::new($path, [IO.FileMode]::CreateNew, [Security.AccessControl.FileSystemRights]::FullControl,
-        [IO.FileShare]::None, 4096, [IO.FileOptions]::None, (New-PrivateAcl $false))
+        [IO.FileShare]::None, 4096, [IO.FileOptions]::None, (Get-PrivateAcl $false))
     try {
         Assert-Acl ($stream.GetAccessControl()) $false $true
         $stream.Write($bytes, 0, $bytes.Length)
@@ -161,7 +163,7 @@ $recoveryFile = $null
 try {
     # Avoid JSON pipeline cmdlets: PowerShell module logging can record their parameter/input values.
     # Only fixed script source is executable; the request is deserialized as data by the framework.
-    $request = $json.DeserializeObject([Console]::In.ReadToEnd())
+    $request = $json.DeserializeObject([Console]::In.ReadLine())
     $path = Normalize-Path $request.path
     $parent = [IO.Path]::GetDirectoryName($path)
     $result = @{ ok = $true }

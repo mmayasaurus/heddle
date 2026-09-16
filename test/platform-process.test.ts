@@ -53,14 +53,21 @@ describe('native platform process execution', () => {
       process.stdout.write(String(child.pid)); setInterval(()=>{},1000);`);
     const shim = join(dir, 'worker.cmd');
     writeFileSync(shim, `@echo off\r\n"${process.execPath}" "%~dp0worker.mjs"\r\n`);
-    const result = await run(shim, [], dir, 2000);
-    const pid = Number(result.stdout);
-    expect(result.timedOut).toBe(true);
-    expect(Number.isSafeInteger(pid) && pid > 0, result.stderr).toBe(true);
-    try {
-      expect(() => process.kill(pid, 0)).toThrow();
-    } finally {
-      try { process.kill(pid, 'SIGKILL'); } catch { /* Already reaped as required. */ }
+    for (const mode of ['deadline', 'probe', 'idle']) {
+      const result = mode === 'probe'
+        ? await spawnProbe(shim, [], { cwd: dir, env: process.env, stdin: '', timeoutMs: 2000 })
+        : await run(shim, [], dir, mode === 'idle' ? 10_000 : 2000, undefined, undefined, undefined, mode === 'idle' ? 2000 : undefined);
+      const pid = Number(result.stdout);
+      try {
+        expect(result.timedOut).toBe(mode !== 'idle');
+        if (mode === 'idle') expect('idleTimedOut' in result && result.idleTimedOut).toBe(true);
+        expect(Number.isSafeInteger(pid) && pid > 0, result.stderr).toBe(true);
+        expect(() => process.kill(pid, 0)).toThrow();
+      } finally {
+        if (Number.isSafeInteger(pid) && pid > 0) {
+          try { process.kill(pid, 'SIGKILL'); } catch { /* Already reaped as required. */ }
+        }
+      }
     }
   });
 });

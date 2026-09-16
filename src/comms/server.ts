@@ -153,7 +153,14 @@ export function initOperatorToken(opts: { rotate?: boolean; path?: string } = {}
 export function operatorTokenMatches(env: NodeJS.ProcessEnv, path: string = OPERATOR_TOKEN_PATH): boolean {
   const presented = (env.HEDDLE_COMMS_OPERATOR_TOKEN ?? '').trim();
   if (!presented || !existsSync(path)) return false;
-  const expected = (process.platform === 'win32' ? secureReadFile(path) : readFileSync(path, 'utf8')).trim();
+  let expected: string;
+  try {
+    expected = (process.platform === 'win32' ? secureReadFile(path) : readFileSync(path, 'utf8')).trim();
+  } catch {
+    // Unsafe ACLs, unavailable helpers, and read races revoke authority; authentication never repairs
+    // the trust root or turns a failed read into an exception from this boolean predicate.
+    return false;
+  }
   const a = Buffer.from(presented), b = Buffer.from(expected);
   return a.length === b.length && a.length > 0 && timingSafeEqual(a, b);
 }

@@ -141,9 +141,12 @@ export function defaultExecHook(
   args: string[] | undefined,
   opts: { cwd: string; env: NodeJS.ProcessEnv; stdin: string; timeoutMs: number },
 ): Promise<ProbeResult> {
-  const commandArgs = args && args.length ? args : ['-c', command];
-  const bin = args && args.length ? command : '/bin/sh';
-  return spawnProbe(bin, commandArgs, opts).then((probe) => ({
+  const windowsShell = process.platform === 'win32' && !args?.length;
+  const commandArgs = args && args.length ? args : windowsShell ? [] : ['-c', command];
+  const bin = windowsShell || args?.length ? command : '/bin/sh';
+  // Node's shell mode selects ComSpec/cmd.exe and enables the required Windows verbatim quoting.
+  // Passing a quoted hook through a manually spawned cmd.exe would apply incompatible CRT escaping.
+  return spawnProbe(bin, commandArgs, windowsShell ? { ...opts, shell: true } : opts).then((probe) => ({
     ...probe,
     stdout: capStream(probe.stdout),
     stderr: capStream(probe.stderr),

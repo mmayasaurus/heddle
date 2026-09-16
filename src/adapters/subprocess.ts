@@ -24,13 +24,13 @@ let exitHandlersInstalled = false;
 // then a silent no-op) OR the child may have left its group via setpgid and still be alive under its
 // own pid (child.kill then actually kills it). So the fallback is unconditional. Windows uses taskkill
 // to include descendants; without a pid or that OS utility, fall back to the direct child.
-export function killGroupOrChild(child: ChildProcess): void {
+export function killGroupOrChild(child: ChildProcess): boolean {
   if (process.platform === 'win32' && child.pid !== undefined && process.env.SystemRoot) {
     try {
       // npm .cmd shims add a shell parent. Killing only that parent leaves the actual worker alive.
       execFileSync(join(process.env.SystemRoot, 'System32', 'taskkill.exe'), ['/PID', String(child.pid), '/T', '/F'],
         { stdio: 'ignore', windowsHide: true, timeout: 5000 });
-      return;
+      return true;
     } catch {
       // Already gone or taskkill unavailable: still attempt to terminate the direct child below.
     }
@@ -38,15 +38,16 @@ export function killGroupOrChild(child: ChildProcess): void {
   if (process.platform !== 'win32' && child.pid !== undefined) {
     try {
       process.kill(-child.pid, 'SIGKILL');
-      return;
+      return true;
     } catch {
       // Group gone, or the child left its group — fall through to a direct child kill.
     }
   }
   try {
-    child.kill('SIGKILL');
+    return child.kill('SIGKILL');
   } catch {
     // Already exited, or cannot be killed (best effort).
+    return false;
   }
 }
 
@@ -92,7 +93,7 @@ function capAppend(acc: string, accBytes: number, chunk: string, cap: number):
 export function spawnProbe(
   bin: string,
   args: string[],
-  opts: { cwd: string; env: NodeJS.ProcessEnv; stdin: string; timeoutMs: number; maxStreamBytes?: number },
+  opts: { cwd: string; env: NodeJS.ProcessEnv; stdin: string; timeoutMs: number; maxStreamBytes?: number; shell?: boolean },
 ): Promise<{ stdout: string; stderr: string; exitCode: number | null; timedOut: boolean }> {
   return new Promise((resolve) => {
     const child = spawn(bin, args, {
@@ -100,6 +101,7 @@ export function spawnProbe(
       env: opts.env,
       stdio: ['pipe', 'pipe', 'pipe'],
       detached: true,
+      ...(opts.shell ? { shell: true } : {}),
     });
     installExitHandlers();
     if (child.pid !== undefined) liveChildren.add(child);
@@ -115,6 +117,7 @@ export function spawnProbe(
     let stderrBytes = 0;
     let settled = false;
     let killReason: 'deadline' | null = null;
+    let terminationRequested = false;
     let childExited = false;
     let graceTimer: NodeJS.Timeout | undefined;
     let drainTimer: NodeJS.Timeout | undefined;
@@ -139,7 +142,7 @@ export function spawnProbe(
       if (settled || killReason !== null) return;
       killReason = 'deadline';
       try {
-        killGroupOrChild(child);
+        terminationRequested = killGroupOrChild(child);
       } finally {
         armGrace();
       }
@@ -167,7 +170,8 @@ export function spawnProbe(
         finish(code, false);
       }, GRACE_MS);
     });
-    child.on('close', (code, signal) => finish(code, killReason === 'deadline' && signal === 'SIGKILL'));
+    child.on('close', (code, signal) => finish(code, killReason === 'deadline' &&
+      (signal === 'SIGKILL' || (process.platform === 'win32' && terminationRequested))));
     child.on('error', (err) => {
       if (killReason !== null) {
         stderr = `${stderr}\nkill error: ${String(err)}`;
@@ -203,6 +207,7 @@ export function run(bin: string, args: string[], cwd: string, timeoutMs: number,
     // 'error' and 'close' can BOTH fire (e.g. spawn failure then close) — settle exactly once.
     let settled = false;
     let killReason: 'deadline' | 'idle' | null = null;
+    let terminationRequested = false;
     let graceTimer: NodeJS.Timeout | undefined;
     let drainTimer: NodeJS.Timeout | undefined;
     let idleTimer: NodeJS.Timeout | undefined;
@@ -242,7 +247,7 @@ export function run(bin: string, args: string[], cwd: string, timeoutMs: number,
       killReason = 'idle';
       clearTimeout(timer);
       try {
-        killGroupOrChild(child);
+        terminationRequested = killGroupOrChild(child);
       } finally {
         armGrace();
       }
@@ -252,7 +257,7 @@ export function run(bin: string, args: string[], cwd: string, timeoutMs: number,
       killReason = 'deadline';
       if (idleTimer !== undefined) clearTimeout(idleTimer);
       try {
-        killGroupOrChild(child);
+        terminationRequested = killGroupOrChild(child);
       } finally {
         // Arm the grace net unconditionally — even if the kill threw. If 'close' has not settled run()
         // by GRACE_MS (an escaped setsid/double-fork grandchild still holding the inherited pipes, or a
@@ -303,8 +308,9 @@ export function run(bin: string, args: string[], cwd: string, timeoutMs: number,
       }, GRACE_MS);
     });
     child.on('close', (code, signal) => {
-      // Decide timedOut from the outcome signal, not a pre-kill guess.
-      finish(code, killReason === 'deadline' && signal === 'SIGKILL', killReason === 'idle' && signal === 'SIGKILL');
+      // External taskkill termination has no POSIX signal; retain its successful termination result.
+      const killed = signal === 'SIGKILL' || (process.platform === 'win32' && terminationRequested);
+      finish(code, killReason === 'deadline' && killed, killReason === 'idle' && killed);
     });
     child.on('error', (err) => {
       // A post-spawn kill error (e.g. EPERM surfacing asynchronously after the timer fired) can land

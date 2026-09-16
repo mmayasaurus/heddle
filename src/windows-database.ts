@@ -1,6 +1,5 @@
-import { existsSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { ensureSecureDir } from './secure-fs.js';
+import { assertSecureDir, ensureSecureDir } from './secure-fs.js';
 import { assertWindowsPrivateFile, createWindowsPrivateFile } from './secure-fs-windows.js';
 
 /** SQLite inherits a private directory DACL; validate pre-existing files before opening the database. */
@@ -8,15 +7,20 @@ export function prepareWindowsDatabase(path: string): void {
   ensureSecureDir(dirname(path));
   try { createWindowsPrivateFile(path, ''); }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+  assertWindowsDatabase(path);
+}
+
+/** Validate existing database storage without provisioning files, directories, or schema. */
+export function assertWindowsDatabase(path: string): void {
+  assertSecureDir(dirname(path));
   assertWindowsPrivateFile(path);
   for (const suffix of ['-wal', '-shm', '-journal']) {
     const sibling = `${path}${suffix}`;
-    if (existsSync(sibling)) {
-      try { assertWindowsPrivateFile(sibling); }
-      catch (error) {
-        // Another SQLite connection may finish a checkpoint between the existence check and open.
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-      }
+    try { assertWindowsPrivateFile(sibling); }
+    catch (error) {
+      // Sidecars are optional and may disappear after a checkpoint. Only absence is acceptable;
+      // an unreadable or unsafe sidecar must not be hidden by an existsSync() pre-check.
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
   }
 }

@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -39,6 +39,15 @@ describe('heddle usage poll-claude CLI', () => {
     expect(statSync(root).mode & 0o777).toBe(0o700);
     expect(statSync(join(root, 'usage')).mode & 0o777).toBe(0o700);
     expect(() => writeAccountRegistry({ schemaVersion: 2, accounts: [] }, join(root, 'accounts.json'))).not.toThrow();
+  });
+
+  it.skipIf(process.platform === 'win32')('continues polling into a legacy POSIX usage directory without changing its permissions', async () => {
+    const home = tempDir(), usageDir = join(home, 'usage');
+    mkdirSync(usageDir);
+    chmodSync(usageDir, 0o775);
+    const result = await runCli(['usage', 'poll-claude', '--json'], { home, env: { HEDDLE_USAGE_DIR: usageDir } });
+    expect(result.code, result.stderr).toBe(0);
+    expect(statSync(usageDir).mode & 0o777).toBe(0o775);
   });
 
   it('exits non-zero and writes no sidecar for an unknown --account id', async () => {

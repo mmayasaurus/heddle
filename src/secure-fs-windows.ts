@@ -42,10 +42,12 @@ export function windowsSecureFs(
     requireOwner: options.requireOwner ?? true,
   };
   const child = spawnSync(executable, ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', helper], {
-    input: JSON.stringify(request), encoding: 'utf8', windowsHide: true, timeout: 30_000,
-    maxBuffer: 16 * 1024 * 1024,
+    // One JSON line gives the helper an explicit frame; it need not wait for pipe EOF on Windows.
+    input: JSON.stringify(request) + '\n', encoding: 'utf8', windowsHide: true, timeout: 30_000,
+    // Base64 JSON must accommodate the runner's 32 MiB retained worker output.
+    maxBuffer: 64 * 1024 * 1024,
     // No provider credentials or user PowerShell profile in the ACL helper's environment.
-    env: { SystemRoot: systemRoot, WINDIR: systemRoot, TEMP: process.env.TEMP, TMP: process.env.TMP },
+    env: { SystemRoot: systemRoot, WINDIR: systemRoot },
   });
   if (child.error || child.status !== 0) throw new Error('Windows secure filesystem helper failed');
   let result: { ok?: boolean; code?: string; reason?: string; content?: string; mtimeMs?: number; recoveryFile?: string };

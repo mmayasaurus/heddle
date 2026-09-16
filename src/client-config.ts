@@ -144,7 +144,6 @@ function nativeHooks(config: Record<string, unknown>, client: FleetClient, dir: 
       const foreign = item.hooks.filter((hook: unknown) => {
         const value = object(hook, 'hook');
         return !owns(value.command);
-
       });
       return foreign.length ? [{ ...item, hooks: foreign }] : [];
     });

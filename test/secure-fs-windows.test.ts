@@ -51,6 +51,8 @@ describe('Windows secure filesystem transport', () => {
     Object.defineProperty(process, 'platform', { value: 'win32' });
     vi.stubEnv('SystemRoot', 'C:\\Windows');
     vi.stubEnv('ANTHROPIC_API_KEY', 'FAKE_INHERITED_SECRET');
+    vi.stubEnv('TEMP', 'C:\\foreign-temp');
+    vi.stubEnv('TMP', 'C:\\foreign-temp');
     transport.active = true;
     transport.response = { status: 0, stdout: '{"ok":true}', stderr: '' };
     secureWriteFile('C:\\Users\\test\\credential', 'FAKE_SECRET_SENTINEL');
@@ -59,6 +61,7 @@ describe('Windows secure filesystem transport', () => {
     expect(args.join(' ')).not.toContain('FAKE_SECRET_SENTINEL');
     expect(JSON.parse(options.input).content).toBe(Buffer.from('FAKE_SECRET_SENTINEL').toString('base64'));
     expect(JSON.stringify(options.env)).not.toContain('FAKE_INHERITED_SECRET');
+    expect(options.env).toEqual({ SystemRoot: 'C:\\Windows', WINDIR: 'C:\\Windows' });
   });
 
   it('reports a validated recovery filename without trusting arbitrary diagnostic fields', () => {
@@ -79,9 +82,9 @@ describe.skipIf(!nativeWindows)('Windows native credential filesystem', () => {
   let root: string;
   const powershell = (script: string, path: string): string => {
     const result = spawnSync(join(process.env.SystemRoot!, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
-      ['-NoProfile', '-NonInteractive', '-Command', '$ErrorActionPreference="Stop"; $p=[Console]::In.ReadToEnd(); ' + script],
-      { input: path, encoding: 'utf8', timeout: 30_000, windowsHide: true });
-    if (result.error || result.status !== 0) throw new Error(`Windows ACL test fixture failed: ${result.stderr}`);
+      ['-NoProfile', '-NonInteractive', '-Command', '$ErrorActionPreference="Stop"; [Console]::InputEncoding=[Text.UTF8Encoding]::new($false); $p=[Console]::In.ReadLine(); ' + script],
+      { input: path + '\n', encoding: 'utf8', timeout: 30_000, windowsHide: true });
+    if (result.error || result.status !== 0) throw new Error(`Windows ACL test fixture failed (${(result.error as NodeJS.ErrnoException | undefined)?.code ?? result.status}): ${result.stderr}`);
     return result.stdout.trim();
   };
   const grantEveryone = (path: string, rights = 'Read'): void => {
@@ -96,7 +99,7 @@ describe.skipIf(!nativeWindows)('Windows native credential filesystem', () => {
     writeFileSync(injected, helper.replace(call, fault));
     const result = spawnSync(join(process.env.SystemRoot!, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
       ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', injected], {
-        input: JSON.stringify({ operation: 'write', path: destination, requireOwner: true, content: Buffer.from('FAKE_NEW_SECRET').toString('base64') }),
+        input: JSON.stringify({ operation: 'write', path: destination, requireOwner: true, content: Buffer.from('FAKE_NEW_SECRET').toString('base64') }) + '\n',
         encoding: 'utf8', timeout: 30_000, windowsHide: true,
       });
     expect(result.status).toBe(0);
