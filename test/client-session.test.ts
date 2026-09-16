@@ -1,12 +1,39 @@
-import { realpathSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { planClientSession } from '../src/client-session.js';
 import { useTempResources } from './helpers.js';
-import { runCli } from './helpers/cli.js';
+import { childEnv, ensureBuilt, PROJECT_ROOT, runCli } from './helpers/cli.js';
 
 describe('native session launch', () => {
   const { tempDir } = useTempResources('heddle-native-session-');
+  it.runIf(process.platform === 'win32')('reports an interrupted Windows launch with exit status 130', async () => {
+    await ensureBuilt();
+    const dir = realpathSync.native(tempDir());
+    const script = join(dir, 'worker.mjs');
+    const pidFile = join(dir, 'worker.pid');
+    writeFileSync(script, `import {writeFileSync} from 'node:fs'; writeFileSync(${JSON.stringify(pidFile)},String(process.pid)); setInterval(()=>{},1000);`);
+    const module = pathToFileURL(join(PROJECT_ROOT, 'dist', 'client-session.js')).href;
+    const code = `import {runClientSession} from ${JSON.stringify(module)};
+      const result=runClientSession(${JSON.stringify({ client: 'opencode', dir, agent: 'codex-test', bin: process.execPath, args: [script] })});
+      setTimeout(()=>process.emit('SIGINT'),1000);process.exitCode=await result;`;
+    const { env } = childEnv();
+    const child = spawnSync(process.execPath, ['--input-type=module', '-e', code], { env, encoding: 'utf8', timeout: 15_000 });
+    try {
+      expect(child.status, child.stderr).toBe(130);
+      const pid = Number(readFileSync(pidFile, 'utf8'));
+      expect(() => process.kill(pid, 0)).toThrow();
+    } finally {
+      if (existsSync(pidFile)) {
+        const pid = Number(readFileSync(pidFile, 'utf8'));
+        if (Number.isSafeInteger(pid) && pid > 0) {
+          try { process.kill(pid, 'SIGKILL'); } catch { /* Already reaped by the launcher. */ }
+        }
+      }
+    }
+  });
   it('uses each native resume contract and preserves explicit native arguments', () => {
     const dir = realpathSync.native(tempDir());
     for (const client of ['codex', 'cursor', 'gemini', 'opencode'] as const) {

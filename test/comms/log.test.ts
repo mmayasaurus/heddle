@@ -1,11 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { CommsLog, COMMS_SCHEMA_VERSION, DEFAULT_ROOM } from '../../src/comms/log.js';
 import { seal } from '../../src/comms/seal.js';
 import type { TierDecision } from '../../src/comms/types.js';
+import { createPrivateTempRoot } from '../helpers/private-temp.js';
 
 /**
  * CommsLog against a TEMP database — never the default ~/.heddle/comms.db (that is the fleet's
@@ -20,14 +20,14 @@ describe('CommsLog (temp db)', () => {
   const clock = () => new Date(Date.UTC(2026, 7, 15, 12, 0, tick++)).toISOString();
 
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), 'heddle-comms-test-'));
-    path = join(dir, 'comms.db');
+    dir = createPrivateTempRoot('heddle-comms-test-');
+    path = join(dir, 'private', 'comms.db');
     tick = 0;
     log = new CommsLog(path, { now: clock });
   });
   afterEach(() => {
-    log.close();
-    rmSync(dir, { recursive: true, force: true });
+    try { log?.close(); }
+    finally { if (dir) rmSync(dir, { recursive: true, force: true }); }
   });
 
   // ------------------------------------------------------------ writer
@@ -431,10 +431,10 @@ describe('CommsLog read-only probe mode (HED-635)', () => {
   let dir: string;
   let path: string;
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), 'heddle-comms-ro-'));
-    path = join(dir, 'comms.db');
+    dir = createPrivateTempRoot('heddle-comms-ro-');
+    path = join(dir, 'private', 'comms.db');
   });
-  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+  afterEach(() => { if (dir) rmSync(dir, { recursive: true, force: true }); });
 
   it('reads a genuine older (v1) db without migrating it', () => {
     const rw = new CommsLog(path);

@@ -1,6 +1,7 @@
 import { closeSync, constants, fchmodSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { windowsSecureFs } from './secure-fs-windows.js';
 
 /**
  * Hardened filesystem primitives for credential files and rotation locks (HED-452). Shared + exported
@@ -29,8 +30,13 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
  * heddle-owned under `~/.heddle` or a user-owned profile dir — a same-uid trust domain a cross-uid attacker
  * cannot write to, and a same-uid process already holds the credentials outright. Callers MUST pass paths
  * whose ancestors are user-owned and not group/other-writable.
- * This module is POSIX-only (it relies on `process.geteuid`); `effectiveUid` fails closed with a clear
- * error on a platform without it (e.g. win32) rather than silently degrading.
+ * Native Windows uses the current token SID and NTFS DACLs through secure-fs-windows, never uid/chmod.
+ * SYSTEM/Administrators are trusted OS principals. Windows ensure/assertSecureDir require a PRIVATE
+ * leaf ACL so native SQLite/CLI child files inherit privacy; scalar read/write parents may grant foreign
+ * read-only access. Unsafe pre-existing secret ACLs are refused even on writes (File.Replace retains
+ * destination ACLs). Local disk paths only; reparse points and ambiguous Windows path aliases fail closed.
+ * A Windows replacement failure may leave the destination absent. Any surviving private temporary is
+ * retained, with its generated recovery basename in the error; callers must inspect before retrying.
  */
 
 /** A null-pid lock younger than this may be one caught mid-creation; back off rather than reclaim it. */
@@ -64,6 +70,11 @@ export function secureWriteFile(path: string, content: string, opts: { mode?: nu
   const dirMode = opts.dirMode ?? 0o700;
   if ((mode & 0o077) !== 0) throw new Error(`refusing to write secret file ${path}: mode 0${mode.toString(8)} would grant group/other access to a secret`);
   if ((dirMode & 0o022) !== 0) throw new Error(`refusing to write secret file ${path}: dirMode 0${dirMode.toString(8)} would create a group/other-writable parent`);
+
+  if (process.platform === 'win32') {
+    windowsSecureFs('write', path, { content });
+    return;
+  }
 
   const euid = effectiveUid(opts.euid);
 
@@ -124,6 +135,7 @@ export function secureWriteFile(path: string, content: string, opts: { mode?: nu
  * / group-or-other-writable); deeper ancestors are the caller's responsibility (see the module invariant).
  */
 export function secureReadFile(path: string, opts: { euid?: number } = {}): string {
+  if (process.platform === 'win32') return windowsSecureFs('read', path).content!;
   const euid = effectiveUid(opts.euid);
   try {
     assertSafeExistingDir(dirname(path));
@@ -174,6 +186,10 @@ export function ensureSecureDir(dir: string, opts: { mode?: number; euid?: numbe
   const mode = opts.mode ?? 0o700;
   if ((mode & 0o700) !== 0o700 || (mode & 0o022) !== 0) {
     throw new Error(`refusing to create credential directory ${dir}: mode 0${mode.toString(8)} must be owner-rwx (0o700) and not group/other-writable`);
+  }
+  if (process.platform === 'win32') {
+    windowsSecureFs('ensure-dir', dir, { boundary: opts.boundary });
+    return;
   }
   const euid = effectiveUid(opts.euid);
   // HED-643: an optional trust root. When given, EVERY existing ancestor from the immediate parent up to
@@ -306,6 +322,10 @@ function createSecureDirTree(dir: string, mode: number, euid: number, boundary?:
  * natural ENOENT unchanged, so a caller can distinguish "absent" from "present but unsafe".
  */
 export function assertSecureDir(dir: string, opts: { euid?: number } = {}): void {
+  if (process.platform === 'win32') {
+    windowsSecureFs('assert-dir', dir);
+    return;
+  }
   assertSafeExistingDir(dir, effectiveUid(opts.euid));
 }
 
@@ -338,7 +358,7 @@ export function acquireCredentialLock(
   opts: { isAlive?: (pid: number) => boolean; euid?: number; onReclaimGate?: () => void; onBeforeClaim?: () => void } = {},
 ): CredentialLockResult {
   if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error(`refusing to claim credential lock: invalid pid ${pid}`);
-  const euid = effectiveUid(opts.euid);
+  const euid = process.platform === 'win32' ? 0 : effectiveUid(opts.euid);
   const isAlive = opts.isAlive ?? processAlive;
   ensureSafeParent(dirname(lockPath), 0o700);
 
@@ -425,6 +445,19 @@ function inspectLock(
   euid: number,
   isAlive: (pid: number) => boolean,
 ): { refuse: boolean; result: CredentialLockResult; present: boolean } {
+  if (process.platform === 'win32') {
+    try {
+      const lock = windowsSecureFs('inspect-lock', lockPath);
+      const heldBy = parseLockPid(lock.content!);
+      if (heldBy !== null && isAlive(heldBy)) return { refuse: true, result: { ok: false, heldBy }, present: true };
+      if (heldBy === null && Date.now() - lock.mtimeMs! < CREATION_GRACE_MS) return { refuse: true, result: { ok: false }, present: true };
+      return { refuse: false, result: { ok: false }, present: true };
+    } catch (error) {
+      // Unreadable/unsafe ACLs are never reclaimable on Windows. Only an actual ENOENT is absent.
+      const absent = (error as NodeJS.ErrnoException).code === 'ENOENT';
+      return { refuse: !absent, result: { ok: false }, present: !absent };
+    }
+  }
   let stats: ReturnType<typeof lstatSync>;
   try {
     stats = lstatSync(lockPath);
@@ -464,11 +497,17 @@ function claimLock(lockPath: string, pid: number): boolean {
     // the lock name never exists empty, and a pre-existing name (a regular file OR a planted symlink)
     // yields EEXIST — our lost-race signal — never a stomp or a write-through. link()'s atomicity and its
     // EEXIST-on-symlink behavior are trusted POSIX syscall properties, like O_EXCL's.
-    fd = openSync(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600);
-    writeFileSync(fd, String(pid), 'utf8');
-    fchmodSync(fd, 0o600);
-    closeSync(fd);
-    fd = undefined;
+    if (process.platform === 'win32') {
+      // Protected DACL applies at CreateNew, before any PID bytes are written. NTFS link() publishes
+      // the fully-written file atomically and refuses an existing name, preserving the shared algorithm.
+      windowsSecureFs('create-file', temporary, { content: String(pid) });
+    } else {
+      fd = openSync(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600);
+      writeFileSync(fd, String(pid), 'utf8');
+      fchmodSync(fd, 0o600);
+      closeSync(fd);
+      fd = undefined;
+    }
     linkSync(temporary, lockPath);
     return true;
   } catch (err) {
@@ -502,6 +541,10 @@ function claimLock(lockPath: string, pid: number): boolean {
  * to be owned by it (the writer does; the lock does not — so the existing-dir fast path stays euid-optional).
  */
 function ensureSafeParent(parent: string, mode: number, euid?: number): void {
+  if (process.platform === 'win32') {
+    windowsSecureFs('ensure-dir', parent);
+    return;
+  }
   // Validate-or-create, retrying on a concurrent create. HED-626: the absent branch builds the parent (and
   // any missing ancestors) with the SAME validated per-level walk ensureSecureDir uses, not a single
   // umask-subject `mkdir -p` — otherwise a restrictive umask that strips owner-execute strands a partial,
@@ -640,11 +683,15 @@ function readLockPid(lockPath: string): number | null {
     // Requiring ^\d+$ on the raw bytes makes any malformed body null (garbage → reclaimable when stale),
     // the safe classification. (JS `$` without the `m` flag matches end-of-input only, so a trailing
     // newline is rejected too, not tolerated.)
-    const raw = readFileSync(lockPath, 'utf8');
-    if (!/^\d+$/.test(raw)) return null;
-    const pid = Number(raw);
-    return Number.isSafeInteger(pid) && pid > 0 ? pid : null;
+    const raw = process.platform === 'win32' ? windowsSecureFs('read', lockPath).content! : readFileSync(lockPath, 'utf8');
+    return parseLockPid(raw);
   } catch {
     return null;
   }
+}
+
+function parseLockPid(raw: string): number | null {
+  if (!/^\d+$/.test(raw)) return null;
+  const pid = Number(raw);
+  return Number.isSafeInteger(pid) && pid > 0 ? pid : null;
 }

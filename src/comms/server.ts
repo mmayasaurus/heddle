@@ -4,6 +4,7 @@ import type { Transport as McpTransport } from '@modelcontextprotocol/sdk/shared
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
+import { secureReadFile, secureWriteFile } from '../secure-fs.js';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { CommsLog, DEFAULT_COMMS_PATH } from './log.js';
@@ -133,6 +134,11 @@ const DEFAULT_IDENTITY_CACHE_DIR = join(homedir(), '.claude', 'fleet-identity-ca
 export function initOperatorToken(opts: { rotate?: boolean; path?: string } = {}): { path: string; action: 'created' | 'rotated' | 'kept' } {
   const path = opts.path ?? OPERATOR_TOKEN_PATH;
   const existed = existsSync(path);
+  if (process.platform === 'win32') {
+    if (existed && !opts.rotate) secureReadFile(path); // Validate the native ACL; chmod cannot protect Windows tokens.
+    else secureWriteFile(path, randomBytes(24).toString('hex') + '\n');
+    return { path, action: existed ? (opts.rotate ? 'rotated' : 'kept') : 'created' };
+  }
   if (existed && !opts.rotate) {
     chmodSync(path, 0o600); // a pre-existing file with loose bits is tightened, not trusted as-is
     return { path, action: 'kept' };
@@ -147,7 +153,14 @@ export function initOperatorToken(opts: { rotate?: boolean; path?: string } = {}
 export function operatorTokenMatches(env: NodeJS.ProcessEnv, path: string = OPERATOR_TOKEN_PATH): boolean {
   const presented = (env.HEDDLE_COMMS_OPERATOR_TOKEN ?? '').trim();
   if (!presented || !existsSync(path)) return false;
-  const expected = readFileSync(path, 'utf8').trim();
+  let expected: string;
+  try {
+    expected = (process.platform === 'win32' ? secureReadFile(path) : readFileSync(path, 'utf8')).trim();
+  } catch {
+    // Unsafe ACLs, unavailable helpers, and read races revoke authority; authentication never repairs
+    // the trust root or turns a failed read into an exception from this boolean predicate.
+    return false;
+  }
   const a = Buffer.from(presented), b = Buffer.from(expected);
   return a.length === b.length && a.length > 0 && timingSafeEqual(a, b);
 }

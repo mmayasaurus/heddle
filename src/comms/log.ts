@@ -1,5 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
+import { assertWindowsDatabase, prepareWindowsDatabase } from '../windows-database.js';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import {
@@ -309,7 +310,12 @@ export class CommsLog {
     const readOnly = opts.readOnly ?? false;
     // Read-only probe mode never provisions: no mkdir, no journal-mode write, no migration. A normal
     // read-write open still mkdirs the parent and creates the sqlite file exactly as before.
-    if (!readOnly && path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
+    if (path !== ':memory:') {
+      if (process.platform === 'win32') {
+        if (readOnly) assertWindowsDatabase(path);
+        else prepareWindowsDatabase(path);
+      } else if (!readOnly) mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    }
     // Set up on a local handle; `this.db` is assigned only once the connection is fully usable, so a
     // constructor failure never leaves a half-initialised object (and closes what it opened).
     const db = readOnly ? new DatabaseSync(path, { readOnly: true }) : new DatabaseSync(path);

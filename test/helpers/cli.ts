@@ -22,7 +22,8 @@ function cleanEnv(home: string, extra: Record<string, string> = {}): Record<stri
   // Child commands open the default ledger, so inheriting HOME would make a test capable of changing
   // the operator's real history. USERPROFILE is Windows' home source, so both must point at the
   // temp home or startup's orphan sweep could mutate the operator's real ledger.
-  return { PATH: process.env.PATH ?? '', HOME: home, USERPROFILE: home, ...extra };
+  return { PATH: process.env.PATH ?? '', HOME: home, USERPROFILE: home,
+    ...(process.platform === 'win32' ? { SystemRoot: process.env.SystemRoot ?? '', TEMP: home, TMP: home } : {}), ...extra };
 }
 
 export function withTempHome(): string {

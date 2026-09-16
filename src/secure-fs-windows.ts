@@ -1,0 +1,114 @@
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { win32 } from 'node:path';
+
+/**
+ * Windows PowerShell 5.1 supplies the .NET Framework ACL APIs without a native npm dependency.
+ * Secret write bytes travel only over stdin; read bytes return over a captured private pipe. Never
+ * attach child output/errors as an Error cause: PowerShell diagnostics can echo the input document.
+ * SID/DACL checks always run natively; POSIX euid/mode seams cannot override them.
+ */
+type WindowsOperation = 'read' | 'write' | 'create-file' | 'assert-private-file' | 'assert-sqlite-sidecar' | 'assert-dir' | 'ensure-dir' | 'inspect-lock';
+interface WindowsResult {
+  content?: string;
+  mtimeMs?: number;
+}
+interface WindowsResponse extends WindowsResult {
+  ok?: boolean;
+  code?: string;
+  reason?: string;
+  recoveryFile?: string;
+}
+const reasons: Record<string, string> = {
+  ACL: 'unsafe ACL or foreign ownership',
+  REPARSE: 'reparse point (symlink or junction)',
+  TYPE: 'unexpected filesystem object type',
+  PATH: 'unsupported or ambiguous path',
+  BOUNDARY: 'boundary is not an ancestor of the credential directory',
+  INHERITANCE: 'private directory ACL must inherit current-user FullControl into files and directories',
+  RECOVERY: 'publication failed; a private recovery file was retained; inspect the credential directory before retrying',
+  IO: 'operation failed',
+};
+
+export function windowsSecureFs(
+  operation: WindowsOperation,
+  path: string,
+  options: { content?: string; boundary?: string; requireOwner?: boolean } = {},
+): WindowsResult {
+  const systemRoot = process.env.SystemRoot;
+  if (!systemRoot || !/^[a-z]:[\\/]/i.test(systemRoot)) {
+    throw new Error('Windows secure filesystem requires an absolute SystemRoot');
+  }
+  const executable = win32.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  const helper = fileURLToPath(new URL('../assets/secure-fs-windows.ps1', import.meta.url));
+  const request = {
+    operation, path,
+    ...(options.content === undefined ? {} : { content: Buffer.from(options.content, 'utf8').toString('base64') }),
+    ...(options.boundary === undefined ? {} : { boundary: options.boundary }),
+    requireOwner: options.requireOwner ?? true,
+  };
+  const child = spawnSync(executable, ['-NoLogo', '-NoProfile', '-NonInteractive', '-InputFormat', 'None', '-ExecutionPolicy', 'Bypass', '-File', helper], {
+    // One JSON line gives the helper an explicit frame; it need not wait for pipe EOF on Windows.
+    input: JSON.stringify(request) + '\n', encoding: 'utf8', windowsHide: true, timeout: 30_000,
+    // Base64 JSON must accommodate the runner's 32 MiB retained worker output.
+    maxBuffer: 64 * 1024 * 1024,
+    // No provider credentials or user PowerShell profile in the ACL helper's environment.
+    env: { SystemRoot: systemRoot, WINDIR: systemRoot },
+  });
+  if (child.error || child.status !== 0) throw new Error('Windows secure filesystem helper failed');
+  return decodeWindowsResponse(operation, parseWindowsResponse(child.stdout));
+}
+
+function parseWindowsResponse(stdout: string): WindowsResponse {
+  let result: WindowsResponse;
+  try {
+    result = JSON.parse(stdout.replace(/^\uFEFF/, '').trim());
+    if (!result || typeof result !== 'object' || typeof result.ok !== 'boolean') throw new Error();
+  } catch {
+    throw new Error('Windows secure filesystem helper returned an invalid response');
+  }
+  return result;
+}
+
+function windowsResponseError(result: WindowsResponse): NodeJS.ErrnoException {
+  // The helper generates this basename internally. Only that narrow format may reach diagnostics;
+  // never surface an arbitrary child-provided path or exception message beside credential failures.
+  const recovery = result.reason === 'RECOVERY' && typeof result.recoveryFile === 'string' && /^\.[a-f0-9]{32}\.tmp$/.test(result.recoveryFile)
+    ? `; recovery file retained in credential directory: ${result.recoveryFile}` : '';
+  const reason = typeof result.reason === 'string' && Object.hasOwn(reasons, result.reason) ? reasons[result.reason] : reasons.IO;
+  const error: NodeJS.ErrnoException = new Error(`Windows secure filesystem: ${reason}${recovery}`);
+  error.code = ['ENOENT', 'EEXIST', 'EACCES', 'EBUSY', 'EINVAL', 'EIO'].includes(result.code ?? '') ? result.code : 'EIO';
+  return error;
+}
+
+function decodeWindowsResponse(operation: WindowsOperation, result: WindowsResponse): WindowsResult {
+  if (!result.ok) throw windowsResponseError(result);
+  if (result.content !== undefined && typeof result.content !== 'string') {
+    throw new Error('Windows secure filesystem helper returned an invalid response');
+  }
+  if ((operation === 'read' || operation === 'inspect-lock') && typeof result.content !== 'string') {
+    throw new Error('Windows secure filesystem helper returned an invalid read response');
+  }
+  if (operation === 'inspect-lock' && (typeof result.mtimeMs !== 'number' || !Number.isFinite(result.mtimeMs))) {
+    throw new Error('Windows secure filesystem helper returned invalid lock metadata');
+  }
+  return {
+    ...(result.content === undefined ? {} : { content: Buffer.from(result.content, 'base64').toString('utf8') }),
+    ...(result.mtimeMs === undefined ? {} : { mtimeMs: result.mtimeMs }),
+  };
+}
+
+/** Validate exact current-user ownership through an open file handle without copying its bytes. */
+export function assertWindowsPrivateFile(path: string): void {
+  windowsSecureFs('assert-private-file', path);
+}
+
+/** Native SQLite sidecars may use a trusted system owner while inheriting a private parent DACL. */
+export function assertWindowsSqliteSidecar(path: string): void {
+  windowsSecureFs('assert-sqlite-sidecar', path);
+}
+
+/** Create with a private DACL before writing any bytes; EEXIST is never an overwrite permission. */
+export function createWindowsPrivateFile(path: string, content: string): void {
+  windowsSecureFs('create-file', path, { content });
+}

@@ -42,7 +42,7 @@ vi.mock('node:fs', async (importActual) => {
 // resolves to the wrapped version.
 const { acquireCredentialLock, releaseCredentialLock, secureWriteFile } = await import('../src/secure-fs.js');
 
-describe('secure-fs concurrency — ensureSafeParent tolerates a raced parent create (HED-626)', () => {
+describe.skipIf(process.platform === 'win32')('POSIX secure-fs concurrency — ensureSafeParent tolerates a raced parent create (HED-626)', () => {
   const dirs: string[] = [];
   const tempDir = (): string => {
     const dir = mkdtempSync(join(tmpdir(), 'heddle-secure-fs-conc-'));

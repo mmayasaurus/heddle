@@ -1,10 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { Ledger } from '../../src/ledger.js';
 import { CommsLog } from '../../src/comms/log.js';
+import { createPrivateTempRoot } from '../helpers/private-temp.js';
 import {
   Broker, LedgerTargetState, DEFAULT_MAX_BODY_BYTES, DEFAULT_RATE_LIMIT,
   type BrokerOptions, type Delivery, type PostResult, type TargetState, type TargetStateProvider, type Transport, type TransportOutcome,
@@ -72,16 +72,16 @@ describe('Broker (temp db)', () => {
   };
 
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), 'heddle-broker-test-'));
+    dir = createPrivateTempRoot('heddle-broker-test-');
     tick = 0;
     nowMs = 1_000_000;
-    log = new CommsLog(join(dir, 'comms.db'), { now: clock });
+    log = new CommsLog(join(dir, 'private', 'comms.db'), { now: clock });
     transport = new FakeTransport();
     state = new FakeState();
   });
   afterEach(() => {
-    log.close();
-    rmSync(dir, { recursive: true, force: true });
+    try { log?.close(); }
+    finally { if (dir) rmSync(dir, { recursive: true, force: true }); }
   });
 
   describe('addressing', () => {

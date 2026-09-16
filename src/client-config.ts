@@ -1,6 +1,7 @@
 import { accessSync, constants, existsSync, lstatSync, readFileSync, realpathSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
+import { hookCommand, isHeddleHookCommand } from './hook-command.js';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 import { parse as parseToml, stringify as stringifyToml } from 'smol-toml';
@@ -136,14 +137,9 @@ function nativeHooks(config: Record<string, unknown>, client: FleetClient, dir: 
   for (const [native, event] of Object.entries(events)) {
     const entries = next[native] ?? [];
     if (!Array.isArray(entries)) throw new Error(`hooks.${native} must be an array`);
-    const prefix = [process.execPath, '--disable-warning=ExperimentalWarning', join(here, '..', 'dist', 'client-hook.js'), client, event, dir]
-      .map((value) => `'${value.replace(/'/g, `'"'"'`)}'`).join(' ');
-    const command = `${prefix} '${agent ?? ''}' '--heddle-fleet-hook'`;
-    const owns = (value: unknown): boolean => {
-      if (typeof value !== 'string' || !value.startsWith(prefix + " '") || !value.endsWith("' '--heddle-fleet-hook'")) return false;
-      const priorAgent = value.slice(prefix.length + 2, -"' '--heddle-fleet-hook'".length);
-      return priorAgent === '' || parseAddress(priorAgent)?.kind === 'agent';
-    };
+    const prefix = [process.execPath, '--disable-warning=ExperimentalWarning', join(here, '..', 'dist', 'client-hook.js'), client, event, dir];
+    const command = hookCommand([...prefix, agent ?? '', '--heddle-fleet-hook']);
+    const owns = (value: unknown): boolean => typeof value === 'string' && isHeddleHookCommand(value, prefix);
     const handler = { type: 'command', command, timeout: client === 'gemini' ? 5000 : 5 };
     // Grouped native hooks can mix owned and user handlers; retain foreign siblings.
     const kept = entries.flatMap((entry) => {
@@ -222,10 +218,12 @@ export interface ClientInstallOptions { dir: string; clients: FleetClient[]; age
 
 /** Native agents can call the installed CLI even when no global `heddle` shim exists. */
 export function clientStartupInstructions(): string {
-  const command = [process.execPath, '--disable-warning=ExperimentalWarning', join(here, '..', 'dist', 'cli.js')]
-    .map((value) => `'${value.replace(/'/g, `'"'"'`)}'`).join(' ');
-  return readFileSync(join(here, '..', 'assets', 'client-startup.md'), 'utf8')
+  const windows = process.platform === 'win32';
+  const argv = [process.execPath, '--disable-warning=ExperimentalWarning', join(here, '..', 'dist', 'cli.js')];
+  const command = windows ? '& ' + argv.map((value) => `'${value.replace(/'/g, "''")}'`).join(' ') : hookCommand(argv);
+  const instructions = readFileSync(join(here, '..', 'assets', 'client-startup.md'), 'utf8')
     .replace(/`heddle (?=dispatch|ledger)/g, () => '`' + command + ' ');
+  return instructions + (windows ? '\nRun the generated command examples in PowerShell on Windows.\n' : '');
 }
 
 /** An additive install: no Claude settings, hooks, launchers, accounts, or worker routes are edited. */

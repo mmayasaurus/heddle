@@ -11,7 +11,8 @@ import {
 } from '../src/secure-fs.js';
 import { useTempResources } from './helpers.js';
 
-describe('secure filesystem primitives', () => {
+// This suite asserts POSIX uid, mode, umask and O_NOFOLLOW behavior. Native ACL coverage is separate.
+describe.skipIf(process.platform === 'win32')('POSIX secure filesystem primitives', () => {
   const { tempDir } = useTempResources('heddle-secure-fs-test-');
   const euid = process.geteuid?.() ?? 0;
   const foreignEuid = euid + 1;
