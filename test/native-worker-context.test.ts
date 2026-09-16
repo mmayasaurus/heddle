@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { execFileSync } from 'node:child_process';
@@ -99,7 +99,8 @@ async function call(peer: Client, name: string, args: Record<string, unknown> = 
 }
 
 describe('native worker context through actual MCP subprocesses', () => {
-  const { tempDir, tempLedger } = useTempResources('heddle-native-worker-context-');
+  const { tempDir: tempAlias, tempLedger } = useTempResources('heddle-native-worker-context-');
+  const tempDir = () => realpathSync(tempAlias());
 
   for (const row of clients) {
     it(`${row.provider} overrides installed parent identity, shares the broker/ledger, and refuses nesting`, async () => {
@@ -261,6 +262,81 @@ describe('native worker context through actual MCP subprocesses', () => {
       expect(() => nativeClientIntegrationInstalled(cwd, 'cursor', true)).toThrow(/unverified Heddle MCP entries/);
       expect(nativeClientIntegrationInstalled(cwd, 'cursor')).toBe(false);
     }
+  });
+
+  it('rejects cwd and higher-ancestor aliases even when wrapper ownership resolves to the same directory', () => {
+    const parent = tempDir(), cwd = join(parent, 'project');
+    mkdirSync(cwd);
+    const path = join(cwd, '.cursor', 'mcp.json');
+    const original = install(cwd, 'cursor', path);
+    expect(nativeClientIntegrationInstalled(cwd, 'cursor', true)).toBe(true);
+    const links = tempDir();
+    symlinkSync(cwd, join(links, 'cwd-alias'), 'dir');
+    symlinkSync(parent, join(links, 'ancestor-alias'), 'dir');
+    for (const alias of [join(links, 'cwd-alias'), join(links, 'ancestor-alias', 'project')]) {
+      expect(() => nativeClientIntegrationInstalled(alias, 'cursor', true)).toThrow(/unverified Heddle MCP entries/);
+      expect(nativeClientIntegrationInstalled(alias, 'cursor')).toBe(false);
+    }
+    expect(readFileSync(path, 'utf8')).toBe(original);
+  });
+
+  it('restores parent identity after metadata-only edits to native worker server entries', () => {
+    for (const row of clients.filter((row) => row.client !== 'codex')) {
+      const cwd = tempDir(), path = join(cwd, row.relative);
+      const original = install(cwd, row.client, path);
+      const restore = materializeWorkerMcp(cwd, row.provider, [], { dispatchId: 1 }, {
+        HEDDLE_WORKER: '1', HEDDLE_DISPATCH_ID: '1', HEDDLE_PARENT: 'U', HEDDLE_COMMS_ADDRESS: 'U.1',
+        HEDDLE_AGENT: 'U.1', FLEET_AGENT: 'U.1', HEDDLE_LEDGER_DB: '/worker/ledger.db',
+      });
+      const config = JSON.parse(readFileSync(path, 'utf8'));
+      const servers = config[row.client === 'opencode' ? 'mcp' : 'mcpServers'];
+      for (const server of Object.values(servers) as Record<string, unknown>[]) server.description = 'metadata added by client';
+      writeFileSync(path, JSON.stringify(config));
+      restore();
+      const final = JSON.parse(readFileSync(path, 'utf8'));
+      const finalServers = final[row.client === 'opencode' ? 'mcp' : 'mcpServers'];
+      const originalServers = JSON.parse(original)[row.client === 'opencode' ? 'mcp' : 'mcpServers'];
+      for (const name of ['heddle', 'heddle-comms']) {
+        expect(finalServers[name]).toEqual({ ...originalServers[name], description: 'metadata added by client' });
+      }
+      expect(readFileSync(path, 'utf8')).not.toContain('HEDDLE_WORKER');
+      expect(readFileSync(path, 'utf8')).not.toContain('/worker/ledger.db');
+    }
+  });
+
+  it('preserves deliberate command/env edits while clearing unchanged transient identity fields', () => {
+    const cwd = tempDir(), path = join(cwd, 'opencode.json');
+    install(cwd, 'opencode', path);
+    const restore = materializeWorkerMcp(cwd, 'opencode', [], { dispatchId: 1 }, {
+      HEDDLE_WORKER: '1', HEDDLE_DISPATCH_ID: '1', HEDDLE_PARENT: 'U', HEDDLE_COMMS_ADDRESS: 'U.1',
+      HEDDLE_AGENT: 'U.1', FLEET_AGENT: 'U.1', HEDDLE_LEDGER_DB: '/worker/ledger.db',
+    });
+    const config = JSON.parse(readFileSync(path, 'utf8'));
+    config.mcp.heddle.command = ['operator-selected-server'];
+    config.mcp.heddle.environment.HEDDLE_LEDGER_DB = '/operator/selected-ledger.db';
+    config.mcp.heddle.environment.CUSTOM_OPTION = 'preserve';
+    writeFileSync(path, JSON.stringify(config));
+    restore();
+    const final = JSON.parse(readFileSync(path, 'utf8'));
+    expect(final.mcp.heddle.command).toEqual(['operator-selected-server']);
+    expect(final.mcp.heddle.environment).toMatchObject({
+      HEDDLE_AGENT: 'installed-parent', FLEET_AGENT: 'installed-parent',
+      HEDDLE_LEDGER_DB: '/operator/selected-ledger.db', CUSTOM_OPTION: 'preserve',
+    });
+    for (const name of ['heddle', 'heddle-comms']) {
+      expect(final.mcp[name].environment).not.toHaveProperty('HEDDLE_WORKER');
+      expect(final.mcp[name].environment).not.toHaveProperty('HEDDLE_COMMS_ADDRESS');
+    }
+  });
+
+  it('refuses stale worker identity without its materialization ownership sidecar', () => {
+    const cwd = tempDir(), path = join(cwd, '.cursor', 'mcp.json');
+    install(cwd, 'cursor', path);
+    const config = JSON.parse(readFileSync(path, 'utf8'));
+    config.mcpServers.heddle.env.HEDDLE_WORKER = '1';
+    config.mcpServers.heddle.env.HEDDLE_AGENT = 'U.1';
+    writeFileSync(path, JSON.stringify(config));
+    expect(() => nativeClientIntegrationInstalled(cwd, 'cursor', true)).toThrow(/unverified Heddle MCP entries/);
   });
 
   it('requires both owned wrapper entries before recognizing native initialization', () => {

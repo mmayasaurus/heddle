@@ -36,7 +36,7 @@ check `check_workers` and `heddle ledger show <dispatch-id> --json` for the orig
 The same terminal command supports longer-than-default dispatches in the other clients.
 Apply the project's existing startup, handoff and closeout workflows under .claude/commands
 when present; their Markdown instructions can be read without Claude slash commands.
-Launch or resume with `heddle launch <codex|cursor|gemini|opencode> --dir <worktree>
---agent <assigned-id> [--resume <native-session-id|latest>]`. The launcher installs the
-selected client's Heddle integration and preserves native approval controls. Native Gemini
-requires its own Google sign-in; Antigravity's login is separate.
+After this integration is installed, start the client normally from this assigned worktree:
+`codex`, `cursor-agent` (or `agent`), `gemini`, or `opencode`. Use the client's normal resume
+controls. `heddle launch` is optional; it combines installation, identity binding and native launch.
+Native Gemini requires its own Google sign-in; Antigravity's login is separate.

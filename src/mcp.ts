@@ -1,12 +1,12 @@
-import { readFileSync, existsSync, writeFileSync, unlinkSync, mkdirSync, mkdtempSync, rmSync, renameSync, lstatSync, realpathSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { readFileSync, existsSync, writeFileSync, unlinkSync, mkdirSync, mkdtempSync, rmSync, renameSync, realpathSync } from 'node:fs';
+import { join, dirname, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { isDeepStrictEqual } from 'node:util';
 import { parse as parseToml } from 'smol-toml';
 import { withFileLock } from './matlock.js';
 import type { MaterializeOpts } from './skillpacks.js';
 import { ENFORCEABLE } from './capabilities.js';
-import { serverDefinitions, type FleetClient } from './client-config.js';
+import { clientFileSource, serverDefinitions, type FleetClient } from './client-config.js';
 
 /**
  * Worker MCP attachment — grants a cross-provider worker the code-discovery tools its task needs.
@@ -41,15 +41,17 @@ export function nativeClientIntegrationInstalled(cwd: string, provider: string, 
   const relative = {
     codex: '.codex/config.toml', cursor: '.cursor/mcp.json', gemini: '.gemini/settings.json', opencode: 'opencode.json',
   }[client];
-  const path = join(cwd, relative);
+  const path = join(resolve(cwd), relative);
   let namedEntries = false;
   try {
     if (!existsSync(path)) return false;
-    if (lstatSync(path).isSymbolicLink() || lstatSync(dirname(path)).isSymbolicLink()) {
+    let raw: string | null;
+    try { raw = clientFileSource(path); }
+    catch {
       namedEntries = true; // The client follows this config; ownership cannot be verified safely.
-      throw new Error('symlinked native configuration');
+      throw new Error('unverifiable native configuration path');
     }
-    const raw = readFileSync(path, 'utf8');
+    if (raw === null) return false;
     const config = (client === 'codex' ? parseToml(raw) : JSON.parse(raw)) as Record<string, any>;
     const servers = config[client === 'codex' ? 'mcp_servers' : client === 'opencode' ? 'mcp' : 'mcpServers'];
     if (!servers || typeof servers !== 'object' || Array.isArray(servers)) return false;
@@ -67,7 +69,13 @@ export function nativeClientIntegrationInstalled(cwd: string, provider: string, 
         && typeof args.at(-1) === 'string'
         && realpathSync(args.at(-1)) === realpathSync(cwd);
     });
-    if (owned) return true;
+    if (owned) {
+      // Completed-worker stamps without our ownership record must never become a new baseline.
+      if (refuseUnverified && hasNativeWorkerContext(servers) && !existsSync(sidecarPath(path))) {
+        throw new Error('stale native worker identity without an ownership sidecar');
+      }
+      return true;
+    }
   } catch { /* Unreadable or unrelated configuration is not an initialized native integration. */ }
   if (namedEntries && refuseUnverified) throw new Error(
     `unverified Heddle MCP entries in ${path} — refusing a native worker that could inherit an orchestrator identity; ` +
@@ -95,7 +103,7 @@ const CODEX_MCP_DEFS: Record<string, { command: string; args: string[] }> = {
 export function codexMcpFlags(serverNames: string[]): string[] {
   const flags: string[] = [];
   for (const n of serverNames) {
-    const def = CODEX_MCP_DEFS[n];
+    const def = Object.hasOwn(CODEX_MCP_DEFS, n) ? CODEX_MCP_DEFS[n] : undefined;
     if (!def) {
       throw new Error(`unknown codex MCP server "${n}". Known: ${Object.keys(CODEX_MCP_DEFS).join(', ')}`);
     }
@@ -109,7 +117,7 @@ export function codexMcpFlags(serverNames: string[]): string[] {
 export function resolveMcpServers(names: string[]): Record<string, { command: string; args: string[] }> {
   const out: Record<string, { command: string; args: string[] }> = {};
   for (const n of names) {
-    const s = WORKER_MCP_SERVERS[n];
+    const s = Object.hasOwn(WORKER_MCP_SERVERS, n) ? WORKER_MCP_SERVERS[n] : undefined;
     if (!s) {
       throw new Error(
         `unknown worker MCP server "${n}". Available: ${Object.keys(WORKER_MCP_SERVERS).join(', ')}.` +
@@ -344,7 +352,11 @@ function mergedContent(
   for (const [id, list] of Object.entries(sidecar.refs)) {
     for (const name of list) merged[name] = sidecar.definitions[id]?.[name] ?? definitions[name] ?? merged[name];
   }
-  return JSON.stringify({ ...base, [configKey]: merged }, null, 2);
+  // OpenCode adds its schema on startup when absent. Include that deterministic CLI write before
+  // runTarget snapshots a read-only worktree; actual subsequent config/file writes stay detectable.
+  const schema = configKey === 'mcp' && base.$schema === undefined
+    ? { $schema: 'https://opencode.ai/config.json' } : {};
+  return JSON.stringify({ ...schema, ...base, [configKey]: merged }, null, 2);
 }
 
 function hasNativeWorkerContext(definitions: Record<string, unknown>): boolean {
@@ -361,6 +373,28 @@ function sameJsonContent(left: string | null, right: string): boolean {
   catch { return false; }
 }
 
+/** Restore generated fields only while they still equal our worker write. */
+function restoreMatchingFields(
+  actual: Record<string, unknown>, before: Record<string, unknown>, after: Record<string, unknown>,
+): void {
+  for (const [key, expected] of Object.entries(before)) {
+    const value = actual[key];
+    if ((key === 'env' || key === 'environment') && value && typeof value === 'object' && !Array.isArray(value)
+      && expected && typeof expected === 'object' && !Array.isArray(expected)) {
+      const original = after[key];
+      restoreMatchingFields(value as Record<string, unknown>, expected as Record<string, unknown>,
+        original && typeof original === 'object' && !Array.isArray(original) ? original as Record<string, unknown> : {});
+      if (!Object.hasOwn(after, key) && Object.keys(value).length === 0) delete actual[key];
+      continue;
+    }
+    if (!isDeepStrictEqual(value, expected)) continue;
+    if (Object.hasOwn(after, key)) Object.defineProperty(actual, key, {
+      value: after[key], enumerable: true, configurable: true, writable: true,
+    });
+    else delete actual[key];
+  }
+}
+
 /** Restore only entries still equal to our write; retain native CLI additions and user edits. */
 function restoreUnchangedEntries(
   current: string | null, expected: string, next: string, configKey: string, names: string[],
@@ -371,9 +405,17 @@ function restoreUnchangedEntries(
     const entries = actual?.[configKey];
     if (!entries || typeof entries !== 'object' || Array.isArray(entries)) return null;
     for (const name of names) {
-      if (!isDeepStrictEqual(entries[name], before[configKey]?.[name])) continue;
-      if (Object.hasOwn(after[configKey] ?? {}, name)) entries[name] = after[configKey][name];
-      else delete entries[name];
+      const expected = before[configKey]?.[name], original = after[configKey]?.[name];
+      if (isDeepStrictEqual(entries[name], expected)) {
+        if (Object.hasOwn(after[configKey] ?? {}, name)) Object.defineProperty(entries, name, {
+          value: original, enumerable: true, configurable: true, writable: true,
+        });
+        else delete entries[name];
+      } else if (entries[name] && typeof entries[name] === 'object' && !Array.isArray(entries[name])
+        && expected && typeof expected === 'object' && !Array.isArray(expected)) {
+        restoreMatchingFields(entries[name], expected,
+          original && typeof original === 'object' && !Array.isArray(original) ? original : {});
+      }
     }
     return JSON.stringify(actual, null, 2);
   } catch { return null; }
@@ -441,7 +483,7 @@ function writeMergedMcpJson(
             const restored = restoreUnchangedEntries(current, expected, mergedContent(sidecar, configKey, definitions), configKey, Object.keys(definitions));
             if (restored !== null) writeFileSync(path, restored, 'utf8');
           }
-          process.stderr.write(`heddle: ${path} was edited during dispatch #${ownId} — preserving external edits; removed heddle's ref${nativeContext ? ' and restored unchanged owned entries' : ''}\n`);
+          process.stderr.write(`heddle: ${path} was edited during dispatch #${ownId} — preserving external edits; removed heddle's ref${nativeContext ? ' and restored unchanged owned fields' : ''}\n`);
           if (Object.keys(sidecar.refs).length === 0) { try { unlinkSync(sidecarPath(path)); } catch { /* already gone */ } }
           else writeFileSync(sidecarPath(path), JSON.stringify(sidecar, null, 2), 'utf8');
           return;

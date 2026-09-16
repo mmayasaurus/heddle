@@ -2,7 +2,6 @@ import { spawn } from 'node:child_process';
 import { realpathSync } from 'node:fs';
 import { resolveIdentity } from './identity.js';
 import { parseAddress } from './comms/address.js';
-import { buildWorkerEnv } from './env.js';
 import { applyInstall } from './init-project.js';
 import { codexClientFlags, planClientInstall, type FleetClient } from './client-config.js';
 
@@ -47,8 +46,10 @@ export async function runClientSession(options: ClientSessionOptions): Promise<n
     return 0;
   }
   applyInstall(install);
-  const { env } = buildWorkerEnv({ unset: ['HEDDLE_COMMS_ADDRESS', 'HEDDLE_PARENT', 'HEDDLE_DISPATCH_ID'] });
-  // This is an orchestrator launch, not a worker dispatch: bind after the worker sanitizer.
+  // An interactive native launch keeps the operator's chosen native login/configuration.
+  // Worker dispatch uses its separate credential-isolating environment builder.
+  const env = { ...process.env };
+  for (const key of ['HEDDLE_WORKER', 'HEDDLE_COMMS_ADDRESS', 'HEDDLE_PARENT', 'HEDDLE_DISPATCH_ID', 'HEDDLE_COMMS_ROLE', 'HEDDLE_COMMS_OPERATOR_TOKEN']) delete env[key];
   Object.assign(env, { HEDDLE_AGENT: plan.agent, FLEET_AGENT: plan.agent,
     HEDDLE_CLIENT: plan.client, HEDDLE_COMMS_TRANSPORT: 'stdio', HEDDLE_COMMS_PUSH: '0' });
   process.stderr.write(`heddle: ${plan.agent} → ${plan.client} in ${plan.dir}. Review new native hooks/MCP servers in the client's trust controls.\n`);

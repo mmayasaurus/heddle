@@ -1,11 +1,10 @@
 import { DatabaseSync } from 'node:sqlite';
-import { closeSync, lstatSync, mkdirSync, openSync, readFileSync } from 'node:fs';
+import { closeSync, lstatSync, mkdirSync, openSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
-import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { clientInbox, evaluateClientHook, renderClientHook, type ClientEvent } from './client-hooks.js';
-import { parseFleetClients } from './client-config.js';
+import { clientStartupInstructions, parseFleetClients } from './client-config.js';
 import { resolveCommsIdentity } from './comms/server.js';
 
 const EVENTS = new Set(['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'Stop']);
@@ -53,6 +52,12 @@ async function main(): Promise<void> {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('hook input must be an object');
   const env: NodeJS.ProcessEnv = { ...process.env, HEDDLE_COMMS_TRANSPORT: 'stdio', ...(agent && process.env.HEDDLE_WORKER !== '1' ? { HEDDLE_AGENT: agent, FLEET_AGENT: agent } : {}) };
   const result = evaluateClientHook(event, raw, cwd, env);
+  // These clients support nonblocking context after tools, not in their before-tool response.
+  // Re-evaluate nudges with the same arguments; enforced denials remain before-tool only.
+  if (event === 'PostToolUse' && (client === 'cursor' || client === 'opencode')) {
+    const before = evaluateClientHook('PreToolUse', raw, cwd, env);
+    result.context = [before.context, result.context].filter(Boolean).join('\n');
+  }
   let db: DatabaseSync | undefined;
   try {
     const session = raw.session_id ?? raw.conversation_id;
@@ -70,7 +75,7 @@ async function main(): Promise<void> {
       db.prepare('INSERT INTO receipts VALUES (?,?) ON CONFLICT(session) DO UPDATE SET last_id=max(last_id,excluded.last_id)').run(key, inbox.lastId);
       db.exec('COMMIT');
     }
-    if (event === 'SessionStart') result.context = [readFileSync(fileURLToPath(new URL('../assets/client-startup.md', import.meta.url)), 'utf8'), result.context].filter(Boolean).join('\n');
+    if (event === 'SessionStart') result.context = [clientStartupInstructions(), result.context].filter(Boolean).join('\n');
     process.stdout.write(JSON.stringify(renderClientHook(client, event, result, raw)) + '\n');
   } finally { db?.close(); }
 }

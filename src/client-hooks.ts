@@ -37,7 +37,7 @@ export function evaluateClientHook(event: ClientEvent, raw: Record<string, unkno
   if (event === 'PreToolUse' && env.HEDDLE_WORKER === '1' && payload.tool_name === 'Task') {
     return { context: '', deny: 'Heddle workers cannot spawn another agent (depth-1 limit).' };
   }
-  const agent = env.HEDDLE_AGENT ?? env.FLEET_AGENT ?? '';
+  const agent = resolveCommsIdentity({ ...env, HEDDLE_COMMS_TRANSPORT: 'stdio' }, cwd, () => {}).identity ?? '';
   const rulesDir = env.HEDDLE_RULES_DIR ?? (existsSync(join(cwd, 'rules')) ? join(cwd, 'rules') : fileURLToPath(new URL('../rules', import.meta.url)));
   const matched = evaluateRules(loadRules(rulesDir), { event, payload, agent,
     agentRole: env.HEDDLE_WORKER === '1' ? 'worker' : 'orchestrator', isSubagent: Boolean(payload.agent_id) })
@@ -78,7 +78,8 @@ export function renderClientHook(client: FleetClient, event: ClientEvent, result
       : { decision: client === 'gemini' ? 'deny' : 'block', reason: result.context };
   }
   if (client === 'cursor') {
-    if (event === 'PreToolUse') return { permission: result.deny ? 'deny' : 'allow', ...(result.deny ? { user_message: result.deny, agent_message: result.deny } : {}) };
+    // A hook must not auto-approve a tool that still needs the client's native approval.
+    if (event === 'PreToolUse') return result.deny ? { permission: 'deny', user_message: result.deny, agent_message: result.deny } : {};
     return result.context ? { additional_context: result.context } : {};
   }
   const nativeEvent = client === 'gemini' ? ({ UserPromptSubmit: 'BeforeAgent', PreToolUse: 'BeforeTool', PostToolUse: 'AfterTool' } as Record<string, string>)[event] ?? event : event;

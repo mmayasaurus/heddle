@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { stringify as stringifyToml } from 'smol-toml';
@@ -12,7 +12,7 @@ import { modelFamilyPack } from '../src/skillpacks.js';
 import { serverDefinitions } from '../src/client-config.js';
 import { CommsLog } from '../src/comms/log.js';
 import type { WorkerAdapter } from '../src/types.js';
-import { IDENTITIES, useTempResources } from './helpers.js';
+import { IDENTITIES, initRepoFixture, useTempResources } from './helpers.js';
 
 const savedCommsDb = process.env.HEDDLE_COMMS_DB;
 afterEach(() => {
@@ -38,7 +38,8 @@ function writeConfig(path: string, content: string): void {
 }
 
 describe('native provider policy', () => {
-  const { tempDir, tempLedger } = useTempResources('heddle-native-provider-policy-');
+  const { tempDir: tempAlias, tempLedger } = useTempResources('heddle-native-provider-policy-');
+  const tempDir = () => realpathSync(tempAlias());
   const table = loadRouting();
 
   it('registers additive adapters without changing legacy gemini/agy', () => {
@@ -154,6 +155,75 @@ describe('native provider policy', () => {
     expect(result.mcp.heddle).toEqual(JSON.parse(original).mcp.heddle);
     expect(result.mcp['heddle-comms']).toEqual(JSON.parse(original).mcp['heddle-comms']);
     expect(readFileSync(path, 'utf8')).not.toContain('HEDDLE_WORKER');
+  });
+
+  it('includes OpenCode startup schema in the read-only baseline and still rejects substantive writes', async () => {
+    const priorRouting = process.env.HEDDLE_ROUTING;
+    const routingPath = join(tempDir(), 'routing.yaml');
+    writeFileSync(routingPath, `version: 0
+providers:
+  opencode: {execution: headless, billing_class: free-tier}
+task_classes:
+  schema-review:
+    provider: opencode
+    model: opencode/nemotron-3-ultra-free
+    skills: []
+    mcp: [memtrace]
+    read_only: true
+    edits_code: false
+    auto_assess: false
+`);
+    process.env.HEDDLE_ROUTING = routingPath;
+    try {
+      for (const initialized of [false, true]) {
+        for (const mutation of [false, true]) {
+          const dir = initRepoFixture(tempDir(), 'worker', { linkedWorktree: true });
+          const path = join(dir, 'opencode.json');
+          const original = initialized ? installedConfig(dir, 'opencode') : null;
+          if (original !== null) writeConfig(path, original);
+          process.env.HEDDLE_COMMS_DB = join(tempDir(), 'comms.db');
+          let invoked = false;
+          const adapter: WorkerAdapter = {
+            name: 'opencode-startup', provider: 'opencode',
+            async dispatch(_prompt, opts) {
+              try {
+                invoked = true;
+                expect(opts.readOnly).toBe(true);
+                const config = JSON.parse(readFileSync(path, 'utf8'));
+                // Reproduce the real CLI's startup normalization only when the schema is absent.
+                // With the fix this write is unnecessary; without it the mandate check fails.
+                if (!config.$schema) {
+                  config.$schema = 'https://opencode.ai/config.json';
+                  writeFileSync(path, JSON.stringify(config, null, 2));
+                }
+                if (mutation) {
+                  config.model = 'unexpected-model-change';
+                  writeFileSync(path, JSON.stringify(config, null, 2));
+                }
+                return { ok: true, output: 'review result', exitCode: 0 };
+              } catch (error) { throw new Error(`OpenCode startup fixture failed: ${String(error)}`); }
+            },
+          };
+          const outcome = await dispatch({
+            taskClass: 'schema-review', cwd: dir, prompt: 'read-only review', identity: IDENTITIES.boundU,
+          }, tempLedger(), () => adapter);
+          expect(invoked, outcome.error).toBe(true);
+          if (mutation) {
+            expect(outcome.ok).toBe(false);
+            expect(outcome.quarantine).toMatchObject({ reason: 'mandate-violation', output: 'review result' });
+            expect(JSON.parse(readFileSync(path, 'utf8')).model).toBe('unexpected-model-change');
+          } else {
+            expect(outcome.ok, outcome.error).toBe(true);
+            expect(outcome.quarantine).toBeUndefined();
+            if (original === null) expect(existsSync(path)).toBe(false);
+            else expect(readFileSync(path, 'utf8')).toBe(original);
+          }
+        }
+      }
+    } finally {
+      if (priorRouting === undefined) delete process.env.HEDDLE_ROUTING;
+      else process.env.HEDDLE_ROUTING = priorRouting;
+    }
   });
 
   it('mints a real child and supplies sanitized worker MCP env on an initialized direct route', async () => {

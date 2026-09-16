@@ -124,24 +124,30 @@ function nativeHooks(config: Record<string, unknown>, client: FleetClient, dir: 
   const hooks = config.hooks === undefined ? {} : object(config.hooks, 'hooks');
   const next = { ...hooks };
   const events: Record<string, string> = client === 'cursor'
-    ? { sessionStart: 'SessionStart', preToolUse: 'PreToolUse', postToolUse: 'PostToolUse', stop: 'Stop' }
+    ? { sessionStart: 'SessionStart', preToolUse: 'PreToolUse', postToolUse: 'PostToolUse', postToolUseFailure: 'PostToolUse', stop: 'Stop' }
     : client === 'gemini'
       ? { SessionStart: 'SessionStart', BeforeAgent: 'UserPromptSubmit', BeforeTool: 'PreToolUse', AfterTool: 'PostToolUse', AfterAgent: 'Stop' }
       : { SessionStart: 'SessionStart', UserPromptSubmit: 'UserPromptSubmit', PreToolUse: 'PreToolUse', PostToolUse: 'PostToolUse', Stop: 'Stop' };
   for (const [native, event] of Object.entries(events)) {
     const entries = next[native] ?? [];
     if (!Array.isArray(entries)) throw new Error(`hooks.${native} must be an array`);
-    const command = [process.execPath, '--disable-warning=ExperimentalWarning', join(here, '..', 'dist', 'client-hook.js'), client, event, dir, agent ?? '', '--heddle-fleet-hook']
+    const prefix = [process.execPath, '--disable-warning=ExperimentalWarning', join(here, '..', 'dist', 'client-hook.js'), client, event, dir]
       .map((value) => `'${value.replace(/'/g, `'"'"'`)}'`).join(' ');
+    const command = `${prefix} '${agent ?? ''}' '--heddle-fleet-hook'`;
+    const owns = (value: unknown): boolean => {
+      if (typeof value !== 'string' || !value.startsWith(prefix + " '") || !value.endsWith("' '--heddle-fleet-hook'")) return false;
+      const priorAgent = value.slice(prefix.length + 2, -"' '--heddle-fleet-hook'".length);
+      return priorAgent === '' || parseAddress(priorAgent)?.kind === 'agent';
+    };
     const handler = { type: 'command', command, timeout: client === 'gemini' ? 5000 : 5 };
     // Grouped native hooks can mix owned and user handlers; retain foreign siblings.
     const kept = entries.flatMap((entry) => {
       const item = object(entry, `hooks.${native} entry`);
-      if (client === 'cursor') return typeof item.command === 'string' && item.command.includes('--heddle-fleet-hook') ? [] : [item];
+      if (client === 'cursor') return owns(item.command) ? [] : [item];
       if (!Array.isArray(item.hooks)) throw new Error(`hooks.${native} entry.hooks must be an array`);
       const foreign = item.hooks.filter((hook: unknown) => {
         const value = object(hook, 'hook');
-        return typeof value.command !== 'string' || !value.command.includes('--heddle-fleet-hook');
+        return !owns(value.command);
       });
       return foreign.length ? [{ ...item, hooks: foreign }] : [];
     });
@@ -171,6 +177,7 @@ function jsonConfig(raw: string | null, client: FleetClient, servers: ReturnType
   try { parsed = raw === null ? {} : JSON.parse(raw); }
   catch { throw new Error(`client configuration is not valid JSON: ${path}`); }
   const config = object(parsed, path);
+  const schema = client === 'opencode' && !config.$schema ? { $schema: 'https://opencode.ai/config.json' } : {};
   const key = client === 'opencode' ? 'mcp' : 'mcpServers';
   const existing = config[key] === undefined ? {} : object(config[key], `${path}: ${key}`);
   const next = { ...existing };
@@ -183,11 +190,19 @@ function jsonConfig(raw: string | null, client: FleetClient, servers: ReturnType
     }
     next[name] = expected;
   }
-  if (raw !== null && isDeepStrictEqual(existing, next)) return raw;
-  return JSON.stringify({ ...config, [key]: next }, null, 2) + '\n';
+  if (raw !== null && !schema.$schema && isDeepStrictEqual(existing, next)) return raw;
+  return JSON.stringify({ ...config, ...schema, [key]: next }, null, 2) + '\n';
 }
 
 export interface ClientInstallOptions { dir: string; clients: FleetClient[]; agent?: string; dryRun?: boolean; homeDir?: string; }
+
+/** Native agents can call the installed CLI even when no global `heddle` shim exists. */
+export function clientStartupInstructions(): string {
+  const command = [process.execPath, '--disable-warning=ExperimentalWarning', join(here, '..', 'dist', 'cli.js')]
+    .map((value) => `'${value.replace(/'/g, `'"'"'`)}'`).join(' ');
+  return readFileSync(join(here, '..', 'assets', 'client-startup.md'), 'utf8')
+    .replace(/`heddle (?=dispatch|ledger)/g, () => '`' + command + ' ');
+}
 
 /** An additive install: no Claude settings, hooks, launchers, accounts, or worker routes are edited. */
 export function clientInstallSteps(options: ClientInstallOptions): InstallStep[] {
@@ -221,13 +236,13 @@ export function clientInstallSteps(options: ClientInstallOptions): InstallStep[]
       const pluginPath = join(dir, '.opencode', 'plugins', 'heddle-fleet.js'), pluginRaw = clientFileSource(pluginPath);
       if (pluginRaw !== null && !pluginRaw.startsWith('// Heddle managed native integration.')) throw new Error(`existing OpenCode plugin preserved: ${pluginPath}`);
       const plugin = readFileSync(join(here, '..', 'assets', 'opencode-fleet-plugin.js'), 'utf8')
-        .replace('__HEDDLE_NODE__', () => JSON.stringify(process.execPath))
-        .replace('__HEDDLE_HOOK__', () => JSON.stringify(join(here, '..', 'dist', 'client-hook.js')))
-        .replace('__HEDDLE_AGENT__', () => JSON.stringify(agent ?? ''));
+        .replace("'__HEDDLE_NODE__'", () => JSON.stringify(process.execPath))
+        .replace("'__HEDDLE_HOOK__'", () => JSON.stringify(join(here, '..', 'dist', 'client-hook.js')))
+        .replace("'__HEDDLE_AGENT__'", () => JSON.stringify(agent ?? ''));
       steps.push(...plannedFile(pluginPath, 'client:opencode:plugin', pluginRaw, plugin, dryRun));
     }
   }
-  const guidance = readFileSync(join(here, '..', 'assets', 'client-startup.md'), 'utf8');
+  const guidance = clientStartupInstructions();
   const instructionFiles = new Set(clients.map((client) => client === 'gemini' ? 'GEMINI.md' : 'AGENTS.md'));
   for (const file of instructionFiles) {
     const path = join(dir, file), raw = clientFileSource(path);

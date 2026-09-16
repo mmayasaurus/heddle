@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { codexMcpFlags, materializeWorkerMcp, validateWorkerMcp, workerMcpSupported, mcpAttachable, webCapable } from '../src/mcp.js';
 import { dispatch } from '../src/dispatch.js';
@@ -29,6 +29,14 @@ describe('validateWorkerMcp — direct unit contract', () => {
 
   it('rejects an unknown codex MCP server by name', () => {
     expect(() => validateWorkerMcp('codex', ['does-not-exist'])).toThrow(/unknown codex MCP server "does-not-exist"/);
+  });
+
+  it('rejects inherited prototype properties as server names at the registry boundary', () => {
+    for (const provider of ['codex', 'cursor', 'claude', 'gemini-cli', 'opencode']) {
+      for (const name of ['__proto__', 'constructor', 'toString']) {
+        expect(() => validateWorkerMcp(provider, [name])).toThrow(/unknown .*MCP server/);
+      }
+    }
   });
 
   it('explains that Serena is Codex-only when cursor requests it', () => {
@@ -123,7 +131,7 @@ describe('dispatch — a materialize failure AFTER the row opens finishes it, ne
 
   it('a throw inside materializeWorkerMcp is caught and the row is finished ok=false, not left in flight', async () => {
     const ledger = tempLedger();
-    const cwd = tempDir();
+    const cwd = realpathSync(tempDir());
     // Seed a malformed .cursor/mcp.json so writeMergedMcpJson throws (mcp.ts:206-208). This passes
     // validateWorkerMcp (cursor + memtrace is valid) and fails INSIDE the dispatch try, AFTER
     // startUnderCap has opened the row. Force the cursor route explicitly — cursor's materialize

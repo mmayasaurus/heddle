@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 export const HeddleFleet = async ({ client, directory }) => {
   const invoke = (event, payload) => {
     try {
-      return JSON.parse(execFileSync(__HEDDLE_NODE__, [__HEDDLE_HOOK__, 'opencode', event, directory, __HEDDLE_AGENT__],
+      return JSON.parse(execFileSync('__HEDDLE_NODE__', ['__HEDDLE_HOOK__', 'opencode', event, directory, '__HEDDLE_AGENT__'],
         { input: JSON.stringify(payload), encoding: 'utf8', timeout: 5000, maxBuffer: 256 * 1024, stdio: ['pipe', 'pipe', 'pipe'] }));
     } catch { return {}; } // same fail-open posture as the ratified Heddle rules engine
   };
