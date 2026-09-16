@@ -23,5 +23,10 @@ or stored message is not evidence that the recipient has read or acted on it.
 Follow project authorization before communicating or delegating. For an authorized delegated
 task, use `list_task_classes`, `plan_dispatch`, and `dispatch_worker`; do not assume this client
 has Claude's Agent or SendMessage tools. Preserve Heddle's worker depth limit and routing policy.
+Cursor CLI has a 60-second MCP call timeout: for delegated work, use the existing terminal
+command `heddle dispatch --class <class> --agent <verified-identity> --task '<task>' --json`
+from this worktree, and collect its terminal result. Do not repeat a timed-out dispatch blindly;
+check `check_workers` and `heddle ledger show <dispatch-id> --json` for the original result first.
+The same terminal command supports longer-than-default dispatches in the other clients.
 Apply the project's existing startup, handoff and closeout workflows under .claude/commands
 when present; their Markdown instructions can be read without Claude slash commands.

@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { parse as parseToml } from 'smol-toml';
@@ -35,7 +35,7 @@ describe('native fleet client installation', () => {
     const read = (path: string) => JSON.parse(readFileSync(join(opts.dir, path), 'utf8'));
     expect(read('.cursor/mcp.json')).toMatchObject({ other: 42, mcpServers: { existing: { command: 'custom' }, 'heddle-comms': { env: { HEDDLE_CLIENT: 'cursor' } } } });
     expect(read('.gemini/settings.json').mcpServers.heddle).toMatchObject({ env: { HEDDLE_CLIENT: 'gemini' }, timeout: 660_000 });
-    expect(read('opencode.json').mcp.heddle).toMatchObject({ type: 'local', enabled: true, environment: { HEDDLE_CLIENT: 'opencode' } });
+    expect(read('opencode.json').mcp.heddle).toMatchObject({ type: 'local', enabled: true, environment: { HEDDLE_CLIENT: 'opencode' }, timeout: 660_000 });
     expect(readFileSync(join(opts.dir, 'AGENTS.md'), 'utf8')).toMatch(/^Original project instructions/);
     expect(readFileSync(join(opts.dir, 'GEMINI.md'), 'utf8')).toContain('check_inbox');
     expect(planClientInstall(opts).steps.every((step) => step.action === 'ok')).toBe(true);
@@ -81,6 +81,67 @@ describe('native fleet client installation', () => {
     writeFileSync(join(opts.dir, 'opencode.jsonc'), '// operator settings\n{}');
     expect(() => planClientInstall({ ...opts, clients: ['opencode'] })).toThrow('opencode.jsonc');
     expect(existsSync(join(opts.dir, 'opencode.json'))).toBe(false);
+  });
+
+  it('preserves marker examples in prose and handles standalone CRLF markers at EOF', () => {
+    const opts = { ...options(), clients: ['cursor'] as const };
+    const path = join(opts.dir, 'AGENTS.md');
+    const prose = 'Example: <!-- heddle fleet: begin --> keep this policy <!-- heddle fleet: end -->.\n';
+    writeFileSync(path, prose + '<!-- heddle fleet: begin -->\r\nold guidance\r\n<!-- heddle fleet: end -->');
+    applyInstall(planClientInstall({ ...opts, clients: [...opts.clients] }));
+    const next = readFileSync(path, 'utf8');
+    expect(next.startsWith(prose)).toBe(true);
+    expect(next).not.toContain('old guidance');
+    expect(next).toContain('60-second MCP call timeout');
+  });
+
+  it('rejects a canonical home target even when the home setting is a symlink', () => {
+    const opts = options(), alias = join(tempDir(), 'home-alias');
+    symlinkSync(opts.dir, alias);
+    expect(() => planClientInstall({ ...opts, homeDir: alias })).toThrow('home directory');
+  });
+
+  it('accepts an explicitly selected symlink to a project and binds the canonical workspace', () => {
+    const opts = options(), alias = join(tempDir(), 'project-alias');
+    symlinkSync(opts.dir, alias);
+    const plan = planClientInstall({ ...opts, dir: alias });
+    expect(plan.options.dir).toBe(opts.dir);
+    expect(plan.steps.every((step) => step.path.startsWith(opts.dir + '/'))).toBe(true);
+  });
+
+  it('rejects a parent symlink inserted after planning before writing any files', () => {
+    const opts = options(), elsewhere = tempDir();
+    mkdirSync(join(opts.dir, '.cursor'));
+    const plan = planClientInstall(opts);
+    renameSync(join(opts.dir, '.cursor'), join(opts.dir, '.cursor-original'));
+    symlinkSync(elsewhere, join(opts.dir, '.cursor'));
+    expect(() => applyInstall(plan)).toThrow('symlink');
+    expect(existsSync(join(opts.dir, '.codex'))).toBe(false);
+    expect(existsSync(join(elsewhere, 'mcp.json'))).toBe(false);
+  });
+
+  it('detects edits made while earlier client files are being written', () => {
+    const opts = options(), path = join(opts.dir, 'AGENTS.md');
+    writeFileSync(path, 'original instructions');
+    const plan = planClientInstall(opts), first = plan.steps[0], content = first.content;
+    let edited = false;
+    Object.defineProperty(first, 'content', { get() {
+      if (!edited) { edited = true; writeFileSync(path, 'concurrent operator edit'); }
+      return content;
+    } });
+    expect(() => applyInstall(plan)).toThrow('changed underneath');
+    expect(readFileSync(path, 'utf8')).toBe('concurrent operator edit');
+  });
+
+  it('never replaces an existing immutable backup even without a snapshot precondition', () => {
+    const opts = options(), path = join(opts.dir, 'AGENTS.md');
+    writeFileSync(path, 'original');
+    const plan = planClientInstall(opts), backup = plan.steps.find((step) => step.step === 'client-instructions:AGENTS.md:backup')!;
+    expect(backup.exclusive).toBe(true);
+    writeFileSync(backup.path, 'another installer backup');
+    expect(() => applyInstall({ ...plan, steps: [{ ...backup, expectedContent: undefined }] })).toThrow('EEXIST');
+    expect(readFileSync(backup.path, 'utf8')).toBe('another installer backup');
+    expect(readFileSync(path, 'utf8')).toBe('original');
   });
 
   it('composes with init-project while default Claude initialization remains opt-in free', () => {

@@ -1,11 +1,11 @@
-import { existsSync, lstatSync, readFileSync, realpathSync } from 'node:fs';
+import { accessSync, constants, existsSync, lstatSync, readFileSync, realpathSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 import { parse as parseToml, stringify as stringifyToml } from 'smol-toml';
 import { parseAddress } from './comms/address.js';
-import type { InstallPlan, InstallStep } from './init-project.js';
+import { canonicalizePath, type InstallPlan, type InstallStep } from './init-project.js';
 
 export const FLEET_CLIENTS = ['codex', 'cursor', 'gemini', 'opencode'] as const;
 export type FleetClient = typeof FLEET_CLIENTS[number];
@@ -34,7 +34,7 @@ function checkedToml(raw: string) {
   catch { throw new Error('invalid Codex TOML configuration; repair the config before installing (contents omitted)'); }
 }
 
-function source(path: string): string | null {
+export function clientFileSource(path: string): string | null {
   // Do not follow a config symlink or a symlinked parent into another checkout/user config.
   for (let part = path; ; part = dirname(part)) {
     try {
@@ -47,14 +47,27 @@ function source(path: string): string | null {
   return existsSync(path) ? readFileSync(path, 'utf8') : null;
 }
 
+/** Check likely permission failures before a composed install changes any Claude files. */
+export function checkClientParentWritable(path: string): void {
+  let parent = dirname(path);
+  while (!existsSync(parent) && dirname(parent) !== parent) parent = dirname(parent);
+  accessSync(parent, constants.W_OK | constants.X_OK);
+}
+
 function managedBlock(raw: string, start: string, end: string): { before: string; after: string } {
-  const first = raw.indexOf(start), last = raw.indexOf(end);
-  if (first === -1 && last === -1) return { before: raw + (raw && !raw.endsWith('\n') ? '\n' : ''), after: '' };
-  if (first < 0 || last < first || raw.indexOf(start, first + start.length) !== -1 || raw.indexOf(end, last + end.length) !== -1) {
+  const starts: number[] = [], ends: Array<{ start: number; after: number }> = [];
+  let offset = 0;
+  for (const line of raw.split('\n')) {
+    const marker = line.endsWith('\r') ? line.slice(0, -1) : line;
+    if (marker === start) starts.push(offset);
+    if (marker === end) ends.push({ start: offset, after: Math.min(raw.length, offset + line.length + 1) });
+    offset += line.length + 1;
+  }
+  if (!starts.length && !ends.length) return { before: raw + (raw && !raw.endsWith('\n') ? '\n' : ''), after: '' };
+  if (starts.length !== 1 || ends.length !== 1 || ends[0].start < starts[0]) {
     throw new Error('malformed or duplicated heddle managed block; repair its markers before installing');
   }
-  const after = last + end.length;
-  return { before: raw.slice(0, first), after: raw.slice(after + (raw[after] === '\n' ? 1 : 0)) };
+  return { before: raw.slice(0, starts[0]), after: raw.slice(ends[0].after) };
 }
 
 function plannedFile(path: string, step: string, raw: string | null, content: string, dryRun: boolean): InstallStep[] {
@@ -63,8 +76,15 @@ function plannedFile(path: string, step: string, raw: string | null, content: st
   if (raw !== null) {
     // Keep an immutable backup of each pre-edit version, including operator comments/formatting.
     let backup = `${path}.heddle-backup`;
-    for (let n = 1; existsSync(backup) && readFileSync(backup, 'utf8') !== raw; n++) backup = `${path}.heddle-backup.${n}`;
-    if (!existsSync(backup)) planned.push({ path: backup, step: `${step}:backup`, content: raw, expectedContent: null, action: dryRun ? 'would-create' : 'create', mode: 0o600 });
+    for (let n = 1; ; n++) {
+      const prior = clientFileSource(backup);
+      if (prior === raw) break;
+      if (prior === null) {
+        planned.push({ path: backup, step: `${step}:backup`, content: raw, expectedContent: null, action: dryRun ? 'would-create' : 'create', mode: 0o600, exclusive: true });
+        break;
+      }
+      backup = `${path}.heddle-backup.${n}`;
+    }
   }
   planned.push({ path, step, content, expectedContent: raw, action: raw === null ? (dryRun ? 'would-create' : 'create') : (dryRun ? 'would-update' : 'update') });
   return planned;
@@ -104,7 +124,7 @@ function jsonConfig(raw: string | null, client: FleetClient, servers: ReturnType
   const next = { ...existing };
   for (const [name, def] of Object.entries(servers)) {
     const expected = client === 'opencode'
-      ? { type: 'local', command: [def.command, ...def.args], environment: def.env, enabled: true }
+      ? { type: 'local', command: [def.command, ...def.args], environment: def.env, enabled: true, timeout: 660_000 }
       : def;
     if (Object.hasOwn(existing, name) && !isDeepStrictEqual(existing[name], expected)) {
       throw new Error(`MCP server ${name} already has different configuration in ${path}; existing settings were preserved`);
@@ -129,7 +149,7 @@ export function clientInstallSteps(options: ClientInstallOptions): InstallStep[]
     const path = join(dir, relative);
     // OpenCode loads JSONC too. Do not shadow it with a second competing project config.
     if (client === 'opencode' && existsSync(join(dir, 'opencode.jsonc'))) throw new Error('opencode.jsonc already exists; configure its mcp entries manually rather than creating a competing opencode.json');
-    const raw = source(path);
+    const raw = clientFileSource(path);
     const servers = serverDefinitions(dir, client, agent);
     const content = client === 'codex' ? tomlConfig(raw ?? '', servers) : jsonConfig(raw, client, servers, path);
     steps.push(...plannedFile(path, `client:${client}`, raw, content, dryRun));
@@ -137,7 +157,7 @@ export function clientInstallSteps(options: ClientInstallOptions): InstallStep[]
   const guidance = readFileSync(join(here, '..', 'assets', 'client-startup.md'), 'utf8');
   const instructionFiles = new Set(clients.map((client) => client === 'gemini' ? 'GEMINI.md' : 'AGENTS.md'));
   for (const file of instructionFiles) {
-    const path = join(dir, file), raw = source(path);
+    const path = join(dir, file), raw = clientFileSource(path);
     const parts = managedBlock(raw ?? '', GUIDE_START, GUIDE_END);
     steps.push(...plannedFile(path, `client-instructions:${file}`, raw, parts.before + `${GUIDE_START}\n${guidance.trimEnd()}\n${GUIDE_END}\n` + parts.after, dryRun));
   }
@@ -147,9 +167,10 @@ export function clientInstallSteps(options: ClientInstallOptions): InstallStep[]
 /** Reuses the project's CAS/atomic install engine; init-project may compose the same steps. */
 export function planClientInstall(input: ClientInstallOptions): InstallPlan {
   const target = resolve(input.dir);
-  if (!existsSync(target) || !lstatSync(target).isDirectory()) throw new Error(`client target is not a directory: ${target}`);
+  if (!existsSync(target)) throw new Error(`client target is not a directory: ${target}`);
   const dir = realpathSync.native(target);
-  if (dir === dirname(dir) || dir === resolve(input.homeDir ?? homedir())) throw new Error('choose a project worktree, not the filesystem root or home directory');
+  if (!lstatSync(dir).isDirectory()) throw new Error(`client target is not a directory: ${target}`);
+  if (dir === dirname(dir) || dir === canonicalizePath(input.homeDir ?? homedir())) throw new Error('choose a project worktree, not the filesystem root or home directory');
   const steps = clientInstallSteps({ ...input, dir });
   return { options: { dir, canonical: dir, name: basename(dir), homeDir: input.homeDir ?? homedir(), dryRun: input.dryRun }, steps };
 }

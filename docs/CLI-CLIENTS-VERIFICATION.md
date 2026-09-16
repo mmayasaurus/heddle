@@ -31,9 +31,20 @@ any language model. `test/client-config.test.ts` checks configuration preservati
 idempotency, dry runs, conflict/error handling, race detection, symlinks, secret-free reports,
 and composition with unchanged default Claude initialization.
 
-The full suite passed with 2,285 tests passing and one skipped. TypeScript checking and the
-built CLI classes/packs smoke checks are also part of validation. Claude's existing comms,
+`npm test -- --maxWorkers=4` initially passed with 2,285 tests passing and one skipped.
+`npm run typecheck`, `npm run build`, and built CLI `classes --json` / `packs --json`
+smoke checks also passed. Claude's existing comms,
 channel/push, adapter, dispatch, hook and installer tests remain in the regression suite.
+After the backup/write and marker fixes, the full suite passed again with 2,290 tests and one
+skip. The final target-path and test-structure adjustments passed the focused client/config/
+init-project suite (80 tests), followed by typechecking, build and CLI smoke checks.
+
+Follow-up source inspection of Cursor CLI 2026.09.10-fd3934a found its `McpSdkClient.callTool`
+does not pass timeout options and its bundled MCP SDK defaults to 60,000 ms. Installed startup
+guidance therefore directs Cursor agents to Heddle's existing terminal dispatch for delegated
+work. OpenCode 1.14.41 passes each MCP entry's `timeout` to `client.callTool`; generated entries
+now set 660,000 ms, matching the Codex/Gemini budget. This was verified against
+[OpenCode's versioned MCP source](https://github.com/anomalyco/opencode/blob/v1.14.41/packages/opencode/src/mcp/index.ts).
 
 ## Boundaries
 

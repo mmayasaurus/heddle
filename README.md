@@ -246,6 +246,19 @@ running turn and queued messages are not read receipts. Claude retains its exist
 push and hooks. Claude hook enforcement is not emulated in the other clients; they receive
 the shared project-policy and lifecycle instructions.
 
+Codex, Gemini and OpenCode MCP entries allow 660 seconds for tool calls. Cursor CLI
+2026.09.10 has a fixed 60-second MCP call timeout; use the existing terminal command
+`heddle dispatch --class <class> --agent <verified-identity> --task '<task>' --json`
+for delegated work in Cursor. Collect the terminal result and check the ledger before
+retrying any timed-out dispatch. Messaging and the short orchestration tools remain available
+through MCP in all four clients.
+
+Installation validates all snapshots before writing and rechecks native targets at replacement.
+Backups are created exclusively. Installation is not a multi-file filesystem transaction: a disk
+failure may leave earlier steps applied, and an uncooperative local writer racing the final
+check/rename is outside its guarantees. Stop concurrent configuration editors during installation;
+after an I/O failure, fix the cause and rerun the idempotent installer.
+
 On a fresh project, `init-project ... --clients codex,cursor,gemini,opencode [--agent my-agent]`
 composes the same client steps with normal project initialization. Omitting `--clients` retains
 the existing Claude setup behavior. Native Gemini CLI and OpenCode here are fleet-session hosts;

@@ -1277,7 +1277,7 @@ try {
       if (has('--agent') && (!agent || agent.startsWith('--'))) throw new Error('--agent requires a fleet identity');
       const report = applyInstall(planClientInstall({ dir, clients, agent, dryRun: has('--dry-run') }));
       // Configs and backups can contain existing operator secrets: never echo their contents.
-      const steps = report.steps.map(({ content: _content, expectedContent: _expected, ...step }) => step);
+      const steps = redactReport(report, false, process.cwd()).steps;
       out(json, { steps, humanSteps: ['Restart the selected CLI in this worktree; approve its MCP servers using its native trust controls.', 'Call comms_whoami and check_workers to verify identity, then check_inbox.'] },
         () => steps.map((step) => `${step.action} ${step.step}: ${step.path}`).join('\n'));
       break;

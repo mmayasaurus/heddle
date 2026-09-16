@@ -11,10 +11,9 @@ import { ensureBuilt, PROJECT_ROOT } from './helpers/cli.js';
 
 describe('mixed CLI fleet over real stdio MCP servers', () => {
   const { tempDir } = useTempResources('heddle-native-mcp-');
-  it('all generated clients send and receive across the Claude broker, retain cursors and enforce worker limits', async () => {
-    await ensureBuilt();
-    const home = realpathSync.native(tempDir()), peers: Client[] = [];
-    const common = { PATH: process.env.PATH ?? '', HOME: home, USERPROFILE: home, HEDDLE_COMMS_DB: join(home, 'comms.db'), HEDDLE_LEDGER_DB: join(home, 'ledger.db') };
+  function connections(clientHome: string) {
+    const peers: Client[] = [];
+    const common = { PATH: process.env.PATH ?? '', HOME: clientHome, USERPROFILE: clientHome, HEDDLE_COMMS_DB: join(clientHome, 'comms.db'), HEDDLE_LEDGER_DB: join(clientHome, 'ledger.db') };
     async function connect(name: string, command: string, args: string[], env: Record<string, string>) {
       const client = new Client({ name, version: '1' });
       peers.push(client);
@@ -32,6 +31,11 @@ describe('mixed CLI fleet over real stdio MCP servers', () => {
         return JSON.parse(result.content[0].text);
       } catch (error) { throw new Error(`${name} failed: ${String(error)}`); }
     }
+    return { peers, connect, call };
+  }
+  it('all generated clients send and receive across the Claude broker, retain cursors and enforce worker limits', async () => {
+    await ensureBuilt();
+    const { peers, connect, call } = connections(realpathSync.native(tempDir()));
     try {
       const claude = await connect('claude', process.execPath, ['--disable-warning=ExperimentalWarning', join(PROJECT_ROOT, 'dist/comms/channel-server.js')], { HEDDLE_AGENT: 'claude-test' });
       expect(claude.getServerCapabilities()?.experimental).toHaveProperty('claude/channel');
@@ -72,6 +76,14 @@ describe('mixed CLI fleet over real stdio MCP servers', () => {
         const denied = await call(worker, 'dispatch_worker', { prompt: 'Must never dispatch another worker', provider: 'codex', model: 'test', override_reason: 'Synthetic regression verifies the worker depth limit.' });
         expect(denied).toMatchObject({ ok: false, refusal: { code: 'depth-1' } });
       }
+    } finally {
+      await Promise.all(peers.map((peer) => peer.close().catch(() => undefined)));
+    }
+  }, 60_000);
+  it('resolves file identity in the intended workspace even when spawned elsewhere', async () => {
+    await ensureBuilt();
+    const { peers, connect, call } = connections(realpathSync.native(tempDir()));
+    try {
       // No explicit identity still resolves the intended worktree even when spawned elsewhere.
       const dir = realpathSync.native(tempDir());
       writeFileSync(join(dir, '.fleet-agent'), 'file-test');
@@ -80,5 +92,5 @@ describe('mixed CLI fleet over real stdio MCP servers', () => {
     } finally {
       await Promise.all(peers.map((peer) => peer.close().catch(() => undefined)));
     }
-  }, 60_000);
+  });
 });
