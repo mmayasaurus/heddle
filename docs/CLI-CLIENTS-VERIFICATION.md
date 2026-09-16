@@ -21,6 +21,16 @@ reply was verified in the intended isolated broker, rather than inferred from mo
 Codex's `-c` parser treats quoted dotted-key segments literally; generated launch overrides
 use bare managed server names and quote only values.
 
+Real delegated workers also completed the identity/message/nested-dispatch probe through
+Heddle's dispatcher: Codex `gpt-5.6-terra`, Cursor `composer-2.5`, and OpenCode
+`opencode/nemotron-3-ultra-free` each posted the expected marker from its own broker-minted
+child address and received a `depth-1` refusal when attempting nested dispatch. The Codex
+worker used its normal lean configuration, with explicit MCP definitions and tool approvals.
+OpenCode adds schema metadata while loading its config; cleanup preserves those additions
+and restores unchanged Heddle MCP entries to the parent identity. Concurrent native workers
+that need the same project config are refused until its current worker finishes; separate
+worktrees support parallel sessions. Codex workers use per-invocation configuration.
+
 ## Automated coverage
 
 The native client tests cover configuration/hook preservation, backups, idempotency,
@@ -32,6 +42,8 @@ and continuation guards. The OpenCode plugin is exercised with a controlled nati
 process, including rejection of tool calls and no continuation after an error or idle event
 without normal completion. Launcher tests run an actual child process and check cwd, identity,
 exit propagation, resume arguments, and refusal of worker-to-orchestrator escalation.
+Sanitized-environment MCP subprocess tests cover all four worker clients, including the
+exact shared ledger for nested refusals and no broker creation in uninitialized workspaces.
 
 Native worker adapter tests exercise real synthetic subprocesses: argv, resume, output,
 usage normalization, malformed/incomplete/error/truncated output, and environment forwarding.
