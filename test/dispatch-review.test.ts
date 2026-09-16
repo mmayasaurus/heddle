@@ -119,7 +119,7 @@ describe('adversarial review dispatch', () => {
     const restore = reviewRouting(tempDir); const ledger = tempLedger(); const fake = fakeAdapter();
     try {
       const refused = await dispatch({ taskClass: 'adversarial-review', provider: 'cursor', model: 'cursor-grok-4.6-high', authorProvider: 'cursor', prompt: 'review', cwd: tempDir(), identity: unbound }, ledger, () => fake.adapter);
-      expect(refused.refusal?.code).toBe('same-provider-review'); expect(refused.refusal?.reason).toContain('DIFFERENT provider'); expect(fake.calls).toHaveLength(0); expect(ledger.recent(1)[0].refusal).toBe('same-provider-review');
+      expect(refused.refusal?.code).toBe('same-provider-review'); expect(refused.refusal?.reason).toContain('DIFFERENT model family'); expect(fake.calls).toHaveLength(0); expect(ledger.recent(1)[0].refusal).toBe('same-provider-review');
       const ran = await dispatch({ taskClass: 'adversarial-review', provider: 'codex', model: 'gpt-5.6-sol', authorProvider: 'cursor', prompt: 'review', cwd: tempDir(), identity: unbound }, ledger, () => fake.adapter);
       expect(ran.review?.reviewerProvider).toBe('codex'); expect(fake.calls).toHaveLength(1);
     } finally { restore(); }

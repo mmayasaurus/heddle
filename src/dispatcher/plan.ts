@@ -314,7 +314,7 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
       );
     }
     if (sameModelFamily(target.provider, target.model, author, req.authorModel)) {
-      sameProviderReview = `task class "${route.taskClass}" requires a reviewer from a DIFFERENT provider than the ` +
+      sameProviderReview = `task class "${route.taskClass}" requires a reviewer from a DIFFERENT model family than the ` +
         `author (${author}); the effective route ${target.provider}/${target.model} is the author's own family` +
         (origin === 'explicit' ? ' (named explicitly)' : decision.routedAwayForCap ? ' (cap-aware route-away landed there)' : '') + '.';
     }

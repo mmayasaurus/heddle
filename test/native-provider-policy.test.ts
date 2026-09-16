@@ -7,7 +7,7 @@ import { defaultAdapterFor } from '../src/dispatcher/adapters.js';
 import { billingVerdict } from '../src/dispatcher/billing.js';
 import { materializeWorkerMcp, nativeClientIntegrationInstalled, validateWorkerMcp, webCapable } from '../src/mcp.js';
 import { modelFamily, sameModelFamily } from '../src/model-family.js';
-import { directRoute, loadRouting, type RoutingTable } from '../src/routing.js';
+import { directRoute, loadRouting } from '../src/routing.js';
 import { modelFamilyPack } from '../src/skillpacks.js';
 import { serverDefinitions } from '../src/client-config.js';
 import { CommsLog } from '../src/comms/log.js';

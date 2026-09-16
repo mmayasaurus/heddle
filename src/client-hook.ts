@@ -1,5 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
-import { closeSync, lstatSync, mkdirSync, openSync } from 'node:fs';
+import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { createHash } from 'node:crypto';
@@ -24,7 +24,9 @@ function readInput(): Promise<string> {
 }
 
 function openState(path: string): DatabaseSync {
-  // Receipts contain only hashed session keys and message IDs. Never follow a state symlink.
+  // Receipts contain only hashed session keys and message IDs. Reject observed state symlinks.
+  // As in secure-fs, hostile same-user pathname swaps are outside the guarantee: DatabaseSync
+  // reopens a pathname and cannot consume the validated descriptor below.
   for (let p = path; ; p = dirname(p)) {
     try { if (lstatSync(p).isSymbolicLink()) throw new Error('symlinked native hook state'); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
@@ -33,7 +35,17 @@ function openState(path: string): DatabaseSync {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   try { closeSync(openSync(path, 'wx', 0o600)); }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
-  const db = new DatabaseSync(path);
+  // Validate the existing file through a no-follow descriptor too: the path may have changed
+  // since the ancestor check. NONBLOCK prevents a substituted FIFO from wedging the hook.
+  const fd = openSync(path, constants.O_RDWR | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  let db: DatabaseSync;
+  try {
+    const opened = fstatSync(fd), current = lstatSync(path);
+    if (!opened.isFile() || !current.isFile() || opened.dev !== current.dev || opened.ino !== current.ino) {
+      throw new Error('native hook state must remain a regular file');
+    }
+    db = new DatabaseSync(path);
+  } finally { closeSync(fd); }
   try {
     db.exec('PRAGMA busy_timeout=1000; CREATE TABLE IF NOT EXISTS receipts (session TEXT PRIMARY KEY, last_id INTEGER NOT NULL);');
     return db;
@@ -85,5 +97,5 @@ catch (error) {
   // The ratified rules engine is fail-open, matching heddle-hook. Never print payload contents.
   process.stderr.write(`heddle native hook failed: ${error instanceof Error ? error.message : 'unknown error'}\n`);
   process.stdout.write('{}\n');
-  process.exitCode = 1;
+  process.exitCode = 0;
 } finally { process.stdin.destroy(); }

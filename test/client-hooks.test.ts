@@ -152,4 +152,40 @@ describe('native hook lifecycle', () => {
       expect(child.stdout).not.toContain('parent-only-marker');
     } finally { log.close(); }
   });
+
+  it('keeps native hooks nonblocking when the hook input is invalid', async () => {
+    await ensureBuilt();
+    const dir = realpathSync.native(tempDir()), { env } = childEnv({ home: dir });
+    for (const client of ['codex', 'cursor', 'gemini', 'opencode']) {
+      const child = spawnSync(process.execPath, [join(PROJECT_ROOT, 'dist/client-hook.js'), client, 'PostToolUse', dir],
+        { input: '{broken', env, encoding: 'utf8', timeout: 10000 });
+      expect(child.status).toBe(0);
+      expect(JSON.parse(child.stdout)).toEqual({});
+      expect(child.stderr).toContain('invalid hook input JSON');
+      expect(child.stderr).not.toContain('{broken');
+    }
+  });
+
+  it.skipIf(process.platform === 'win32')('refuses a state symlink substituted after the initial path check', async () => {
+    await ensureBuilt();
+    const dir = realpathSync.native(tempDir()), state = join(dir, 'state.db'), target = join(dir, 'external.db');
+    writeFileSync(state, 'original state'); writeFileSync(target, 'external bytes must remain unchanged');
+    const preload = join(dir, 'swap.mjs');
+    writeFileSync(preload, `import fs from 'node:fs'; import { syncBuiltinESMExports } from 'node:module';
+const originalOpen = fs.openSync;
+fs.openSync = function(path, flags, ...rest) {
+  if (path === ${JSON.stringify(state)} && flags === 'wx') {
+    fs.renameSync(path, path + '.preserved'); fs.symlinkSync(${JSON.stringify(target)}, path);
+  }
+  return originalOpen(path, flags, ...rest);
+}; syncBuiltinESMExports();`);
+    const { env } = childEnv({ home: dir, env: { HEDDLE_CLIENT_STATE_DB: state } });
+    const child = spawnSync(process.execPath, ['--import', preload, join(PROJECT_ROOT, 'dist/client-hook.js'), 'cursor', 'PostToolUse', dir, 'codex-test'],
+      { input: JSON.stringify({ session_id: 'state-race' }), env, encoding: 'utf8', timeout: 10000 });
+    expect(child.status).toBe(0);
+    expect(JSON.parse(child.stdout)).toEqual({});
+    expect(child.stderr).toContain('heddle native hook failed');
+    expect(readFileSync(target, 'utf8')).toBe('external bytes must remain unchanged');
+    expect(readFileSync(state + '.preserved', 'utf8')).toBe('original state');
+  });
 });

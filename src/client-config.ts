@@ -14,7 +14,8 @@ const START = '# heddle fleet MCP: begin';
 const END = '# heddle fleet MCP: end';
 const GUIDE_START = '<!-- heddle fleet: begin -->';
 const GUIDE_END = '<!-- heddle fleet: end -->';
-const FORWARDED_ENV = ['HEDDLE_AGENT', 'FLEET_AGENT', 'HEDDLE_WORKER', 'HEDDLE_DISPATCH_ID', 'HEDDLE_PARENT', 'HEDDLE_COMMS_ADDRESS', 'HEDDLE_COMMS_DB', 'HEDDLE_LEDGER_DB', 'HEDDLE_PROJECTS'];
+const IDENTITY_ENV = ['HEDDLE_AGENT', 'FLEET_AGENT', 'HEDDLE_WORKER', 'HEDDLE_DISPATCH_ID', 'HEDDLE_PARENT', 'HEDDLE_COMMS_ADDRESS'];
+const FORWARDED_ENV = [...IDENTITY_ENV, 'HEDDLE_COMMS_DB', 'HEDDLE_LEDGER_DB', 'HEDDLE_PROJECTS'];
 
 export function parseFleetClients(value: string): FleetClient[] {
   const clients = value.split(',').map((s) => s.trim());
@@ -99,10 +100,14 @@ export function serverDefinitions(dir: string, client: FleetClient, agent?: stri
   // Some native clients sanitize the MCP subprocess environment. Preserve explicit broker/project
   // locations without copying ambient credentials into generated configuration.
   const paths = Object.fromEntries(['HEDDLE_COMMS_DB', 'HEDDLE_LEDGER_DB', 'HEDDLE_PROJECTS'].flatMap((key) => process.env[key] ? [[key, process.env[key]!]] : []));
+  // Cursor sanitizes ambient MCP env. Its native empty-default interpolation preserves launcher
+  // identity while letting unset fields fall through to file identity and non-worker defaults.
+  const forwarded = client === 'cursor'
+    ? Object.fromEntries(IDENTITY_ENV.map((key) => [key, '${' + key + ':-}'])) : {};
   return Object.fromEntries(['heddle', 'heddle-comms'].map((name) => [name, {
     command: process.execPath,
     args: ['--disable-warning=ExperimentalWarning', join(here, '..', 'dist', 'client-mcp.js'), name, dir],
-    env: { ...paths, HEDDLE_CLIENT: client, ...(agent ? { HEDDLE_AGENT: agent, FLEET_AGENT: agent } : {}), ...workerEnv },
+    env: { ...forwarded, ...paths, HEDDLE_CLIENT: client, ...(agent ? { HEDDLE_AGENT: agent, FLEET_AGENT: agent } : {}), ...workerEnv },
     ...(client === 'gemini' ? { timeout: 660_000 } : {}),
   }]));
 }
@@ -185,13 +190,32 @@ function jsonConfig(raw: string | null, client: FleetClient, servers: ReturnType
     const expected = client === 'opencode'
       ? { type: 'local', command: [def.command, ...def.args], environment: def.env, enabled: true, timeout: 660_000 }
       : def;
-    if (Object.hasOwn(existing, name) && !isDeepStrictEqual(existing[name], expected)) {
+    if (Object.hasOwn(existing, name) && !isDeepStrictEqual(existing[name], expected)
+      && !isIdentityRebind(existing[name], expected, client)) {
       throw new Error(`MCP server ${name} already has different configuration in ${path}; existing settings were preserved`);
     }
     next[name] = expected;
   }
   if (raw !== null && !schema.$schema && isDeepStrictEqual(existing, next)) return raw;
   return JSON.stringify({ ...config, ...schema, [key]: next }, null, 2) + '\n';
+}
+
+/** Reassign a seat or add Cursor's generated empty lineage defaults; preserve all other fields. */
+function isIdentityRebind(prior: unknown, expected: unknown, client: FleetClient): boolean {
+  const key = client === 'opencode' ? 'environment' : 'env';
+  const withoutIdentity = (value: unknown): unknown => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+    const config = value as Record<string, unknown>, rawEnv = config[key];
+    if (!rawEnv || typeof rawEnv !== 'object' || Array.isArray(rawEnv)) return value;
+    const env = { ...rawEnv } as Record<string, unknown>;
+    if (env.HEDDLE_WORKER === '1') return value; // Never rebind a materialized worker.
+    delete env.HEDDLE_AGENT; delete env.FLEET_AGENT;
+    if (client === 'cursor') for (const name of ['HEDDLE_WORKER', 'HEDDLE_DISPATCH_ID', 'HEDDLE_PARENT', 'HEDDLE_COMMS_ADDRESS']) {
+      if (env[name] === '${' + name + ':-}') delete env[name];
+    }
+    return { ...config, [key]: env };
+  };
+  return isDeepStrictEqual(withoutIdentity(prior), withoutIdentity(expected));
 }
 
 export interface ClientInstallOptions { dir: string; clients: FleetClient[]; agent?: string; dryRun?: boolean; homeDir?: string; }

@@ -1,10 +1,10 @@
-import { existsSync, mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { parse as parseToml, stringify as stringifyToml } from 'smol-toml';
 import { serverDefinitions, type FleetClient } from '../src/client-config.js';
 import { dispatch } from '../src/dispatch.js';
@@ -15,9 +15,11 @@ import type { DispatchOptions, WorkerAdapter } from '../src/types.js';
 import { IDENTITIES, useTempResources } from './helpers.js';
 import { ensureBuilt, PROJECT_ROOT } from './helpers/build.js';
 import { withFileLock } from '../src/matlock.js';
+import * as matlock from '../src/matlock.js';
 
 const savedEnv = { ...process.env };
 afterEach(() => {
+  vi.restoreAllMocks();
   for (const key of Object.keys(process.env)) if (!(key in savedEnv)) delete process.env[key];
   Object.assign(process.env, savedEnv);
 });
@@ -210,7 +212,7 @@ describe('native worker context through actual MCP subprocesses', () => {
 
   it('does not create a comms database in a generic uninitialized workspace', async () => {
     for (const row of clients) {
-      const cwd = tempDir();
+      const cwd = tempAlias(); // macOS /var alias is valid even without an initialized config.
       process.env.HEDDLE_COMMS_DB = join(tempDir(), 'must-not-exist.db');
       const outcome = await dispatch({
         provider: row.provider, model: row.model, cwd, prompt: 'ordinary synthetic worker',
@@ -264,7 +266,7 @@ describe('native worker context through actual MCP subprocesses', () => {
     }
   });
 
-  it('rejects cwd and higher-ancestor aliases even when wrapper ownership resolves to the same directory', () => {
+  it('accepts cwd and higher-ancestor aliases for the same canonical initialized workspace', () => {
     const parent = tempDir(), cwd = join(parent, 'project');
     mkdirSync(cwd);
     const path = join(cwd, '.cursor', 'mcp.json');
@@ -274,10 +276,110 @@ describe('native worker context through actual MCP subprocesses', () => {
     symlinkSync(cwd, join(links, 'cwd-alias'), 'dir');
     symlinkSync(parent, join(links, 'ancestor-alias'), 'dir');
     for (const alias of [join(links, 'cwd-alias'), join(links, 'ancestor-alias', 'project')]) {
-      expect(() => nativeClientIntegrationInstalled(alias, 'cursor', true)).toThrow(/unverified Heddle MCP entries/);
-      expect(nativeClientIntegrationInstalled(alias, 'cursor')).toBe(false);
+      expect(nativeClientIntegrationInstalled(alias, 'cursor', true)).toBe(true);
+      const restore = materializeWorkerMcp(alias, 'cursor', [], { dispatchId: 1 }, {
+        HEDDLE_WORKER: '1', HEDDLE_AGENT: 'U.1', FLEET_AGENT: 'U.1',
+      });
+      expect(JSON.parse(readFileSync(path, 'utf8')).mcpServers.heddle.env.HEDDLE_AGENT).toBe('U.1');
+      restore();
+      expect(readFileSync(path, 'utf8')).toBe(original);
     }
     expect(readFileSync(path, 'utf8')).toBe(original);
+  });
+
+  it('recognizes a native installation through the platform temporary-directory alias', () => {
+    const alias = tempAlias(), cwd = realpathSync(alias), path = join(cwd, '.cursor', 'mcp.json');
+    install(cwd, 'cursor', path);
+    expect(nativeClientIntegrationInstalled(alias, 'cursor', true)).toBe(true);
+  });
+
+  it('still rejects config symlinks beneath an aliased workspace and wrappers bound elsewhere', () => {
+    const cwd = tempDir(), other = tempDir(), alias = join(tempDir(), 'tmp-alias');
+    symlinkSync(cwd, alias, 'dir');
+    const path = join(cwd, '.cursor', 'mcp.json');
+    install(other, 'cursor', path);
+    expect(() => nativeClientIntegrationInstalled(alias, 'cursor', true)).toThrow(/unverified Heddle MCP entries/);
+    renameSync(join(cwd, '.cursor'), join(cwd, 'original-cursor'));
+    symlinkSync(join(cwd, 'original-cursor'), join(cwd, '.cursor'), 'dir');
+    expect(() => nativeClientIntegrationInstalled(alias, 'cursor', true)).toThrow(/unverified Heddle MCP entries/);
+  });
+
+  it('refuses malformed native ownership sidecars without losing an active identity or external bytes', () => {
+    const corruptions = [
+      (state: any) => { state.refs['1'] = 'heddle'; },
+      (state: any) => { state.refs['1'] = [42]; },
+      (state: any) => { delete state.original; },
+      (state: any) => { state.original = 42; },
+      (state: any) => { delete state.definitions; },
+      (state: any) => { state.definitions = []; },
+      (state: any) => { delete state.definitions['1']; },
+      (state: any) => { delete state.definitions['1'].heddle; },
+      (state: any) => { state.definitions['1'].heddle = null; },
+      (state: any) => { state.definitions['1'] = { heddle: {}, 'heddle-comms': {} }; },
+    ];
+    for (const corrupt of corruptions) {
+      const cwd = tempDir(), path = join(cwd, '.cursor', 'mcp.json');
+      install(cwd, 'cursor', path);
+      const context = { HEDDLE_WORKER: '1', HEDDLE_AGENT: 'U.1', FLEET_AGENT: 'U.1' };
+      const restore = materializeWorkerMcp(cwd, 'cursor', [], { dispatchId: 1 }, context);
+      const sidecar = join(dirname(path), '.heddle-mcp-refs.json');
+      const active = readFileSync(path, 'utf8'), originalState = readFileSync(sidecar, 'utf8');
+      const state = JSON.parse(originalState);
+      corrupt(state);
+      const damaged = JSON.stringify(state);
+      writeFileSync(sidecar, damaged);
+      try {
+        expect(() => materializeWorkerMcp(cwd, 'cursor', [], { dispatchId: 2 }, {
+          ...context, HEDDLE_AGENT: 'U.2', FLEET_AGENT: 'U.2',
+        })).toThrow(/ownership sidecar.*unreadable/);
+        restore();
+        expect(readFileSync(path, 'utf8')).toBe(active);
+        expect(readFileSync(sidecar, 'utf8')).toBe(damaged);
+      } finally { writeFileSync(sidecar, originalState); restore(); }
+    }
+  });
+
+  it('preserves legacy generic MCP sidecars without per-ref definitions', () => {
+    const cwd = tempDir(), path = join(cwd, '.cursor', 'mcp.json');
+    const restoreFirst = materializeWorkerMcp(cwd, 'cursor', ['memtrace'], { dispatchId: 1 });
+    const sidecar = join(dirname(path), '.heddle-mcp-refs.json');
+    const legacy = JSON.parse(readFileSync(sidecar, 'utf8'));
+    delete legacy.definitions;
+    writeFileSync(sidecar, JSON.stringify(legacy));
+    const restoreSecond = materializeWorkerMcp(cwd, 'cursor', ['memtrace'], { dispatchId: 2 });
+    restoreSecond();
+    expect(JSON.parse(readFileSync(path, 'utf8')).mcpServers.memtrace).toBeDefined();
+    expect(JSON.parse(readFileSync(sidecar, 'utf8')).refs).toEqual({ '1': ['memtrace'] });
+    restoreFirst();
+    expect(existsSync(path)).toBe(false);
+    expect(existsSync(sidecar)).toBe(false);
+  });
+
+  it('rechecks native config and sidecar symlinks inside the mutation lock and on restore', () => {
+    const realLock = matlock.withFileLock;
+    for (const phase of ['materialize', 'restore']) for (const kind of ['file', 'directory', 'sidecar']) {
+      const cwd = tempDir(), path = join(cwd, '.cursor', 'mcp.json');
+      install(cwd, 'cursor', path);
+      const context = { HEDDLE_WORKER: '1', HEDDLE_AGENT: 'U.1', FLEET_AGENT: 'U.1' };
+      const restore = phase === 'restore' ? materializeWorkerMcp(cwd, 'cursor', [], { dispatchId: 1 }, context) : undefined;
+      const sidecar = join(dirname(path), '.heddle-mcp-refs.json');
+      const target = kind === 'directory' ? dirname(path) : kind === 'sidecar' ? sidecar : path;
+      const moved = target + '.original';
+      let snapshot: string | undefined;
+      const spy = vi.spyOn(matlock, 'withFileLock').mockImplementation((lock, action, opts) => realLock(lock, () => {
+        if (kind === 'sidecar' && !existsSync(target)) writeFileSync(target, '{"external":true}');
+        renameSync(target, moved);
+        symlinkSync(moved, target, kind === 'directory' ? 'dir' : 'file');
+        snapshot = readFileSync(kind === 'directory' ? join(moved, 'mcp.json') : moved, 'utf8');
+        return action();
+      }, opts));
+      try {
+        if (restore) restore();
+        else expect(() => materializeWorkerMcp(cwd, 'cursor', [], { dispatchId: 1 }, context)).toThrow(/symlink/);
+        expect(readFileSync(kind === 'directory' ? join(moved, 'mcp.json') : moved, 'utf8')).toBe(snapshot);
+        if (kind !== 'sidecar') expect(existsSync(sidecar)).toBe(phase === 'restore');
+      } finally { spy.mockRestore(); }
+    }
   });
 
   it('restores parent identity after metadata-only edits to native worker server entries', () => {
@@ -299,7 +401,7 @@ describe('native worker context through actual MCP subprocesses', () => {
       for (const name of ['heddle', 'heddle-comms']) {
         expect(finalServers[name]).toEqual({ ...originalServers[name], description: 'metadata added by client' });
       }
-      expect(readFileSync(path, 'utf8')).not.toContain('HEDDLE_WORKER');
+      expect(finalServers.heddle[row.client === 'opencode' ? 'environment' : 'env'].HEDDLE_WORKER).not.toBe('1');
       expect(readFileSync(path, 'utf8')).not.toContain('/worker/ledger.db');
     }
   });

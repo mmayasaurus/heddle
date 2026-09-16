@@ -41,9 +41,13 @@ export function nativeClientIntegrationInstalled(cwd: string, provider: string, 
   const relative = {
     codex: '.codex/config.toml', cursor: '.cursor/mcp.json', gemini: '.gemini/settings.json', opencode: 'opencode.json',
   }[client];
-  const path = join(resolve(cwd), relative);
+  let path = join(resolve(cwd), relative);
   let namedEntries = false;
   try {
+    // Match installation: workspace aliases (/tmp, /var, selected project links) are valid,
+    // while config files/directories below the canonical workspace must not be symlinks.
+    const workspace = realpathSync(cwd);
+    path = join(workspace, relative);
     if (!existsSync(path)) return false;
     let raw: string | null;
     try { raw = clientFileSource(path); }
@@ -67,7 +71,7 @@ export function nativeClientIntegrationInstalled(cwd: string, provider: string, 
         && args.length === definition.args.length
         && JSON.stringify(args.slice(0, -1)) === JSON.stringify(definition.args.slice(0, -1))
         && typeof args.at(-1) === 'string'
-        && realpathSync(args.at(-1)) === realpathSync(cwd);
+        && realpathSync(args.at(-1)) === workspace;
     });
     if (owned) {
       // Completed-worker stamps without our ownership record must never become a new baseline.
@@ -246,6 +250,7 @@ export function materializeWorkerMcp(
   // keeps it consistent with validateWorkerMcp, which lists claude as supported (codacy #68).
   if (provider === 'codex' || provider === 'claude') return () => { /* no-op */ };
 
+  if (nativeClient) cwd = realpathSync(cwd);
   const servers = resolveMcpServers(serverNames);
   const nativeServers = nativeClient
     ? serverDefinitions(cwd, nativeClient, undefined, nativeWorkerEnv)
@@ -312,16 +317,31 @@ function readSidecar(path: string, required = false): McpSidecar | null {
   try {
     const raw = JSON.parse(readFileSync(sc, 'utf8')) as McpSidecar;
     if (raw && typeof raw === 'object' && raw.refs && typeof raw.refs === 'object' && !Array.isArray(raw.refs)) {
-      const refs: Record<string, string[]> = {};
+      if (required && (!Object.hasOwn(raw, 'original') || (raw.original !== null && typeof raw.original !== 'string')
+        || !raw.definitions || typeof raw.definitions !== 'object' || Array.isArray(raw.definitions))) {
+        throw new Error('invalid native ownership metadata');
+      }
+      const refs: Record<string, string[]> = Object.create(null);
       for (const [id, list] of Object.entries(raw.refs)) {
         // shape-validate each entry: server lists are arrays of strings
         if (Array.isArray(list) && list.every((x) => typeof x === 'string')) refs[id] = list;
+        else if (required) throw new Error('invalid native ownership ref');
       }
-      const definitions: Record<string, Record<string, unknown>> = {};
+      const definitions: Record<string, Record<string, unknown>> = Object.create(null);
       if (raw.definitions && typeof raw.definitions === 'object' && !Array.isArray(raw.definitions)) {
         for (const [id, value] of Object.entries(raw.definitions)) {
           if (value && typeof value === 'object' && !Array.isArray(value)) {
             definitions[id] = value as Record<string, unknown>;
+          }
+        }
+      }
+      if (required) {
+        for (const [id, names] of Object.entries(refs)) {
+          const owned = definitions[id];
+          if (!owned || Object.keys(owned).length !== names.length || names.some((name) =>
+            !Object.hasOwn(owned, name) || !owned[name] || typeof owned[name] !== 'object' || Array.isArray(owned[name])
+            || ((name === 'heddle' || name === 'heddle-comms') && !hasNativeWorkerContext({ [name]: owned[name] })))) {
+            throw new Error('incomplete native ownership definitions');
           }
         }
       }
@@ -350,7 +370,10 @@ function mergedContent(
   }
   const merged: Record<string, unknown> = { ...((existing ?? {}) as Record<string, unknown>) };
   for (const [id, list] of Object.entries(sidecar.refs)) {
-    for (const name of list) merged[name] = sidecar.definitions[id]?.[name] ?? definitions[name] ?? merged[name];
+    for (const name of list) Object.defineProperty(merged, name, {
+      value: sidecar.definitions[id]?.[name] ?? definitions[name] ?? merged[name],
+      enumerable: true, configurable: true, writable: true,
+    });
   }
   // OpenCode adds its schema on startup when absent. Include that deterministic CLI write before
   // runTarget snapshots a read-only worktree; actual subsequent config/file writes stay detectable.
@@ -434,6 +457,7 @@ function writeMergedMcpJson(
   mkdirSync(dirname(path), { recursive: true });
 
   withFileLock(lock, () => {
+    if (nativeContext) { clientFileSource(path); clientFileSource(sidecarPath(path)); }
     const sidecar = readSidecar(path, nativeContext)
       ?? { original: existsSync(path) ? readFileSync(path, 'utf8') : null, refs: {}, definitions: {} };
     // A malformed pre-existing config must fail BEFORE any state is persisted — writing the
@@ -450,7 +474,8 @@ function writeMergedMcpJson(
       }
     }
     if (nativeContext) {
-      const owner = Object.keys(sidecar.refs).find((id) => id !== ownId && hasNativeWorkerContext(sidecar.definitions[id] ?? {}));
+      const owner = Object.keys(sidecar.refs).find((id) => id !== ownId &&
+        sidecar.refs[id].some((name) => name === 'heddle' || name === 'heddle-comms'));
       if (owner) throw new Error(
         `native worker context in ${path} is owned by active dispatch #${owner} — ` +
         'refusing overlapping child identities; retry after that worker finishes or use a separate worktree',
@@ -466,6 +491,7 @@ function writeMergedMcpJson(
   return () => {
     withFileLock(lock, () => {
       try {
+        if (nativeContext) { clientFileSource(path); clientFileSource(sidecarPath(path)); }
         const sidecar = readSidecar(path, nativeContext);
         if (!sidecar || !(ownId in sidecar.refs)) return; // nothing of ours recorded — leave it
         // Tamper check: if the file no longer matches what the sidecar says heddle last wrote,

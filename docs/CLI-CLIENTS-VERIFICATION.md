@@ -63,6 +63,9 @@ Claude shell hooks. Inbox notices arrive at supported session/tool/turn boundari
 turn can continue when a message arrived before it ended. An already idle native terminal is
 not forcibly interrupted. Receipts only track hook notifications, separately from Claude's
 channel cursor; broker history remains intact, and notification is not proof of reading.
+State-file checks reject pre-existing symlinks/nonregular files and an early substitution
+before the no-follow descriptor opens. As with the repository's filesystem helpers,
+hostile same-user swaps around SQLite's later pathname open remain outside that guarantee.
 OpenCode's plugin must be enabled (`--pure` disables external plugins).
 
 Cursor CLI's MCP SDK uses a 60-second tool timeout. For longer delegated tasks, use Heddle's

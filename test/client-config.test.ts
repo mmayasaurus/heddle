@@ -1,11 +1,13 @@
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { parse as parseToml } from 'smol-toml';
-import { FLEET_CLIENTS, parseFleetClients, planClientInstall } from '../src/client-config.js';
+import { FLEET_CLIENTS, parseFleetClients, planClientInstall, serverDefinitions } from '../src/client-config.js';
 import { applyInstall, planInstall, redactReport } from '../src/init-project.js';
 import { useTempResources } from './helpers.js';
 import { runCli } from './helpers/cli.js';
+
+afterEach(() => vi.unstubAllEnvs());
 
 describe('native fleet client installation', () => {
   const { tempDir } = useTempResources('heddle-client-config-');
@@ -39,6 +41,64 @@ describe('native fleet client installation', () => {
     expect(readFileSync(join(opts.dir, 'AGENTS.md'), 'utf8')).toMatch(/^Original project instructions/);
     expect(readFileSync(join(opts.dir, 'GEMINI.md'), 'utf8')).toContain('check_inbox');
     expect(planClientInstall(opts).steps.every((step) => step.action === 'ok')).toBe(true);
+  });
+
+  it('rebinds installed identities without replacing foreign server configuration or worker ownership', () => {
+    const opts = options();
+    applyInstall(planClientInstall(opts));
+    applyInstall(planClientInstall({ ...opts, agent: 'next-seat' }));
+    for (const [client, file, key, envKey] of [
+      ['cursor', '.cursor/mcp.json', 'mcpServers', 'env'],
+      ['gemini', '.gemini/settings.json', 'mcpServers', 'env'],
+      ['opencode', 'opencode.json', 'mcp', 'environment'],
+    ] as const) {
+      const path = join(opts.dir, file), raw = readFileSync(path, 'utf8');
+      const config = JSON.parse(raw);
+      expect(config[key].heddle[envKey].HEDDLE_AGENT).toBe('next-seat');
+      for (const change of [{ HEDDLE_WORKER: '1' }, { CUSTOM: 'preserve-me' }]) {
+        config[key].heddle[envKey] = { ...JSON.parse(raw)[key].heddle[envKey], ...change };
+        const modified = JSON.stringify(config);
+        writeFileSync(path, modified);
+        expect(() => planClientInstall({ ...opts, clients: [client], agent: 'third-seat' })).toThrow('different configuration');
+        expect(readFileSync(path, 'utf8')).toBe(modified);
+      }
+      writeFileSync(path, raw);
+    }
+  });
+
+  it('upgrades Cursor configurations generated before empty lineage forwarding was added', () => {
+    const opts = { ...options(), clients: ['cursor'] as const };
+    applyInstall(planClientInstall({ ...opts, clients: [...opts.clients] }));
+    const path = join(opts.dir, '.cursor/mcp.json'), config = JSON.parse(readFileSync(path, 'utf8'));
+    for (const server of Object.values(config.mcpServers) as { env: Record<string, string> }[]) {
+      for (const name of ['HEDDLE_WORKER', 'HEDDLE_DISPATCH_ID', 'HEDDLE_PARENT', 'HEDDLE_COMMS_ADDRESS']) delete server.env[name];
+    }
+    writeFileSync(path, JSON.stringify(config));
+    applyInstall(planClientInstall({ ...opts, clients: [...opts.clients] }));
+    expect(JSON.parse(readFileSync(path, 'utf8')).mcpServers.heddle.env.HEDDLE_WORKER).toBe('${HEDDLE_WORKER:-}');
+  });
+
+  it('forwards Cursor launcher identity with empty defaults and preserves explicit agent and worker precedence', () => {
+    const dir = options().dir;
+    for (const key of ['HEDDLE_COMMS_DB', 'HEDDLE_LEDGER_DB', 'HEDDLE_PROJECTS']) vi.stubEnv(key, undefined);
+    vi.stubEnv('HEDDLE_AGENT', 'ambient-parent');
+    vi.stubEnv('FLEET_AGENT', 'ambient-parent');
+    const dynamic = serverDefinitions(dir, 'cursor');
+    for (const server of Object.values(dynamic)) {
+      expect(server.env).toEqual({
+        HEDDLE_CLIENT: 'cursor', HEDDLE_AGENT: '${HEDDLE_AGENT:-}', FLEET_AGENT: '${FLEET_AGENT:-}',
+        HEDDLE_WORKER: '${HEDDLE_WORKER:-}', HEDDLE_DISPATCH_ID: '${HEDDLE_DISPATCH_ID:-}',
+        HEDDLE_PARENT: '${HEDDLE_PARENT:-}', HEDDLE_COMMS_ADDRESS: '${HEDDLE_COMMS_ADDRESS:-}',
+      });
+    }
+    expect(serverDefinitions(dir, 'cursor', 'U').heddle.env).toMatchObject({ HEDDLE_AGENT: 'U', FLEET_AGENT: 'U' });
+    vi.stubEnv('HEDDLE_COMMS_DB', '/explicit/comms.db');
+    const child = { HEDDLE_AGENT: 'U.1', FLEET_AGENT: 'U.1', HEDDLE_WORKER: '1', HEDDLE_COMMS_DB: '/worker/comms.db' };
+    expect(serverDefinitions(dir, 'cursor', 'U', child).heddle.env).toMatchObject(child);
+    expect(serverDefinitions(dir, 'cursor').heddle.env).toHaveProperty('HEDDLE_COMMS_DB', '/explicit/comms.db');
+    for (const client of ['codex', 'gemini', 'opencode'] as const) {
+      expect(serverDefinitions(dir, client).heddle.env).not.toHaveProperty('HEDDLE_AGENT');
+    }
   });
 
   it('plans without writing, aborts every write on a raced file, and redacts existing secrets', () => {
