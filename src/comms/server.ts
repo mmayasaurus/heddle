@@ -12,7 +12,7 @@ import { Ledger, DEFAULT_LEDGER_PATH } from '../ledger.js';
 import { Broker } from './broker.js';
 import type { LineageSource } from './envelope.js';
 import {
-  ChannelTransport, InboundPump, CHANNEL_INSTRUCTIONS, SENDMESSAGE_LIMITS, sendMessageHint, confirmSent, mirrorSent, mirrorReceived, errorMessage,
+  ChannelTransport, InboundPump, CHANNEL_INSTRUCTIONS, POLLING_INSTRUCTIONS, SENDMESSAGE_LIMITS, sendMessageHint, confirmSent, mirrorSent, mirrorReceived, errorMessage,
 } from './bridge.js';
 import { parseAddress, BROADCAST, OPERATOR } from './address.js';
 import { pauseReadiness, type InFlightSource } from './quiesce.js';
@@ -266,7 +266,7 @@ export function resolveCommsIdentity(
       return { identity: null, isOperator: false };
     }
   }
-  const fleet = resolveFleetBinding(env, cwd, warn, pidBridgeWarn, { allowPidBridge: true });
+  const fleet = resolveFleetBinding(env, cwd, warn, pidBridgeWarn, { allowPidBridge: env.HEDDLE_COMMS_TRANSPORT !== 'stdio' });
   return { identity: fleet?.identity ?? null, isOperator: false };
 }
 
@@ -284,7 +284,7 @@ function resolveCommsBinding(
       return { identity: null, isOperator: false, bindingSource: null };
     }
   }
-  const fleet = resolveFleetBinding(env, cwd, warn, pidBridgeWarn, { allowPidBridge: true });
+  const fleet = resolveFleetBinding(env, cwd, warn, pidBridgeWarn, { allowPidBridge: env.HEDDLE_COMMS_TRANSPORT !== 'stdio' });
   return { identity: fleet?.identity ?? null, isOperator: false, bindingSource: fleet?.source ?? null };
 }
 
@@ -297,6 +297,7 @@ export function openLedgerIfPresent(env: NodeJS.ProcessEnv, warn: (m: string) =>
 
 export function createCommsServer(opts: CommsServerOptions): CommsServer {
   const env = opts.env;
+  const standardMcp = env.HEDDLE_COMMS_TRANSPORT === 'stdio';
   const warn = opts.warn ?? ((m: string) => process.stderr.write(`heddle-comms: ${m}\n`));
   const cwd = opts.cwd ?? process.cwd();
   const log = opts.log ?? new CommsLog(env.HEDDLE_COMMS_DB || DEFAULT_COMMS_PATH);
@@ -322,7 +323,7 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
   // (on-PR HIGH, #92). A session bound at construction (lazyIdentity=false) keeps full authority.
   const tierCap = (): 'agent-message' | null => (me !== null && (bindingSource === 'pid-bridge' || lazyIdentity)) ? 'agent-message' : null;
   const isWorker = env.HEDDLE_WORKER === '1';
-  const pushEnabled = env.HEDDLE_COMMS_PUSH === '1';
+  const pushEnabled = !standardMcp && env.HEDDLE_COMMS_PUSH === '1';
   const channelLoadedProbe = opts.channelLoadedProbe ?? (() => {
     const cp = Number(env.CLAUDE_PID);
     return channelLoadedFromParentArgv(Number.isInteger(cp) && cp > 0 ? cp : process.ppid);
@@ -330,7 +331,7 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
   type PushDelivery = 'off' | 'ok' | 'suspect-channel-not-loaded';
   let channelLoaded: boolean | null;
   try {
-    channelLoaded = channelLoadedProbe();
+    channelLoaded = standardMcp ? null : channelLoadedProbe();
   } catch (err) {
     // Fail-open, but never SILENTLY: a probe failure is logged, not swallowed (HED-270 review).
     warn(`channel-loaded probe failed: ${errorMessage(err)}`);
@@ -343,14 +344,16 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
   const mcp = new Server(
     { name: 'heddle-comms', version: '0.0.1' },
     {
-      capabilities: { experimental: { 'claude/channel': {} }, tools: {} },
-      instructions: CHANNEL_INSTRUCTIONS + (me
+      capabilities: standardMcp ? { tools: {} } : { experimental: { 'claude/channel': {} }, tools: {} },
+      instructions: (standardMcp ? POLLING_INSTRUCTIONS : CHANNEL_INSTRUCTIONS) + (me
         ? ` You are ${me} (identity source: ${bindingSource}).`
-        : ' (This session has NO bound comms identity. It can bind from env at startup or lazily after Claude rename from the PID bridge; check comms_whoami for the live identity and source.)'),
+        : standardMcp ? ' No bound identity: set HEDDLE_AGENT/FLEET_AGENT or a worktree .fleet-agent before starting; check comms_whoami.'
+          : ' (This session has NO bound comms identity. It can bind from env at startup or lazily after Claude rename from the PID bridge; check comms_whoami for the live identity and source.)'),
     },
   );
   const broker = new Broker({ log, ledger, transport: new ChannelTransport(log), onWarning: warn, ...(opts.now ? { now: opts.now } : {}), ...(opts.targetState ? { targetState: opts.targetState } : {}) });
   log.ensureDefaultRooms();
+  if (standardMcp && me && parseAddress(me)?.kind === 'agent') log.register({ address: me });
   if (me) {
     const restored = broker.restoreHeld({ sender: me });
     if (restored) warn(`restored ${restored} held message(s) posted by ${me}`);
@@ -472,7 +475,9 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
     try { if (me && pushEnabled) log.unregisterSession(me, instanceId); } catch (err) { warn(`unregister failed: ${errorMessage(err)}`); }
   }
 
-  mcp.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
+  mcp.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: standardMcp ? TOOLS.map((tool) => tool.name === 'post_message'
+    ? { ...tool, description: 'Post through the shared durable Heddle broker to any agent, room or @all, regardless of CLI. The broker sets the trust tier. Stored/queued does not mean read; offline and polling recipients retrieve messages with check_inbox.' }
+    : tool) : TOOLS }));
   mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     const a = (req.params.arguments ?? {}) as Record<string, unknown>;
     try {
@@ -554,12 +559,13 @@ export function createCommsServer(opts: CommsServerOptions): CommsServer {
     if (res.outcome === 'refused') return res;
     const rec = log.get(res.messageId);
     const targetKind = parseAddress(res.to)?.kind;
-    const tactical = rec !== null && (targetKind === 'agent' || targetKind === 'child') && res.code === 'no-live-session';
+    const tactical = !standardMcp && rec !== null && (targetKind === 'agent' || targetKind === 'child') && res.code === 'no-live-session';
     return {
       ...res,
       note: tactical
         ? 'No live heddle-comms session for the target: it can pull this from the log, or deliver it now with SendMessage using sendMessage below, then call confirm_sent.'
-        : res.code === 'queued-for-channel' ? "Queued: the target's heddle-comms channel will inject it (structured <channel> event)." : undefined,
+        : res.code === 'queued-for-channel' ? "Queued: the target's heddle-comms channel will inject it (structured <channel> event)."
+          : standardMcp && res.code === 'no-live-session' ? 'Stored in the durable inbox; the recipient must call check_inbox. This is not a read receipt.' : undefined,
       ...(tactical && rec ? { sendMessage: sendMessageHint(rec, res.envelope, log.session(res.to)?.sessionName ?? null) } : {}),
     };
   }

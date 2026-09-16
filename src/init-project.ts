@@ -8,6 +8,7 @@ import { resolveCatalogRoot } from './rules/lifecycle.js';
 import { loadRules } from './rules/load.js';
 import { RuleIdPattern } from './rules/schema.js';
 import type { HookRuleSelection } from './wizard/hooks-choose.js';
+import { clientInstallSteps, type FleetClient } from './client-config.js';
 
 const WIRED_HOOKS = ['agent-identity.py', 'agent-preflight.py', 'remind-owned-prs.py', 'require-memtrace-first.py', 'delegation-nudge.py', 'require-pr-sweep.py'] as const;
 const OPTIONAL_HOOKS = ['protect-workspace.py', 'require-vault-search.py', 'auto-reindex-vault.py'] as const;
@@ -18,6 +19,7 @@ export interface InstallOptions {
   dir: string; canonical?: string; name?: string; team?: string; agents?: string; room?: string; launcher?: string;
   enforceMemtrace?: boolean; dryRun?: boolean; homeDir?: string; showContent?: boolean;
   hookRules?: HookRuleSelection[]; hookCatalogRoot?: string;
+  clients?: FleetClient[]; clientAgent?: string;
 }
 export interface InstallStep {
   step: string; path: string; action: 'ok' | 'create' | 'update' | 'skip' | 'would-create' | 'would-update'; reason?: string; content?: string; bytes?: number; expectedContent?: string | null;
@@ -513,6 +515,7 @@ export function planInstall(input: InstallOptions): InstallPlan {
   const dryRun = input.dryRun === true;
   const hookCatalogRoot = input.hookCatalogRoot ?? resolveCatalogRoot();
   const steps = [canonicalStep(canonical), renderSettingsStep(dir, canonical, input.hookRules ?? [], hookCatalogRoot, dryRun), ...renderRulesSteps(dir, canonical, dryRun), ...renderHookRulesSteps(dir, input.hookRules ?? [], hookCatalogRoot, dryRun), renderMcpStep(dir, dryRun), renderIgnoreStep(dir, dryRun), renderGateStep(dir, dryRun), ...renderLifecycleCommandSteps(dir, dryRun), registryStep(input, dir, state, details, dryRun), enforceMarkerStep(input, dir, homeDir, dryRun)];
+  if (input.clients) steps.push(...clientInstallSteps({ dir, clients: input.clients, agent: input.clientAgent, dryRun }));
   return { options: { ...input, dir, canonical, name: details.name, homeDir }, steps };
 }
 
@@ -533,7 +536,7 @@ export function applyInstall(plan: InstallPlan, dryRun = false): InstallReport {
     }
   }
   for (const step of plan.steps) {
-    if (skipWrites || !step.content) continue;
+    if (skipWrites || step.content === undefined) continue;
     if (step.action === 'ok') {
       // Content already matches, so no rewrite — but re-apply an explicit mode if it has drifted: a
       // launcher whose bytes are intact yet lost its execute bit (an external chmod, or a fresh clone
@@ -554,7 +557,9 @@ export function applyInstall(plan: InstallPlan, dryRun = false): InstallReport {
 export function redactReport(report: InstallReport, showContent: boolean, homeDir: string): InstallReport {
   if (showContent) return report;
   const heddleDir = resolve(homeDir, '.heddle');
-  return { ...report, steps: report.steps.map(({ content, ...step }) => content && isAncestorOrEqual(heddleDir, resolve(step.path))
+  return { ...report, steps: report.steps.map(({ content, ...step }) => step.step.startsWith('client:') || step.step.startsWith('client-instructions:')
+    ? (({ expectedContent: _expected, ...safe }) => ({ ...safe, ...(content !== undefined ? { bytes: Buffer.byteLength(content) } : {}) }))(step)
+    : content && isAncestorOrEqual(heddleDir, resolve(step.path))
     ? { ...step, bytes: Buffer.byteLength(content) }
     : { ...step, ...(content ? { content } : {}) }) };
 }

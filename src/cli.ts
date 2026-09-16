@@ -14,6 +14,7 @@ import { classifyEffort, assessResult } from './classify.js';
 import { resolveIdentity } from './identity.js';
 import { loadProjectRegistry, DEFAULT_PROJECTS_PATH } from './projects.js';
 import { applyInstall, planInstall, redactReport } from './init-project.js';
+import { parseFleetClients, planClientInstall } from './client-config.js';
 import { pickClaudeAccount, readClaudeAccounts } from './capaware.js';
 import { claudeAccountRows, pickClaudeAccountsBatch, usableClaudeCaps } from './account-pick.js';
 import { bindingMeter, claudeFloorsFrom } from './floors.js';
@@ -102,6 +103,8 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
   heddle setup [--only <ids>] [--skip <ids>] [--dry-run] [--answers <file>] [--home <dir>] [--target <dir>] [--json]  guided fresh-machine onboarding walkthrough (composes the wizard steps in order; without --target, PR automation uses the current repo or offers to add one, confirming before it writes; exit 1 if any step failed)
   heddle accounts add [--provider <p>] [--answers <file>]  add native-login or env-repoint accounts interactively
   heddle comms init [--json]     initialize the comms database, operator token, and registered project rooms
+  heddle init-client <dir> --clients codex,cursor,gemini,opencode [--agent <id>] [--dry-run] [--json]
+                                 add native fleet MCP configuration and startup instructions to a worktree
   heddle fleet install-hooks [--dry-run] [--json]  install vendored fleet hooks under ~/.heddle/fleet/hooks
   heddle fleet hooks-diff [--json]  compare installed fleet hooks with the vendored canon
   heddle fleet install-launchers [--dry-run] [--json]  install vendored fleet launchers under ~/.heddle/fleet/launchers
@@ -113,7 +116,7 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
   heddle mode [desktop|mobile|away] [--note "<t>"] [--json]   operator mode (HED-336): no arg prints
                                  the current mode; a mode word sets it (~/.heddle/operator-mode.json —
                                  the pocket console and desktop app write the same file)
-  heddle init-project <dir> [--canonical <path>] [--name <n>] [--team <KEY>] [--agents A,B,…] [--room <#room>] [--launcher <script>] [--preset <tier>] [--hook-rules <a,b>] [--enforce <a,b>] [--answers <file>] [--enforce-memtrace] [--dry-run] [--json] [--show-content]
+  heddle init-project <dir> [--canonical <path>] [--name <n>] [--team <KEY>] [--agents A,B,…] [--room <#room>] [--launcher <script>] [--preset <tier>] [--hook-rules <a,b>] [--enforce <a,b>] [--answers <file>] [--enforce-memtrace] [--clients codex,cursor,gemini,opencode] [--agent <id>] [--dry-run] [--json] [--show-content]
   heddle whoami [--json]         this process's bound identity (HEDDLE_AGENT / FLEET_AGENT / .fleet-agent) + worker context
   heddle ambient-cred-vars [--json]   canonical ambient Anthropic credential env-var names the harness strips when isolating a per-account login (single source of truth for launcher/keeper env scrubbing; HED-607)
   heddle doctor [--json] [--provider <p>]   verify harnesses/accounts/config; --provider runs only that provider's checks plus global config checks (exit 1 on any fail)
@@ -1266,6 +1269,20 @@ try {
       break;
     }
 
+    case 'init-client': {
+      const dir = process.argv[3];
+      if (!dir || dir.startsWith('--')) throw new Error('init-client requires a workspace directory');
+      const clients = parseFleetClients(arg('--clients') ?? '');
+      const agent = arg('--agent');
+      if (has('--agent') && (!agent || agent.startsWith('--'))) throw new Error('--agent requires a fleet identity');
+      const report = applyInstall(planClientInstall({ dir, clients, agent, dryRun: has('--dry-run') }));
+      // Configs and backups can contain existing operator secrets: never echo their contents.
+      const steps = report.steps.map(({ content: _content, expectedContent: _expected, ...step }) => step);
+      out(json, { steps, humanSteps: ['Restart the selected CLI in this worktree; approve its MCP servers using its native trust controls.', 'Call comms_whoami and check_workers to verify identity, then check_inbox.'] },
+        () => steps.map((step) => `${step.action} ${step.step}: ${step.path}`).join('\n'));
+      break;
+    }
+
     case 'init-project': {
       const dir = process.argv[3];
       if (!dir || dir.startsWith('--')) {
@@ -1317,7 +1334,8 @@ try {
           }
         }
       }
-      const plan = planInstall({ dir, canonical: arg('--canonical'), name: arg('--name'), team: arg('--team'), agents: arg('--agents'), room: arg('--room'), launcher: arg('--launcher'), hookRules, hookCatalogRoot: catalogRoot, enforceMemtrace: has('--enforce-memtrace'), dryRun: has('--dry-run'), showContent: has('--show-content') });
+      if (has('--clients') && has('--agent') && (!arg('--agent') || arg('--agent')!.startsWith('--'))) throw new Error('--agent requires a fleet identity');
+      const plan = planInstall({ dir, canonical: arg('--canonical'), name: arg('--name'), team: arg('--team'), agents: arg('--agents'), room: arg('--room'), launcher: arg('--launcher'), hookRules, hookCatalogRoot: catalogRoot, enforceMemtrace: has('--enforce-memtrace'), dryRun: has('--dry-run'), showContent: has('--show-content'), ...(has('--clients') ? { clients: parseFleetClients(arg('--clients') ?? ''), clientAgent: arg('--agent') } : {}) });
       const report = applyInstall(plan, has('--dry-run'));
       const output = redactReport(report, has('--show-content'), plan.options.homeDir);
       out(json, output, () => [...report.steps.map((step) => `${step.action} ${step.step}: ${step.path}${step.reason ? ` (${step.reason})` : ''}`), ...report.humanSteps.map((step) => `- ${step}`)].join('\n'));
