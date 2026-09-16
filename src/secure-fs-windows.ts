@@ -8,7 +8,7 @@ import { win32 } from 'node:path';
  * attach child output/errors as an Error cause: PowerShell diagnostics can echo the input document.
  * SID/DACL checks always run natively; POSIX euid/mode seams cannot override them.
  */
-type WindowsOperation = 'read' | 'write' | 'create-file' | 'assert-private-file' | 'assert-dir' | 'ensure-dir' | 'inspect-lock';
+type WindowsOperation = 'read' | 'write' | 'create-file' | 'assert-private-file' | 'assert-sqlite-sidecar' | 'assert-dir' | 'ensure-dir' | 'inspect-lock';
 interface WindowsResult {
   content?: string;
   mtimeMs?: number;
@@ -98,9 +98,14 @@ function decodeWindowsResponse(operation: WindowsOperation, result: WindowsRespo
   };
 }
 
-/** Validate a database or sidecar through an open file handle without copying any of its bytes. */
+/** Validate exact current-user ownership through an open file handle without copying its bytes. */
 export function assertWindowsPrivateFile(path: string): void {
   windowsSecureFs('assert-private-file', path);
+}
+
+/** Native SQLite sidecars may use a trusted system owner while inheriting a private parent DACL. */
+export function assertWindowsSqliteSidecar(path: string): void {
+  windowsSecureFs('assert-sqlite-sidecar', path);
 }
 
 /** Create with a private DACL before writing any bytes; EEXIST is never an overwrite permission. */

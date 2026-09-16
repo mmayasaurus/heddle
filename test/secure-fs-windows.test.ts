@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { acquireCredentialLock, assertSecureDir, ensureSecureDir, releaseCredentialLock, secureReadFile, secureWriteFile } from '../src/secure-fs.js';
 import { assertWindowsPrivateFile, createWindowsPrivateFile, windowsSecureFs } from '../src/secure-fs-windows.js';
+import { CommsLog } from '../src/comms/log.js';
 import { createPrivateTempRoot } from './helpers/private-temp.js';
 
 const nativeWindows = process.platform === 'win32';
@@ -119,6 +120,12 @@ describe.skipIf(!nativeWindows)('Windows native credential filesystem', () => {
       $rule=New-Object System.Security.AccessControl.FileSystemAccessRule($sid,'${rights}','Allow');
       $acl.AddAccessRule($rule); Set-Acl -LiteralPath $p -AclObject $acl`, path);
   };
+  const isAdministrator = (): boolean => powershell(`$principal=[Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent());
+    $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)`, root) === 'True';
+  const setAdministratorOwner = (path: string): void => {
+    powershell(`$a=Get-Acl -LiteralPath $p; $a.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'));
+      Set-Acl -LiteralPath $p -AclObject $a`, path);
+  };
   const invokeWithPublicationFault = (destination: string, call: string, fault: string) => {
     const helper = readFileSync(fileURLToPath(new URL('../assets/secure-fs-windows.ps1', import.meta.url)), 'utf8');
     expect(helper.split(call)).toHaveLength(2); // exactly one native call is altered, never silently missed
@@ -187,10 +194,48 @@ describe.skipIf(!nativeWindows)('Windows native credential filesystem', () => {
     expect(() => assertSecureDir(directory)).toThrow(/inherit/i);
   }, 60_000);
 
+  it('accepts trusted SQLite sidecar owners for concurrent writers and readers while keeping the main owner strict', (context) => {
+    if (!isAdministrator()) { context.skip(); return; }
+    const path = join(root, 'database', 'comms.db');
+    const first = new CommsLog(path);
+    try {
+      first.append({ from: 'codex-test', to: '#fleet', body: 'first writer' });
+      for (const sidecar of [`${path}-wal`, `${path}-shm`]) {
+        expect(existsSync(sidecar)).toBe(true);
+        setAdministratorOwner(sidecar);
+        // This exception belongs only to SQLite validation, never generic credential-file checks.
+        expect(() => assertWindowsPrivateFile(sidecar)).toThrow(/ownership/);
+      }
+      const second = new CommsLog(path);
+      try {
+        second.append({ from: 'codex-test', to: '#fleet', body: 'second writer' });
+        const reader = new CommsLog(path, { readOnly: true });
+        try { expect(reader.transcript({ all: true }).map((message) => message.body)).toEqual(['first writer', 'second writer']); }
+        finally { reader.close(); }
+      } finally { second.close(); }
+    } finally { first.close(); }
+    setAdministratorOwner(path);
+    expect(() => new CommsLog(path)).toThrow(/ownership/);
+    expect(() => new CommsLog(path, { readOnly: true })).toThrow(/ownership/);
+  }, 60_000);
+
+  it('refuses foreign read grants on live SQLite sidecars for writers and readonly clients', () => {
+    const path = join(root, 'database', 'comms.db');
+    const first = new CommsLog(path);
+    try {
+      first.append({ from: 'codex-test', to: '#fleet', body: 'private message' });
+      expect(existsSync(`${path}-wal`)).toBe(true);
+      grantEveryone(`${path}-wal`);
+      expect(() => new CommsLog(path)).toThrow(/ACL/);
+      expect(() => new CommsLog(path, { readOnly: true })).toThrow(/ACL/);
+      expect(first.transcript({ all: true })[0]?.body).toBe('private message');
+    } finally { first.close(); }
+  }, 60_000);
+
   it('retains private recovery bytes after a simulated ReplaceFile 1176 partial failure', () => {
     const destination = join(root, 'credential');
     secureWriteFile(destination, 'FAKE_OLD_SECRET');
-    const call = '[IO.File]::Replace($temporary, $path, $null)';
+    const call = '[IO.File]::Replace($temporary, $path, [System.Management.Automation.Language.NullString]::Value)';
     const fault = `[IO.File]::Delete($path); throw [IO.IOException]::new('simulated ERROR_UNABLE_TO_MOVE_REPLACEMENT', ${0x80070000 | 1176})`;
     const response = invokeWithPublicationFault(destination, call, fault);
     expect(response).toMatchObject({ ok: false, reason: 'RECOVERY', code: 'EIO' });
@@ -257,14 +302,12 @@ describe.skipIf(!nativeWindows)('Windows native credential filesystem', () => {
   }, 60_000);
 
   it('rejects a foreign owner even if its DACL permits only the current user', (context) => {
-    const admin = powershell(`$principal=New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent());
-      $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)`, root);
     // Assigning Administrators ownership needs an elevated token. ACL rejection tests run for all users.
-    if (admin !== 'True') { context.skip(); return; }
+    if (!isAdministrator()) { context.skip(); return; }
     const file = join(root, 'credential');
     secureWriteFile(file, 'FAKE_OLD');
-    powershell(`$a=Get-Acl -LiteralPath $p; $a.SetOwner((New-Object Security.Principal.SecurityIdentifier('S-1-5-32-544')));
-      Set-Acl -LiteralPath $p -AclObject $a`, file);
+    setAdministratorOwner(file);
+    expect(() => assertWindowsPrivateFile(file)).toThrow(/ownership/);
     expect(() => secureReadFile(file, { euid: 0 })).toThrow(/ownership/);
     expect(() => secureWriteFile(file, 'FAKE_NEW', { euid: 0 })).toThrow(/ownership/);
   }, 60_000);

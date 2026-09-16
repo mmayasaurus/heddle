@@ -1,21 +1,21 @@
 // Native CLI launch canary. Run only on a disposable Windows x64 runner with Node 22+.
-// Usage: node scripts/verify-windows-clients.mjs C:\path\to\built\heddle
+// Usage: node scripts/verify-windows-clients.mjs
 // Installs into RUNNER_TEMP only; never changes user/machine PATH or performs provider login.
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { spawnProbe } from '../dist/adapters/subprocess.js';
 
 async function main() {
   assert.equal(process.platform, 'win32', 'Run this artifact on native Windows only');
   assert.equal(process.arch, 'x64', 'The pinned Cursor archive is Windows x64');
   assert(Number(process.versions.node.split('.')[0]) >= 22, 'Node 22+ is required');
   assert(process.env.RUNNER_TEMP, 'Use a disposable CI runner with RUNNER_TEMP');
-  const repo = resolve(process.argv[2] ?? process.cwd());
+  const repo = fileURLToPath(new URL('../', import.meta.url));
   const cli = join(repo, 'dist', 'cli.js');
   assert(existsSync(cli), 'Build Heddle before running the smoke');
-  const { spawnProbe } = await import(pathToFileURL(join(repo, 'dist', 'adapters', 'subprocess.js')).href);
   const systemRoot = process.env.SystemRoot;
   assert(systemRoot && /^[a-z]:[\\/]/i.test(systemRoot), 'An absolute SystemRoot is required');
   const node = process.execPath;
@@ -108,20 +108,30 @@ $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($sid, 'Ful
   const archivePath = join(root, 'cursor-package.zip');
   writeFileSync(archivePath, archive);
   const archiveSha256 = createHash('sha256').update(archive).digest('hex');
-  const cursorInstallScript = join(root, 'unpack-cursor.ps1');
-  // Reproduce the layout in the official Windows installer; do not execute its PATH/deletion code.
-  writeFileSync(cursorInstallScript, `param([string] $Archive, [string] $Target, [string] $Version)
+  const cursorVersions = join(cursorRoot, 'versions');
+  mkdirSync(cursorVersions, { recursive: true });
+  // Use the Framework ZIP API without Utility/Archive module discovery. Paths are data on stdin.
+  const extractScript = `[Console]::InputEncoding = [Text.UTF8Encoding]::new($false)
 $ErrorActionPreference = 'Stop'
-$versions = Join-Path $Target 'versions'
-New-Item -ItemType Directory -Path $versions -Force | Out-Null
-Expand-Archive -LiteralPath $Archive -DestinationPath $versions
-Rename-Item -LiteralPath (Join-Path $versions 'dist-package') -NewName $Version
-Get-ChildItem -LiteralPath (Join-Path $versions $Version) -Filter 'cursor-agent*' -File | Copy-Item -Destination $Target
-`);
-  await checked('unpack pinned Cursor archive', powershell,
+[void][Reflection.Assembly]::Load('System.IO.Compression.FileSystem, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089')
+$archive = [Console]::In.ReadLine()
+$destination = [Console]::In.ReadLine()
+[IO.Compression.ZipFile]::ExtractToDirectory($archive, $destination)
+[Console]::Out.Write('CURSOR_ARCHIVE_EXTRACTED')
+`;
+  const extracted = await checked('unpack pinned Cursor archive', powershell,
     ['-NoLogo', '-NoProfile', '-NonInteractive', '-InputFormat', 'None', '-ExecutionPolicy', 'Bypass',
-      '-File', cursorInstallScript, archivePath, cursorRoot, cursorVersion], 60_000);
-  assert(existsSync(join(cursorRoot, 'versions', cursorVersion, 'node.exe')), 'Cursor bundled Node is missing');
+      '-Command', extractScript], 60_000, root, `${archivePath}\n${cursorVersions}\n`);
+  assert.equal(extracted.stdout.trim(), 'CURSOR_ARCHIVE_EXTRACTED', 'Cursor extraction did not report completion');
+  const cursorPackage = join(cursorVersions, 'dist-package');
+  const packageFiles = existsSync(cursorPackage) ? readdirSync(cursorPackage) : [];
+  const missing = ['node.exe', 'index.js', 'cursor-agent.cmd', 'cursor-agent.ps1'].filter((name) => !packageFiles.includes(name));
+  assert.equal(missing.length, 0, `Cursor archive is missing ${missing.join(', ')}; extracted roots: ${readdirSync(cursorVersions).join(', ')}; package files: ${packageFiles.join(', ')}`);
+  // Match the official installer's versions/<version> layout and parent-level launchers.
+  renameSync(cursorPackage, join(cursorVersions, cursorVersion));
+  for (const launcher of ['cursor-agent.cmd', 'cursor-agent.ps1']) {
+    copyFileSync(join(cursorVersions, cursorVersion, launcher), join(cursorRoot, launcher));
+  }
 
   const clients = [
     { client: 'codex', bin: join(prefix, 'codex.cmd'), version: '0.154.0' },

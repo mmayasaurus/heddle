@@ -138,7 +138,7 @@ function Ensure-Directory([string] $path, [string] $boundary = '', [bool] $check
     }
 }
 
-function Open-PrivateRead([string] $path, [bool] $assertOnly = $false) {
+function Open-PrivateRead([string] $path, [bool] $assertOnly = $false, [bool] $requireOwner = $true) {
     Assert-Type $path $false
     # SQLite callers inspect existing DB/WAL/SHM while cooperating writers hold them. Validation-only
     # handles share writes/deletes; secret reads keep a stable, non-writable handle until bytes are read.
@@ -146,7 +146,7 @@ function Open-PrivateRead([string] $path, [bool] $assertOnly = $false) {
     if ($assertOnly) { $sharing = [IO.FileShare]'ReadWrite,Delete' }
     $stream = [IO.FileStream]::new($path, [IO.FileMode]::Open, [Security.AccessControl.FileSystemRights]::Read,
         $sharing, 4096, [IO.FileOptions]::None)
-    try { Assert-Acl ($stream.GetAccessControl()) $false $true; return $stream }
+    try { Assert-Acl ($stream.GetAccessControl()) $false $requireOwner; return $stream }
     catch { $stream.Dispose(); throw }
 }
 
@@ -178,6 +178,14 @@ try {
         'assert-private-file' {
             Assert-Directory $parent
             $stream = Open-PrivateRead $path $true
+            $stream.Dispose()
+        }
+        'assert-sqlite-sidecar' {
+            if ($path -notmatch '-(?:wal|shm|journal)$') { Refuse 'PATH' }
+            Assert-Directory $parent $true $true
+            # SQLite uses its token's default owner, which may be Administrators when elevated.
+            # Reuse the trusted system principals, while preserving the full private-DACL checks.
+            $stream = Open-PrivateRead $path $true $false
             $stream.Dispose()
         }
         { $_ -eq 'read' -or $_ -eq 'inspect-lock' } {
@@ -219,7 +227,9 @@ try {
                             $present = $true
                         }
                     }
-                    if ($present) { [IO.File]::Replace($temporary, $path, $null) }
+                    # PowerShell converts $null to an empty string for a .NET string parameter.
+                    # Replace requires a true null backup path, not an invalid empty filename.
+                    if ($present) { [IO.File]::Replace($temporary, $path, [System.Management.Automation.Language.NullString]::Value) }
                 } catch {
                     # ReplaceFile can fail AFTER removing the destination (Win32 error 1176), leaving
                     # this private temp as the only surviving new content. A successful publication
