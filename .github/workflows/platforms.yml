@@ -46,7 +46,7 @@ jobs:
         run: |
           node --input-type=module <<'NODE'
           import { spawnSync } from 'node:child_process';
-          import { writeFileSync } from 'node:fs';
+          import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
           import { join } from 'node:path';
           const root = process.env.SystemRoot;
           const executable = join(root, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
@@ -69,6 +69,27 @@ jobs:
             process.stdout.write(JSON.stringify({ mode, status: result.status, code: result.error?.code,
               stdout: result.stdout, stderr: result.stderr }) + '\n');
           }
+          let helper = readFileSync('assets/secure-fs-windows.ps1', 'utf8');
+          const stages = [
+            ['Add-Type -AssemblyName System.Web.Extensions', 'assembly'],
+            ['$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User', 'identity'],
+            ['$request = $json.DeserializeObject([Console]::In.ReadLine())', 'request'],
+            ['Ensure-Directory $path $boundary $true $true', 'directory'],
+          ];
+          for (const [statement, stage] of stages) {
+            if (helper.split(statement).length !== 2) throw new Error('ambiguous canary instrumentation');
+            helper = helper.replace(statement,
+              `[Console]::Error.WriteLine('before-${stage}'); ${statement}; [Console]::Error.WriteLine('after-${stage}')`);
+          }
+          const helperPath = join(process.env.RUNNER_TEMP, 'heddle-helper-canary.ps1');
+          writeFileSync(helperPath, helper);
+          const directory = join(mkdtempSync(join(process.env.RUNNER_TEMP, 'heddle-helper-')), 'private');
+          const result = spawnSync(executable, ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', helperPath], {
+            input: JSON.stringify({ operation: 'ensure-dir', path: directory, requireOwner: true }) + '\n',
+            encoding: 'utf8', timeout: 30000, maxBuffer: 16384, windowsHide: true,
+            env: { SystemRoot: root, WINDIR: root } });
+          process.stdout.write(JSON.stringify({ mode: 'actual-helper', status: result.status, code: result.error?.code,
+            stdout: result.stdout, stderr: result.stderr }) + '\n');
           NODE
       - name: Native filesystem, process, and fleet tests
         run: npx vitest run --bail=1 --reporter=verbose test/platform-process.test.ts test/platform-filesystem.test.ts test/hook-command.test.ts test/secure-fs-windows.test.ts test/client-session.test.ts test/client-hooks.test.ts test/comms/address.test.ts test/comms/log.test.ts test/comms/broker.test.ts
