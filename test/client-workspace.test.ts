@@ -77,6 +77,15 @@ describe('copied native configuration in linked worktrees', () => {
       expect(JSON.parse(result.content[0].text)).toMatchObject({ identity: 'linked-seat', bindingSource: 'fleet-file' });
     } catch (error) { throw new Error(`linked ${client} stdio failed: ${String(error)}`); }
     finally { await peer.close().catch(() => undefined); }
+    const worker = new Client({ name: 'pinned-worker-test', version: '1' });
+    try {
+      await worker.connect(new StdioClientTransport({ command: client === 'opencode' ? def.command[0] : def.command,
+        args: client === 'opencode' ? def.command.slice(1) : def.args,
+        env: { ...childEnvironment, HEDDLE_WORKER: '1' }, cwd: linked, stderr: 'pipe' }));
+      const result = await worker.callTool({ name: 'comms_whoami', arguments: {} }) as { content: { text: string }[] };
+      expect(JSON.parse(result.content[0].text)).toMatchObject({ identity: 'canonical-seat', bindingSource: 'fleet-file' });
+    } catch (error) { throw new Error(`pinned ${client} worker stdio failed: ${String(error)}`); }
+    finally { await worker.close().catch(() => undefined); }
     const conflict = spawnSync(process.execPath, [join(PROJECT_ROOT, 'dist/client-mcp.js'), 'heddle-comms', canonical],
       { cwd: linked, env: { ...childEnvironment, HEDDLE_AGENT: 'conflicting-seat' }, encoding: 'utf8', timeout: 10000 });
     expect(conflict.status).toBe(1);
@@ -109,6 +118,40 @@ describe('copied native configuration in linked worktrees', () => {
     }
   });
 
+  it('identity conflicts deny PreToolUse for every client without turning other events into permissions or Stop loops', async () => {
+    await ensureBuilt();
+    const { canonical, linked, root } = fixture();
+    for (const dir of [canonical, linked]) {
+      mkdirSync(join(dir, 'rules'));
+      writeFileSync(join(dir, 'rules/enforced.yaml'), 'id: enforced\nevent: PreToolUse\nmatch:\n  tool: Bash\naction: block\nenforce: true\nmessage: policy denial\nfail_open: true\n');
+    }
+    const { env } = childEnv({ home: root, env: { HEDDLE_AGENT: 'canonical-seat' } });
+    for (const client of FLEET_CLIENTS) {
+      for (const event of ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'Stop']) {
+        const result = spawnSync(process.execPath, [join(PROJECT_ROOT, 'dist/client-hook.js'), client, event, canonical], {
+          cwd: canonical, env, encoding: 'utf8', timeout: 10000,
+          input: JSON.stringify({ cwd: linked, tool_name: 'exec_command', tool_input: { cmd: 'probe' } }),
+        });
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.stderr).toContain('identity conflicts');
+        const output = JSON.parse(result.stdout);
+        if (event === 'PreToolUse') {
+          if (client === 'codex') expect(output.hookSpecificOutput.permissionDecision).toBe('deny');
+          else if (client === 'cursor') expect(output.permission).toBe('deny');
+          else if (client === 'gemini') expect(output.decision).toBe('deny');
+          else expect(output.deny).toContain('identity conflicts');
+        } else if (event === 'Stop') expect(output).toEqual({});
+        else {
+          expect(result.stdout).toContain('identity conflicts');
+          expect(output).not.toHaveProperty('decision');
+          expect(output).not.toHaveProperty('permission');
+          expect(output).not.toHaveProperty('deny');
+          expect(output.hookSpecificOutput ?? {}).not.toHaveProperty('permissionDecision');
+        }
+      }
+    }
+  });
+
   it('worker hooks use actual linked process cwd and ignore payload redirection to another worktree', async () => {
     await ensureBuilt();
     const { canonical, linked, root, git } = fixture();
@@ -116,7 +159,7 @@ describe('copied native configuration in linked worktrees', () => {
     git(canonical, ['worktree', 'add', '-qb', 'other', other]);
     for (const [dir, label] of [[canonical, 'canonical-policy'], [linked, 'linked-policy'], [other, 'other-policy']]) {
       mkdirSync(join(dir, 'rules'));
-      writeFileSync(join(dir, 'rules/worker-cwd.yaml'), `id: worker-cwd\nevent: PreToolUse\nmatch:\n  tool: Bash\naction: block\nenforce: true\nmessage: ${label} {{cwd}}\nfail_open: true\n`);
+      writeFileSync(join(dir, 'rules/worker-cwd.yaml'), `id: worker-cwd\nevent: PreToolUse\nmatch:\n  tool: Bash\naction: block\nenforce: true\nmessage: ${label} {{cwd}} {{agent}}\nfail_open: true\n`);
     }
     const { env } = childEnv({ home: root, env: { HEDDLE_WORKER: '1', HEDDLE_AGENT: 'linked-seat.1', HEDDLE_PARENT: 'linked-seat' } });
     for (const client of FLEET_CLIENTS) {
@@ -126,7 +169,7 @@ describe('copied native configuration in linked worktrees', () => {
           input: JSON.stringify({ cwd: payloadCwd, tool_name: 'exec_command', tool_input: { cmd: 'probe' } }),
         });
         expect(result.status, result.stderr).toBe(0);
-        expect(result.stdout, result.stderr).toContain(`linked-policy ${linked}`);
+        expect(result.stdout, result.stderr).toContain(`linked-policy ${linked} linked-seat.1`);
         expect(result.stdout).not.toContain('canonical-policy');
         expect(result.stdout).not.toContain('other-policy');
       }

@@ -15,6 +15,13 @@ export function sameClientWorkspace(configured: string, candidate: string): bool
   } catch { return false; } // Missing/unreadable Git identity cannot authorize a different workspace.
 }
 
+export class ClientWorkspaceIdentityConflict extends Error {
+  constructor() {
+    super('native client identity conflicts with the selected worktree owner');
+    this.name = 'ClientWorkspaceIdentityConflict';
+  }
+}
+
 /** Runtime-only binding keeps tracked native config and its permissions unchanged in worktrees. */
 export function resolveClientWorkspace(configured: string, candidates: unknown[], env: NodeJS.ProcessEnv = process.env,
   workerHookCwd?: string): string {
@@ -29,6 +36,6 @@ export function resolveClientWorkspace(configured: string, candidates: unknown[]
   if (cwd === fallback) return cwd; // Preserve existing same-workspace launcher identity precedence.
   const bound = env.HEDDLE_AGENT?.trim() || env.FLEET_AGENT?.trim();
   const owner = clientFileSource(join(cwd, '.fleet-agent'))?.trim();
-  if (bound && owner && bound !== owner) throw new Error('native client identity conflicts with the selected worktree owner');
+  if (bound && owner && bound !== owner) throw new ClientWorkspaceIdentityConflict();
   return cwd;
 }

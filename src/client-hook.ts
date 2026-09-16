@@ -5,7 +5,7 @@ import { homedir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { clientInbox, evaluateClientHook, renderClientHook, type ClientEvent } from './client-hooks.js';
 import { clientStartupInstructions, parseFleetClients } from './client-config.js';
-import { resolveClientWorkspace } from './client-workspace.js';
+import { ClientWorkspaceIdentityConflict, resolveClientWorkspace } from './client-workspace.js';
 import { resolveCommsIdentity } from './comms/server.js';
 
 const EVENTS = new Set(['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'Stop']);
@@ -64,7 +64,17 @@ async function main(): Promise<void> {
   catch { throw new Error('invalid hook input JSON (contents omitted)'); }
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('hook input must be an object');
   const env: NodeJS.ProcessEnv = { ...process.env, HEDDLE_COMMS_TRANSPORT: 'stdio', ...(agent && process.env.HEDDLE_WORKER !== '1' ? { HEDDLE_AGENT: agent, FLEET_AGENT: agent } : {}) };
-  const cwd = resolveClientWorkspace(configuredCwd, [raw.cwd, process.cwd()], env, process.cwd());
+  let cwd: string;
+  try { cwd = resolveClientWorkspace(configuredCwd, [raw.cwd, process.cwd()], env, process.cwd()); }
+  catch (error) {
+    if (!(error instanceof ClientWorkspaceIdentityConflict)) throw error;
+    // A known identity mismatch is a policy refusal, not an unexpected fail-open hook error.
+    process.stderr.write(`heddle native hook: ${error.message}\n`);
+    const conflict = event === 'PreToolUse' ? { context: '', deny: error.message } : { context: error.message };
+    // Stop context would request another turn; report only stderr at that boundary.
+    process.stdout.write(JSON.stringify(event === 'Stop' ? {} : renderClientHook(client, event, conflict, raw)) + '\n');
+    return;
+  }
   const result = evaluateClientHook(event, raw, cwd, env);
   // These clients support nonblocking context after tools, not in their before-tool response.
   // Re-evaluate nudges with the same arguments; enforced denials remain before-tool only.
