@@ -33,6 +33,7 @@ import { runPrOwn } from './pr-own.js';
 import { runPrSweep } from './pr-sweep.js';
 import { runPrWatch } from './pr-watch.js';
 import { bootstrapComms } from './comms/bootstrap.js';
+import { runClientSession } from './client-session.js';
 import { loadAccountRegistry, reconcileRegistryIdentity, writeAccountRegistry, type IdentityReconcileChange, type IdentityReconcileWarning } from './accounts.js';
 import { DEFAULT_ACCOUNTS_PATH } from './capaware.js';
 import { migrateConfigFile } from './config-migrations.js';
@@ -102,6 +103,7 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
   heddle accounts verify         verify local credential paths and recorded Claude login state
   heddle setup [--only <ids>] [--skip <ids>] [--dry-run] [--answers <file>] [--home <dir>] [--target <dir>] [--json]  guided fresh-machine onboarding walkthrough (composes the wizard steps in order; without --target, PR automation uses the current repo or offers to add one, confirming before it writes; exit 1 if any step failed)
   heddle accounts add [--provider <p>] [--answers <file>]  add native-login or env-repoint accounts interactively
+  heddle launch <codex|cursor|gemini|opencode> [--dir <worktree>] [--agent <id>] [--model <model>] [--resume <id|latest>] [--bin <path>] [--dry-run] [-- <native args>]
   heddle comms init [--json]     initialize the comms database, operator token, and registered project rooms
   heddle init-client <dir> --clients codex,cursor,gemini,opencode [--agent <id>] [--dry-run] [--json]
                                  add native fleet MCP configuration and startup instructions to a worktree
@@ -199,7 +201,7 @@ const json = has('--json');
  * `--dry-run` preview especially must observe, not mutate.
  * Best-effort — a hygiene failure must never break the command the operator actually ran.
  */
-if (cmd !== 'mode' && cmd !== 'pr' && cmd !== 'comms' && cmd !== 'setup' && cmd !== 'fleet' && cmd !== 'top' && cmd !== 'upgrade' && cmd !== 'uninstall' && cmd !== 'ambient-cred-vars' && !(cmd === 'ledger' && (process.argv[3] === 'sweep' || process.argv[3] === 'finish')) && !(cmd === 'usage' && (process.argv[3] === 'poll-claude' || process.argv[3] === 'install-poll-launchd'))) {
+if (cmd !== 'launch' && cmd !== 'mode' && cmd !== 'pr' && cmd !== 'comms' && cmd !== 'setup' && cmd !== 'fleet' && cmd !== 'top' && cmd !== 'upgrade' && cmd !== 'uninstall' && cmd !== 'ambient-cred-vars' && !(cmd === 'ledger' && (process.argv[3] === 'sweep' || process.argv[3] === 'finish')) && !(cmd === 'usage' && (process.argv[3] === 'poll-claude' || process.argv[3] === 'install-poll-launchd'))) {
   try {
     const { closed } = new Ledger().sweepOrphans();
     if (closed > 0) console.error(`heddle: closed ${closed} orphaned in-flight dispatch row${closed === 1 ? '' : 's'} (heddle ledger --json shows outcome='orphaned')`);
@@ -1266,6 +1268,25 @@ try {
       const state = writeOperatorMode(requested, note);
       out(json, state, () => `operator mode → ${state.mode}` +
         (state.note ? `  (${state.note})` : '') + `  [${state.since}]`);
+      break;
+    }
+
+    case 'launch': {
+      const raw = process.argv.slice(3), separator = raw.indexOf('--');
+      const flags = separator < 0 ? raw : raw.slice(0, separator);
+      const clients = parseFleetClients(flags.shift() ?? '');
+      if (clients.length !== 1) throw new Error('launch selects exactly one native client');
+      const values: Record<string, string> = {};
+      let dryRun = false;
+      for (let i = 0; i < flags.length; i++) {
+        const name = flags[i];
+        if (name === '--dry-run') { dryRun = true; continue; }
+        if (!['--dir', '--agent', '--model', '--resume', '--bin'].includes(name) || !flags[i + 1] || flags[i + 1].startsWith('--')) throw new Error(`invalid launch option ${name}; native arguments go after --`);
+        values[name] = flags[++i];
+      }
+      process.exitCode = await runClientSession({ client: clients[0], dir: values['--dir'] ?? process.cwd(),
+        agent: values['--agent'], model: values['--model'], resume: values['--resume'], bin: values['--bin'], dryRun,
+        args: separator < 0 ? [] : raw.slice(separator + 1) });
       break;
     }
 

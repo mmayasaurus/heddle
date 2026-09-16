@@ -34,6 +34,11 @@ function checkedToml(raw: string) {
   catch { throw new Error('invalid Codex TOML configuration; repair the config before installing (contents omitted)'); }
 }
 
+function checkedJson(raw: string, path: string): Record<string, unknown> {
+  try { return object(JSON.parse(raw), path); }
+  catch { throw new Error(`invalid JSON configuration in ${path} (contents omitted)`); }
+}
+
 export function clientFileSource(path: string): string | null {
   // Do not follow a config symlink or a symlinked parent into another checkout/user config.
   for (let part = path; ; part = dirname(part)) {
@@ -90,13 +95,60 @@ function plannedFile(path: string, step: string, raw: string | null, content: st
   return planned;
 }
 
-function serverDefinitions(dir: string, client: FleetClient, agent?: string) {
+export function serverDefinitions(dir: string, client: FleetClient, agent?: string, workerEnv?: Record<string, string>) {
+  // Some native clients sanitize the MCP subprocess environment. Preserve explicit broker/project
+  // locations without copying ambient credentials into generated configuration.
+  const paths = Object.fromEntries(['HEDDLE_COMMS_DB', 'HEDDLE_LEDGER_DB', 'HEDDLE_PROJECTS'].flatMap((key) => process.env[key] ? [[key, process.env[key]!]] : []));
   return Object.fromEntries(['heddle', 'heddle-comms'].map((name) => [name, {
     command: process.execPath,
     args: ['--disable-warning=ExperimentalWarning', join(here, '..', 'dist', 'client-mcp.js'), name, dir],
-    env: { HEDDLE_CLIENT: client, ...(agent ? { HEDDLE_AGENT: agent, FLEET_AGENT: agent } : {}) },
+    env: { ...paths, HEDDLE_CLIENT: client, ...(agent ? { HEDDLE_AGENT: agent, FLEET_AGENT: agent } : {}), ...workerEnv },
     ...(client === 'gemini' ? { timeout: 660_000 } : {}),
   }]));
+}
+
+/** Explicit launch overrides make Codex exec work even when it ignores project config layers. */
+export function codexClientFlags(dir: string, agent?: string, workerEnv?: Record<string, string>): string[] {
+  return Object.entries(serverDefinitions(dir, 'codex', agent, workerEnv)).flatMap(([name, server]) => {
+    // Codex's -c key parser splits dotted keys literally (it does not unquote TOML key segments).
+    const prefix = `mcp_servers.${name}`;
+    return ['-c', `${prefix}.command=${JSON.stringify(server.command)}`, '-c', `${prefix}.args=${JSON.stringify(server.args)}`,
+      '-c', `${prefix}.tool_timeout_sec=660`, '-c', `${prefix}.env_vars=${JSON.stringify(FORWARDED_ENV)}`,
+      ...(workerEnv?.HEDDLE_WORKER === '1' ? ['-c', `${prefix}.default_tools_approval_mode="approve"`] : []),
+      ...Object.entries(server.env).flatMap(([key, value]) => ['-c', `${prefix}.env.${key}=${JSON.stringify(value)}`])];
+  });
+}
+
+/** Only replace our named command entries; preserve every other native hook. */
+function nativeHooks(config: Record<string, unknown>, client: FleetClient, dir: string, agent?: string): Record<string, unknown> {
+  const hooks = config.hooks === undefined ? {} : object(config.hooks, 'hooks');
+  const next = { ...hooks };
+  const events: Record<string, string> = client === 'cursor'
+    ? { sessionStart: 'SessionStart', preToolUse: 'PreToolUse', postToolUse: 'PostToolUse', stop: 'Stop' }
+    : client === 'gemini'
+      ? { SessionStart: 'SessionStart', BeforeAgent: 'UserPromptSubmit', BeforeTool: 'PreToolUse', AfterTool: 'PostToolUse', AfterAgent: 'Stop' }
+      : { SessionStart: 'SessionStart', UserPromptSubmit: 'UserPromptSubmit', PreToolUse: 'PreToolUse', PostToolUse: 'PostToolUse', Stop: 'Stop' };
+  for (const [native, event] of Object.entries(events)) {
+    const entries = next[native] ?? [];
+    if (!Array.isArray(entries)) throw new Error(`hooks.${native} must be an array`);
+    const command = [process.execPath, '--disable-warning=ExperimentalWarning', join(here, '..', 'dist', 'client-hook.js'), client, event, dir, agent ?? '', '--heddle-fleet-hook']
+      .map((value) => `'${value.replace(/'/g, `'"'"'`)}'`).join(' ');
+    const handler = { type: 'command', command, timeout: client === 'gemini' ? 5000 : 5 };
+    // Grouped native hooks can mix owned and user handlers; retain foreign siblings.
+    const kept = entries.flatMap((entry) => {
+      const item = object(entry, `hooks.${native} entry`);
+      if (client === 'cursor') return typeof item.command === 'string' && item.command.includes('--heddle-fleet-hook') ? [] : [item];
+      if (!Array.isArray(item.hooks)) throw new Error(`hooks.${native} entry.hooks must be an array`);
+      const foreign = item.hooks.filter((hook: unknown) => {
+        const value = object(hook, 'hook');
+        return typeof value.command !== 'string' || !value.command.includes('--heddle-fleet-hook');
+      });
+      return foreign.length ? [{ ...item, hooks: foreign }] : [];
+    });
+    next[native] = [...kept, client === 'cursor' ? { command, timeout: 5, ...(native === 'stop' ? { loop_limit: 5 } : {}) }
+      : { hooks: [{ ...handler, ...(client === 'codex' && event !== 'Stop' && event !== 'PreToolUse' ? { additionalContextLimit: 5000 } : {}) }] }];
+  }
+  return { ...config, ...(client === 'cursor' ? { version: 1 } : {}), hooks: next };
 }
 
 function tomlConfig(raw: string, servers: ReturnType<typeof serverDefinitions>): string {
@@ -151,8 +203,29 @@ export function clientInstallSteps(options: ClientInstallOptions): InstallStep[]
     if (client === 'opencode' && existsSync(join(dir, 'opencode.jsonc'))) throw new Error('opencode.jsonc already exists; configure its mcp entries manually rather than creating a competing opencode.json');
     const raw = clientFileSource(path);
     const servers = serverDefinitions(dir, client, agent);
-    const content = client === 'codex' ? tomlConfig(raw ?? '', servers) : jsonConfig(raw, client, servers, path);
+    let content = client === 'codex' ? tomlConfig(raw ?? '', servers) : jsonConfig(raw, client, servers, path);
+    if (client === 'gemini') {
+      const config = JSON.parse(content);
+      const hooked = nativeHooks(config, client, dir, agent);
+      if (!isDeepStrictEqual(config, hooked)) content = JSON.stringify(hooked, null, 2) + '\n';
+    }
     steps.push(...plannedFile(path, `client:${client}`, raw, content, dryRun));
+    if (client === 'codex' || client === 'cursor') {
+      const hookPath = join(dir, `.${client}`, 'hooks.json'), hookRaw = clientFileSource(hookPath);
+      const config = hookRaw === null ? {} : checkedJson(hookRaw, hookPath);
+      const hooked = nativeHooks(config, client, dir, agent);
+      const hookContent = hookRaw !== null && isDeepStrictEqual(config, hooked) ? hookRaw : JSON.stringify(hooked, null, 2) + '\n';
+      steps.push(...plannedFile(hookPath, `client:${client}:hooks`, hookRaw, hookContent, dryRun));
+    }
+    if (client === 'opencode') {
+      const pluginPath = join(dir, '.opencode', 'plugins', 'heddle-fleet.js'), pluginRaw = clientFileSource(pluginPath);
+      if (pluginRaw !== null && !pluginRaw.startsWith('// Heddle managed native integration.')) throw new Error(`existing OpenCode plugin preserved: ${pluginPath}`);
+      const plugin = readFileSync(join(here, '..', 'assets', 'opencode-fleet-plugin.js'), 'utf8')
+        .replace('__HEDDLE_NODE__', () => JSON.stringify(process.execPath))
+        .replace('__HEDDLE_HOOK__', () => JSON.stringify(join(here, '..', 'dist', 'client-hook.js')))
+        .replace('__HEDDLE_AGENT__', () => JSON.stringify(agent ?? ''));
+      steps.push(...plannedFile(pluginPath, 'client:opencode:plugin', pluginRaw, plugin, dryRun));
+    }
   }
   const guidance = readFileSync(join(here, '..', 'assets', 'client-startup.md'), 'utf8');
   const instructionFiles = new Set(clients.map((client) => client === 'gemini' ? 'GEMINI.md' : 'AGENTS.md'));
