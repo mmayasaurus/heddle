@@ -33,18 +33,36 @@
  * review until it is ignored, which is strictly worse; the zone is three tool-owned dirs, a write
  * there cannot enter a merge (untracked) or touch source, and destroyed daemon state is re-derivable.
  */
-const TOOL_RUNTIME_PREFIXES = ['.memdb/', '.memtrace/', '.serena/cache/', '.verity/.logs/'] as const;
+const TOOL_RUNTIME_PREFIXES = ['.memdb/', '.memtrace/', '.serena/cache/'] as const;
 
 /**
  * HED-699: Verity's hook runtime state. Its hooks run inside every headless Claude worker (the consumer
- * repo's `.claude/settings.json`) and rewrite hidden files directly under `.verity/`
- * (`.conversation-buffer`, `.last-analysis.<id>`, `.iteration-count`, …) plus `.verity/.logs/`, so a
- * read-only reviewer with NO write tools was quarantined on every run in a Verity repo (ledger 2237).
- * Same narrowness as `.serena/cache/`: only HIDDEN files directly under `.verity/` and `.verity/.logs/`
- * are churn. `.verity/memory/**` (the knowledge graph), `.verity/config.json` and anything nested
- * deeper stay visible to both guards. Operator-gated, like the list above (HED-550).
+ * repo's `.claude/settings.json`) and write machine-local state under `.verity/`, so a read-only reviewer
+ * with NO write tools was quarantined on every run in a Verity repo (ledger 2237). Verity's own gitignore
+ * block (`.verity/*`, `!.verity/standard.yaml`) hides all of it; a repo that commits that block never
+ * reaches this predicate (ignored paths are not enumerated, HED-569). This covers repos that have not.
+ * Only the names Verity's CLI (@codacy/verity-cli) actually writes are churn (round-2 review: a blanket
+ * hidden-file match would hide e.g. `.verity/.exfil` or `.verity/.logs/payload.ts`):
+ * - state files `.conversation-buffer`, `.iteration-count`, `.last-reviewed-sha`, `.last-intent`,
+ *   `.seeded`, `.plugin-active`, `.memory-sync-state.json`, and the per-session-suffixed
+ *   `.last-analysis`, `.last-pass-hash`, `.advisory-episode`, `.ignore-declaration`;
+ * - `.task-context/<session>.jsonl`, `.cache/pending-<epoch>-<hex>.json`, and the debug logs
+ *   `.logs/{cli,stderr}.log` (rotated to `.1`);
+ * - `.snapshot/**` and `.baseline/**`, Verity's MIRROR copies of repo files, whose names are arbitrary
+ *   repo-relative paths by design.
+ * `.verity/memory/**` (the knowledge graph), `config.json`, `standard.yaml`, `credentials` and any other
+ * name stay visible to both guards. Untracked-only, and operator-gated like the list above (HED-550).
  */
-const VERITY_RUNTIME_FILE = /^\.verity\/\.[^/]+$/;
+const VERITY_RUNTIME_FILE = new RegExp(
+  '^\\.verity/(?:'
+  + '\\.(?:conversation-buffer|iteration-count|last-reviewed-sha|last-intent|seeded|plugin-active|memory-sync-state\\.json)'
+  + '|\\.(?:last-analysis|last-pass-hash|advisory-episode|ignore-declaration)(?:\\.[0-9a-f]+)?'
+  + '|\\.task-context/[^/]+\\.jsonl'
+  + '|\\.cache/pending-[0-9]+-[0-9a-f]+\\.json'
+  + '|\\.logs/(?:cli|stderr)\\.log(?:\\.1)?'
+  + '|\\.(?:snapshot|baseline)/.+'
+  + ')$',
+);
 
 export const isToolRuntimePath = (rel: string): boolean =>
   TOOL_RUNTIME_PREFIXES.some((prefix) => rel.startsWith(prefix)) || VERITY_RUNTIME_FILE.test(rel);

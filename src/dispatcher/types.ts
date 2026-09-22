@@ -312,6 +312,8 @@ export interface DispatchPlan {
   rotationAccount?: DispatchContext['rotationAccount'];
   /** Number of registered Claude accounts consulted for the effective Claude target. */
   claudeAccountCount: number;
+  /** How many of those are env-repoint accounts that are pin-only beside a native one (HED-698). */
+  claudePinOnlyCount: number;
   /** True for a `dispatchable: false` class — dispatch() refuses before any route runs. */
   notDispatchable: boolean;
   /** HED-3: set when the class primary matched the author's provider and a pool entry was taken instead. */

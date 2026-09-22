@@ -7,7 +7,7 @@ import { sameModelFamily } from './model-family.js';
 import { fleetPauseStatus } from './fleet-pause.js';
 import { resolveIdentity, attributeDispatch } from './identity.js';
 import { readProviderCaps } from './usage.js';
-import { readClaudeAccounts, pickClaudeAccount, capAwarePolicy, hardRefusal } from './capaware.js';
+import { readClaudeAccounts, pickClaudeAccount, capAwarePolicy, hardRefusal, envRepointPinOnly } from './capaware.js';
 import { classifyRotationRefusal, DEFAULT_COOLDOWN_S, DEFAULT_COOLING_PATH, readCooling, readRotationAccounts, writeCooling } from './rotation.js';
 import { basename } from 'node:path';
 import { defaultAdapterFor } from './dispatcher/adapters.js';
@@ -216,7 +216,7 @@ export async function dispatch(
   if (hasNoDispatchableClaudeAccount(plan)) {
     return refusalOutcome(ctx, req, route.taskClass, target, skillsForRefusal, {
       code: 'no-dispatchable-account',
-      reason: noDispatchableClaudeAccountReason(plan.claudeAccountCount),
+      reason: noDispatchableClaudeAccountReason(plan.claudeAccountCount, plan.claudePinOnlyCount),
       instruction: 'An operator must restore a Claude account before this can dispatch.',
     });
   }
@@ -376,7 +376,7 @@ export async function dispatch(
           { pin: req.accountPin, routeAwayAtPct: capAwarePolicy(table).routeAwayAtPct, forFable: fallback.model === 'fable' }) ?? null;
         ctx.account = ctx.claudeAccount?.account.id ?? null;
         if (fallbackAccounts.length > 0 && ctx.claudeAccount === null) {
-          const note = `claude capability-fit fallback blocked: no dispatchable account — ${noDispatchableClaudeAccountReason(fallbackAccounts.length)}`;
+          const note = `claude capability-fit fallback blocked: no dispatchable account — ${noDispatchableClaudeAccountReason(fallbackAccounts.length, fallbackAccounts.filter(envRepointPinOnly(fallbackAccounts)).length)}`;
           const base = primary.error?.trim() ? primary.error : '';
           primary.error = base ? `${base}; ${note}` : note;
           try { ledger.annotateError(primary.ledgerId, note); } catch { /* best-effort: a ledger write failure must not abort or misclassify the dispatch */ }
@@ -484,7 +484,7 @@ export async function dispatch(
         { pin: req.accountPin, routeAwayAtPct: capAwarePolicy(table).routeAwayAtPct, forFable: fallback.model === 'fable' }) ?? null;
       ctx.account = ctx.claudeAccount?.account.id ?? null;
       if (fallbackAccounts.length > 0 && ctx.claudeAccount === null) {
-        const note = `claude fallback blocked: no dispatchable account — ${noDispatchableClaudeAccountReason(fallbackAccounts.length)}`;
+        const note = `claude fallback blocked: no dispatchable account — ${noDispatchableClaudeAccountReason(fallbackAccounts.length, fallbackAccounts.filter(envRepointPinOnly(fallbackAccounts)).length)}`;
         const base = primary.error?.trim() ? primary.error : '';
         primary.error = base ? `${base}; ${note}` : note;
         try {

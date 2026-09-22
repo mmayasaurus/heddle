@@ -470,4 +470,18 @@ describe('pickClaudeAccount — env-repoint accounts (HED-698)', () => {
     expect(placed.length).toBeGreaterThan(0);
     for (const assignment of placed) expect(assignment.account).not.toBe('glm');
   });
+
+  it('a batch refusal counts pin-only env-repoint rows apart from logged-out ones (round-2 finding 7)', () => {
+    const floors: ClaudeFloors = { neverBelowPct: 3, residencyCapBelowPct: 10, residencyMax: 2 };
+    const { assignments } = pickClaudeAccountsBatch(claudeCaps([{ id: 'glm', used: 1 }]), [...natives.map((a) => ({ ...a, loggedIn: false })), glm], floors, ['A']);
+    expect(assignments.A).toMatchObject({ refused: true });
+    const { reason } = assignments.A as { reason: string };
+    expect(reason).toContain('2 logged-out');
+    expect(reason).toContain('1 env-repoint pin-only');
+  });
+
+  it('batch placement still uses an env-repoint-only registry (HED-531)', () => {
+    const floors: ClaudeFloors = { neverBelowPct: 3, residencyCapBelowPct: 10, residencyMax: 2 };
+    expect(pickClaudeAccountsBatch(claudeCaps([{ id: 'glm', used: 1 }]), [glm], floors, ['A']).assignments.A).toMatchObject({ account: 'glm' });
+  });
 });

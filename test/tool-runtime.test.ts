@@ -44,24 +44,30 @@ describe('isToolRuntimePath', () => {
   });
 });
 
-// HED-699: Verity's hooks run inside every headless Claude worker and rewrite hidden runtime files
-// directly under `.verity/` (ledger 2237: `.conversation-buffer` + `.logs/cli.log` quarantined a
-// review whose worker had NO write tools). Only that hidden runtime layer is churn.
+// HED-699: Verity's hooks run inside every headless Claude worker and write machine-local state under
+// `.verity/` (ledger 2237: `.conversation-buffer` + `.logs/cli.log` quarantined a review whose worker had
+// NO write tools). Only the names Verity's CLI writes are churn (round-2 review finding 4).
 describe('isToolRuntimePath — Verity hook runtime (HED-699)', () => {
-  it('matches the hidden runtime files directly under .verity/ and anything under .verity/.logs/', () => {
-    expect(isToolRuntimePath('.verity/.conversation-buffer')).toBe(true);
-    expect(isToolRuntimePath('.verity/.last-analysis.ce78350b6387')).toBe(true);
-    expect(isToolRuntimePath('.verity/.iteration-count')).toBe(true);
-    expect(isToolRuntimePath('.verity/.logs/cli.log')).toBe(true);
-    expect(isToolRuntimePath('.verity/.logs/stderr.log')).toBe(true);
+  it('matches exactly the state files, logs, task context, pending cache and mirror dirs Verity writes', () => {
+    for (const rel of [
+      '.verity/.conversation-buffer', '.verity/.iteration-count', '.verity/.last-reviewed-sha', '.verity/.last-intent',
+      '.verity/.seeded', '.verity/.plugin-active', '.verity/.memory-sync-state.json',
+      '.verity/.last-analysis', '.verity/.last-analysis.ce78350b6387', '.verity/.last-pass-hash.3113977d2a16',
+      '.verity/.advisory-episode.ce78350b6387', '.verity/.ignore-declaration.9be0ad484d2f',
+      '.verity/.task-context/352c013d-5d3e-459c-b5cb-dee8684240ee.jsonl',
+      '.verity/.cache/pending-1790036195-642b98f2.json',
+      '.verity/.logs/cli.log', '.verity/.logs/stderr.log', '.verity/.logs/cli.log.1',
+      '.verity/.snapshot/.heddle/launch-nostepinne.sh', '.verity/.baseline/96c7c2693edf9af1/files/src/x.ts', '.verity/.baseline/.carry',
+    ]) expect(isToolRuntimePath(rel), rel).toBe(true);
   });
 
-  it('does NOT match the knowledge graph, visible config, nested hidden files or a lookalike dir', () => {
-    expect(isToolRuntimePath('.verity/memory/index.md')).toBe(false);
-    expect(isToolRuntimePath('.verity/memory/.hidden-note')).toBe(false);
-    expect(isToolRuntimePath('.verity/config.json')).toBe(false);
-    expect(isToolRuntimePath('.verity')).toBe(false);
-    expect(isToolRuntimePath('src/.verity/.conversation-buffer')).toBe(false);
-    expect(isToolRuntimePath('.verityx/.conversation-buffer')).toBe(false);
+  it('does NOT match names Verity never writes, the knowledge graph, config, credentials or lookalikes', () => {
+    for (const rel of [
+      '.verity/.exfil', '.verity/.logs/payload.ts', '.verity/.logs/cli.log.2', '.verity/.cache/stolen.json',
+      '.verity/.task-context/notes.txt', '.verity/.task-context/nested/x.jsonl', '.verity/.last-analysis.not-hex',
+      '.verity/.snapshot', '.verity/.baseline',
+      '.verity/memory/index.md', '.verity/memory/.hidden-note', '.verity/config.json', '.verity/standard.yaml', '.verity/credentials',
+      '.verity', 'src/.verity/.conversation-buffer', '.verityx/.conversation-buffer',
+    ]) expect(isToolRuntimePath(rel), rel).toBe(false);
   });
 });

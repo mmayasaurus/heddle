@@ -17,7 +17,7 @@ import { WORKER_ENV } from '../identity.js';
 import { providerExecution, type Route, type RouteTarget } from '../routing.js';
 import type { WorkerAdapter, WorkerResult } from '../types.js';
 import { packsFor, requestedPacks } from './packs.js';
-import { effectiveModelIdentity } from '../model-family.js';
+import { effectiveModelIdentity, sameModelFamily } from '../model-family.js';
 import { baseRecord, refusalOutcome, refuseBilling, webRefusalReason } from './refusals.js';
 import { billingVerdict } from './billing.js';
 import { tierReadOnlyVerdict } from './tier-gate.js';
@@ -116,6 +116,17 @@ export async function runTarget(
   const skills = route.bounds
     ? []
     : packsFor(runsAs.provider, requestedPacks(route.reviewerPool, target.skills, req.skills), req.cwd);
+  // HED-3, authoritative at the spawn chokepoint: every path (primary, class fallback, capability-fit
+  // fallback) reaches here with the account it re-picked, so a review whose EFFECTIVE family equals the
+  // author's never runs, even when an earlier raw-route check saw a different provider (HED-697 r2).
+  if (ctx.review && route.reviewerPool && sameModelFamily(runsAs.provider, runsAs.model, ctx.review.authorProvider, ctx.review.authorModel)) {
+    return refusalOutcome(ctx, req, route.taskClass, target, skills, {
+      code: 'same-provider-review',
+      reason: `task class "${route.taskClass}" requires a reviewer from a DIFFERENT model family than the author `
+        + `(${ctx.review.authorProvider}); ${target.provider}/${target.model} runs as ${runsAs.provider}/${runsAs.model}, the author's own family.`,
+      instruction: 'Pin a different-family account, or name a reviewer route from another provider family.',
+    }, { extra: { usedFallback: fellBackFrom !== null }, fellBackFrom });
+  }
   // mcp is a REQUIREMENT, not best-effort: validateWorkerMcp (below) THROWS if the resolved provider
   // has no attachment path. HED-249 reverses HED-205's graceful-degrade — an mcp-carrying class may
   // only resolve to mcp-attachable providers (a routing.v0.yaml CI invariant enforces this for

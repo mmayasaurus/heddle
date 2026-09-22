@@ -12,7 +12,7 @@ import { pickReviewer, normalizeProvider, type ReviewerPick } from '../review.js
 import { decideCapabilities, capabilityPolicy } from '../capabilities.js';
 import { readProviderCaps } from '../usage.js';
 import {
-  decideRoute, readClaudeAccounts, adviseClaudeAccount, pickClaudeAccount, capAwarePolicy,
+  decideRoute, readClaudeAccounts, adviseClaudeAccount, pickClaudeAccount, capAwarePolicy, envRepointPinOnly,
   type RouteDecision, type ClaudeAccount, type AccountAdvice, type AccountPick,
 } from '../capaware.js';
 import {
@@ -43,12 +43,20 @@ export function hasNoDispatchableClaudeAccount(plan: Pick<DispatchPlan,
     && plan.accountPick === null;
 }
 
-export function noDispatchableClaudeAccountReason(accountCount: number): string {
-  const registry = accountCount === 1
-    ? 'the 1 registered account is'
-    : `all ${accountCount} registered accounts are`;
+export function noDispatchableClaudeAccountReason(accountCount: number, pinOnlyCount = 0): string {
+  // HED-698: pin-only env-repoint accounts are not "logged out" — name them apart, with the way to use one.
+  const autoCount = accountCount - pinOnlyCount;
+  const kind = pinOnlyCount > 0 ? 'native' : 'registered';
+  const registry = autoCount === 1
+    ? `the 1 ${kind} account is`
+    : `all ${autoCount} ${kind} accounts are`;
+  const pinOnly = pinOnlyCount > 0
+    ? ` ${pinOnlyCount === 1 ? '1 env-repoint account is' : `${pinOnlyCount} env-repoint accounts are`} pin-only beside them (HED-698): `
+      + 'pass account_pin to run one — it runs that service\'s model, not Claude.'
+    : '';
   return `no dispatchable Claude account — ${registry} logged-out or non-dispatchable ` +
-    '(a billing/logged-out signal, or a replaced credential). Run `claude /login` on the affected account and update accounts.json, or wait for a keeper ping to clear the signal.';
+    '(a billing/logged-out signal, or a replaced credential). Run `claude /login` on the affected account and update accounts.json, or wait for a keeper ping to clear the signal.'
+    + pinOnly;
 }
 
 export function excludedClaudePin(err: unknown): { pin: string; reason: string } | null {
@@ -290,9 +298,9 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
   target = decision.target;
   fallback = decision.fallback;
   if (reviewerPick) decision.routeReason = `${decision.routeReason}; reviewer ${reviewerPick.reason}`;
-  // HED-3 invariant, checked on the EFFECTIVE target (after explicit route / pool pick / cap-aware
-  // route-away): a review class never runs on the author's family. author_provider is REQUIRED for
-  // review classes — an orchestrator reviewing its own edits passes 'claude'.
+  // HED-3 inputs: author_provider is REQUIRED for review classes (an orchestrator reviewing its own edits
+  // passes 'claude') and must be a known provider. The family COMPARISON runs below, once the claude
+  // account is bound, on the identity the worker runs as (HED-697).
   if (route.reviewerPool && !notDispatchable) {
     if (author && !providerConfig(table, author)) {
       throw new Error(
@@ -330,6 +338,7 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
   let accountPick: AccountPick | null | undefined;
   let rotationAccount: DispatchContext['rotationAccount'];
   let claudeAccountCount = 0;
+  let claudePinOnlyCount = 0;
   let pinnedExcludedAccount: { pin: string; reason: string } | undefined;
   if (target.provider === 'codex' || target.provider === 'cursor') {
     const registry = req.rotationAccounts ?? readRotationAccounts();
@@ -340,6 +349,7 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
   if (target.provider === 'claude') {
     const accounts = claudeAccounts();
     claudeAccountCount = accounts.length;
+    claudePinOnlyCount = accounts.filter(envRepointPinOnly(accounts)).length;
     accountAdvice = adviseClaudeAccount(caps.claude, accounts);
     if (!req.inSession && !notDispatchable) {
       try {
@@ -365,8 +375,11 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
   const runsAs = effectiveModelIdentity(target.provider, target.model,
     target.provider === 'claude' ? accountPick?.account.envRepoint : undefined);
   // HED-3 invariant, checked on the EFFECTIVE target AND the account it binds (validation of
-  // author_provider/author_model happened above).
-  if (route.reviewerPool && !notDispatchable && author && sameModelFamily(runsAs.provider, runsAs.model, author, req.authorModel)) {
+  // author_provider/author_model happened above). A claude headless plan that binds NO account in a
+  // non-empty registry is refused below (pinned-excluded / no dispatchable account); judging a family
+  // it will never run would mask that real reason with a misleading "author's own family".
+  const bindRefusalPending = hasNoDispatchableClaudeAccount({ target, execution, notDispatchable, claudeAccountCount, accountPick });
+  if (route.reviewerPool && !notDispatchable && author && !bindRefusalPending && sameModelFamily(runsAs.provider, runsAs.model, author, req.authorModel)) {
     const runsAsNote = runsAs.provider === target.provider ? '' : ` (runs as ${runsAs.provider}/${runsAs.model})`;
     sameProviderReview = `task class "${route.taskClass}" requires a reviewer from a DIFFERENT model family than the ` +
       `author (${author}); the effective route ${target.provider}/${target.model}${runsAsNote} is the author's own family` +
@@ -442,15 +455,17 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
   // HED-519: a HEADLESS claude opus/fable adversarial-review is empirically unreliable (json-mode is
   // silent till completion → SIGKILL at timeout with zero output). Compute here so the preview and the
   // real dispatch agree. Explicit `=== 'headless'` (NOT reachesRunTarget): in-session preempts everything.
+  // Keyed on what RUNS (HED-697): a claude/opus route bound to a GLM account spawns --model glm-5.3, not
+  // opus, so the opus/fable reliability wall does not apply to it.
   const headlessClaudeReviewRefusal = execution === 'headless'
-    && target.provider === 'claude'
-    && /(?:^|[-/])(opus|fable)(?:[-/]|$)/i.test(target.model)
+    && runsAs.provider === 'claude'
+    && /(?:^|[-/])(opus|fable)(?:[-/]|$)/i.test(runsAs.model)
     && route.taskClass === 'adversarial-review'
-    ? `headless ${target.provider}/${target.model} for an adversarial-review is empirically unreliable — `
+    ? `headless ${runsAs.provider}/${runsAs.model} for an adversarial-review is empirically unreliable — `
       + `claude -p --output-format json is silent until completion, so a substantial review that overruns `
       + `SIGKILLs at its timeout with zero output (HED-511: 6/6 such dispatches died this way).`
     : undefined;
-  return { route, target, fallback, origin, execution, decision, symbol, resolutionWalk, skillsForRefusal, account, accountAdvice, accountPick, rotationAccount, claudeAccountCount, notDispatchable, reviewerPick, sameProviderReview, pinnedExcludedAccount, overrideReasonRequired, billingRefusal, tierRefusal, envRepointRefusal, billingAdvice, capabilityRefusal, requiresWebRefusal, capabilityFitRebinds, headlessClaudeReviewRefusal };
+  return { route, target, fallback, origin, execution, decision, symbol, resolutionWalk, skillsForRefusal, account, accountAdvice, accountPick, rotationAccount, claudeAccountCount, claudePinOnlyCount, notDispatchable, reviewerPick, sameProviderReview, pinnedExcludedAccount, overrideReasonRequired, billingRefusal, tierRefusal, envRepointRefusal, billingAdvice, capabilityRefusal, requiresWebRefusal, capabilityFitRebinds, headlessClaudeReviewRefusal };
 }
 
 /** One shared dry-run summary for `heddle route` and the `plan_dispatch` MCP tool (identical fields). */
@@ -495,7 +510,7 @@ export function summarizePlan(plan: DispatchPlan): Record<string, unknown> {
       : plan.pinnedExcludedAccount
       ? { code: 'no-dispatchable-account', reason: plan.pinnedExcludedAccount.reason }
       : noDispatchableAccount
-      ? { code: 'no-dispatchable-account', reason: noDispatchableClaudeAccountReason(plan.claudeAccountCount) }
+      ? { code: 'no-dispatchable-account', reason: noDispatchableClaudeAccountReason(plan.claudeAccountCount, plan.claudePinOnlyCount) }
       : plan.headlessClaudeReviewRefusal
       ? { code: 'headless-claude-review-unreliable', reason: plan.headlessClaudeReviewRefusal }
       : plan.capabilityRefusal

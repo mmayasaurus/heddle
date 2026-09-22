@@ -568,8 +568,8 @@ export function adviseClaudeAccount(caps: ProviderCaps | undefined, accounts: Cl
   const known = accounts.map((a) => rows.find((r) => r.id === a.id) ?? { id: a.id, usedPct: null, stale: true });
   // HED-698: beside a native account, advice never recommends an env-repoint account (another model family
   // behind the harness). An env-repoint-only registry is advised on like any other (HED-531).
-  const hasNativeAccount = accounts.some((a) => a.envRepoint === undefined);
-  const excluded = new Set(accounts.filter((a) => (hasNativeAccount && a.envRepoint !== undefined) || a.loggedIn === false || isDispatchExcluded(caps, a.id)).map((a) => a.id));
+  const pinOnly = envRepointPinOnly(accounts);
+  const excluded = new Set(accounts.filter((a) => pinOnly(a) || a.loggedIn === false || isDispatchExcluded(caps, a.id)).map((a) => a.id));
   const fresh = known.filter((r): r is { id: string; usedPct: number; stale: boolean } => r.usedPct !== null && !excluded.has(r.id));
   const bestRow = fresh.sort((x, y) => x.usedPct - y.usedPct)[0];
   const best = bestRow ? { id: bestRow.id, usedPct: bestRow.usedPct, configDir: accounts.find((a) => a.id === bestRow.id)?.configDir ?? null } : null;
@@ -652,6 +652,18 @@ function fableWeeklyOf(caps: ProviderCaps | undefined, accountId: string): numbe
 export const fmtPct = (n: number): string => (Number.isInteger(n) ? n.toFixed(0) : n.toFixed(1));
 
 /** Fresh billing/login failures are not addressable; all other or stale signals fail open. */
+/**
+ * HED-698: beside a NATIVE Claude account, an env-repoint account (GLM, Kimi, …) is pin-only. It runs a
+ * DIFFERENT model family through the claude harness, so no automatic choice (the plan's pick, a
+ * fallback's re-pick, advice, the Fable estimate, fleet batch placement) may land on it when the native
+ * accounts are out; that must refuse. A registry of ONLY env-repoint accounts keeps HED-531's behaviour:
+ * that service IS the operator's Claude, so it stays pickable. The one rule every picker shares.
+ */
+export function envRepointPinOnly(accounts: readonly ClaudeAccount[]): (account: ClaudeAccount) => boolean {
+  const hasNative = accounts.some((a) => a.envRepoint === undefined);
+  return (account) => hasNative && account.envRepoint !== undefined;
+}
+
 export function isDispatchExcluded(caps: ProviderCaps | undefined, id: string, nowMs = Date.now()): boolean {
   const signal = caps?.accounts.find((row) => row.id === id)?.dispatch;
   if (!signal || (signal.reason !== 'billing' && signal.reason !== 'logged-out')) return false;
@@ -686,9 +698,9 @@ export function bestFableWeekly(
   }
   let best: { id: string; pct: number } | null = null;
   // HED-698: an unpinned Fable estimate never ranks an env-repoint account beside a native one.
-  const hasNativeAccount = accounts.some((a) => a.envRepoint === undefined);
+  const pinOnly = envRepointPinOnly(accounts);
   for (const a of accounts) {
-    if (a.loggedIn === false || isDispatchExcluded(caps, a.id) || (hasNativeAccount && a.envRepoint !== undefined)) continue;
+    if (a.loggedIn === false || isDispatchExcluded(caps, a.id) || pinOnly(a)) continue;
     const pct = fableWeeklyOf(caps, a.id);
     if (pct !== null && (best === null || pct < best.pct)) best = { id: a.id, pct };
   }
@@ -754,15 +766,12 @@ export function pickClaudeAccount(
   // whose credential was replaced would otherwise make the picker choose an account that 401s). And
   // (HED-261, when floors are supplied) a FLOORED account — 5h or 7d headroom below never_below_pct — is not
   // addressable either: never select/resume onto a near-exhausted account (the rollover-scare guard).
-  // HED-698: an env-repoint account (GLM, Kimi, …) runs a DIFFERENT model family through the claude
-  // harness. In a registry that also holds a NATIVE Claude account it is pin-only: no automatic pick
-  // (dispatch, capability-fit fallback, rotation, or the no-fresh-caps default below, which would
-  // otherwise prefer a configDir:null env-repoint row) may hand a Claude task to it when the native
-  // accounts are out; that must refuse. A registry of ONLY env-repoint accounts keeps HED-531's
-  // behaviour: that service IS the operator's Claude, so it stays pickable.
-  const hasNativeAccount = accounts.some((a) => a.envRepoint === undefined);
+  // HED-698 (envRepointPinOnly): no automatic pick here — the plan's, a capability-fit or class
+  // fallback's re-pick, or the no-fresh-caps default below, which would otherwise prefer a
+  // configDir:null env-repoint row — may hand a Claude task to a pin-only env-repoint account.
+  const pinOnly = envRepointPinOnly(accounts);
   const addressable = accounts.filter((a) =>
-    (!hasNativeAccount || a.envRepoint === undefined) && a.loggedIn !== false && !isDispatchExcluded(caps, a.id) && !(floorApplies && opts.floors && isFloored(usedOf(a.id), used7dOf(a.id), opts.floors)));
+    !pinOnly(a) && a.loggedIn !== false && !isDispatchExcluded(caps, a.id) && !(floorApplies && opts.floors && isFloored(usedOf(a.id), used7dOf(a.id), opts.floors)));
   // For a FABLE-model target, Fable-weekly headroom outranks 5h headroom (HED-76): the weekly
   // Fable share is the binding constraint, and only accounts with a KNOWN estimate compete on it
   // (unknown → fall through to the normal 5h ordering — unknown never decides).

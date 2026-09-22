@@ -87,13 +87,27 @@ An env-repoint `claude[]` account runs another vendor's model through the Claude
 harness's tools. Add one with `heddle accounts add --provider <service>`. The token lives in
 `~/.heddle/secrets.env` under the name in `authTokenRef`.
 
-- **Family (HED-697).** A dispatch pinned to the account runs as its `service` (and `model`), not as
-  `claude`. The HED-3 review guard, the family skill pack and the review row all use that identity. So
-  `adversarial-review` with `author_provider: claude` and `account_pin: <glm id>` is a genuine
-  cross-family review, scored `claude → glm`.
+- **Family (HED-697).** A dispatch bound to the account (by `account_pin`, or by HED-531's automatic
+  pick in an env-repoint-only registry) runs as its `service` and `model`, not as `claude`. These all
+  judge that identity:
+  - the HED-3 review guard, at plan time and again at spawn, so a fallback that re-binds the account is
+    re-checked;
+  - HED-519's headless opus/fable refusal;
+  - the review row.
+
+  So `adversarial-review` with `author_provider: claude`, `provider: claude` (any model, including the
+  pool's `opus`) and `account_pin: <glm id>` is a genuine cross-family review, scored `claude → glm`.
+  There is no family skill pack for these services, so the worker gets none (not the claude one either).
 - **Selection (HED-698).** In a registry that also has a native Claude account, an env-repoint account
-  is **pin-only**: pass `account_pin`. Automatic picks, rotation and the tier-presence check never land
-  on it, so an exhausted native pool refuses instead of silently running another family. A registry with
-  only env-repoint accounts keeps using them automatically (HED-531).
+  is **pin-only**: pass `account_pin`. None of these ever lands on it:
+  - the plan's automatic pick;
+  - a fallback's re-pick;
+  - account advice;
+  - fleet batch placement;
+  - the tier-presence check.
+
+  So an exhausted native pool refuses, and the refusal counts the pin-only accounts, instead of silently
+  running another family. A registry with only env-repoint accounts keeps using them automatically
+  (HED-531).
 - **Read-only reviewers** get Read/Grep/Glob only, with no shell or git (see `src/adapters/claude.ts`).
   Pass `diff_base` or embed the diff in the prompt.

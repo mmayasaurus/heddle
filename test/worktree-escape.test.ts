@@ -252,6 +252,26 @@ describe('worktree escape detection', () => {
     ]);
   });
 
+  it('excludes only untracked Verity runtime writes from the escape fingerprint, reporting any other .verity/ name (HED-699)', () => {
+    const { root } = linkedWorktree(tempDir);
+    const before = checkoutFingerprint(root)!;
+    const writeAt = (rel: string, body: string) => {
+      mkdirSync(dirname(join(root, rel)), { recursive: true });
+      writeFileSync(join(root, rel), body);
+    };
+    for (const rel of ['.verity/.conversation-buffer', '.verity/.logs/cli.log', '.verity/.cache/pending-1790036195-642b98f2.json',
+      '.verity/.baseline/96c7c2693edf9af1/files/src/x.ts']) {
+      writeAt(rel, 'verity runtime');
+    }
+    expect(escapedPaths(before, checkoutFingerprint(root))).toEqual([]);
+    for (const rel of ['.verity/.exfil', '.verity/.logs/payload.ts', '.verity/memory/evil.md']) writeAt(rel, 'escaped');
+    expect(escapedPaths(before, checkoutFingerprint(root))).toEqual([
+      '?? .verity/.exfil',
+      '?? .verity/.logs/payload.ts',
+      '?? .verity/memory/evil.md',
+    ]);
+  });
+
   it('reports a tracked rename into a runtime dir and a tracked edit under one, with the SPECIFIC record (HED-550 F5)', () => {
     const { root } = linkedWorktree(tempDir);
     const gc = (...a: string[]) => git(root, '-c', 'user.email=t@t', '-c', 'user.name=t', ...a);

@@ -207,6 +207,42 @@ describe('adversarial review helpers', () => {
   }, 90_000); // snapshot-heavy: ~10 snapshotWorktree calls, each several REAL git spawns; a loaded
   //            parallel-fork run can exceed the default 30s (HED-211). Generous ceiling, not a hang.
 
+  it('excludes only untracked Verity runtime writes; any other .verity/ name, and a tracked one, still flips the digest (HED-699)', () => {
+    const cwd = tempDir();
+    git(cwd, 'init', '-q');
+    mkdirSync(join(cwd, 'src'));
+    writeFileSync(join(cwd, 'src', 'x.ts'), 'export const x = 1;\n');
+    mkdirSync(join(cwd, '.verity'));
+    writeFileSync(join(cwd, '.verity', '.seeded'), 'tracked on purpose\n');
+    git(cwd, 'add', 'src/x.ts', '.verity/.seeded');
+    commit(cwd, 'init');
+    const writeAt = (rel: string, body: string) => {
+      mkdirSync(dirname(join(cwd, rel)), { recursive: true });
+      writeFileSync(join(cwd, rel), body);
+    };
+
+    // What Verity's hooks write inside a worker (ledger 2237) is not a reviewer write.
+    const baseline = snapshotWorktree(cwd);
+    for (const rel of ['.verity/.conversation-buffer', '.verity/.logs/cli.log', '.verity/.last-analysis.ce78350b6387',
+      '.verity/.task-context/352c013d-5d3e-459c-b5cb-dee8684240ee.jsonl', '.verity/.snapshot/src/x.ts']) {
+      writeAt(rel, 'verity runtime');
+    }
+    expect(sameSnapshot(baseline, snapshotWorktree(cwd))).toBe(true);
+
+    // A name Verity never writes, the knowledge graph and visible config all flip it (round-2 finding 4).
+    for (const rel of ['.verity/.exfil', '.verity/.logs/payload.ts', '.verity/memory/evil.md', '.verity/config.json']) {
+      const prev = snapshotWorktree(cwd);
+      writeAt(rel, 'reviewer write');
+      expect(sameSnapshot(prev, snapshotWorktree(cwd)), rel).toBe(false);
+      rmSync(join(cwd, rel));
+    }
+
+    // A TRACKED runtime-named file is project content: an edit is always hashed.
+    const beforeEdit = snapshotWorktree(cwd);
+    writeFileSync(join(cwd, '.verity', '.seeded'), 'edited\n');
+    expect(sameSnapshot(beforeEdit, snapshotWorktree(cwd))).toBe(false);
+  }, 90_000); // snapshot-heavy (HED-211): ~8 snapshotWorktree calls of several REAL git spawns each.
+
   it('still hashes a TRACKED file under a runtime dir, and excludes only untracked .serena/cache churn (HED-550)', () => {
     const cwd = tempDir();
     git(cwd, 'init', '-q');
