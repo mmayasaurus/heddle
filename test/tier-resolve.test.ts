@@ -177,3 +177,17 @@ describe('tier-symbol schema validation', () => {
       .toMatchObject({ provider: 'codex', model: 'gpt-5.6-terra' });
   });
 });
+
+// HED-698: an env-repoint row rides the claude harness but serves another family. It never proves a
+// NATIVE Claude registry alive; an env-repoint-only registry keeps HED-531 (its row is that Claude).
+describe('env-repoint rows and native provider presence (HED-698)', () => {
+  const glmRow: Account = { ...account('claude'), id: 'glm', credentialRef: 'claude:glm:/x/glm',
+    envRepoint: { baseUrl: 'https://glm.example.test/api/anthropic', authTokenRef: 'GLM_KEY', service: 'glm' } };
+  it('walks off claude when every NATIVE Claude account is logged out, even with a live GLM row', () => {
+    const accounts: Account[] = [{ ...account('claude'), loggedIn: false }, glmRow, account('codex')];
+    expect(resolve('orchestration', accounts).provider).not.toBe('claude');
+  });
+  it('treats an env-repoint-only Claude registry as Claude-present (HED-531)', () => {
+    expect(resolve('orchestration', [glmRow, account('codex')]).provider).toBe('claude');
+  });
+});

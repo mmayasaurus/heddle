@@ -17,6 +17,7 @@ import { WORKER_ENV } from '../identity.js';
 import { providerExecution, type Route, type RouteTarget } from '../routing.js';
 import type { WorkerAdapter, WorkerResult } from '../types.js';
 import { packsFor, requestedPacks } from './packs.js';
+import { effectiveModelIdentity, sameModelFamily } from '../model-family.js';
 import { baseRecord, refusalOutcome, refuseBilling, webRefusalReason } from './refusals.js';
 import { billingVerdict } from './billing.js';
 import { tierReadOnlyVerdict } from './tier-gate.js';
@@ -108,9 +109,24 @@ export async function runTarget(
   // Review classes: the class packs carry the find-only MANDATE — an explicit skills list may add
   // packs but can never drop them (same posture as the worker-role union). requestedPacks is the
   // single definition every dry-run/refusal path shares.
+  // HED-697: what the worker actually runs as. A claude target on an env-repoint account (GLM, Kimi, …)
+  // runs that service's model, so the family pack and the review row name the service, not the harness.
+  const runsAs = effectiveModelIdentity(target.provider, target.model,
+    target.provider === 'claude' ? ctx.claudeAccount?.account.envRepoint : undefined);
   const skills = route.bounds
     ? []
-    : packsFor(target.provider, requestedPacks(route.reviewerPool, target.skills, req.skills), req.cwd);
+    : packsFor(runsAs.provider, requestedPacks(route.reviewerPool, target.skills, req.skills), req.cwd);
+  // HED-3, authoritative at the spawn chokepoint: every path (primary, class fallback, capability-fit
+  // fallback) reaches here with the account it re-picked, so a review whose EFFECTIVE family equals the
+  // author's never runs, even when an earlier raw-route check saw a different provider (HED-697 r2).
+  if (ctx.review && route.reviewerPool && sameModelFamily(runsAs.provider, runsAs.model, ctx.review.authorProvider, ctx.review.authorModel)) {
+    return refusalOutcome(ctx, req, route.taskClass, target, skills, {
+      code: 'same-provider-review',
+      reason: `task class "${route.taskClass}" requires a reviewer from a DIFFERENT model family than the author `
+        + `(${ctx.review.authorProvider}); ${target.provider}/${target.model} runs as ${runsAs.provider}/${runsAs.model}, the author's own family.`,
+      instruction: 'Pin a different-family account, or name a reviewer route from another provider family.',
+    }, { extra: { usedFallback: fellBackFrom !== null }, fellBackFrom });
+  }
   // mcp is a REQUIREMENT, not best-effort: validateWorkerMcp (below) THROWS if the resolved provider
   // has no attachment path. HED-249 reverses HED-205's graceful-degrade — an mcp-carrying class may
   // only resolve to mcp-attachable providers (a routing.v0.yaml CI invariant enforces this for
@@ -278,7 +294,7 @@ export async function runTarget(
     if (ctx.review) {
       ctx.ledger.recordReview({
         dispatchId: ledgerId, authorProvider: ctx.review.authorProvider, authorModel: ctx.review.authorModel,
-        authorDispatchId: ctx.review.authorDispatchId, reviewerProvider: target.provider, reviewerModel: target.model,
+        authorDispatchId: ctx.review.authorDispatchId, reviewerProvider: runsAs.provider, reviewerModel: runsAs.model,
       });
     }
   } catch (err) {
@@ -618,7 +634,8 @@ export async function runTarget(
     ...(destroyedReport ? { destroyed: destroyedReport } : {}),
     ...(billingDegraded ? { billingDegraded } : {}),
     ...(boundedReceipt ? { boundedReceipt } : {}),
-    ...(ctx.review ? { review: { authorProvider: ctx.review.authorProvider, reviewerProvider: target.provider, reviewerModel: target.model, mandateOk, reviewerPick: ctx.review.reviewerPick } } : {}),
+    // HED-697: the outcome's review block names the SAME reviewer identity as the ledger review row.
+    ...(ctx.review ? { review: { authorProvider: ctx.review.authorProvider, reviewerProvider: runsAs.provider, reviewerModel: runsAs.model, mandateOk, reviewerPick: ctx.review.reviewerPick } } : {}),
     ...(assessment ? { assessment } : {}),
     ...(quarantine ? { quarantine } : {}),
   };

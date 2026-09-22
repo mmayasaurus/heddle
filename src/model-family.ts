@@ -33,3 +33,20 @@ export function sameModelFamily(
   const right = modelFamily(rightProvider, rightModel);
   return left !== undefined && right !== undefined && left === right;
 }
+
+/**
+ * HED-697: the provider/model a dispatch actually RUNS AS. A claude-harness route bound to an
+ * env-repoint account (GLM, Kimi, DeepSeek, …) sends the service's model through the Claude Code
+ * harness, so its family is the service's, never 'claude'. The HED-3 guard, the family skill pack
+ * and the review row judge this identity. Every other route is unchanged.
+ * The model half is the account's `envRepoint.model` when set. When it is omitted it is the route's
+ * alias (e.g. `sonnet`) — heddle's ledger convention everywhere (CLAUDE_MODEL_IDS, adapters/claude.ts):
+ * only the argv boundary translates the alias to a concrete Claude id, which the service then maps to
+ * one of its own models; that mapping is invisible to heddle, so set `envRepoint.model` to record it.
+ */
+export function effectiveModelIdentity(
+  provider: string, model: string, envRepoint?: { service: string; model?: string },
+): { provider: string; model: string } {
+  if (provider === 'claude' && envRepoint) return { provider: envRepoint.service, model: envRepoint.model ?? model };
+  return { provider, model };
+}

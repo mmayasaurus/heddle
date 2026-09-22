@@ -27,7 +27,9 @@ another registry path.
       },
       "envRepoint": {
         "baseUrl": "https://api.z.ai/api/anthropic",
-        "authTokenRef": "GLM_API_KEY"
+        "authTokenRef": "GLM_API_KEY",
+        "service": "glm",
+        "model": "glm-5.3"
       },
       "lastVerified": "2026-09-05T00:00:00Z",
       "notes": "GLM routing account",
@@ -57,9 +59,12 @@ are tolerated.
 - `overage` is optional and contains `posture`: `hard-stop`, `bounded-prepaid`, or `open-billing`.
   `spendLimit` and `creditsRemaining` are finite non-negative numbers required only for
   `bounded-prepaid`.
-- `envRepoint` is optional. Its `baseUrl` is a non-empty `http:` or `https:` URL and its
-  `authTokenRef` is a non-empty environment-variable name or keychain reference. Unknown fields
-  within `envRepoint` are tolerated and ignored by the loader.
+- `envRepoint` is optional. Its `baseUrl` is an `https:` URL, or `http:` only for a loopback host
+  (`localhost`, `127.0.0.1`, `::1`) — the loader refuses plaintext `http:` to a remote endpoint
+  (`src/accounts.ts`). Its
+  `authTokenRef` is a non-empty environment-variable name or keychain reference, and its `service`
+  (the env-repoint provider key, e.g. `glm`) is required. `model` is optional; when set, the worker
+  runs that model id. Unknown fields within `envRepoint` are tolerated and ignored by the loader.
 - `lastVerified`, `notes`, `orgId`, `accountUuid`, `preferUntil`, and `email` are optional strings.
   `notes` falls back to legacy `note`.
 - `loggedIn` is an optional boolean.
@@ -77,3 +82,40 @@ warning. This makes an absent configuration fail-soft while surfacing hand-edit 
 
 `credentialRef` and `envRepoint.authTokenRef` hold only a configuration-directory, environment-variable
 name, or keychain reference. They must never contain a token or other secret.
+
+## Env-repoint accounts (GLM, Kimi, …) on the Claude harness
+
+An env-repoint `claude[]` account runs another vendor's model through the Claude Code harness, with the
+harness's tools. Add one with `heddle accounts add --provider <service>`. The token lives in
+`~/.heddle/secrets.env` under the name in `authTokenRef`.
+
+- **Family (HED-697).** A dispatch bound to the account (by `account_pin`, or by HED-531's automatic
+  pick in an env-repoint-only registry) runs as its `service` and `model`, not as `claude`. Without a
+  `model`, the service receives the route's concrete Claude model id and maps it to one of its own
+  models, which heddle cannot see; the ledger then records the route alias (e.g. `glm/sonnet`). Set
+  `model` so the record names the model that runs. `plan_dispatch` shows this identity as `runs_as`
+  beside `would_run` (the route). Like `would_run`, it previews the PRIMARY: when the primary would
+  capability-rebind to its fallback, the fallback is named in `remaining_fallback` instead (the HED-275
+  preview boundary).
+  These all judge that identity:
+  - the HED-3 review guard, at plan time and again at spawn, so a fallback that re-binds the account is
+    re-checked;
+  - HED-519's headless opus/fable refusal;
+  - the review row.
+
+  So `adversarial-review` with `author_provider: claude`, `provider: claude` (any model, including the
+  pool's `opus`) and `account_pin: <glm id>` is a genuine cross-family review, scored `claude → glm`.
+  There is no family skill pack for these services, so the worker gets none (not the claude one either).
+- **Selection (HED-698).** In a registry that also has a native Claude account, an env-repoint account
+  is **pin-only**: pass `account_pin`. None of these ever lands on it:
+  - the plan's automatic pick;
+  - a fallback's re-pick;
+  - account advice;
+  - fleet batch placement;
+  - the tier-presence check.
+
+  So an exhausted native pool refuses, and the refusal counts the pin-only accounts, instead of silently
+  running another family. A registry with only env-repoint accounts keeps using them automatically
+  (HED-531).
+- **Read-only reviewers** get Read/Grep/Glob only, with no shell or git (see `src/adapters/claude.ts`).
+  Pass `diff_base` or embed the diff in the prompt.

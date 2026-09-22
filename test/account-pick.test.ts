@@ -422,3 +422,66 @@ describe('regression PR#176 — dispatch signals cover signal-only and all accou
     expect(pickClaudeAccount(readProviderCaps({ usageDir: dir, nowS }).claude, accounts, { pin: 'acct1' })?.account.id).toBe('acct1');
   });
 });
+
+// HED-698: an env-repoint account (GLM, Kimi, …) runs another model family through the claude harness.
+// With a NATIVE account registered it is pin-only; an env-repoint-only registry keeps HED-531.
+describe('pickClaudeAccount — env-repoint accounts (HED-698)', () => {
+  const glm: ClaudeAccount = { id: 'glm', configDir: '/x/glm', envRepoint: { baseUrl: 'https://glm.example.test/api/anthropic', authTokenRef: 'GLM_KEY', service: 'glm', model: 'glm-5.3' } };
+  const kimiNoDir: ClaudeAccount = { id: 'kimi', configDir: null, envRepoint: { baseUrl: 'https://kimi.example.test/anthropic', authTokenRef: 'KIMI_KEY', service: 'kimi' } };
+  const natives: ClaudeAccount[] = [{ id: 'acct2', configDir: '/x/.claude-acct2' }, { id: 'acct3', configDir: '/x/.claude-acct3' }];
+
+  it('never hands a Claude task to an env-repoint account when every native account is out — it refuses (null)', () => {
+    expect(pickClaudeAccount(undefined, [...natives.map((a) => ({ ...a, loggedIn: false })), glm])).toBeNull();
+  });
+
+  it('the no-fresh-caps default never prefers a configDir:null env-repoint row over a native account', () => {
+    expect(pickClaudeAccount(undefined, [...natives, kimiNoDir])?.account.id).toBe('acct2');
+  });
+
+  it('still ranks only native accounts when an env-repoint account carries a fresh reading', () => {
+    expect(pickClaudeAccount(claudeCaps([{ id: 'glm', used: 1 }, { id: 'acct2', used: 60 }]), [...natives, glm])?.account.id).toBe('acct2');
+  });
+
+  it('binds an env-repoint account when it is pinned in a mixed registry', () => {
+    expect(pickClaudeAccount(undefined, [...natives, glm], { pin: 'glm' })).toMatchObject({ account: { id: 'glm' }, reason: 'account:glm pinned', env: { CLAUDE_CONFIG_DIR: '/x/glm' } });
+  });
+
+  it('keeps HED-531 for an env-repoint-only registry: that service is the operator\'s Claude', () => {
+    expect(pickClaudeAccount(undefined, [kimiNoDir])?.account.id).toBe('kimi');
+  });
+
+  it('advice never recommends an env-repoint account beside a native one, but still advises an env-repoint-only registry', () => {
+    expect(adviseClaudeAccount(claudeCaps([{ id: 'glm', used: 1 }, { id: 'acct2', used: 60 }]), [...natives, glm], {}).best?.id).toBe('acct2');
+    expect(adviseClaudeAccount(claudeCaps([{ id: 'glm', used: 1 }]), [glm], {}).best?.id).toBe('glm');
+  });
+
+  it('the unpinned Fable-weekly estimate never ranks an env-repoint account beside a native one', () => {
+    const base = claudeCaps([{ id: 'glm', used: 1 }, { id: 'acct2', used: 20 }]);
+    const caps: ProviderCaps = { ...base, accounts: base.accounts.map((row) => ({ ...row, fableWeeklyEstimatePct: row.id === 'glm' ? 1 : 30 })) };
+    expect(bestFableWeekly(caps, [...natives, glm])).toEqual({ id: 'acct2', pct: 30 });
+  });
+
+  it('fleet batch placement never places a seat on an env-repoint account beside a native one', () => {
+    const floors: ClaudeFloors = { neverBelowPct: 3, residencyCapBelowPct: 10, residencyMax: 2 };
+    // GLM has by far the most headroom; placement must still skip it.
+    const { assignments, accounts } = pickClaudeAccountsBatch(claudeCaps([{ id: 'glm', used: 1 }, { id: 'acct2', used: 40 }, { id: 'acct3', used: 50 }]), [...natives, glm], floors, ['A', 'B', 'C']);
+    expect(accounts.find((row) => row.account === 'glm')).toMatchObject({ envRepointPinOnly: true, excluded: true });
+    const placed = Object.values(assignments).filter((a): a is Extract<typeof a, { account: string }> => 'account' in a);
+    expect(placed.length).toBeGreaterThan(0);
+    for (const assignment of placed) expect(assignment.account).not.toBe('glm');
+  });
+
+  it('a batch refusal counts pin-only env-repoint rows apart from logged-out ones (round-2 finding 7)', () => {
+    const floors: ClaudeFloors = { neverBelowPct: 3, residencyCapBelowPct: 10, residencyMax: 2 };
+    const { assignments } = pickClaudeAccountsBatch(claudeCaps([{ id: 'glm', used: 1 }]), [...natives.map((a) => ({ ...a, loggedIn: false })), glm], floors, ['A']);
+    expect(assignments.A).toMatchObject({ refused: true });
+    const { reason } = assignments.A as { reason: string };
+    expect(reason).toContain('2 logged-out');
+    expect(reason).toContain('1 env-repoint pin-only');
+  });
+
+  it('batch placement still uses an env-repoint-only registry (HED-531)', () => {
+    const floors: ClaudeFloors = { neverBelowPct: 3, residencyCapBelowPct: 10, residencyMax: 2 };
+    expect(pickClaudeAccountsBatch(claudeCaps([{ id: 'glm', used: 1 }]), [glm], floors, ['A']).assignments.A).toMatchObject({ account: 'glm' });
+  });
+});

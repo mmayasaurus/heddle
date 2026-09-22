@@ -1,4 +1,4 @@
-import { isDispatchExcluded, type ClaudeAccount } from './capaware.js';
+import { envRepointPinOnly, isDispatchExcluded, type ClaudeAccount } from './capaware.js';
 import { bindingMeter, headroomPct, isFloored, type ClaudeFloors } from './floors.js';
 import { LIMITS_JSON_MAX_AGE_S, type ProviderCaps } from './usage.js';
 
@@ -24,6 +24,8 @@ export interface ClaudeAccountRow {
   loggedOut: boolean;
   dispatchExcluded: boolean;
   overage: boolean;
+  /** HED-698: an env-repoint account (GLM, Kimi, …) in a registry that also holds a native account is pin-only. */
+  envRepointPinOnly: boolean;
   excluded: boolean;
   /** Resident count remains the HED-261 low-headroom-cap input. */
   residents: number;
@@ -60,6 +62,9 @@ function valuesFor(caps: ProviderCaps, id: string): { usedPct5h: number | null; 
 export function claudeAccountRows(
   caps: ProviderCaps, accounts: ClaudeAccount[], floors: ClaudeFloors, residentsByAccount: ReadonlyMap<string, ResidentLoad> = new Map(),
 ): ClaudeAccountRow[] {
+  // HED-698: fleet placement is an automatic pick, so beside a native account an env-repoint row is never
+  // a placement target (a seat launched on it would run another family, or a native CLI with no login).
+  const pinOnly = envRepointPinOnly(accounts);
   return accounts.map((account) => {
     const { usedPct5h, usedPct7d } = valuesFor(caps, account.id);
     const meter = bindingMeter(usedPct5h, usedPct7d);
@@ -70,6 +75,7 @@ export function claudeAccountRows(
     // A caps-row overage flag is authoritative only while the row is FRESH; a stale poll's flag is
     // obsolete and must fall through to the durable registry value, never override it (codeant HED-446).
     const overage = ((capsAccount && !capsAccount.stale ? capsAccount.overageEnabled : undefined) ?? account.overageEnabled ?? false) === true;
+    const pinOnlyRow = pinOnly(account);
     return {
       account: account.id,
       usedPct5h,
@@ -80,7 +86,8 @@ export function claudeAccountRows(
       loggedOut,
       dispatchExcluded,
       overage,
-      excluded: floored || loggedOut || dispatchExcluded || overage,
+      envRepointPinOnly: pinOnlyRow,
+      excluded: floored || loggedOut || dispatchExcluded || overage || pinOnlyRow,
       residents: residentsByAccount.get(account.id)?.count ?? 0,
       residentWeight: residentsByAccount.get(account.id)?.weight ?? 0,
     };
@@ -128,9 +135,10 @@ export function pickClaudeAccountsBatch(
         };
         continue;
       }
-      let floored = 0, capped = 0, loggedOut = 0, dispatchExcluded = 0, overage = 0, unmetered = 0;
+      let floored = 0, capped = 0, loggedOut = 0, dispatchExcluded = 0, overage = 0, unmetered = 0, pinOnly = 0;
       for (const row of rows) {
-        if (row.loggedOut) loggedOut++;
+        if (row.envRepointPinOnly) pinOnly++;
+        else if (row.loggedOut) loggedOut++;
         else if (row.dispatchExcluded) dispatchExcluded++;
         else if (row.overage) overage++;
         else if (row.floored) floored++;
@@ -139,7 +147,7 @@ export function pickClaudeAccountsBatch(
       }
       assignments[agent] = {
         refused: true,
-        reason: `no eligible Claude account: ${floored} floored, ${capped} at residency cap, ${loggedOut} logged-out, ${dispatchExcluded} dispatch-excluded, ${overage} overage, ${unmetered} unmetered`,
+        reason: `no eligible Claude account: ${floored} floored, ${capped} at residency cap, ${loggedOut} logged-out, ${dispatchExcluded} dispatch-excluded, ${overage} overage, ${unmetered} unmetered, ${pinOnly} env-repoint pin-only`,
       };
       continue;
     }
