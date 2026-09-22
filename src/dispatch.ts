@@ -17,6 +17,7 @@ import { planDispatch, resolveRotationAccount, hasNoDispatchableClaudeAccount, n
 import { runTarget } from './dispatcher/run.js';
 import { boundedPreflight } from './bounded-dispatch.js';
 import { checkoutFingerprint, fallbackBarrier, autoWipCommit } from './worktree.js';
+import { redactSecrets } from './redact.js';
 import { escapeControlChars } from './control-escape.js';
 import type { AdapterFactory, DispatchContext, DispatchRequest, DispatchOutcome } from './dispatcher/types.js';
 
@@ -283,6 +284,11 @@ export async function dispatch(
   const dirtBarrier = (routeTarget: RouteTarget, failedLeg: DispatchOutcome): DispatchOutcome | null => {
     const barrier = fallbackBarrier(req.cwd, preFp);
     if (!barrier.blocked) return null;
+    // HED-657: barrier.dirt is escapedPaths() porcelain (worker-influenced filenames) that flows into
+    // the refusal reason + the ledger. Scrub credential SHAPES only (shapes-only — the same treatment the
+    // escape/destroyed warning sinks in dispatcher/run.ts get, HED-651) so a credential-shaped filename
+    // cannot leak here, while ordinary filenames survive so the refusal stays actionable.
+    const safeDirt = (barrier.dirt ?? []).map((p) => redactSecrets(p, { shapesOnly: true })).join(', ');
     if (req.fallbackWipCommit) {
       const result = autoWipCommit(req.cwd, preFp, checkoutFingerprint(req.cwd));
       if (result.committed) {
@@ -291,7 +297,7 @@ export async function dispatch(
       }
       const refusal = {
         code: 'fallback-blocked-dirty-tree' as const,
-        reason: `failed leg ${failedLeg.provider}/${failedLeg.model} (dispatch #${failedLeg.ledgerId}) left checkout dirt: ${(barrier.dirt ?? []).join(', ')}; auto-WIP could not isolate the leg's dirt (${result.reason})`,
+        reason: `failed leg ${failedLeg.provider}/${failedLeg.model} (dispatch #${failedLeg.ledgerId}) left checkout dirt: ${safeDirt}; auto-WIP could not isolate the leg's dirt (${result.reason})`,
         instruction: dirtyTreeInstruction(req.cwd),
       };
       return refusalOutcome(ctx, req, route.taskClass, routeTarget, skillsForRefusal, refusal, {
@@ -305,7 +311,7 @@ export async function dispatch(
     }
     const refusal = {
       code: 'fallback-blocked-dirty-tree' as const,
-      reason: `failed leg ${failedLeg.provider}/${failedLeg.model} (dispatch #${failedLeg.ledgerId}) left checkout dirt: ${(barrier.dirt ?? []).join(', ')}`,
+      reason: `failed leg ${failedLeg.provider}/${failedLeg.model} (dispatch #${failedLeg.ledgerId}) left checkout dirt: ${safeDirt}`,
       instruction: dirtyTreeInstruction(req.cwd),
     };
     return refusalOutcome(ctx, req, route.taskClass, routeTarget, skillsForRefusal, refusal, {

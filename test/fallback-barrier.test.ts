@@ -191,6 +191,23 @@ describe('fallback commit barrier', () => {
     } finally { restore(); }
   });
 
+  it('scrubs credential-shaped dirty filenames from the refuse-only reason', async () => {
+    const root = gitRepo(tempDir); const restore = installRouting(tempDir);
+    const secret = 'a'.repeat(32) + '.' + 'b'.repeat(16);
+    const credentialPath = `backup_${secret}`;
+    const harness = adapterHarness({
+      codex: () => { writeFileSync(join(root, credentialPath), 'dirty\n'); return failure(); },
+      cursor: success,
+    });
+    try {
+      const outcome = await dispatch(request(root), tempLedger(), harness.factory);
+      expect(outcome.refusal?.code).toBe('fallback-blocked-dirty-tree');
+      expect(outcome.refusal?.reason).toContain('[redacted]');
+      expect(outcome.refusal?.reason).not.toContain(secret);
+      expect(harness.calls.map((call) => call.provider)).toEqual(['codex']);
+    } finally { restore(); }
+  });
+
   it('runs the fallback when the primary fails without changing the checkout', async () => {
     const root = gitRepo(tempDir); const restore = installRouting(tempDir);
     const harness = adapterHarness({ codex: () => failure(), cursor: success });
