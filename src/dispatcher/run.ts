@@ -623,7 +623,8 @@ export async function runTarget(
     ...(destroyedReport ? { destroyed: destroyedReport } : {}),
     ...(billingDegraded ? { billingDegraded } : {}),
     ...(boundedReceipt ? { boundedReceipt } : {}),
-    ...(ctx.review ? { review: { authorProvider: ctx.review.authorProvider, reviewerProvider: target.provider, reviewerModel: target.model, mandateOk, reviewerPick: ctx.review.reviewerPick } } : {}),
+    // HED-697: the outcome's review block names the SAME reviewer identity as the ledger review row.
+    ...(ctx.review ? { review: { authorProvider: ctx.review.authorProvider, reviewerProvider: runsAs.provider, reviewerModel: runsAs.model, mandateOk, reviewerPick: ctx.review.reviewerPick } } : {}),
     ...(assessment ? { assessment } : {}),
     ...(quarantine ? { quarantine } : {}),
   };

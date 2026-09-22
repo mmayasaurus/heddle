@@ -62,6 +62,27 @@ describe('adversarial review on a pinned env-repoint account (HED-697)', () => {
     expect(outcome.skills).not.toContain('family-claude');
   });
 
+  it('an env-repoint-only registry (HED-531 auto-pick) is judged by the account it binds, in plan AND run', async () => {
+    const dispatch = await loadDispatch();
+    const fake = fakeAdapter(undefined, { readAgents: false }); const ledger = tempLedger();
+    // No pin: HED-531 auto-picks the only (GLM) account. A Claude-authored review runs, scored claude → glm.
+    const ran = await dispatch({ ...request('glm'), accountPin: undefined, accounts: [glm] }, ledger, () => fake.adapter);
+    expect(ran.refusal).toBeUndefined();
+    expect(ran.review).toMatchObject({ reviewerProvider: 'glm', reviewerModel: 'glm-5.3' });
+    expect(ledger.getReview(ran.ledgerId)).toMatchObject({ reviewer_provider: 'glm' });
+    // …and a GLM-authored review on the same registry is the author's own family: refused, never run.
+    const refused = await dispatch({ ...request('glm'), accountPin: undefined, accounts: [glm], authorProvider: 'glm' }, ledger, () => fake.adapter);
+    expect(refused.refusal?.code).toBe('same-provider-review');
+    expect(fake.calls).toHaveLength(1);
+  });
+
+  it('an in-session dispatch cannot borrow an env-repoint pin to pass the family guard (it runs on the orchestrator login)', async () => {
+    await loadDispatch();
+    const { planDispatch } = await import('../src/dispatcher/plan.js');
+    const plan = planDispatch({ ...request('glm'), inSession: true });
+    expect(plan.sameProviderReview).toContain('DIFFERENT model family');
+  });
+
   it('still refuses the same review pinned to a NATIVE Claude account (the author family)', async () => {
     const dispatch = await loadDispatch();
     const fake = fakeAdapter(undefined, { readAgents: false }); const ledger = tempLedger();

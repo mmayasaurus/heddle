@@ -450,7 +450,24 @@ describe('pickClaudeAccount — env-repoint accounts (HED-698)', () => {
     expect(pickClaudeAccount(undefined, [kimiNoDir])?.account.id).toBe('kimi');
   });
 
-  it('advice never recommends an env-repoint account', () => {
+  it('advice never recommends an env-repoint account beside a native one, but still advises an env-repoint-only registry', () => {
     expect(adviseClaudeAccount(claudeCaps([{ id: 'glm', used: 1 }, { id: 'acct2', used: 60 }]), [...natives, glm], {}).best?.id).toBe('acct2');
+    expect(adviseClaudeAccount(claudeCaps([{ id: 'glm', used: 1 }]), [glm], {}).best?.id).toBe('glm');
+  });
+
+  it('the unpinned Fable-weekly estimate never ranks an env-repoint account beside a native one', () => {
+    const base = claudeCaps([{ id: 'glm', used: 1 }, { id: 'acct2', used: 20 }]);
+    const caps: ProviderCaps = { ...base, accounts: base.accounts.map((row) => ({ ...row, fableWeeklyEstimatePct: row.id === 'glm' ? 1 : 30 })) };
+    expect(bestFableWeekly(caps, [...natives, glm])).toEqual({ id: 'acct2', pct: 30 });
+  });
+
+  it('fleet batch placement never places a seat on an env-repoint account beside a native one', () => {
+    const floors: ClaudeFloors = { neverBelowPct: 3, residencyCapBelowPct: 10, residencyMax: 2 };
+    // GLM has by far the most headroom; placement must still skip it.
+    const { assignments, accounts } = pickClaudeAccountsBatch(claudeCaps([{ id: 'glm', used: 1 }, { id: 'acct2', used: 40 }, { id: 'acct3', used: 50 }]), [...natives, glm], floors, ['A', 'B', 'C']);
+    expect(accounts.find((row) => row.account === 'glm')).toMatchObject({ envRepointPinOnly: true, excluded: true });
+    const placed = Object.values(assignments).filter((a): a is Extract<typeof a, { account: string }> => 'account' in a);
+    expect(placed.length).toBeGreaterThan(0);
+    for (const assignment of placed) expect(assignment.account).not.toBe('glm');
   });
 });

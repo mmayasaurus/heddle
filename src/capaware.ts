@@ -566,8 +566,10 @@ export function adviseClaudeAccount(caps: ProviderCaps | undefined, accounts: Cl
   const usable = caps !== undefined && !caps.stale && caps.source !== 'none';
   const rows = (usable ? caps.accounts : []).map((a) => ({ id: a.id, usedPct: a.stale ? null : a.fiveHour.usedPercentage, stale: a.stale }));
   const known = accounts.map((a) => rows.find((r) => r.id === a.id) ?? { id: a.id, usedPct: null, stale: true });
-  // HED-698: advice never recommends an env-repoint account (a different model family behind the harness).
-  const excluded = new Set(accounts.filter((a) => a.envRepoint !== undefined || a.loggedIn === false || isDispatchExcluded(caps, a.id)).map((a) => a.id));
+  // HED-698: beside a native account, advice never recommends an env-repoint account (another model family
+  // behind the harness). An env-repoint-only registry is advised on like any other (HED-531).
+  const hasNativeAccount = accounts.some((a) => a.envRepoint === undefined);
+  const excluded = new Set(accounts.filter((a) => (hasNativeAccount && a.envRepoint !== undefined) || a.loggedIn === false || isDispatchExcluded(caps, a.id)).map((a) => a.id));
   const fresh = known.filter((r): r is { id: string; usedPct: number; stale: boolean } => r.usedPct !== null && !excluded.has(r.id));
   const bestRow = fresh.sort((x, y) => x.usedPct - y.usedPct)[0];
   const best = bestRow ? { id: bestRow.id, usedPct: bestRow.usedPct, configDir: accounts.find((a) => a.id === bestRow.id)?.configDir ?? null } : null;
@@ -683,8 +685,10 @@ export function bestFableWeekly(
     }
   }
   let best: { id: string; pct: number } | null = null;
+  // HED-698: an unpinned Fable estimate never ranks an env-repoint account beside a native one.
+  const hasNativeAccount = accounts.some((a) => a.envRepoint === undefined);
   for (const a of accounts) {
-    if (a.loggedIn === false || isDispatchExcluded(caps, a.id)) continue;
+    if (a.loggedIn === false || isDispatchExcluded(caps, a.id) || (hasNativeAccount && a.envRepoint !== undefined)) continue;
     const pct = fableWeeklyOf(caps, a.id);
     if (pct !== null && (best === null || pct < best.pct)) best = { id: a.id, pct };
   }

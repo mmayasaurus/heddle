@@ -290,14 +290,6 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
   target = decision.target;
   fallback = decision.fallback;
   if (reviewerPick) decision.routeReason = `${decision.routeReason}; reviewer ${reviewerPick.reason}`;
-  // HED-697: a claude route PINNED to an env-repoint account (GLM, Kimi, …) runs that service's model
-  // through the Claude Code harness, so the guard below, the family pack and the review row judge the
-  // service's family, not the harness name. HED-698 keeps env-repoint accounts out of every automatic
-  // pick, so a pin is the only way a claude route lands on one.
-  const pinnedEnvRepoint = target.provider === 'claude' && req.accountPin
-    ? claudeAccounts().find((a) => a.id === req.accountPin)?.envRepoint
-    : undefined;
-  const runsAs = effectiveModelIdentity(target.provider, target.model, pinnedEnvRepoint);
   // HED-3 invariant, checked on the EFFECTIVE target (after explicit route / pool pick / cap-aware
   // route-away): a review class never runs on the author's family. author_provider is REQUIRED for
   // review classes — an orchestrator reviewing its own edits passes 'claude'.
@@ -321,12 +313,6 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
         `because OpenCode fronts multiple model families.`,
       );
     }
-    if (sameModelFamily(runsAs.provider, runsAs.model, author, req.authorModel)) {
-      const runsAsNote = runsAs.provider === target.provider ? '' : ` (runs as ${runsAs.provider}/${runsAs.model})`;
-      sameProviderReview = `task class "${route.taskClass}" requires a reviewer from a DIFFERENT model family than the ` +
-        `author (${author}); the effective route ${target.provider}/${target.model}${runsAsNote} is the author's own family` +
-        (origin === 'explicit' ? ' (named explicitly)' : decision.routedAwayForCap ? ' (cap-aware route-away landed there)' : '') + '.';
-    }
   }
 
   // Claude runs headless by default (HED-78); `inSession` keeps the shared-cache subagent protocol.
@@ -337,12 +323,6 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
   // gates run, so the dry run must NOT surface a runTarget-only refusal (billing, capability, web) for
   // it — that would advertise a refusal the (spawn-less) run never makes. Shared by all three below.
   const reachesRunTarget = execution !== 'in-session-subagent';
-  // Same list the worker would actually get, family pack included — a refusal or dry run that
-  // advertises a different set than runTarget materializes is a lie the operator acts on (PR #34).
-  const skillsForRefusal = route.bounds
-    ? []
-    : packsFor(runsAs.provider, requestedPacks(route.reviewerPool, target.skills, req.skills), req.cwd);
-
   // Account (HED-68/78): codex → the CODEX_HOME the caller selected; claude → the registry account
   // with the most 5h headroom (headless worker) — or advice only when the caller wants in-session.
   let account: string | null = null;
@@ -376,6 +356,27 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
       account = accountAdvice.best?.id ?? null;
     }
   }
+  // HED-697: what the worker RUNS AS, from the account this plan binds. It is the same account runTarget
+  // receives as ctx.claudeAccount, so the dry run and the real run agree: a pin, or an env-repoint-only
+  // registry's automatic pick (HED-531). An env-repoint account (GLM, Kimi, …) runs the service's model
+  // through the Claude Code harness, so the HED-3 guard, the family pack and the review row judge the
+  // service's family. In-session dispatches bind nothing (the orchestrator's own login), so they keep
+  // the route identity; a pin cannot vouch for a family that never runs.
+  const runsAs = effectiveModelIdentity(target.provider, target.model,
+    target.provider === 'claude' ? accountPick?.account.envRepoint : undefined);
+  // HED-3 invariant, checked on the EFFECTIVE target AND the account it binds (validation of
+  // author_provider/author_model happened above).
+  if (route.reviewerPool && !notDispatchable && author && sameModelFamily(runsAs.provider, runsAs.model, author, req.authorModel)) {
+    const runsAsNote = runsAs.provider === target.provider ? '' : ` (runs as ${runsAs.provider}/${runsAs.model})`;
+    sameProviderReview = `task class "${route.taskClass}" requires a reviewer from a DIFFERENT model family than the ` +
+      `author (${author}); the effective route ${target.provider}/${target.model}${runsAsNote} is the author's own family` +
+      (origin === 'explicit' ? ' (named explicitly)' : decision.routedAwayForCap ? ' (cap-aware route-away landed there)' : '') + '.';
+  }
+  // Same list the worker would actually get, family pack included — a refusal or dry run that
+  // advertises a different set than runTarget materializes is a lie the operator acts on (PR #34).
+  const skillsForRefusal = route.bounds
+    ? []
+    : packsFor(runsAs.provider, requestedPacks(route.reviewerPool, target.skills, req.skills), req.cwd);
   // Preview only (the runTarget gate is authoritative). Keyed on the plan's bound `account`; the
   // registry read + corrupt-file guard live inside billingVerdict. `billingRefusal` is gated on
   // reachesRunTarget so an in-session preview never advertises a billing refusal the run never makes.
