@@ -59,7 +59,9 @@ are tolerated.
 - `overage` is optional and contains `posture`: `hard-stop`, `bounded-prepaid`, or `open-billing`.
   `spendLimit` and `creditsRemaining` are finite non-negative numbers required only for
   `bounded-prepaid`.
-- `envRepoint` is optional. Its `baseUrl` is a non-empty `http:` or `https:` URL, its
+- `envRepoint` is optional. Its `baseUrl` is an `https:` URL, or `http:` only for a loopback host
+  (`localhost`, `127.0.0.1`, `::1`) — the loader refuses plaintext `http:` to a remote endpoint
+  (`src/accounts.ts`). Its
   `authTokenRef` is a non-empty environment-variable name or keychain reference, and its `service`
   (the env-repoint provider key, e.g. `glm`) is required. `model` is optional; when set, the worker
   runs that model id. Unknown fields within `envRepoint` are tolerated and ignored by the loader.
@@ -91,7 +93,10 @@ harness's tools. Add one with `heddle accounts add --provider <service>`. The to
   pick in an env-repoint-only registry) runs as its `service` and `model`, not as `claude`. Without a
   `model`, the service receives the route's concrete Claude model id and maps it to one of its own
   models, which heddle cannot see; the ledger then records the route alias (e.g. `glm/sonnet`). Set
-  `model` so the record names the model that runs. `plan_dispatch` shows this identity as `runs_as`.
+  `model` so the record names the model that runs. `plan_dispatch` shows this identity as `runs_as`
+  beside `would_run` (the route). Like `would_run`, it previews the PRIMARY: when the primary would
+  capability-rebind to its fallback, the fallback is named in `remaining_fallback` instead (the HED-275
+  preview boundary).
   These all judge that identity:
   - the HED-3 review guard, at plan time and again at spawn, so a fallback that re-binds the account is
     re-checked;

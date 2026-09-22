@@ -85,6 +85,15 @@ describe('adversarial review on a pinned env-repoint account (HED-697)', () => {
     expect(summarizePlan(planDispatch(request('acct2')))).toMatchObject({ would_run: null, runs_as: null });
   });
 
+  it('runs_as keeps would_run\'s HED-275 preview boundary: a capability-fit rebind previews the PRIMARY, the fallback in remaining_fallback', async () => {
+    await loadDispatch();
+    const { planDispatch, summarizePlan } = await import('../src/dispatcher/plan.js');
+    // claude cannot enforce `net`; research-summarize's codex fallback can — the run rebinds to it.
+    const plan = planDispatch({ taskClass: 'research-summarize', capabilities: ['net'], accounts: [native], caps: { claude: caps }, prompt: 'x', cwd: tempDir(), identity: IDENTITIES.unbound });
+    expect(plan.capabilityFitRebinds).toBe(true);
+    expect(summarizePlan(plan)).toMatchObject({ would_run: 'claude/haiku', runs_as: 'claude/haiku', remaining_fallback: 'codex/gpt-5.6-luna' });
+  });
+
   it('an in-session dispatch cannot borrow an env-repoint pin to pass the family guard (it runs on the orchestrator login)', async () => {
     await loadDispatch();
     const { planDispatch } = await import('../src/dispatcher/plan.js');
