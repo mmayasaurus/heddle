@@ -49,7 +49,10 @@ const TOOL_RUNTIME_PREFIXES = ['.memdb/', '.memtrace/', '.serena/cache/'] as con
  * - `.task-context/<session>.jsonl`, `.cache/pending-<epoch>-<hex>.json`, and the debug logs
  *   `.logs/{cli,stderr}.log` (rotated to `.1`);
  * - `.snapshot/**` and `.baseline/**`, Verity's MIRROR copies of repo files, whose names are arbitrary
- *   repo-relative paths by design.
+ *   repo-relative paths by design. Known, bounded blind spot of the same class as the three daemon dirs
+ *   above (operator-gated, HED-550): an untracked write inside these two Verity-owned dirs is
+ *   indistinguishable from Verity's own mirroring by path, so it is excluded too. It cannot enter a merge
+ *   (untracked) or touch source.
  * `.verity/memory/**` (the knowledge graph), `config.json`, `standard.yaml`, `credentials` and any other
  * name stay visible to both guards. Untracked-only, and operator-gated like the list above (HED-550).
  */
