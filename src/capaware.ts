@@ -566,7 +566,8 @@ export function adviseClaudeAccount(caps: ProviderCaps | undefined, accounts: Cl
   const usable = caps !== undefined && !caps.stale && caps.source !== 'none';
   const rows = (usable ? caps.accounts : []).map((a) => ({ id: a.id, usedPct: a.stale ? null : a.fiveHour.usedPercentage, stale: a.stale }));
   const known = accounts.map((a) => rows.find((r) => r.id === a.id) ?? { id: a.id, usedPct: null, stale: true });
-  const excluded = new Set(accounts.filter((a) => a.loggedIn === false || isDispatchExcluded(caps, a.id)).map((a) => a.id));
+  // HED-698: advice never recommends an env-repoint account (a different model family behind the harness).
+  const excluded = new Set(accounts.filter((a) => a.envRepoint !== undefined || a.loggedIn === false || isDispatchExcluded(caps, a.id)).map((a) => a.id));
   const fresh = known.filter((r): r is { id: string; usedPct: number; stale: boolean } => r.usedPct !== null && !excluded.has(r.id));
   const bestRow = fresh.sort((x, y) => x.usedPct - y.usedPct)[0];
   const best = bestRow ? { id: bestRow.id, usedPct: bestRow.usedPct, configDir: accounts.find((a) => a.id === bestRow.id)?.configDir ?? null } : null;
@@ -749,8 +750,15 @@ export function pickClaudeAccount(
   // whose credential was replaced would otherwise make the picker choose an account that 401s). And
   // (HED-261, when floors are supplied) a FLOORED account — 5h or 7d headroom below never_below_pct — is not
   // addressable either: never select/resume onto a near-exhausted account (the rollover-scare guard).
+  // HED-698: an env-repoint account (GLM, Kimi, …) runs a DIFFERENT model family through the claude
+  // harness. In a registry that also holds a NATIVE Claude account it is pin-only: no automatic pick
+  // (dispatch, capability-fit fallback, rotation, or the no-fresh-caps default below, which would
+  // otherwise prefer a configDir:null env-repoint row) may hand a Claude task to it when the native
+  // accounts are out; that must refuse. A registry of ONLY env-repoint accounts keeps HED-531's
+  // behaviour: that service IS the operator's Claude, so it stays pickable.
+  const hasNativeAccount = accounts.some((a) => a.envRepoint === undefined);
   const addressable = accounts.filter((a) =>
-    a.loggedIn !== false && !isDispatchExcluded(caps, a.id) && !(floorApplies && opts.floors && isFloored(usedOf(a.id), used7dOf(a.id), opts.floors)));
+    (!hasNativeAccount || a.envRepoint === undefined) && a.loggedIn !== false && !isDispatchExcluded(caps, a.id) && !(floorApplies && opts.floors && isFloored(usedOf(a.id), used7dOf(a.id), opts.floors)));
   // For a FABLE-model target, Fable-weekly headroom outranks 5h headroom (HED-76): the weekly
   // Fable share is the binding constraint, and only accounts with a KNOWN estimate compete on it
   // (unknown → fall through to the normal 5h ordering — unknown never decides).

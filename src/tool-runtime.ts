@@ -33,7 +33,18 @@
  * review until it is ignored, which is strictly worse; the zone is three tool-owned dirs, a write
  * there cannot enter a merge (untracked) or touch source, and destroyed daemon state is re-derivable.
  */
-const TOOL_RUNTIME_PREFIXES = ['.memdb/', '.memtrace/', '.serena/cache/'] as const;
+const TOOL_RUNTIME_PREFIXES = ['.memdb/', '.memtrace/', '.serena/cache/', '.verity/.logs/'] as const;
+
+/**
+ * HED-699: Verity's hook runtime state. Its hooks run inside every headless Claude worker (the consumer
+ * repo's `.claude/settings.json`) and rewrite hidden files directly under `.verity/`
+ * (`.conversation-buffer`, `.last-analysis.<id>`, `.iteration-count`, …) plus `.verity/.logs/`, so a
+ * read-only reviewer with NO write tools was quarantined on every run in a Verity repo (ledger 2237).
+ * Same narrowness as `.serena/cache/`: only HIDDEN files directly under `.verity/` and `.verity/.logs/`
+ * are churn. `.verity/memory/**` (the knowledge graph), `.verity/config.json` and anything nested
+ * deeper stay visible to both guards. Operator-gated, like the list above (HED-550).
+ */
+const VERITY_RUNTIME_FILE = /^\.verity\/\.[^/]+$/;
 
 export const isToolRuntimePath = (rel: string): boolean =>
-  TOOL_RUNTIME_PREFIXES.some((prefix) => rel.startsWith(prefix));
+  TOOL_RUNTIME_PREFIXES.some((prefix) => rel.startsWith(prefix)) || VERITY_RUNTIME_FILE.test(rel);

@@ -27,7 +27,9 @@ another registry path.
       },
       "envRepoint": {
         "baseUrl": "https://api.z.ai/api/anthropic",
-        "authTokenRef": "GLM_API_KEY"
+        "authTokenRef": "GLM_API_KEY",
+        "service": "glm",
+        "model": "glm-5.3"
       },
       "lastVerified": "2026-09-05T00:00:00Z",
       "notes": "GLM routing account",
@@ -57,9 +59,10 @@ are tolerated.
 - `overage` is optional and contains `posture`: `hard-stop`, `bounded-prepaid`, or `open-billing`.
   `spendLimit` and `creditsRemaining` are finite non-negative numbers required only for
   `bounded-prepaid`.
-- `envRepoint` is optional. Its `baseUrl` is a non-empty `http:` or `https:` URL and its
-  `authTokenRef` is a non-empty environment-variable name or keychain reference. Unknown fields
-  within `envRepoint` are tolerated and ignored by the loader.
+- `envRepoint` is optional. Its `baseUrl` is a non-empty `http:` or `https:` URL, its
+  `authTokenRef` is a non-empty environment-variable name or keychain reference, and its `service`
+  (the env-repoint provider key, e.g. `glm`) is required. `model` is optional; when set, the worker
+  runs that model id. Unknown fields within `envRepoint` are tolerated and ignored by the loader.
 - `lastVerified`, `notes`, `orgId`, `accountUuid`, `preferUntil`, and `email` are optional strings.
   `notes` falls back to legacy `note`.
 - `loggedIn` is an optional boolean.
@@ -77,3 +80,20 @@ warning. This makes an absent configuration fail-soft while surfacing hand-edit 
 
 `credentialRef` and `envRepoint.authTokenRef` hold only a configuration-directory, environment-variable
 name, or keychain reference. They must never contain a token or other secret.
+
+## Env-repoint accounts (GLM, Kimi, …) on the Claude harness
+
+An env-repoint `claude[]` account runs another vendor's model through the Claude Code harness, with the
+harness's tools. Add one with `heddle accounts add --provider <service>`. The token lives in
+`~/.heddle/secrets.env` under the name in `authTokenRef`.
+
+- **Family (HED-697).** A dispatch pinned to the account runs as its `service` (and `model`), not as
+  `claude`. The HED-3 review guard, the family skill pack and the review row all use that identity. So
+  `adversarial-review` with `author_provider: claude` and `account_pin: <glm id>` is a genuine
+  cross-family review, scored `claude → glm`.
+- **Selection (HED-698).** In a registry that also has a native Claude account, an env-repoint account
+  is **pin-only**: pass `account_pin`. Automatic picks, rotation and the tier-presence check never land
+  on it, so an exhausted native pool refuses instead of silently running another family. A registry with
+  only env-repoint accounts keeps using them automatically (HED-531).
+- **Read-only reviewers** get Read/Grep/Glob only, with no shell or git (see `src/adapters/claude.ts`).
+  Pass `diff_base` or embed the diff in the prompt.

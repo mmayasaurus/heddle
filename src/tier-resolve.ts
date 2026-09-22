@@ -29,7 +29,13 @@ function available(target: RouteTarget, accounts: Account[]): string | null {
   // via envRepoint.service (provider-matrix.ts); a target naming one is never dead via account presence
   // (gating them would route the operator's gemini/groq lanes away). Universal presence is a follow-up.
   if (!isAccountModeledProvider(target.provider)) return null;
-  const providerAccounts = accounts.filter((account) => account.provider === target.provider && account.loggedIn !== false);
+  // HED-698: an env-repoint row rides the claude/codex harness but serves another family. Where the
+  // registry has a NATIVE row for this provider, only native rows prove it alive (all natives logged
+  // out = dead, so the HED-264 walk runs instead of landing on GLM/Kimi). An env-repoint-only registry
+  // keeps HED-531's behaviour: its rows are that operator's provider.
+  const hasNative = accounts.some((account) => account.provider === target.provider && account.envRepoint === undefined);
+  const providerAccounts = accounts.filter((account) => account.provider === target.provider && account.loggedIn !== false
+    && (!hasNative || account.envRepoint === undefined));
   if (providerAccounts.length === 0) return 'no logged-in account';
   // v1 deliberately gates only Fable: non-Fable Claude models remain serveable by any logged-in Claude
   // account until a complete per-model capability map is introduced. C1: an UNSET tier means

@@ -43,3 +43,25 @@ describe('isToolRuntimePath', () => {
     expect(isToolRuntimePath('README.md')).toBe(false);
   });
 });
+
+// HED-699: Verity's hooks run inside every headless Claude worker and rewrite hidden runtime files
+// directly under `.verity/` (ledger 2237: `.conversation-buffer` + `.logs/cli.log` quarantined a
+// review whose worker had NO write tools). Only that hidden runtime layer is churn.
+describe('isToolRuntimePath — Verity hook runtime (HED-699)', () => {
+  it('matches the hidden runtime files directly under .verity/ and anything under .verity/.logs/', () => {
+    expect(isToolRuntimePath('.verity/.conversation-buffer')).toBe(true);
+    expect(isToolRuntimePath('.verity/.last-analysis.ce78350b6387')).toBe(true);
+    expect(isToolRuntimePath('.verity/.iteration-count')).toBe(true);
+    expect(isToolRuntimePath('.verity/.logs/cli.log')).toBe(true);
+    expect(isToolRuntimePath('.verity/.logs/stderr.log')).toBe(true);
+  });
+
+  it('does NOT match the knowledge graph, visible config, nested hidden files or a lookalike dir', () => {
+    expect(isToolRuntimePath('.verity/memory/index.md')).toBe(false);
+    expect(isToolRuntimePath('.verity/memory/.hidden-note')).toBe(false);
+    expect(isToolRuntimePath('.verity/config.json')).toBe(false);
+    expect(isToolRuntimePath('.verity')).toBe(false);
+    expect(isToolRuntimePath('src/.verity/.conversation-buffer')).toBe(false);
+    expect(isToolRuntimePath('.verityx/.conversation-buffer')).toBe(false);
+  });
+});

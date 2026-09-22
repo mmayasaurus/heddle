@@ -33,3 +33,16 @@ export function sameModelFamily(
   const right = modelFamily(rightProvider, rightModel);
   return left !== undefined && right !== undefined && left === right;
 }
+
+/**
+ * HED-697: the provider/model a dispatch actually RUNS AS. A claude-harness route bound to an
+ * env-repoint account (GLM, Kimi, DeepSeek, …) sends the service's model through the Claude Code
+ * harness, so its family is the service's, never 'claude'. The HED-3 guard, the family skill pack
+ * and the review row judge this identity. Every other route is unchanged.
+ */
+export function effectiveModelIdentity(
+  provider: string, model: string, envRepoint?: { service: string; model?: string },
+): { provider: string; model: string } {
+  if (provider === 'claude' && envRepoint) return { provider: envRepoint.service, model: envRepoint.model ?? model };
+  return { provider, model };
+}
