@@ -44,9 +44,11 @@ const TOOL_RUNTIME_PREFIXES = ['.memdb/', '.memtrace/', '.serena/cache/'] as con
  * Only the names Verity's CLI (@codacy/verity-cli) actually writes are churn (round-2 review: a blanket
  * hidden-file match would hide e.g. `.verity/.exfil` or `.verity/.logs/payload.ts`):
  * - state files `.conversation-buffer`, `.iteration-count`, `.last-reviewed-sha`, `.last-intent`,
- *   `.seeded`, `.plugin-active`, `.memory-sync-state.json`, and the per-session-suffixed
- *   `.last-analysis`, `.last-pass-hash`, `.advisory-episode`, `.ignore-declaration`;
- * - `.task-context/<session>.jsonl`, `.cache/pending-<epoch>-<hex>.json`, and the debug logs
+ *   `.seeded`, `.plugin-active`, `.memory-sync-state.json`, and `.last-analysis`, `.last-pass-hash`,
+ *   `.advisory-episode`, `.ignore-declaration`, each optionally suffixed `.<12 hex>` (scopedFile:
+ *   sha1(session id), first 12 hex digits);
+ * - `.task-context/<task id>.jsonl` (bufferPath strips the id to `[A-Za-z0-9_-]`),
+ *   `.cache/pending-<epoch seconds>-<8 hex>.json` (randomBytes(4)), and the debug logs
  *   `.logs/{cli,stderr}.log` (rotated to `.1`);
  * - `.snapshot/**` and `.baseline/**`, Verity's MIRROR copies of repo files, whose names are arbitrary
  *   repo-relative paths by design. Known, bounded blind spot of the same class as the three daemon dirs
@@ -59,9 +61,9 @@ const TOOL_RUNTIME_PREFIXES = ['.memdb/', '.memtrace/', '.serena/cache/'] as con
 const VERITY_RUNTIME_FILE = new RegExp(
   '^\\.verity/(?:'
   + '\\.(?:conversation-buffer|iteration-count|last-reviewed-sha|last-intent|seeded|plugin-active|memory-sync-state\\.json)'
-  + '|\\.(?:last-analysis|last-pass-hash|advisory-episode|ignore-declaration)(?:\\.[0-9a-f]+)?'
-  + '|\\.task-context/[^/]+\\.jsonl'
-  + '|\\.cache/pending-[0-9]+-[0-9a-f]+\\.json'
+  + '|\\.(?:last-analysis|last-pass-hash|advisory-episode|ignore-declaration)(?:\\.[0-9a-f]{12})?'
+  + '|\\.task-context/[A-Za-z0-9_-]+\\.jsonl'
+  + '|\\.cache/pending-[0-9]{10,}-[0-9a-f]{8}\\.json'
   + '|\\.logs/(?:cli|stderr)\\.log(?:\\.1)?'
   + '|\\.(?:snapshot|baseline)/.+'
   + ')$',

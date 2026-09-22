@@ -64,7 +64,9 @@ describe('isToolRuntimePath — Verity hook runtime (HED-699)', () => {
   it('does NOT match names Verity never writes, the knowledge graph, config, credentials or lookalikes', () => {
     for (const rel of [
       '.verity/.exfil', '.verity/.logs/payload.ts', '.verity/.logs/cli.log.2', '.verity/.cache/stolen.json',
-      '.verity/.task-context/notes.txt', '.verity/.task-context/nested/x.jsonl', '.verity/.last-analysis.not-hex',
+      '.verity/.task-context/notes.txt', '.verity/.task-context/nested/x.jsonl', '.verity/.task-context/a.b.jsonl',
+      '.verity/.last-analysis.not-hex', '.verity/.last-analysis.a', '.verity/.last-pass-hash.ce78350b63870',
+      '.verity/.cache/pending-1-a.json', '.verity/.cache/pending-1790036195-642b98f.json',
       '.verity/.snapshot', '.verity/.baseline',
       '.verity/memory/index.md', '.verity/memory/.hidden-note', '.verity/config.json', '.verity/standard.yaml', '.verity/credentials',
       '.verity', 'src/.verity/.conversation-buffer', '.verityx/.conversation-buffer',

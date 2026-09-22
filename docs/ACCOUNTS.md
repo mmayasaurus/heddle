@@ -88,8 +88,11 @@ harness's tools. Add one with `heddle accounts add --provider <service>`. The to
 `~/.heddle/secrets.env` under the name in `authTokenRef`.
 
 - **Family (HED-697).** A dispatch bound to the account (by `account_pin`, or by HED-531's automatic
-  pick in an env-repoint-only registry) runs as its `service` and `model`, not as `claude`. These all
-  judge that identity:
+  pick in an env-repoint-only registry) runs as its `service` and `model`, not as `claude`. Without a
+  `model`, the service receives the route's concrete Claude model id and maps it to one of its own
+  models, which heddle cannot see; the ledger then records the route alias (e.g. `glm/sonnet`). Set
+  `model` so the record names the model that runs. `plan_dispatch` shows this identity as `runs_as`.
+  These all judge that identity:
   - the HED-3 review guard, at plan time and again at spawn, so a fallback that re-binds the account is
     re-checked;
   - HED-519's headless opus/fable refusal;

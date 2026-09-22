@@ -465,7 +465,7 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
       + `claude -p --output-format json is silent until completion, so a substantial review that overruns `
       + `SIGKILLs at its timeout with zero output (HED-511: 6/6 such dispatches died this way).`
     : undefined;
-  return { route, target, fallback, origin, execution, decision, symbol, resolutionWalk, skillsForRefusal, account, accountAdvice, accountPick, rotationAccount, claudeAccountCount, claudePinOnlyCount, notDispatchable, reviewerPick, sameProviderReview, pinnedExcludedAccount, overrideReasonRequired, billingRefusal, tierRefusal, envRepointRefusal, billingAdvice, capabilityRefusal, requiresWebRefusal, capabilityFitRebinds, headlessClaudeReviewRefusal };
+  return { route, target, fallback, origin, execution, decision, symbol, resolutionWalk, skillsForRefusal, account, accountAdvice, accountPick, rotationAccount, claudeAccountCount, claudePinOnlyCount, runsAs, notDispatchable, reviewerPick, sameProviderReview, pinnedExcludedAccount, overrideReasonRequired, billingRefusal, tierRefusal, envRepointRefusal, billingAdvice, capabilityRefusal, requiresWebRefusal, capabilityFitRebinds, headlessClaudeReviewRefusal };
 }
 
 /** One shared dry-run summary for `heddle route` and the `plan_dispatch` MCP tool (identical fields). */
@@ -483,11 +483,15 @@ export function summarizePlan(plan: DispatchPlan): Record<string, unknown> {
   // a capability-fit fallback reaches runTarget, which gates the REBOUND account — so don't advertise the
   // primary's tier refusal here). Ordered after billing, mirroring the runTarget gate order.
   const previewTier = plan.capabilityFitRebinds ? undefined : plan.tierRefusal;
+  const refusedPreview = notDispatchable || plan.decision.refusal || previewBilling || previewTier || plan.envRepointRefusal || plan.sameProviderReview || plan.pinnedExcludedAccount || noDispatchableAccount || plan.headlessClaudeReviewRefusal || plan.overrideReasonRequired || plan.capabilityRefusal || plan.requiresWebRefusal;
   return {
     task_class: plan.route.taskClass,
     symbol: plan.symbol ?? null,
     resolution_walk: plan.resolutionWalk ?? [],
-    would_run: notDispatchable || plan.decision.refusal || previewBilling || previewTier || plan.envRepointRefusal || plan.sameProviderReview || plan.pinnedExcludedAccount || noDispatchableAccount || plan.headlessClaudeReviewRefusal || plan.overrideReasonRequired || plan.capabilityRefusal || plan.requiresWebRefusal ? null : `${plan.target.provider}/${plan.target.model}`,
+    would_run: refusedPreview ? null : `${plan.target.provider}/${plan.target.model}`,
+    // HED-697: would_run keeps its contract (the ROUTE); runs_as is the identity the worker runs as and the
+    // ledger records — they differ only when a claude route binds an env-repoint account (GLM, Kimi, …).
+    runs_as: refusedPreview ? null : `${plan.runsAs.provider}/${plan.runsAs.model}`,
     execution: plan.execution ?? null,
     in_session: plan.execution === 'in-session-subagent',
     routed_away_for_cap: plan.decision.routedAwayForCap,

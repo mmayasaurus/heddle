@@ -76,6 +76,15 @@ describe('adversarial review on a pinned env-repoint account (HED-697)', () => {
     expect(fake.calls).toHaveLength(1);
   });
 
+  it('the dry-run preview names the identity that runs (runs_as) beside the route (would_run)', async () => {
+    await loadDispatch();
+    const { planDispatch, summarizePlan } = await import('../src/dispatcher/plan.js');
+    expect(summarizePlan(planDispatch(request('glm')))).toMatchObject({ would_run: 'claude/sonnet', runs_as: 'glm/glm-5.3' });
+    expect(summarizePlan(planDispatch({ ...request('acct2'), authorProvider: 'codex' }))).toMatchObject({ would_run: 'claude/sonnet', runs_as: 'claude/sonnet' });
+    // A refused plan previews neither.
+    expect(summarizePlan(planDispatch(request('acct2')))).toMatchObject({ would_run: null, runs_as: null });
+  });
+
   it('an in-session dispatch cannot borrow an env-repoint pin to pass the family guard (it runs on the orchestrator login)', async () => {
     await loadDispatch();
     const { planDispatch } = await import('../src/dispatcher/plan.js');
