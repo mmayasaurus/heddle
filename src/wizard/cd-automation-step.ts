@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { atomicWriteFile } from './persist.js';
+import { createFileWithinRoot } from '../secure-fs.js';
 import type { WizardContext, WizardIO, WizardStep, WizardStepResult } from './step.js';
 
 export interface CdAutomationAssets {
@@ -80,11 +80,14 @@ async function applyCdWorkflows(targetDir: string, io: WizardIO, assets: CdAutom
     const add = await io.prompter.confirm(workflow.prompt, false);
     if (!add) {
       declined.push(path);
-    } else if (existsSync(path)) {
+      continue;
+    }
+    // createFileWithinRoot guards the `.github/workflows` chain below `targetDir` and is create-only, so a
+    // symlinked component fails closed before any write and an existing workflow is left unchanged (HED-650).
+    if (createFileWithinRoot(targetDir, path, readCdTemplate(workflow.template(assets))) === 'exists') {
       existing.push({ path, environment: workflow.environment });
       io.report(`CD automation: already present — left unchanged: ${path}`);
     } else {
-      atomicWriteFile(path, readCdTemplate(workflow.template(assets)));
       written.push({ path, environment: workflow.environment });
       io.report(`CD automation: wrote ${path}`);
     }
@@ -141,6 +144,9 @@ export function cdAutomationStep(): WizardStep {
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
         io.report(`CD automation failed: ${detail}`);
+        if (/symlink|writable|not a directory/i.test(detail)) {
+          io.report(`If ${ctx.targetDir}/.github is a symlink or world-writable, heddle will not write through it — replace it with a plain directory you own and re-run.`);
+        }
         return { id: 'cd-automation', status: 'failed', summary: 'CD automation: failed to write a workflow' };
       }
     },
