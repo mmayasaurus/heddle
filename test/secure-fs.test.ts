@@ -1,6 +1,8 @@
+import { execFileSync } from 'node:child_process';
 import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { pathToFileURL } from 'node:url';
+import { beforeAll, describe, expect, it } from 'vitest';
 import {
   acquireCredentialLock,
   assertSecureDir,
@@ -10,6 +12,7 @@ import {
   secureWriteFile,
 } from '../src/secure-fs.js';
 import { useTempResources } from './helpers.js';
+import { ensureBuilt, PROJECT_ROOT } from './helpers/cli.js';
 
 // This suite asserts POSIX uid, mode, umask and O_NOFOLLOW behavior. Native ACL coverage is separate.
 describe.skipIf(process.platform === 'win32')('POSIX secure filesystem primitives', () => {
@@ -789,5 +792,27 @@ describe.skipIf(process.platform === 'win32')('POSIX secure filesystem primitive
     } finally {
       process.umask(prevUmask);
     }
+  });
+});
+
+describe('secureReadFile FIFO/device hang guard (HED-594 round 3)', () => {
+  const { tempDir } = useTempResources('heddle-secure-fs-fifo-');
+  beforeAll(async () => { await ensureBuilt(); }, 120_000);
+
+  it('rejects a FIFO fast instead of blocking in open() (O_NONBLOCK)', () => {
+    // secureReadFile opens O_NOFOLLOW|O_NONBLOCK then fstat-rejects a non-regular file. WITHOUT O_NONBLOCK a
+    // FIFO blocks in open() waiting for a writer — a sync in-process call would wedge THIS vitest worker (a
+    // thread blocked in a syscall cannot be interrupted by vitest's per-test timeout), so we probe in a child
+    // that execFileSync HARD-KILLS at 3s: with the guard the child exits ~instantly having thrown "not a
+    // regular file"; a revert makes open() block, the child is killed, execFileSync throws, and this test
+    // FAILS cleanly instead of hanging the suite. The credential reader (rotation key / secrets env) shares
+    // this primitive, so this pins the fix at the primitive, not only at the runtime-hook sink.
+    const fifo = join(tempDir(), 'credential');
+    execFileSync('mkfifo', [fifo]); // Node has no mkfifo
+    const dist = pathToFileURL(join(PROJECT_ROOT, 'dist/secure-fs.js')).href;
+    const script = `import(${JSON.stringify(dist)}).then((m) => { try { m.secureReadFile(${JSON.stringify(fifo)}); process.stdout.write('NO_THROW'); } catch (e) { process.stdout.write('THREW:' + (e && e.message)); } });`;
+    const out = execFileSync(process.execPath, ['-e', script], { timeout: 3000, encoding: 'utf8' });
+    expect(out).toMatch(/^THREW:/);
+    expect(out).toMatch(/not a regular file/i);
   });
 });
