@@ -346,6 +346,7 @@ export async function runTarget(
   let restoreMcp: () => void = () => {};
   let before: ReturnType<typeof snapshotWorktree> | null = null;
   let after: ReturnType<typeof snapshotWorktree> | null = null;
+  let afterAt: string | undefined;
   // HED-98: workers dispatched into <repo>/.worktrees/<agent> can resolve "the project root" by
   // walking up (a linked worktree's .git is a FILE pointing at the parent) and write into the
   // CANONICAL checkout. No provider offers a verified write-confinement flag, so heddle DETECTS:
@@ -475,7 +476,7 @@ export async function runTarget(
   } catch (err) {
     result = { ok: false, output: '', exitCode: null, error: err instanceof Error ? err.message : String(err) };
   } finally {
-    if (before) after = snapshotWorktree(req.cwd); // BEFORE restore — see the baseline comment above
+    if (before) { after = snapshotWorktree(req.cwd); afterAt = new Date().toISOString(); } // BEFORE restore — see the baseline comment above
     // Restore is best-effort and must never keep the row from being finished (a restore failure is
     // reported in the outcome error instead).
     for (const restore of [restoreMcp, restoreSkills]) {
@@ -545,21 +546,31 @@ export async function runTarget(
   // `output` channel); nothing is reverted (operator's call).
   let mandateOk: boolean | null = null;
   let quarantine: DispatchOutcome['quarantine'];
+  let mandateWarning: { note: string } | undefined;
   if (before && after) {
     mandateOk = sameSnapshot(before, after);
-    if (ctx.review) ctx.ledger.setReviewMandate(ledgerId, mandateOk);
     if (mandateOk === false) {
-      // HED-601: a reviewer that changed the worktree did NOT do the job it was given —
-      // a read-only MANDATE VIOLATION is a HARD failure whose output is QUARANTINED, never auto-trusted.
-      // The findings are WITHHELD from the trusted `output` channel (emptied in the returned outcome below)
-      // and moved to `quarantine`; the ledger row keeps them (output persisted to outputs/<id>.md, ok=0) as
-      // the durable record, so adopting any finding is a deliberate act on it. Nothing is reverted.
-      const note = `MANDATE VIOLATION: the read-only worker changed the worktree (content digest of HEAD + tracked/untracked files + stash differs from before the run) — nothing was reverted; the worker output is QUARANTINED (dispatch ok=0), never auto-trusted. The violation is durably recorded on the ledger row (ok=0 + this error, plus mandate_ok=0 on review rows); the findings ride this outcome's quarantine.output and are best-effort-persisted to the ledger output store (outputs/${ledgerId}.md when the write succeeds). Inspect \`git status\`/\`git diff\`, then adopt any finding only as a deliberate act on that quarantine record.`;
-      process.stderr.write(`heddle: ${note}\n`);
-      result.ok = false;
-      result.error = result.error ? `${result.error}; ${note}` : note;
-      quarantine = { reason: 'mandate-violation', note, output: result.output ?? '', ledgerId };
+      // Attribute only peers live within the snapshot window; later starts cannot have caused this diff.
+      const attributable = wt !== null && !ctx.ledger.overlappingByCwd(req.cwd, ledgerId, { windowEnd: afterAt!, staleAfterMs: ctx.caps.staleAfterMs });
+      if (attributable) {
+        // HED-601: a reviewer that changed the worktree did NOT do the job it was given —
+        // a read-only MANDATE VIOLATION is a HARD failure whose output is QUARANTINED, never auto-trusted.
+        // The findings are WITHHELD from the trusted `output` channel (emptied in the returned outcome below)
+        // and moved to `quarantine`; the ledger row keeps them (output persisted to outputs/<id>.md, ok=0) as
+        // the durable record, so adopting any finding is a deliberate act on it. Nothing is reverted.
+        const note = `MANDATE VIOLATION: the read-only worker changed the worktree (content digest of HEAD + tracked/untracked files + stash differs from before the run) — nothing was reverted; the worker output is QUARANTINED (dispatch ok=0), never auto-trusted. The violation is durably recorded on the ledger row (ok=0 + this error, plus mandate_ok=0 on review rows); the findings ride this outcome's quarantine.output and are best-effort-persisted to the ledger output store (outputs/${ledgerId}.md when the write succeeds). Inspect \`git status\`/\`git diff\`, then adopt any finding only as a deliberate act on that quarantine record.`;
+        process.stderr.write(`heddle: ${note}\n`);
+        result.ok = false;
+        result.error = result.error ? `${result.error}; ${note}` : note;
+        quarantine = { reason: 'mandate-violation', note, output: result.output ?? '', ledgerId };
+      } else {
+        const note = `read-only mandate: ${req.cwd} changed during the run, but heddle cannot attribute the change to this worker — a concurrent writer was possible (a peer dispatch on the same cwd, or a shared/main checkout edited by another agent); nothing was reverted (operator's call).`;
+        process.stderr.write(`heddle: ${note}\n`);
+        mandateWarning = { note };
+        mandateOk = null;
+      }
     }
+    if (ctx.review) ctx.ledger.setReviewMandate(ledgerId, mandateOk);
   }
   // HED-3 auto-assess: judge the reviewer's output with the cheap classifier (best-effort).
   // HED-601: never grade QUARANTINED output — a mandate-violating worker did not do its task, so assessing it
@@ -599,7 +610,10 @@ export async function runTarget(
     // so a credential-shaped checkout filename cannot leak into the ledger, outcome, CLI, or stderr while
     // ordinary long filenames survive (the opaque backstop is deliberately NOT applied to these
     // heddle-generated notes). result.error remains full-mode redacted at its vendor-stderr boundary.
-    error: [result.error, escapeReport?.note, destroyedReport?.note, billingDegraded?.reason].filter(Boolean).join('; ') || undefined,
+    // The HED-609 mandate warning (mandateWarning?.note) carries only ${req.cwd} — a worktree directory
+    // path, not worker-controlled filenames — so it has no credential-shape vector and rides the join
+    // as-is (no scrub needed).
+    error: [result.error, escapeReport?.note, destroyedReport?.note, mandateWarning?.note, billingDegraded?.reason].filter(Boolean).join('; ') || undefined,
     sessionId: result.sessionId,
     durationMs: result.durationMs,
     inputTokens: result.usage?.inputTokens,

@@ -178,7 +178,7 @@ export interface DispatchOutcome extends WorkerResult {
     authorProvider: string | null;
     reviewerProvider: string;
     reviewerModel: string;
-    /** true = worktree untouched, false = the reviewer changed files (MANDATE VIOLATION), null = not a git repo. */
+    /** true = worktree untouched, false = the reviewer changed files (attributable MANDATE VIOLATION), null = not a git repo, OR a detected change that could not be attributed to this worker because a concurrent same-cwd writer was possible (HED-609 — recorded as a warning, not a violation). */
     mandateOk: boolean | null;
     reviewerPick?: string;
   };
