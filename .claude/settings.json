@@ -20,7 +20,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "if command -v verity >/dev/null 2>&1; then verity baseline capture; else echo \"heddle: verity CLI not installed — skipping baseline capture (quality gate inactive on this machine)\" >&2; fi",
+            "command": "if command -v verity >/dev/null 2>&1; then out=$(verity baseline capture 2>&1); rc=$?; case \"$out\" in *\"No Verity token\"*) : ;; *) printf '%s\\n' \"$out\"; exit $rc ;; esac; else echo \"heddle: verity CLI not installed — skipping baseline capture (quality gate inactive on this machine)\" >&2; fi",
             "timeout": 60
           }
         ]
@@ -41,7 +41,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "if command -v verity >/dev/null 2>&1; then verity intent capture; else echo \"heddle: verity CLI not installed — skipping intent capture (quality gate inactive on this machine)\" >&2; fi",
+            "command": "if command -v verity >/dev/null 2>&1; then out=$(verity intent capture 2>&1); rc=$?; case \"$out\" in *\"No Verity token\"*) : ;; *) printf '%s\\n' \"$out\"; exit $rc ;; esac; else echo \"heddle: verity CLI not installed — skipping intent capture (quality gate inactive on this machine)\" >&2; fi",
             "timeout": 30
           }
         ]
@@ -141,7 +141,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "if command -v verity >/dev/null 2>&1; then verity analyze; else echo \"heddle: verity CLI not installed — skipping analysis (quality gate inactive on this machine)\" >&2; fi",
+            "command": "if command -v verity >/dev/null 2>&1; then out=$(verity analyze 2>&1); rc=$?; case \"$out\" in *\"No Verity token\"*) : ;; *) printf '%s\\n' \"$out\"; exit $rc ;; esac; else echo \"heddle: verity CLI not installed — skipping analysis (quality gate inactive on this machine)\" >&2; fi",
             "timeout": 120,
             "statusMessage": "Running Verity analysis"
           }
@@ -165,7 +165,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "if command -v verity >/dev/null 2>&1; then verity compact; else echo \"heddle: verity CLI not installed — skipping compact hook (quality gate inactive on this machine)\" >&2; fi",
+            "command": "if command -v verity >/dev/null 2>&1; then out=$(verity compact 2>&1); rc=$?; case \"$out\" in *\"No Verity token\"*) : ;; *) printf '%s\\n' \"$out\"; exit $rc ;; esac; else echo \"heddle: verity CLI not installed — skipping compact hook (quality gate inactive on this machine)\" >&2; fi",
             "timeout": 60
           }
         ]
@@ -176,7 +176,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "if command -v verity >/dev/null 2>&1; then verity session end; else echo \"heddle: verity CLI not installed — skipping session-end hook (quality gate inactive on this machine)\" >&2; fi",
+            "command": "if command -v verity >/dev/null 2>&1; then out=$(verity session end 2>&1); rc=$?; case \"$out\" in *\"No Verity token\"*) : ;; *) printf '%s\\n' \"$out\"; exit $rc ;; esac; else echo \"heddle: verity CLI not installed — skipping session-end hook (quality gate inactive on this machine)\" >&2; fi",
             "timeout": 60
           }
         ]
