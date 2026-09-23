@@ -4,8 +4,8 @@ import { basename, join } from 'node:path';
 import { DEFAULT_MIN_TIER, type RouteTarget, type RoutingTable, type Tier } from './routing.js';
 import type { LanesConfig } from './lanes.js';
 import { buildLadder, tierOfProvider } from './ladder.js';
+import { ladderEligible } from './ladder-eligibility.js';
 import { bindingMeter, isFloored, type ClaudeFloors } from './floors.js';
-import { mcpAttachable, webCapable } from './mcp.js';
 import { bindingWindow, DISPATCH_SIGNAL_MAX_AGE_S, type CapsByProvider, type ProviderCaps } from './usage.js';
 import { isAccountModeledProvider, validateEnvRepoint, type Account, type AccountEnvRepoint } from './accounts.js';
 
@@ -247,18 +247,23 @@ function walkLadder(
   // Capability gate (MCP attachability + web) — must pass for EVERY candidate, the declared fallback
   // included: a caller mcp override or a requiresWeb class can make even the class's own declared
   // fallback unattachable, and selecting it would throw in runTarget instead of continuing (qodo HIGH).
-  const capable = (t: RouteTarget): boolean =>
-    (ctx.mcp.length === 0 || mcpAttachable(t.provider, ctx.mcp)) &&
-    (!ctx.requiresWeb || webCapable(t.provider, ctx.grantedCapabilities));
-  const eligible = (t: RouteTarget, tier: Tier): boolean =>
-    !excluded.has(t.provider) && !(ctx.editsCode && tier === 'T0') && capable(t); // T0 lanes are read-only by construction
-  const ladder = buildLadder(tierOfProvider(deadTarget.provider, lanes, ctx.laneDefaults), minTier, maxTier, lanes, ctx.laneDefaults, eligible);
+  const eligibility = {
+    mcp: ctx.mcp, requiresWeb: ctx.requiresWeb, grantedCapabilities: ctx.grantedCapabilities,
+    editsCode: ctx.editsCode, excluded,
+  };
+  const ladder = buildLadder(
+    tierOfProvider(deadTarget.provider, lanes, ctx.laneDefaults), minTier, maxTier,
+    lanes, ctx.laneDefaults, (target, tier) => ladderEligible(target, tier, eligibility),
+  );
   const candidates: { target: RouteTarget; label: string }[] = [];
   // The declared fallback (resolveRoute-enriched) leads the walk — but only if it clears the capability
   // gate above; an unattachable declared fallback is skipped (with a check) rather than selected-then-
   // thrown. A bare lane_defaults candidate inherits the class skills/mcp/capabilities so a walked worker
   // keeps its task-fit + mandate packs and its verified MCP attachment (else discovery-less → ledger 206).
-  if (declaredFallback && capable(declaredFallback)) {
+  const fallbackEligible = declaredFallback && ladderEligible(declaredFallback, minTier, {
+    ...eligibility, editsCode: false, excluded: new Set<string>(),
+  });
+  if (declaredFallback && fallbackEligible) {
     candidates.push({ target: declaredFallback, label: 'declared-fallback' });
   } else if (declaredFallback) {
     checks.push(`declared fallback ${declaredFallback.provider}/${declaredFallback.model} skipped — cannot attach the effective mcp/web capability`);
