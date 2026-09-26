@@ -1,0 +1,50 @@
+{
+  "repo_label": "example",
+  "rule_owner": "the project owner",
+  "orchestrator": "LEAD",
+  "main_refs": [
+    "refs/remotes/origin/main",
+    "refs/heads/main"
+  ],
+  "main_branch_names": [
+    "main",
+    "master"
+  ],
+  "protected_paths": {
+    "exact": [
+      "CLAUDE.md",
+      "AGENTS.md",
+      ".mcp.json"
+    ],
+    "prefixes": [
+      ".claude/",
+      ".heddle/",
+      "rules/",
+      ".cursor/",
+      ".codex/",
+      "Harness/",
+      ".github/"
+    ],
+    "globs": []
+  },
+  "protected_paths_reason": "Agent and harness files do not belong in this repository",
+  "protected_paths_allowed_branches": [
+    "*/repo-game-only-*"
+  ],
+  "worktrees_dir": "/path/to/repo/.worktrees",
+  "worktree_cap": 20,
+  "worktree_cap_mode": "warn",
+  "worktree_creators": [
+    "LEAD"
+  ],
+  "alert_log": "~/.heddle/fleet/alerts/git-guard.jsonl",
+  "checks": {
+    "no_main_merge": true,
+    "no_protected_paths": true,
+    "no_push_to_main": true,
+    "no_force_push": true,
+    "no_remote_delete": true,
+    "worktree_cap": true,
+    "worktree_alert": true
+  }
+}
