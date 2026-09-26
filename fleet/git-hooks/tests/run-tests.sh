@@ -184,9 +184,10 @@ grep -q "^post-merge" "$T/chain.log" && ok "S15 post-merge chained" || bad "S15 
 # S16 engine failure fails open and still chains
 : > "$T/chain.log"
 echo z > z.txt; git add z.txt
-HEDDLE_GIT_GUARD_CONFIG=/nonexistent/guard.json /usr/bin/python3 "$SRC/heddle_git_guard.py" post-commit 2>"$T/s16.err"; rc=$?
+HEDDLE_GIT_GUARD_ALERT_LOG="$T/guard-errors.jsonl" HEDDLE_GIT_GUARD_CONFIG=/nonexistent/guard.json /usr/bin/python3 "$SRC/heddle_git_guard.py" post-commit 2>"$T/s16.err"; rc=$?
 expect_rc "S16 engine error fails open" 0 $rc
 grep -q "internal error" "$T/s16.err" && ok "S16 engine error is loud" || bad "S16 engine error is loud"
+grep -q '"guard-error"' "$T/guard-errors.jsonl" 2>/dev/null && ok "S16 engine error logged inside the test folder" || bad "S16 engine error logged inside the test folder"
 grep -q "^post-commit" "$T/chain.log" && ok "S16 chain still ran" || bad "S16 chain still ran"
 git commit -qm "z" 2>/dev/null
 
