@@ -122,15 +122,17 @@ export interface SwitchAccountRow extends ClaudeAccountRow {
 /**
  * The account to move a running session onto (`heddle account pick --leaving`). Where the plain single
  * pick takes the most 5h headroom, this ranks LOGINS:
- * - folders logged into one login are one candidate, since they draw on one usage pool, and the login
+ * - folders logged into one login draw on one usage pool, so they are one candidate, and the login
  *   being left is never a candidate, whichever of its folders the session ran in;
- * - a login's room is its headroom on the tighter of its two windows, a 5h window that resets within
- *   SWITCH_RESET_SOON_S counting as empty while it has more than SWITCH_RESET_SOON_MIN_ROOM_PCT left;
+ * - a login's room is its headroom on the tighter of its two windows, by the tightest reading any of
+ *   its folders has, a 5h window that resets within SWITCH_RESET_SOON_S counting as empty while it has
+ *   more than SWITCH_RESET_SOON_MIN_ROOM_PCT left; the pick reports that reading's meters;
  * - that room is shared with the sessions already on the login: the pick has the most room per seat
  *   (room ÷ (weighted sessions + 1)), then the most room, then the lowest account id.
- * An account the batch placement excludes (floored, logged out, dispatch-excluded, overage, env-repoint
- * pin-only, unmetered) is never picked, even when its 5h window resets soon. A login's room is the least
- * of its usable folders' readings, and the folder picked is its first usable one in registry order.
+ * What is true of the pool takes the whole login out: a floored reading, overage billing, or a billing
+ * failure, on any of its folders. What is true of one folder (logged out, a logged-out dispatch
+ * signal, env-repoint pin-only) only rules out moving into that folder: the login is picked through
+ * its first folder in registry order that isn't ruled out, and needs at least one reading.
  * `residents` null = the census was unavailable: rank on room alone.
  */
 export function pickClaudeAccountToSwitch(
@@ -145,63 +147,73 @@ export function pickClaudeAccountToSwitch(
   const loginKeys = accounts.map((account) => opts.loginOf(account));
   const rows: SwitchAccountRow[] = claudeAccountRows(caps, accounts, floors)
     .map((row, index) => ({ ...row, leaving: loginKeys[index] === opts.leaving }));
-  const logins = new Map<string, { account: ClaudeAccount; room: number; resetsSoon: boolean }>();
-  let left = 0, unusable = 0;
+  interface Login {
+    /** The folder a session would move into. */
+    into: ClaudeAccount | null;
+    /** The reading with the least room, on any of the login's folders. */
+    tightest: { id: string; room: number; resetsSoon: boolean } | null;
+    barred: boolean;
+  }
+  const logins = new Map<string, Login>();
+  let left = 0;
   for (const [index, account] of accounts.entries()) {
-    const login = loginKeys[index];
     const row = rows[index];
     if (row.leaving) {
       left++;
       continue;
     }
-    if (row.excluded || row.headroomPct === null) {
-      unusable++;
-      continue;
-    }
-    const reset5h = caps.accounts.find((capsRow) => capsRow.id === account.id)?.fiveHour.resetsAt ?? null;
+    const login = logins.get(loginKeys[index]) ?? { into: null, tightest: null, barred: false };
+    logins.set(loginKeys[index], login);
+    const capsRow = caps.accounts.find((candidate) => candidate.id === account.id);
+    if (row.floored || row.overage || (row.dispatchExcluded && capsRow?.dispatch?.reason === 'billing')) login.barred = true;
+    if (!row.excluded && !login.into) login.into = account;
+    if (row.headroomPct === null) continue;
+    const reset5h = capsRow?.fiveHour.resetsAt ?? null;
     // (A window whose reset has already passed reads 0% used: readProviderCaps rolled it over.)
     const resetsSoon = row.usedPct5h !== null && 100 - row.usedPct5h > SWITCH_RESET_SOON_MIN_ROOM_PCT &&
       reset5h !== null && reset5h > opts.nowS && reset5h <= opts.nowS + SWITCH_RESET_SOON_S;
     const room = Math.min(...[resetsSoon ? 0 : row.usedPct5h, row.usedPct7d]
       .filter((used): used is number => used !== null)
       .map((used) => 100 - used));
-    const seen = logins.get(login);
-    if (!seen) logins.set(login, { account, room, resetsSoon });
-    else if (room < seen.room) logins.set(login, { ...seen, room, resetsSoon: seen.resetsSoon && resetsSoon });
+    if (!login.tightest || room < login.tightest.room) login.tightest = { id: account.id, room, resetsSoon };
   }
-  if (logins.size === 0) {
+  const candidates = [...logins.entries()].flatMap(([key, { into, tightest, barred }]) =>
+    (into && tightest && !barred ? [{ key, into, tightest }] : []));
+  if (candidates.length === 0) {
     return {
       pick: null,
       rows,
       reason: `no other login has a usable account: ${left} account(s) on the login being left, ` +
-        `${unusable} excluded (floored, logged out, dispatch-excluded, overage, pin-only or unmetered)`,
+        `${accounts.length - left} on logins ruled out (floored, overage or a billing failure on any of a login's ` +
+        `folders, or every folder logged out, pin-only or unmetered)`,
     };
   }
-  const weightOn = (login: string) => opts.residents?.get(login)?.weight ?? 0;
-  const ranked = [...logins.entries()].sort(([loginA, a], [loginB, b]) =>
-    b.room / (weightOn(loginB) + 1) - a.room / (weightOn(loginA) + 1) ||
-    b.room - a.room ||
-    a.account.id.localeCompare(b.account.id));
-  const [login, best] = ranked[0];
-  const residents = opts.residents === null ? null : opts.residents.get(login)?.count ?? 0;
-  const { usedPct5h, usedPct7d, resetsAt } = valuesFor(caps, best.account.id);
+  const weightOn = (key: string) => opts.residents?.get(key)?.weight ?? 0;
+  candidates.sort((a, b) =>
+    b.tightest.room / (weightOn(b.key) + 1) - a.tightest.room / (weightOn(a.key) + 1) ||
+    b.tightest.room - a.tightest.room ||
+    a.into.id.localeCompare(b.into.id));
+  const { key, into, tightest } = candidates[0];
+  const residents = opts.residents === null ? null : opts.residents.get(key)?.count ?? 0;
+  const { usedPct5h, usedPct7d, resetsAt } = valuesFor(caps, tightest.id);
   const fmt = (pct: number | null) => (pct === null ? 'unknown' : `${pct.toFixed(0)}%`);
   return {
     rows,
     pick: {
-      account: best.account.id,
-      configDir: best.account.configDir,
-      unsetConfigDir: best.account.configDir === null,
+      account: into.id,
+      configDir: into.configDir,
+      unsetConfigDir: into.configDir === null,
       usedPct5h,
       usedPct7d,
       bindingMeter: bindingMeter(usedPct5h, usedPct7d),
       resetsAt,
-      roomPct: best.room,
+      roomPct: tightest.room,
       residents,
-      reason: `account:${best.account.id} switch pick (room ${best.room.toFixed(0)}%, ` +
+      reason: `account:${into.id} switch pick (room ${tightest.room.toFixed(0)}%, ` +
         `${residents === null ? 'sessions there unknown' : `${residents} session(s) there`}; ` +
-        `5h ${fmt(usedPct5h)}${best.resetsSoon ? `, resetting within ${SWITCH_RESET_SOON_S / 60} min` : ''}, 7d ${fmt(usedPct7d)}; ` +
-        `best of ${logins.size} login(s))`,
+        `5h ${fmt(usedPct5h)}${tightest.resetsSoon ? `, resetting within ${SWITCH_RESET_SOON_S / 60} min` : ''}, ` +
+        `7d ${fmt(usedPct7d)}${tightest.id === into.id ? '' : `, as ${tightest.id} reads them`}; ` +
+        `best of ${candidates.length} login(s))`,
     },
   };
 }

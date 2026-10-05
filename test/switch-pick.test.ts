@@ -16,15 +16,23 @@ const registry: ClaudeAccount[] = [
 ];
 const loginOf = (account: ClaudeAccount) => `uuid:${account.accountUuid}`;
 
-interface Reading { used5h: number | null; used7d?: number | null; reset5h?: number | null }
+interface Reading {
+  used5h: number | null;
+  used7d?: number | null;
+  reset5h?: number | null;
+  /** A dispatch failure signalled for the account just now. */
+  failed?: 'billing' | 'logged-out';
+}
 function caps(readings: Record<string, Reading>): ProviderCaps {
   return {
     provider: 'claude', source: 'limits.json', stale: false, capturedAt: NOW,
     fiveHour: { usedPercentage: null, resetsAt: null }, sevenDay: { usedPercentage: null, resetsAt: null },
     windows: {}, noteCodes: [], activeAccount: null,
-    accounts: Object.entries(readings).map(([id, { used5h, used7d = null, reset5h = null }]) => ({
+    accounts: Object.entries(readings).map(([id, { used5h, used7d = null, reset5h = null, failed }]) => ({
       id, fiveHour: { usedPercentage: used5h, resetsAt: reset5h }, sevenDay: { usedPercentage: used7d, resetsAt: null },
       windows: {}, noteCodes: [], limitReached: false, stale: false,
+      // Dispatch signals are judged against the real clock (isDispatchExcluded).
+      ...(failed ? { dispatch: { account: id, dispatchable: false, reason: failed, checkedAt: Math.floor(Date.now() / 1000) - 10 } } : {}),
     })),
   };
 }
@@ -52,6 +60,40 @@ describe('pickClaudeAccountToSwitch', () => {
   it('moves onto a login through its first folder in registry order', () => {
     const result = pick({ acct2: { used5h: 30 }, acct3: { used5h: 50 }, acct4: { used5h: 20 } }, 'uuid:LOGIN-1');
     expect(result.pick).toMatchObject({ account: 'acct2', configDir: '/x/.claude-acct2', unsetConfigDir: false, roomPct: 70 });
+  });
+
+  it('regression — reports the meters of the login\'s tightest reading, not of the folder it moves into', () => {
+    // The caller refuses a pick at 85% 5h by these meters; acct2's own 10% would hide acct4's 60%.
+    const result = pick({ acct2: { used5h: 10, used7d: 20 }, acct3: { used5h: 70 }, acct4: { used5h: 60, used7d: 20 } }, 'uuid:LOGIN-1');
+    expect(result.pick).toMatchObject({ account: 'acct2', configDir: '/x/.claude-acct2', roomPct: 40, usedPct5h: 60, usedPct7d: 20 });
+    expect(result.pick?.reason).toContain('as acct4 reads them');
+  });
+
+  it('regression — takes the whole login out when any of its folders is floored, overage or failed on billing', () => {
+    // acct2 alone reads 90% room, but acct4 shares its pool and reads it nearly exhausted.
+    expect(pick({ acct2: { used5h: 10 }, acct3: { used5h: 70 }, acct4: { used5h: 98 } }, 'uuid:LOGIN-1').pick)
+      .toMatchObject({ account: 'acct3', roomPct: 30 });
+    // Out, not merely ranked low: with every other login out too, nothing is picked.
+    expect(pick({ acct2: { used5h: 10 }, acct3: { used5h: 99 }, acct4: { used5h: 98 } }, 'uuid:LOGIN-1').pick).toBeNull();
+    const overage = registry.map((account) => (account.id === 'acct4' ? { ...account, overageEnabled: true } : account));
+    expect(pick({ acct2: { used5h: 10 }, acct3: { used5h: 70 }, acct4: { used5h: 10 } }, 'uuid:LOGIN-1', new Map(), overage).pick)
+      .toMatchObject({ account: 'acct3' });
+    expect(pick({ acct2: { used5h: 10 }, acct3: { used5h: 70 }, acct4: { used5h: 10, failed: 'billing' } }, 'uuid:LOGIN-1').pick)
+      .toMatchObject({ account: 'acct3' });
+  });
+
+  it('moves past a folder that is logged out, but still counts its reading toward the login\'s room', () => {
+    const loggedOut = registry.map((account) => (account.id === 'acct2' ? { ...account, loggedIn: false as const } : account));
+    const result = pick({ acct2: { used5h: 40 }, acct3: { used5h: 80 }, acct4: { used5h: 20 } }, 'uuid:LOGIN-1', new Map(), loggedOut);
+    expect(result.pick).toMatchObject({ account: 'acct4', configDir: '/x/.claude-acct4', roomPct: 60, usedPct5h: 40 });
+    // A dispatch signal that the folder lost its login rules out that folder alone, too.
+    expect(pick({ acct2: { used5h: 20, failed: 'logged-out' }, acct3: { used5h: 80 }, acct4: { used5h: 20 } }, 'uuid:LOGIN-1').pick)
+      .toMatchObject({ account: 'acct4', roomPct: 80 });
+  });
+
+  it('moves into a folder with no reading of its own when another folder of its login has one', () => {
+    expect(pick({ acct2: { used5h: null }, acct3: { used5h: 80 }, acct4: { used5h: 30 } }, 'uuid:LOGIN-1').pick)
+      .toMatchObject({ account: 'acct2', roomPct: 70, usedPct5h: 30 });
   });
 
   it('shares a login\'s room with the sessions already on it', () => {
@@ -114,7 +156,7 @@ describe('pickClaudeAccountToSwitch', () => {
     const result = pick({ acct1: { used5h: 99 }, acct2: { used5h: 10 }, acct3: { used5h: null }, acct4: { used5h: 10 } }, 'uuid:LOGIN-2');
     expect(result.pick).toBeNull();
     expect(result).toMatchObject({
-      reason: expect.stringMatching(/no other login has a usable account: 2 account\(s\) on the login being left, 2 excluded/),
+      reason: expect.stringMatching(/no other login has a usable account: 2 account\(s\) on the login being left, 2 on logins ruled out/),
     });
     expect(result.rows.map((row) => [row.account, row.leaving])).toEqual([['acct1', false], ['acct2', true], ['acct3', false], ['acct4', true]]);
   });

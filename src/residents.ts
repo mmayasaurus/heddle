@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { readClaudeAccounts, type ClaudeAccount } from './capaware.js';
-import { loginOfFolder, normalizeConfigDir } from './logins.js';
+import { loginsOf, normalizeConfigDir, type Logins } from './logins.js';
 
 export interface ResidentLoad {
   count: number;
@@ -19,6 +19,9 @@ export interface ResidentsDeps {
   env?: NodeJS.ProcessEnv;
   /** The home folder whose `.claude.json` is the default login's (censusClaudeLogins). Default: homedir(). */
   home?: string;
+  /** censusClaudeLogins: the login resolver to key sessions by, so they match the caller's keys.
+   *  Default: loginsOf(accounts, home). */
+  logins?: Logins;
 }
 
 // A surviving line must be an interactive fleet session: not a codex companion, not a captured shell
@@ -152,7 +155,7 @@ export function censusClaudeResidents(deps: ResidentsDeps = {}): Map<string, Res
  * unknowable: null (after a warning), never a partial count.
  */
 export function censusClaudeLogins(deps: ResidentsDeps = {}): Map<string, ResidentLoad> | null {
-  const accounts = deps.accounts ?? readClaudeAccounts();
+  const resolver = deps.logins ?? loginsOf(deps.accounts ?? readClaudeAccounts(), deps.home);
   const weightOf = deps.weightOf ?? (() => 1);
   const surviving = liveSessionLines(deps);
   if (surviving === null) return null;
@@ -160,7 +163,7 @@ export function censusClaudeLogins(deps: ResidentsDeps = {}): Map<string, Reside
   for (const line of surviving) {
     const configDir = configDirOf(line);
     const letter = letterOf(line);
-    const login = loginOfFolder(configDir ?? null, accounts, deps.home);
+    const login = resolver.ofFolder(configDir ?? null);
     if (!login) {
       warn(deps, `session on ${configDir ?? 'the default config dir'} is on a login that can't be told`);
       return null;

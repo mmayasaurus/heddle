@@ -14,7 +14,7 @@ const { tempDir } = useTempResources('heddle-cli-account-test-');
 const HERMETIC_CENSUS = { HEDDLE_CENSUS_PS_FIXTURE: '[]' };
 
 function fixture(
-  accounts: Array<{ id: string; configDir: string | null; loggedIn?: boolean; accountUuid?: string }>,
+  accounts: Array<{ id: string; configDir: string | null; loggedIn?: boolean; accountUuid?: string; email?: string }>,
   used: Record<string, number>,
   options: {
     used7d?: Record<string, number | null>;
@@ -571,7 +571,22 @@ describe('heddle account pick --leaving (a switch pick for one running session)'
     const usage = fixture(registry, { acct1: 99, acct2: 10, acct3: 98, acct4: 10 });
     const result = await run(['--leaving', 'acct2'], usage, homeLoggedInto('LOGIN-1'));
     expect(result).toMatchObject({ code: 1, stdout: '' });
-    expect(result.stderr).toMatch(/refusing a switch pick: no other login has a usable account: 2 account\(s\) on the login being left, 2 excluded/);
+    expect(result.stderr).toMatch(/refusing a switch pick: no other login has a usable account: 2 account\(s\) on the login being left, 2 on logins ruled out/);
+  }, 30_000);
+
+  it('regression — leaving the default folder skips a registry row that knows the same login only by email', async () => {
+    const home = withTempHome();
+    writeFileSync(join(home, '.claude.json'), JSON.stringify({ oauthAccount: { accountUuid: 'LOGIN-1', emailAddress: 'one@example.com' } }));
+    const usage = fixture([
+      { id: 'acct1', configDir: '/tmp/acct1', email: 'one@example.com' },
+      { id: 'acct2', configDir: '/tmp/acct2', email: 'two@example.com' },
+    ], { acct1: 10, acct2: 60 });
+    const result = await run(['--leaving', 'default', '--json', '--explain'], usage, home);
+    expect(result).toMatchObject({ code: 0, stderr: '' });
+    const parsed = JSON.parse(result.stdout);
+    expect(parsed).toMatchObject({ account: 'acct2', roomPct: 40 });
+    expect(parsed.accounts.map((row: { account: string; leaving: boolean }) => [row.account, row.leaving]))
+      .toEqual([['acct1', true], ['acct2', false]]);
   }, 30_000);
 
   it('exits 2 when --leaving has no value, names no login, or comes with a multi-agent --for', async () => {

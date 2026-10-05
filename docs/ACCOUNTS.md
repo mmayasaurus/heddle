@@ -124,27 +124,35 @@ harness's tools. Add one with `heddle accounts add --provider <service>`. The to
 
 `heddle account pick --leaving <account|config-dir|default> [--json] [--explain]` picks the account a
 running Claude session should move to when it leaves the login it is on. Name that login by a registry
-`id`, by `default` (the folder used when `CLAUDE_CONFIG_DIR` is unset), or by a config folder written
-the way `CLAUDE_CONFIG_DIR` would name it. A plain `account pick` takes the account with the most 5h
-headroom; this ranks **logins** instead:
+`id`, by `default` (the folder used when `CLAUDE_CONFIG_DIR` is unset, whose login `~/.claude.json`
+holds), or by a config folder written the way `CLAUDE_CONFIG_DIR` would name it (a folder set that way
+keeps its own `.claude.json`, so `--leaving ~/.claude` is not `--leaving default`). A plain `account
+pick` takes the account with the most 5h headroom; this ranks **logins** instead:
 
 - **One login, one candidate.** Config folders logged into the same login draw on one usage pool, so
-  they are one candidate, at the least room any of them reports. Folders are grouped by the registry's
-  `accountUuid`, then its `email`. A folder the registry doesn't list, such as the default `~/.claude`,
-  is told by the `oauthAccount` in its own `.claude.json` (`~/.claude.json` for the default folder).
-  The login being left is never picked, whichever of its folders the session ran in, and a login is
-  picked through its first folder in registry order.
-- **Room.** A login's room is its headroom on the tighter of its two windows. A 5h window that resets
-  within 30 minutes counts as empty while more than 15% is left on it, enough to carry the session to
-  the reset. A window with 15% or less left gets no such credit, so a caller that moves sessions off
-  an account at 85% of its 5h window is never handed one it would move straight off again.
+  they are one candidate. A folder's login is its registry row's `accountUuid`, else its `email`; a
+  folder the registry doesn't list (the default `~/.claude`, say), or a row recording neither, is told
+  by the `oauthAccount` in its own `.claude.json`. A login known only by its email takes the
+  `accountUuid` that email is paired with elsewhere (a registry row, or the `.claude.json` of a
+  registered folder or the default one), when exactly one is, so one login reads alike whichever
+  source told it. The login being left is never picked, whichever of its folders the session ran in.
+- **Room.** A login's room is its headroom on the tighter of its two windows, by the tightest reading
+  any of its folders has, and the pick reports that reading's `usedPct5h`, `usedPct7d` and `resetsAt`.
+  A 5h window that resets within 30 minutes counts as empty while more than 15% is left on it, enough
+  to carry the session to the reset. A window with 15% or less left gets no such credit, so a caller
+  that moves sessions off an account at 85% of its 5h window is never handed one it would move straight
+  off again.
 - **Sessions already there.** The room is shared with the interactive sessions already running on the
-  login, from the same process census as batch placement (`src/residents.ts`), counted per login: a
-  session in the default folder counts toward that folder's login. The pick has the most room per
-  seat, `room ÷ (weighted sessions + 1)`, then the most room, then the lowest account id. When the
-  census can't be taken, it ranks on room alone and reports `residents: null`.
-- **Exclusions.** An account batch placement never uses (floored, logged out, dispatch-excluded,
-  overage, env-repoint pin-only, or unmetered) is never picked, even when its 5h window resets soon.
+  login. They come from the same live-process list as batch placement's census (`src/residents.ts`),
+  counted per login rather than per registered account, so a session in a folder the registry doesn't
+  list (the default one, say) counts toward that folder's login. The pick has the most room per seat,
+  `room ÷ (weighted sessions + 1)`, then the most room, then the lowest account id. When the sessions
+  can't be counted, it ranks on room alone and reports `residents: null`.
+- **What rules a login out.** What is true of the shared pool takes the whole login out: a floored
+  reading, overage billing, or a billing failure, on any of its folders, even when its 5h window resets
+  soon. What is true of one folder (logged out, a dispatch signal that it lost its login, env-repoint
+  pin-only) only rules out moving into that folder: the login is moved into through its first folder in
+  registry order that isn't ruled out, and needs at least one reading.
 
 The JSON is the single pick's shape plus `roomPct` and `residents` (the sessions counted on the
 login). `--explain` adds every account, marking the ones on the login being left. It exits 2 when it

@@ -18,7 +18,7 @@ import { applyInstall, planInstall, redactReport } from './init-project.js';
 import { parseFleetClients, planClientInstall } from './client-config.js';
 import { pickClaudeAccount, readClaudeAccounts } from './capaware.js';
 import { claudeAccountRows, pickClaudeAccountToSwitch, pickClaudeAccountsBatch, usableClaudeCaps, type ClaudeAccountRow } from './account-pick.js';
-import { loginKeyOf, loginNamed } from './logins.js';
+import { loginsOf, type Logins } from './logins.js';
 import { bindingMeter, claudeFloorsFrom } from './floors.js';
 import { loadLanes } from './lanes.js';
 import { readSeatWeights, seatWeightsFrom, writeSeatWeightsMirror } from './seat-weights.js';
@@ -141,6 +141,7 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
   heddle usage install-poll-launchd [--start-interval <secs>] [--dry-run] [--json]  install + load the keeper-less launchd usage-poll producer (running this yourself is the activation step — the pack never loads it; refuses if the window-keeper is loaded)
   heddle top [--once] [--json]  one disk-only dashboard snapshot (watch mode is Slice 2)
   heddle account pick [--for <letter[,letter...]>] [--json] [--explain]   healthiest addressable Claude account for a fleet relaunch
+  heddle account pick --leaving <account|config-dir|default> [--json] [--explain]   the account to move one running session to, off the login it names
   heddle account seat-weights sync   atomically refresh ~/.heddle/seat-weights.json from routing/lanes.yaml
   heddle pr own <whoami|claim|check|release|mine> [<pr#>] [--json]       coordinate ownership of a GitHub PR
   heddle pr sweep <pr#> [--json]       sweep all GitHub PR review channels and report mechanical gates
@@ -382,12 +383,14 @@ try {
       const agents = [...new Set(requestedAgents)];
       // --leaving: a pick for ONE running session moving off the login it names (pickClaudeAccountToSwitch).
       let leavingLogin: string | null = null;
+      let logins: Logins | null = null;
       if (leaving !== undefined) {
         if (agents.length > 1) {
           console.error('heddle: --leaving picks for one session; it cannot be combined with a multi-agent --for');
           process.exit(2);
         }
-        leavingLogin = loginNamed(leaving, accounts);
+        logins = loginsOf(accounts);
+        leavingLogin = logins.named(leaving);
         if (leavingLogin === null) {
           console.error(`heddle: cannot decide a switch pick: ${leaving} names no login (not an account id, "default", or a config folder whose .claude.json holds one)`);
           process.exit(2);
@@ -405,12 +408,13 @@ try {
         console.error(`heddle: warning: could not refresh the seat-weights mirror (${(error as Error).message}); using the last-written or unit weights`);
       }
       const { weightOf } = readSeatWeights();
-      if (leavingLogin !== null) {
+      if (leavingLogin !== null && logins !== null) {
         const result = pickClaudeAccountToSwitch(claudeCaps, accounts, floors, {
           leaving: leavingLogin,
-          loginOf: (account) => loginKeyOf(account),
-          // Per LOGIN, so sessions in a folder the registry doesn't list (the default ~/.claude) count too.
-          residents: censusClaudeLogins({ weightOf }),
+          loginOf: logins.ofAccount,
+          // Per LOGIN, keyed by the same resolver, so sessions in a folder the registry doesn't list (the
+          // default ~/.claude) count too.
+          residents: censusClaudeLogins({ weightOf, logins }),
           nowS: Math.floor(Date.now() / 1000),
         });
         if (result.pick === null) {
