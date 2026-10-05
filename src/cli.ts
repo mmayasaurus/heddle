@@ -170,12 +170,17 @@ function out(json: boolean, obj: unknown, text: () => string): void {
   console.log(json ? JSON.stringify(obj, null, 2) : text());
 }
 const ACCOUNT_PICK_USAGE = 'usage: heddle account pick [--for <letter[,letter...]>] [--leaving <account|config-dir|default>] [--json] [--explain]';
-/** `account pick --explain`'s per-account lines (`leaving`: a switch pick's rows on the login being
- *  left, or null where the login can't be told). */
-function explainRows(rows: ReadonlyArray<Omit<ClaudeAccountRow, 'residents' | 'residentWeight'> & { leaving?: boolean | null }>): string {
+/** `account pick --explain`'s per-account lines. A switch pick's rows add `leaving` (on the login being
+ *  left; null where the login can't be told) and `ruledOutBy` (the folder whose state takes the whole
+ *  login out). */
+function explainRows(rows: ReadonlyArray<Omit<ClaudeAccountRow, 'residents' | 'residentWeight'> & {
+  leaving?: boolean | null; ruledOutBy?: { account: string; state: string } | null;
+}>): string {
   return rows.map((account) => {
+    const by = account.ruledOutBy;
     const state = [
       account.leaving ? 'login being left' : account.leaving === null ? 'login unknown' : null,
+      by && by.account !== account.account ? `login ruled out by ${by.account} (${by.state})` : null,
       account.floored ? 'floored' : null,
       account.loggedOut ? 'logged-out' : null,
       account.dispatchExcluded ? 'dispatch-excluded' : null,

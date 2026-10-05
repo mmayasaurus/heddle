@@ -118,6 +118,9 @@ export interface SwitchAccountRow extends ClaudeAccountRow {
   /** On the login being left, so never a candidate; null when its login can't be told, so never a
    *  candidate either. */
   leaving: boolean | null;
+  /** The folder whose pool-wide state (floored, overage, billing failure) takes this row's whole
+   *  login out — this row's own, or a sibling's; null when nothing does. */
+  ruledOutBy: { account: string; state: 'floored' | 'overage' | 'billing failure' } | null;
 }
 
 /** The highest usage a login's folders read on one window, with that reading's reset. */
@@ -155,8 +158,9 @@ export function pickClaudeAccountToSwitch(
   },
 ): { pick: SwitchPickData; rows: SwitchAccountRow[] } | { pick: null; reason: string; rows: SwitchAccountRow[] } {
   const loginKeys = accounts.map((account) => opts.loginOf(account));
-  const rows: SwitchAccountRow[] = claudeAccountRows(caps, accounts, floors)
-    .map((row, index) => ({ ...row, leaving: loginKeys[index] === null ? null : loginKeys[index] === opts.leaving }));
+  const rows: SwitchAccountRow[] = claudeAccountRows(caps, accounts, floors).map((row, index) => ({
+    ...row, leaving: loginKeys[index] === null ? null : loginKeys[index] === opts.leaving, ruledOutBy: null,
+  }));
   const capsRowOf = new Map(caps.accounts.map((capsRow) => [capsRow.id, capsRow]));
   interface Login {
     /** The folder a session would move into. */
@@ -165,7 +169,8 @@ export function pickClaudeAccountToSwitch(
     room: { pct: number; resetsSoon: boolean } | null;
     peak5h: Peak | null;
     peak7d: Peak | null;
-    barred: boolean;
+    /** The first folder, in registry order, whose pool-wide state takes the whole login out. */
+    barredBy: SwitchAccountRow['ruledOutBy'];
   }
   const logins = new Map<string, Login>();
   let left = 0, unknown = 0;
@@ -175,10 +180,12 @@ export function pickClaudeAccountToSwitch(
     if (row.leaving) left++;
     if (key === null) unknown++;
     if (row.leaving !== false || key === null) continue;
-    const login = logins.get(key) ?? { into: null, room: null, peak5h: null, peak7d: null, barred: false };
+    const login = logins.get(key) ?? { into: null, room: null, peak5h: null, peak7d: null, barredBy: null };
     logins.set(key, login);
     const capsRow = capsRowOf.get(account.id);
-    if (row.floored || row.overage || (row.dispatchExcluded && capsRow?.dispatch?.reason === 'billing')) login.barred = true;
+    const poolState = row.floored ? 'floored' as const : row.overage ? 'overage' as const
+      : row.dispatchExcluded && capsRow?.dispatch?.reason === 'billing' ? 'billing failure' as const : null;
+    if (poolState && !login.barredBy) login.barredBy = { account: account.id, state: poolState };
     if (!row.excluded && !login.into) login.into = account;
     if (row.headroomPct === null) continue;
     const reset5h = capsRow?.fiveHour.resetsAt ?? null;
@@ -193,8 +200,12 @@ export function pickClaudeAccountToSwitch(
     if (!login.room || room < login.room.pct) login.room = { pct: room, resetsSoon };
     else if (room === login.room.pct) login.room.resetsSoon &&= resetsSoon;
   }
-  const candidates = [...logins.entries()].flatMap(([key, { into, room, peak5h, peak7d, barred }]) =>
-    (into && room && !barred ? [{ key, into, room, peak5h, peak7d }] : []));
+  for (const [index, row] of rows.entries()) {
+    const key = loginKeys[index];
+    if (row.leaving === false && key !== null) row.ruledOutBy = logins.get(key)?.barredBy ?? null;
+  }
+  const candidates = [...logins.entries()].flatMap(([key, { into, room, peak5h, peak7d, barredBy }]) =>
+    (into && room && !barredBy ? [{ key, into, room, peak5h, peak7d }] : []));
   if (candidates.length === 0) {
     return {
       pick: null,

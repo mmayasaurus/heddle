@@ -118,6 +118,19 @@ describe('heddle account pick --leaving (a switch pick for one running session)'
     expect(result.stdout).toContain('acct3: 5h 50%, 7d unknown, headroom 50% (5h binds), overage\n');
   }, 30_000);
 
+  it('regression — says which sibling folder took a login out, in --explain and its JSON', async () => {
+    // Overage on acct4 takes out its login, acct2's too: acct2 must not read as eligible.
+    const overage = registry.map((account) => (account.id === 'acct4' ? { ...account, overageEnabled: true } : account));
+    const usage = fixture(overage, { acct1: 5, acct2: 30, acct3: 50, acct4: 30 });
+    const text = await run(['--leaving', 'default', '--explain'], usage, homeLoggedInto('LOGIN-1'));
+    expect(text).toMatchObject({ code: 0, stderr: '' });
+    expect(text.stdout).toMatch(/^acct3 /);
+    expect(text.stdout).toContain('acct2: 5h 30%, 7d unknown, headroom 70% (5h binds), login ruled out by acct4 (overage)\n');
+    expect(text.stdout).toContain('acct4: 5h 30%, 7d unknown, headroom 70% (5h binds), overage');
+    const json = JSON.parse((await run(['--leaving', 'default', '--json', '--explain'], usage, homeLoggedInto('LOGIN-1'))).stdout);
+    expect(json.accounts.find((row: { account: string }) => row.account === 'acct2').ruledOutBy).toEqual({ account: 'acct4', state: 'overage' });
+  }, 30_000);
+
   it('refuses with exit 1 when no other login has a usable account', async () => {
     const usage = fixture(registry, { acct1: 99, acct2: 10, acct3: 98, acct4: 10 });
     const result = await run(['--leaving', 'acct2'], usage, homeLoggedInto('LOGIN-1'));

@@ -84,6 +84,38 @@ describe('loginsOf — the login a folder or account draws on', () => {
     expect(logins.named('blank')).toBeNull();
   });
 
+  it('regression — can\'t tell a folder whose .claude.json names only an email paired elsewhere with another id', () => {
+    // The default folder pairs x@example.com with U2; acct1's row says U1 while its own .claude.json holds
+    // only that email. Field by field nothing differs, but the cache can only be U2: the two can't agree.
+    const dir = home({ accountUuid: 'U2', emailAddress: 'x@example.com' });
+    const acct1: ClaudeAccount = { id: 'acct1', configDir: folder(dir, '.claude-acct1', { emailAddress: 'x@example.com' }), accountUuid: 'U1' };
+    const logins = loginsOf([acct1], dir);
+    expect(logins.ofAccount(acct1)).toBeNull();
+    expect(logins.ofFolder(acct1.configDir)).toBeNull();
+  });
+
+  it('takes a row and .claude.json naming one account id as one login, though their emails differ', () => {
+    const dir = home();
+    const acct2: ClaudeAccount = { id: 'acct2', configDir: folder(dir, '.claude-acct2', { accountUuid: 'U2', emailAddress: 'renamed@x.com' }), accountUuid: 'U2', email: 'two@x.com' };
+    expect(loginsOf([acct2], dir).ofAccount(acct2)).toBe('uuid:U2');
+  });
+
+  it('regression — keeps an env-repoint account its own login whatever its row or a leftover .claude.json says, and pairs nothing from it', () => {
+    const dir = home();
+    const envRepoint = { baseUrl: 'https://api.example.com/anthropic', authTokenRef: 'EXAMPLE_KEY', service: 'glm' };
+    // The glm folder was copied from a native one, and its row carries a native-looking identity.
+    const glm: ClaudeAccount = {
+      id: 'glm', configDir: folder(dir, 'glm', { accountUuid: 'U1', emailAddress: 'one@x.com' }),
+      accountUuid: 'G1', email: 'one@x.com', envRepoint,
+    };
+    // Paired with G1 and U1 from glm, this email would be ambiguous; with glm left out it is unpaired.
+    const native: ClaudeAccount = { id: 'acct1', configDir: '/accounts/acct1', email: 'one@x.com' };
+    const logins = loginsOf([glm, native], dir);
+    expect(logins.ofAccount(glm)).toBe('account:glm');
+    expect(logins.ofFolder(glm.configDir)).toBe('account:glm');
+    expect(logins.ofAccount(native)).toBe('email:one@x.com');
+  });
+
   it('regression — can\'t tell a registered folder whose row and own .claude.json name different logins', () => {
     // One of the two is stale (a re-login the registry's populate-only reconcile left unchanged, or a
     // cloned folder's cached blob), and only a live poll could say which.

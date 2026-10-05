@@ -95,6 +95,14 @@ describe('pickClaudeAccountToSwitch', () => {
       .toMatchObject({ account: 'acct3', roomPct: 30 });
     // Out, not merely ranked low: with every other login out too, nothing is picked.
     expect(pick({ acct2: { used5h: 10 }, acct3: { used5h: 99 }, acct4: { used5h: 98 } }, 'uuid:LOGIN-1').pick).toBeNull();
+    // Every folder of the login says which folder took it out.
+    const { rows } = pick({ acct2: { used5h: 10 }, acct3: { used5h: 70 }, acct4: { used5h: 10, failed: 'billing' } }, 'uuid:LOGIN-1');
+    expect(rows.map((row) => [row.account, row.ruledOutBy])).toEqual([
+      ['acct1', null],
+      ['acct2', { account: 'acct4', state: 'billing failure' }],
+      ['acct3', null],
+      ['acct4', { account: 'acct4', state: 'billing failure' }],
+    ]);
     const overage = registry.map((account) => (account.id === 'acct4' ? { ...account, overageEnabled: true } : account));
     expect(pick({ acct2: { used5h: 10 }, acct3: { used5h: 70 }, acct4: { used5h: 10 } }, 'uuid:LOGIN-1', new Map(), overage).pick)
       .toMatchObject({ account: 'acct3' });

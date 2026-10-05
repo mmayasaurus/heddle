@@ -23,9 +23,10 @@ import type { ClaudeAccount } from './capaware.js';
  *
  * Where the sources can't settle it, the login is unknown (null), so a caller never takes it for some
  * other login: an email paired with two or more ids; a registered folder whose row and own
- * `.claude.json` name different logins (one of them is stale, and only a live poll could say which);
- * and a native account with no identity anywhere. An env-repoint account (`envRepoint`) has no Claude
- * login: it is a login of its own, `account:<id>`.
+ * `.claude.json` can't be the same login, however their ids and emails resolve (one of them is stale,
+ * and only a live poll could say which); and a native account with no identity anywhere. An
+ * env-repoint account (`envRepoint`) has no Claude login, whatever its row or folder says: it is a
+ * login of its own, `account:<id>`.
  */
 
 interface Identity {
@@ -96,25 +97,35 @@ export function loginsOf(accounts: readonly ClaudeAccount[], home: string = home
     pairedIds.set(identity.email, (pairedIds.get(identity.email) ?? new Set<string>()).add(identity.uuid));
   };
   for (const account of accounts) {
+    // An env-repoint account has no Claude login, so neither its row nor a .claude.json left in its
+    // folder pairs anything.
+    if (account.envRepoint) continue;
     pair(registryIdentity(account));
     pair(blobOf(folderOf(account.configDir)));
   }
   pair(blobOf(null));
 
-  const keyOf = (identity: Identity): string | null => {
-    if (identity.uuid) return `uuid:${identity.uuid}`;
-    if (!identity.email) return null;
+  /** Every login an identity could be: its account id; else the ids its email is paired with; else,
+   *  paired with none, its email. */
+  const couldBe = (identity: Identity): string[] => {
+    if (identity.uuid) return [`uuid:${identity.uuid}`];
+    if (!identity.email) return [];
     const ids = pairedIds.get(identity.email);
-    if (!ids) return `email:${identity.email}`;
-    return ids.size === 1 ? `uuid:${[...ids][0]}` : null;
+    return ids ? [...ids].map((id) => `uuid:${id}`) : [`email:${identity.email}`];
   };
-  const differ = (a: string | null, b: string | null) => a !== null && b !== null && a !== b;
+  const keyOf = (identity: Identity): string | null => {
+    const logins = couldBe(identity);
+    return logins.length === 1 ? logins[0] : null;
+  };
   const ofAccount = (account: ClaudeAccount): string | null => {
+    if (account.envRepoint) return `account:${account.id}`;
     const registry = registryIdentity(account);
     const cached = blobOf(folderOf(account.configDir));
-    if (!registry && !cached) return account.envRepoint ? `account:${account.id}` : null;
-    if (registry && cached && (differ(registry.uuid, cached.uuid) || differ(registry.email, cached.email))) return null;
-    return keyOf((registry ?? cached)!);
+    if (!registry || !cached) return registry || cached ? keyOf((registry ?? cached)!) : null;
+    // The registry row names the login; the folder's .claude.json can only veto it, when no login it
+    // could be is one the row could be (then one of the two is stale).
+    const fromCache = couldBe(cached);
+    return couldBe(registry).some((login) => fromCache.includes(login)) ? keyOf(registry) : null;
   };
   const ofFolder = (configDir: string | null): string | null => {
     const folder = folderOf(configDir);

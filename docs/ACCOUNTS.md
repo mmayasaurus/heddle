@@ -137,11 +137,12 @@ headroom; this ranks **logins** instead:
   `accountUuid` that email is paired with elsewhere (a registry row, or the `.claude.json` of a
   registered folder or the default one), so one login reads alike whichever source told it. Where the
   sources can't settle it, the login can't be told: two or more ids paired with the email; a registry
-  row and its folder's `.claude.json` naming different logins (one of them is stale, and only a live
-  usage poll could say which); or a native account with no identity anywhere. Such an account is never
-  picked, since it may be the login being left, and `--explain` marks it `login unknown`. (An
-  env-repoint account has no Claude login: it counts as a login of its own.) The login being left is
-  never picked, whichever of its folders the session ran in.
+  row and its folder's `.claude.json` that can't be the same login, however their ids and emails
+  resolve (one of them is stale, and only a live usage poll could say which); or a native account with
+  no identity anywhere. Such an account is never picked, since it may be the login being left, and
+  `--explain` marks it `login unknown`. (An env-repoint account has no Claude login, whatever its row
+  or folder says: it counts as a login of its own.) The login being left is never picked, whichever of
+  its folders the session ran in.
 - **Room.** A login's room is its headroom on the tighter of its two windows, by the tightest reading
   any of its folders has. The pick reports the highest 5h and 7d usage any of its folders reads
   (`usedPct5h`, `usedPct7d`, and `resetsAt` for the window that binds), not just the folder it moves
@@ -164,6 +165,7 @@ headroom; this ranks **logins** instead:
 
 The JSON is the single pick's shape plus `roomPct` and `residents` (the sessions counted on the
 login). `--explain` adds every account with what rules it out, if anything: on the login being left,
-login unknown, floored, logged out, dispatch-excluded, overage, or pin-only. It exits 2 when it
+login unknown, login ruled out by a sibling folder (and why), floored, logged out, dispatch-excluded,
+overage, or pin-only; the JSON rows carry `leaving` and `ruledOutBy`. It exits 2 when it
 can't decide: usage readings missing or stale, a `--leaving` that names no login, or `--leaving` with
 a multi-agent `--for`. It exits 1 when no other login has a usable account.
