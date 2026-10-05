@@ -169,11 +169,12 @@ function commaIds(flag: string): string[] {
 function out(json: boolean, obj: unknown, text: () => string): void {
   console.log(json ? JSON.stringify(obj, null, 2) : text());
 }
-/** `account pick --explain`'s per-account lines (`leaving`: a switch pick's rows on the login being left). */
-function explainRows(rows: ReadonlyArray<Omit<ClaudeAccountRow, 'residents' | 'residentWeight'> & { leaving?: boolean }>): string {
+/** `account pick --explain`'s per-account lines (`leaving`: a switch pick's rows on the login being
+ *  left, or null where the login can't be told). */
+function explainRows(rows: ReadonlyArray<Omit<ClaudeAccountRow, 'residents' | 'residentWeight'> & { leaving?: boolean | null }>): string {
   return rows.map((account) => {
     const state = [
-      account.leaving ? 'login being left' : null,
+      account.leaving ? 'login being left' : account.leaving === null ? 'login unknown' : null,
       account.floored ? 'floored' : null,
       account.loggedOut ? 'logged-out' : null,
       account.dispatchExcluded ? 'dispatch-excluded' : null,

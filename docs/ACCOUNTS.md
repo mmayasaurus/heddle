@@ -123,21 +123,26 @@ harness's tools. Add one with `heddle accounts add --provider <service>`. The to
 ## Moving a running session: `account pick --leaving`
 
 `heddle account pick --leaving <account|config-dir|default> [--json] [--explain]` picks the account a
-running Claude session should move to when it leaves the login it is on. Name that login by a registry
-`id`, by `default` (the folder used when `CLAUDE_CONFIG_DIR` is unset, whose login `~/.claude.json`
-holds), or by a config folder written the way `CLAUDE_CONFIG_DIR` would name it (a folder set that way
-keeps its own `.claude.json`, so `--leaving ~/.claude` is not `--leaving default`). A plain `account
-pick` takes the account with the most 5h headroom; this ranks **logins** instead:
+running Claude session should move to when it leaves the login it is on. Name that login by `default`
+(always the folder used when `CLAUDE_CONFIG_DIR` is unset, whose login `~/.claude.json` holds, even if
+an account is named `default`), by a registry `id`, or by a config folder written the way
+`CLAUDE_CONFIG_DIR` would name it (a folder set that way keeps its own `.claude.json`, so `--leaving
+~/.claude` is not `--leaving default`). A plain `account pick` takes the account with the most 5h
+headroom; this ranks **logins** instead:
 
 - **One login, one candidate.** Config folders logged into the same login draw on one usage pool, so
   they are one candidate. A folder's login is its registry row's `accountUuid`, else its `email`; a
   folder the registry doesn't list (the default `~/.claude`, say), or a row recording neither, is told
   by the `oauthAccount` in its own `.claude.json`. A login known only by its email takes the
   `accountUuid` that email is paired with elsewhere (a registry row, or the `.claude.json` of a
-  registered folder or the default one), when exactly one is, so one login reads alike whichever
-  source told it. The login being left is never picked, whichever of its folders the session ran in.
+  registered folder or the default one), so one login reads alike whichever source told it. When two
+  or more ids are paired with the email (a stale `.claude.json`, say), the login can't be told: the
+  account is never picked, since it may be the login being left, and `--explain` marks it `login
+  unknown`. The login being left is never picked, whichever of its folders the session ran in.
 - **Room.** A login's room is its headroom on the tighter of its two windows, by the tightest reading
-  any of its folders has, and the pick reports that reading's `usedPct5h`, `usedPct7d` and `resetsAt`.
+  any of its folders has. The pick reports the highest 5h and 7d usage any of its folders reads
+  (`usedPct5h`, `usedPct7d`, and `resetsAt` for the window that binds), not just the folder it moves
+  into.
   A 5h window that resets within 30 minutes counts as empty while more than 15% is left on it, enough
   to carry the session to the reset. A window with 15% or less left gets no such credit, so a caller
   that moves sessions off an account at 85% of its 5h window is never handed one it would move straight

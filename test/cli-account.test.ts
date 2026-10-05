@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { useTempResources } from './helpers.js';
@@ -506,7 +506,7 @@ describe('heddle account pick --leaving (a switch pick for one running session)'
       account: 'acct2', configDir: '/tmp/acct2', unsetConfigDir: false,
       usedPct5h: 30, usedPct7d: null, bindingMeter: '5h', resetsAt: null,
       roomPct: 70, residents: 0,
-      reason: 'account:acct2 switch pick (room 70%, 0 session(s) there; 5h 30%, 7d unknown; best of 2 login(s))',
+      reason: 'account:acct2 switch pick (room 70%; 0 session(s) there; its folders at most 5h 30%, 7d unknown; best of 2 login(s))',
     });
   }, 30_000);
 
@@ -578,6 +578,23 @@ describe('heddle account pick --leaving (a switch pick for one running session)'
     const result = await run(['--leaving', 'acct2'], usage, homeLoggedInto('LOGIN-1'));
     expect(result).toMatchObject({ code: 1, stdout: '' });
     expect(result.stderr).toMatch(/refusing a switch pick: no other login has a usable account: 2 account\(s\) on the login being left, 2 on logins ruled out/);
+  }, 30_000);
+
+  it('regression — never picks an account whose own folder caches a stale id for its email', async () => {
+    const home = withTempHome();
+    writeFileSync(join(home, '.claude.json'), JSON.stringify({ oauthAccount: { accountUuid: 'CURRENT', emailAddress: 'one@example.com' } }));
+    const stale = join(tempDir(), '.claude-acct1');
+    mkdirSync(stale);
+    writeFileSync(join(stale, '.claude.json'), JSON.stringify({ oauthAccount: { accountUuid: 'OLD', emailAddress: 'one@example.com' } }));
+    const usage = fixture([
+      { id: 'acct1', configDir: stale, email: 'one@example.com' },
+      { id: 'acct2', configDir: '/tmp/acct2', email: 'two@example.com' },
+    ], { acct1: 10, acct2: 60 });
+    const result = await run(['--leaving', 'default', '--explain'], usage, home);
+    expect(result).toMatchObject({ code: 0, stderr: '' });
+    const [selected, ...details] = result.stdout.trim().split('\n');
+    expect(selected).toMatch(/^acct2 /);
+    expect(details[0]).toMatch(/^acct1: .*, login unknown$/);
   }, 30_000);
 
   it('regression — leaving the default folder skips a registry row that knows the same login only by email', async () => {

@@ -17,10 +17,10 @@ import type { ClaudeAccount } from './capaware.js';
  * it is only the fallback.
  *
  * A login known only by its email takes the account id that email is paired with elsewhere (a
- * registry row, or the `.claude.json` of a registered folder or of the default one, naming both)
- * when exactly one is, so one login reads alike whichever source told it. Otherwise its key is
- * `email:<address>`. A pairing says which id goes with which email, and that stays true even where a
- * cloned folder's blob names the wrong login for that folder.
+ * registry row, or the `.claude.json` of a registered folder or of the default one, naming both), so
+ * one login reads alike whichever source told it. An email nothing pairs with an id keys as
+ * `email:<address>`. An email paired with two or more ids (a stale `.claude.json`, say) leaves its
+ * login unknown: null, so a caller never takes it for some other login.
  */
 
 interface Identity {
@@ -54,14 +54,15 @@ function cachedIdentity(folder: string | null, home: string): Identity | null {
 }
 
 export interface Logins {
-  /** The login a registered account draws on; an account nothing is known about is a login of its own. */
-  ofAccount(account: ClaudeAccount): string;
+  /** The login a registered account draws on; an account nothing is known about is a login of its
+   *  own. null when it can't be told. */
+  ofAccount(account: ClaudeAccount): string | null;
   /** The login of the folder a session runs in, `configDir` as its CLAUDE_CONFIG_DIR reads (null =
    *  unset); null when it can't be told. */
   ofFolder(configDir: string | null): string | null;
-  /** The login `--leaving` names: a registered account id, `default` (the folder used when
-   *  CLAUDE_CONFIG_DIR is unset), or a config folder as CLAUDE_CONFIG_DIR would read; null when it
-   *  names no login that can be told. */
+  /** The login `--leaving` names: `default` (always the folder used when CLAUDE_CONFIG_DIR is unset),
+   *  a registered account id, or a config folder as CLAUDE_CONFIG_DIR would read; null when it names
+   *  no login that can be told. */
   named(name: string): string | null;
 }
 
@@ -90,18 +91,24 @@ export function loginsOf(accounts: readonly ClaudeAccount[], home: string = home
   }
   pair(blobOf(null));
 
-  const keyOf = (identity: Identity | null): string | null => {
-    if (identity?.uuid) return `uuid:${identity.uuid}`;
-    if (!identity?.email) return null;
+  const keyOf = (identity: Identity): string | null => {
+    if (identity.uuid) return `uuid:${identity.uuid}`;
+    if (!identity.email) return null;
     const ids = pairedIds.get(identity.email);
-    return ids?.size === 1 ? `uuid:${[...ids][0]}` : `email:${identity.email}`;
+    if (!ids) return `email:${identity.email}`;
+    return ids.size === 1 ? `uuid:${[...ids][0]}` : null;
   };
-  const ofAccount = (account: ClaudeAccount): string =>
-    keyOf(registryIdentity(account) ?? blobOf(folderOf(account.configDir))) ?? `account:${account.id}`;
+  const ofAccount = (account: ClaudeAccount): string | null => {
+    const identity = registryIdentity(account) ?? blobOf(folderOf(account.configDir));
+    return identity ? keyOf(identity) : `account:${account.id}`;
+  };
   const ofFolder = (configDir: string | null): string | null => {
     const folder = folderOf(configDir);
     const registered = accounts.filter((account) => folderOf(account.configDir) === folder);
-    if (registered.length === 0) return keyOf(blobOf(folder));
+    if (registered.length === 0) {
+      const identity = blobOf(folder);
+      return identity ? keyOf(identity) : null;
+    }
     // Two registry rows for one folder must agree on the login, or it can't be told.
     const keys = new Set(registered.map(ofAccount));
     return keys.size === 1 ? [...keys][0] : null;
@@ -110,8 +117,9 @@ export function loginsOf(accounts: readonly ClaudeAccount[], home: string = home
     ofAccount,
     ofFolder,
     named(name) {
+      if (name === 'default') return ofFolder(null);
       const registered = accounts.find((account) => account.id === name);
-      return registered ? ofAccount(registered) : ofFolder(name === 'default' ? null : name);
+      return registered ? ofAccount(registered) : ofFolder(name);
     },
   };
 }

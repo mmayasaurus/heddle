@@ -94,13 +94,33 @@ describe('loginsOf — the login a folder or account draws on', () => {
     expect(accounts.map(logins.ofAccount)).toEqual(['uuid:U1', 'uuid:U1', 'uuid:U3', 'uuid:U3']);
   });
 
-  it('keeps an email paired with two account ids as an email key', () => {
+  it('can\'t tell the login of an email paired with two account ids', () => {
     const accounts: ClaudeAccount[] = [
       { id: 'a', configDir: '/accounts/a', accountUuid: 'U1', email: 'same@x.com' },
       { id: 'b', configDir: '/accounts/b', accountUuid: 'U2', email: 'same@x.com' },
       { id: 'c', configDir: '/accounts/c', email: 'same@x.com' },
     ];
-    expect(loginsOf(accounts, home()).ofAccount(accounts[2])).toBe('email:same@x.com');
+    const logins = loginsOf(accounts, home());
+    expect(logins.ofAccount(accounts[2])).toBeNull();
+    expect(logins.ofFolder('/accounts/c')).toBeNull();
+    expect(logins.named('c')).toBeNull();
+  });
+
+  it('regression — a stale .claude.json pairing an email with an old id makes that email\'s login unknown, never another login', () => {
+    // acct1's own folder still caches an old id for its email; the default folder has the current one.
+    // Keyed `email:one@x.com`, acct1 would read as a different login from the default folder's and could
+    // be picked when leaving it; unknown, it never is.
+    const dir = home({ accountUuid: 'CURRENT', emailAddress: 'one@x.com' });
+    const acct1: ClaudeAccount = { id: 'acct1', configDir: folder(dir, '.claude-acct1', { accountUuid: 'OLD', emailAddress: 'one@x.com' }), email: 'one@x.com' };
+    const logins = loginsOf([acct1], dir);
+    expect(logins.ofAccount(acct1)).toBeNull();
+    expect(logins.named('default')).toBe('uuid:CURRENT');
+  });
+
+  it('always names the default folder by "default", even beside an account with that id', () => {
+    const dir = home({ accountUuid: 'CURRENT' });
+    const logins = loginsOf([{ id: 'default', configDir: '/accounts/other', accountUuid: 'OTHER' }], dir);
+    expect(logins.named('default')).toBe('uuid:CURRENT');
   });
 
   it('matches a registered folder after ~ and a trailing slash, and prefers the default folder\'s row over home\'s .claude.json', () => {

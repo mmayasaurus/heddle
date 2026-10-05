@@ -62,11 +62,31 @@ describe('pickClaudeAccountToSwitch', () => {
     expect(result.pick).toMatchObject({ account: 'acct2', configDir: '/x/.claude-acct2', unsetConfigDir: false, roomPct: 70 });
   });
 
-  it('regression — reports the meters of the login\'s tightest reading, not of the folder it moves into', () => {
+  it('regression — reports the highest usage any of the login\'s folders reads, not the usage of the folder it moves into', () => {
     // The caller refuses a pick at 85% 5h by these meters; acct2's own 10% would hide acct4's 60%.
     const result = pick({ acct2: { used5h: 10, used7d: 20 }, acct3: { used5h: 70 }, acct4: { used5h: 60, used7d: 20 } }, 'uuid:LOGIN-1');
     expect(result.pick).toMatchObject({ account: 'acct2', configDir: '/x/.claude-acct2', roomPct: 40, usedPct5h: 60, usedPct7d: 20 });
-    expect(result.pick?.reason).toContain('as acct4 reads them');
+  });
+
+  it('regression — reports the same peak usage whatever order the login\'s folders are in, even when their room ties', () => {
+    // Both folders read 14% room, one on its 7d window and one on its 5h; neither alone shows both peaks.
+    const readings = { acct2: { used5h: 10, used7d: 86 }, acct3: { used5h: 90 }, acct4: { used5h: 86, used7d: 10 } };
+    const reversed = [registry[0], registry[3], registry[2], registry[1]];
+    for (const accounts of [registry, reversed]) {
+      expect(pick(readings, 'uuid:LOGIN-1', new Map(), accounts).pick)
+        .toMatchObject({ roomPct: 14, usedPct5h: 86, usedPct7d: 86, bindingMeter: '5h' });
+    }
+  });
+
+  it('never picks an account whose login can\'t be told, since it may be the login being left', () => {
+    const unknown = (account: ClaudeAccount) => (account.id === 'acct1' ? null : `uuid:${account.accountUuid}`);
+    const result = pickClaudeAccountToSwitch(caps({ acct1: { used5h: 0 }, acct2: { used5h: 50 }, acct3: { used5h: 60 }, acct4: { used5h: 50 } }),
+      registry, floors, { leaving: 'uuid:LOGIN-2', loginOf: unknown, residents: new Map(), nowS: NOW });
+    expect(result.pick).toMatchObject({ account: 'acct3' });
+    expect(result.rows.map((row) => [row.account, row.leaving])).toEqual([['acct1', null], ['acct2', true], ['acct3', false], ['acct4', true]]);
+    const none = pickClaudeAccountToSwitch(caps({ acct1: { used5h: 0 }, acct3: { used5h: 99 } }),
+      registry, floors, { leaving: 'uuid:LOGIN-2', loginOf: unknown, residents: new Map(), nowS: NOW });
+    expect(none).toMatchObject({ pick: null, reason: expect.stringContaining(', 1 whose login can\'t be told') });
   });
 
   it('regression — takes the whole login out when any of its folders is floored, overage or failed on billing', () => {
