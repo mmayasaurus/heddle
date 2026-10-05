@@ -383,7 +383,7 @@ Run `heddle --help` for the authoritative syntax. The remaining commands are:
 | `ledger`, `ledger show`, `ledger finish`, `ledger sweep`, `ledger report-in-session` | Inspect, close, sweep, or administratively report ledger records. |
 | `usage`, `usage --remaining`, `usage poll-claude`, `usage install-poll-launchd` | View totals/headroom, collect Claude usage, or install its local polling job. |
 | `top` | Print one disk-only dashboard snapshot. |
-| `account pick`, `account seat-weights sync` | Select a healthy Claude account or refresh seat-weight data. |
+| `account pick`, `account seat-weights sync` | Select a healthy Claude account (with `--leaving`, the one to move a running session to; see [Accounts](docs/ACCOUNTS.md)) or refresh seat-weight data. |
 | `pr own`, `pr sweep`, `pr watch` | Coordinate PR ownership, sweep review channels, or poll PR review/CI state. |
 | `rule list\|propose\|ratify\|test` | Manage hook rules. |
 | `reviews`, `review-outcome` | Inspect the adversarial-review scoreboard or record accepted findings. |

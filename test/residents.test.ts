@@ -1,5 +1,10 @@
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
-import { censusClaudeResidents } from '../src/residents.js';
+import { censusClaudeLogins, censusClaudeResidents } from '../src/residents.js';
+import { useTempResources } from './helpers.js';
+
+const { tempDir } = useTempResources('heddle-residents-test-');
 
 const accounts = [
   { id: 'default', configDir: null },
@@ -122,5 +127,65 @@ describe('censusClaudeResidents', () => {
     expect(censusClaudeResidents({
       accounts, weightOf, exec: execFrom(['801'], { 801: 'claude HEDDLE_AGENT=S CLAUDE_CONFIG_DIR=/accounts/other/' }),
     })).toEqual(new Map([['other', { count: 1, weight: 1 }]]));
+  });
+});
+
+describe('censusClaudeLogins', () => {
+  // The live registry's shape: acct2 and acct4 are two folders logged into one login, and the default
+  // folder (no registry row) is logged into acct1's.
+  const registry = [
+    { id: 'acct1', configDir: '/accounts/acct1', accountUuid: 'LOGIN-1' },
+    { id: 'acct2', configDir: '/accounts/acct2', accountUuid: 'LOGIN-2' },
+    { id: 'acct4', configDir: '/accounts/acct4', accountUuid: 'LOGIN-2' },
+  ];
+  const homeLoggedInto = (accountUuid: string) => {
+    const home = tempDir();
+    writeFileSync(join(home, '.claude.json'), JSON.stringify({ oauthAccount: { accountUuid } }));
+    return home;
+  };
+
+  it('adds up folders sharing a login, and counts an env-less session toward the default folder\'s login', () => {
+    const result = censusClaudeLogins({
+      accounts: registry, weightOf, home: homeLoggedInto('LOGIN-1'),
+      psLines: [
+        'claude HEDDLE_AGENT=R CLAUDE_CONFIG_DIR=/accounts/acct2',
+        'claude CLAUDE_CONFIG_DIR=/accounts/acct4/',
+        'claude HEDDLE_AGENT=S',
+        'claude -p task HEDDLE_AGENT=X CLAUDE_CONFIG_DIR=/accounts/acct2', // headless worker → skip
+      ],
+    });
+    expect(result).toEqual(new Map([
+      ['uuid:LOGIN-2', { count: 2, weight: 3.5 }],
+      ['uuid:LOGIN-1', { count: 1, weight: 1 }],
+    ]));
+  });
+
+  it('counts a session in a folder the registry doesn\'t list by that folder\'s own .claude.json', () => {
+    const folder = join(tempDir(), '.claude-spare');
+    mkdirSync(folder);
+    writeFileSync(join(folder, '.claude.json'), JSON.stringify({ oauthAccount: { accountUuid: 'SPARE' } }));
+    expect(censusClaudeLogins({
+      accounts: registry, weightOf, home: homeLoggedInto('LOGIN-1'), psLines: [`claude CLAUDE_CONFIG_DIR=${folder}`],
+    })).toEqual(new Map([['uuid:SPARE', { count: 1, weight: 1 }]]));
+  });
+
+  it('returns null (never a partial count) when a session\'s login can\'t be told', () => {
+    const warnings: string[] = [];
+    const result = censusClaudeLogins({
+      accounts: registry, weightOf, home: homeLoggedInto('LOGIN-1'), stderr: { write: (m: string) => (warnings.push(m), true) },
+      psLines: ['claude CLAUDE_CONFIG_DIR=/accounts/acct2', 'claude CLAUDE_CONFIG_DIR=/accounts/unknown'],
+    });
+    expect(result).toBeNull();
+    expect(warnings.join('')).toMatch(/resident census unavailable.*can't be told/);
+  });
+
+  it('returns null for an env-less session when the default folder holds no login', () => {
+    const home = tempDir();
+    expect(censusClaudeLogins({ accounts: registry, weightOf, home, stderr: { write: () => true }, psLines: ['claude'] })).toBeNull();
+  });
+
+  it('treats no interactive sessions as an authoritative empty', () => {
+    expect(censusClaudeLogins({ accounts: registry, weightOf, psLines: [] })).toEqual(new Map());
+    expect(censusClaudeLogins({ accounts: registry, weightOf, psLines: ['claude -p task'] })).toEqual(new Map());
   });
 });

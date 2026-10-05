@@ -2,6 +2,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { useTempResources } from './helpers.js';
+import { accountFixture, type AccountFixtureOptions, type FixtureAccount } from './helpers/account-fixture.js';
 import { ensureBuilt, runCli, withTempHome } from './helpers/cli.js';
 
 const { tempDir } = useTempResources('heddle-cli-account-test-');
@@ -13,33 +14,8 @@ const { tempDir } = useTempResources('heddle-cli-account-test-');
 // placement assertions assume — with no subprocess and no stderr warning.
 const HERMETIC_CENSUS = { HEDDLE_CENSUS_PS_FIXTURE: '[]' };
 
-function fixture(
-  accounts: Array<{ id: string; configDir: string | null; loggedIn?: boolean }>,
-  used: Record<string, number>,
-  options: {
-    used7d?: Record<string, number | null>;
-    stale?: boolean;
-    capturedAt?: number;
-    resetsAt?: Record<string, { fiveHour?: number; sevenDay?: number }>;
-    includedAccountIds?: string[];
-  } = {},
-) {
-  const dir = tempDir();
-  const accountsPath = join(dir, 'accounts.json');
-  writeFileSync(accountsPath, JSON.stringify({ claude: accounts }));
-  const nowS = Math.floor(Date.now() / 1000);
-  writeFileSync(join(dir, 'limits.json'), JSON.stringify({
-    writtenAt: nowS,
-    limits: [{
-      provider: 'claude', capturedAt: options.capturedAt ?? nowS, staleAfterSecs: 900, stale: options.stale,
-      accounts: accounts.filter((account) => options.includedAccountIds?.includes(account.id) ?? true).map((account) => ({
-        id: account.id,
-        fiveHour: { usedPercentage: used[account.id], resetsAt: options.resetsAt?.[account.id]?.fiveHour },
-        sevenDay: options.used7d?.[account.id] === null ? {} : { usedPercentage: options.used7d?.[account.id], resetsAt: options.resetsAt?.[account.id]?.sevenDay },
-      })),
-    }],
-  }));
-  return { accountsPath, usageDir: dir };
+function fixture(accounts: FixtureAccount[], used: Record<string, number>, options?: AccountFixtureOptions) {
+  return accountFixture(tempDir(), accounts, used, options);
 }
 
 describe('heddle account pick CLI', () => {

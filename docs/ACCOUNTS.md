@@ -119,3 +119,55 @@ harness's tools. Add one with `heddle accounts add --provider <service>`. The to
   (HED-531).
 - **Read-only reviewers** get Read/Grep/Glob only, with no shell or git (see `src/adapters/claude.ts`).
   Pass `diff_base` or embed the diff in the prompt.
+
+## Moving a running session: `account pick --leaving`
+
+`heddle account pick --leaving <account|config-dir|default> [--json] [--explain]` picks the account a
+running Claude session should move to when it leaves the login it is on. Name that login by `default`
+(always the folder used when `CLAUDE_CONFIG_DIR` is unset, whose login `~/.claude.json` holds, even if
+an account is named `default`), by a registry `id`, or by a config folder written the way
+`CLAUDE_CONFIG_DIR` would name it (a folder set that way keeps its own `.claude.json`, so `--leaving
+~/.claude` is not `--leaving default`). A plain `account pick` takes the account with the most 5h
+headroom; this ranks **logins** instead:
+
+- **One login, one candidate.** Config folders logged into the same login draw on one usage pool, so
+  they are one candidate. A folder's login is its registry row's `accountUuid`, else its `email`; a
+  folder the registry doesn't list (the default `~/.claude`, say), or a row recording neither, is told
+  by the `oauthAccount` in its own `.claude.json`. A login known only by its email takes the
+  `accountUuid` that email is paired with elsewhere (a registry row, or the `.claude.json` of a
+  registered folder or the default one), so one login reads alike whichever source told it. Where the
+  sources can't settle it, the login can't be told: two or more ids paired with the email; a registry
+  row and its folder's `.claude.json` that can't be the same login, however their ids and emails
+  resolve (one of them is stale, and only a live usage poll could say which); or a native account with
+  no identity anywhere. Such an account is never picked, since it may be the login being left, and
+  `--explain` marks it `login unknown`. (An env-repoint account has no Claude login, whatever its row
+  or folder says: it counts as a login of its own, and nothing in its row or folder, the default one
+  included, pairs an email with an id.) The login being left is never picked, whichever of its folders
+  the session ran in.
+- **Room.** A login's room is its headroom on the tighter of its two windows, by the tightest reading
+  any of its folders has. The pick reports the highest 5h and 7d usage any of its folders reads
+  (`usedPct5h`, `usedPct7d`, and `resetsAt` for the window that binds), not just the folder it moves
+  into.
+  A 5h window that resets within 30 minutes counts as empty while more than 15% is left on it, enough
+  to carry the session to the reset. A window with 15% or less left gets no such credit, so a caller
+  that moves sessions off an account at 85% of its 5h window is never handed one it would move straight
+  off again.
+- **Sessions already there.** The room is shared with the interactive sessions already running on the
+  login. They come from the same live-process list as batch placement's census (`src/residents.ts`),
+  counted per login rather than per registered account, so a session in a folder the registry doesn't
+  list (the default one, say) counts toward that folder's login. The pick has the most room per seat,
+  `room ÷ (weighted sessions + 1)`, then the most room, then the lowest account id. When the sessions
+  can't be counted, it ranks on room alone and reports `residents: null`.
+- **What rules a login out.** What is true of the shared pool takes the whole login out: a floored
+  reading, overage billing, or a billing failure, on any of its folders, even when its 5h window resets
+  soon. What is true of one folder (logged out, a dispatch signal that it lost its login, env-repoint
+  pin-only) only rules out moving into that folder: the login is moved into through its first folder in
+  registry order that isn't ruled out, and needs at least one reading.
+
+The JSON is the single pick's shape plus `roomPct` and `residents` (the sessions counted on the
+login). `--explain` adds every account with what rules it out, if anything: on the login being left,
+login unknown, login ruled out by a sibling folder (and why), floored, logged out, dispatch-excluded,
+overage, or pin-only. The login being left shows what takes it out, too; the JSON rows carry
+`leaving` and `ruledOutBy`. It exits 2 when it can't decide: usage readings missing or stale, a
+`--leaving` that names no login, or `--leaving` with a multi-agent `--for`. It exits 1 when no other
+login has a usable account.

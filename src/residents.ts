@@ -1,7 +1,6 @@
 import { execFileSync } from 'node:child_process';
-import { homedir } from 'node:os';
-import { resolve } from 'node:path';
 import { readClaudeAccounts, type ClaudeAccount } from './capaware.js';
+import { loginsOf, normalizeConfigDir, type Logins } from './logins.js';
 
 export interface ResidentLoad {
   count: number;
@@ -18,6 +17,11 @@ export interface ResidentsDeps {
   weightOf?: (letter: string) => number;
   stderr?: Pick<NodeJS.WriteStream, 'write'>;
   env?: NodeJS.ProcessEnv;
+  /** The home folder whose `.claude.json` is the default login's (censusClaudeLogins). Default: homedir(). */
+  home?: string;
+  /** censusClaudeLogins: the login resolver to key sessions by, so they match the caller's keys.
+   *  Default: loginsOf(accounts, home). */
+  logins?: Logins;
 }
 
 // A surviving line must be an interactive fleet session: not a codex companion, not a captured shell
@@ -43,31 +47,13 @@ function parseFixture(raw: string | undefined): string[] | null {
   }
 }
 
-/** Normalize a config dir for exact registry matching: expand a leading ~, then path.resolve (which
- *  collapses ./.. and any trailing slash). Deliberately NOT realpath — see the byNormalizedDir note below. */
-function normalizeConfigDir(dir: string): string {
-  const expanded = dir === '~' ? homedir() : dir.startsWith('~/') ? `${homedir()}/${dir.slice(2)}` : dir;
-  return resolve(expanded);
-}
-
 /**
- * Census live INTERACTIVE Claude sessions per account, weighted, for batch placement. This mirrors the
- * counted set of heddle-window-keeper.py's `live_census` byte-for-byte (same source, skips, exact config-dir
- * attribution, and invalidation — so keeper and picker never disagree) and ADDS a per-session weight
- * from HEDDLE_AGENT (the letter is only the weight-table index; a session with no letter is a plain 1.0
- * seat). Sessions are keyed by ACCOUNT, not by letter.
- *
- * Returns `null` when residency cannot be safely determined — any surviving line whose account is
- * ambiguous, or a broken census mechanism — rather than a partial count. Under-counting is the dangerous
- * direction for placement (an emptier-looking account gets stacked), so the caller degrades to
- * residency-unaware placement rather than trusting a guess (R's inversion, 2026-09-14). An authoritative
- * empty (no interactive `claude` processes, or all of them skipped) is a real `{}`, not null.
+ * The env-bearing `ps` line of every live interactive Claude session (the counted set both censuses
+ * share): `pgrep -x claude` + `ps eww`, minus the SKIP lines. [] when none run; null (after a warning)
+ * when the census mechanism itself failed.
  */
-export function censusClaudeResidents(deps: ResidentsDeps = {}): Map<string, ResidentLoad> | null {
+function liveSessionLines(deps: ResidentsDeps): string[] | null {
   const env = deps.env ?? process.env;
-  const accounts = deps.accounts ?? readClaudeAccounts();
-  const weightOf = deps.weightOf ?? (() => 1);
-
   let lines: string[];
   const fixture = deps.psLines ?? parseFixture(env.HEDDLE_CENSUS_PS_FIXTURE);
   if (fixture) {
@@ -83,7 +69,7 @@ export function censusClaudeResidents(deps: ResidentsDeps = {}): Map<string, Res
         .map((line) => Number(line.trim())).filter((pid) => Number.isInteger(pid) && pid > 0);
     } catch (error) {
       // pgrep status 1 is the documented "no matching process" — an authoritative empty, not a failure.
-      if ((error as { status?: number }).status === 1) return new Map();
+      if ((error as { status?: number }).status === 1) return [];
       warn(deps, 'pgrep command failed');
       return null;
     }
@@ -98,8 +84,32 @@ export function censusClaudeResidents(deps: ResidentsDeps = {}): Map<string, Res
       return null;
     }
   }
+  return lines.filter((line) => line.trim() !== '' && !SKIP.some((re) => re.test(line)));
+}
 
-  const surviving = lines.filter((line) => line.trim() !== '' && !SKIP.some((re) => re.test(line)));
+const configDirOf = (line: string): string | undefined =>
+  /(?:^|\s)CLAUDE_CONFIG_DIR=([^\s]+)/.exec(line)?.[1]?.replace(/^["']|["']$/g, '');
+const letterOf = (line: string): string | undefined => /(?:^|\s)HEDDLE_AGENT=([A-Za-z0-9_-]+)/.exec(line)?.[1];
+
+/**
+ * Census live INTERACTIVE Claude sessions per account, weighted, for batch placement. This mirrors the
+ * counted set of heddle-window-keeper.py's `live_census` byte-for-byte (same source, skips, exact config-dir
+ * attribution, and invalidation — so keeper and picker never disagree) and ADDS a per-session weight
+ * from HEDDLE_AGENT (the letter is only the weight-table index; a session with no letter is a plain 1.0
+ * seat). Sessions are keyed by ACCOUNT, not by letter.
+ *
+ * Returns `null` when residency cannot be safely determined — any surviving line whose account is
+ * ambiguous, or a broken census mechanism — rather than a partial count. Under-counting is the dangerous
+ * direction for placement (an emptier-looking account gets stacked), so the caller degrades to
+ * residency-unaware placement rather than trusting a guess (R's inversion, 2026-09-14). An authoritative
+ * empty (no interactive `claude` processes, or all of them skipped) is a real `{}`, not null.
+ */
+export function censusClaudeResidents(deps: ResidentsDeps = {}): Map<string, ResidentLoad> | null {
+  const accounts = deps.accounts ?? readClaudeAccounts();
+  const weightOf = deps.weightOf ?? (() => 1);
+
+  const surviving = liveSessionLines(deps);
+  if (surviving === null) return null;
   if (surviving.length === 0) return new Map();
 
   const defaults = accounts.filter((account) => account.configDir === null);
@@ -117,8 +127,8 @@ export function censusClaudeResidents(deps: ResidentsDeps = {}): Map<string, Res
   }
   const residents = new Map<string, ResidentLoad>();
   for (const line of surviving) {
-    const configDir = /(?:^|\s)CLAUDE_CONFIG_DIR=([^\s]+)/.exec(line)?.[1]?.replace(/^["']|["']$/g, '');
-    const letter = /(?:^|\s)HEDDLE_AGENT=([A-Za-z0-9_-]+)/.exec(line)?.[1];
+    const configDir = configDirOf(line);
+    const letter = letterOf(line);
     // config-dir → account by UNIQUE exact match; env-less → the single default account IFF exactly one
     // exists. Zero matches (unmapped dir), a non-unique match, or 0/>1 defaults are all ambiguous, and
     // ANY unattributable session invalidates the whole census (never a partial or guessed count).
@@ -134,4 +144,32 @@ export function censusClaudeResidents(deps: ResidentsDeps = {}): Map<string, Res
     residents.set(account.id, { count: prior.count + 1, weight: prior.weight + (letter ? weightOf(letter) : 1) });
   }
   return residents;
+}
+
+/**
+ * The same live sessions, counted per LOGIN (src/logins.ts) rather than per registered account: a
+ * session counts toward the login its config folder draws on — the default folder's when
+ * CLAUDE_CONFIG_DIR is unset. A folder the registry doesn't list (the default `~/.claude`, say) is
+ * told by its own `.claude.json`, so its sessions still count, and folders sharing a login add up.
+ * Weighted like censusClaudeResidents. A session whose login can't be told makes the count
+ * unknowable: null (after a warning), never a partial count.
+ */
+export function censusClaudeLogins(deps: ResidentsDeps = {}): Map<string, ResidentLoad> | null {
+  const resolver = deps.logins ?? loginsOf(deps.accounts ?? readClaudeAccounts(), deps.home);
+  const weightOf = deps.weightOf ?? (() => 1);
+  const surviving = liveSessionLines(deps);
+  if (surviving === null) return null;
+  const logins = new Map<string, ResidentLoad>();
+  for (const line of surviving) {
+    const configDir = configDirOf(line);
+    const letter = letterOf(line);
+    const login = resolver.ofFolder(configDir ?? null);
+    if (!login) {
+      warn(deps, `session on ${configDir ?? 'the default config dir'} is on a login that can't be told`);
+      return null;
+    }
+    const prior = logins.get(login) ?? { count: 0, weight: 0 };
+    logins.set(login, { count: prior.count + 1, weight: prior.weight + (letter ? weightOf(letter) : 1) });
+  }
+  return logins;
 }

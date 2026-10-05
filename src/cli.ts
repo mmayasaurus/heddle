@@ -17,11 +17,12 @@ import { loadProjectRegistry, DEFAULT_PROJECTS_PATH } from './projects.js';
 import { applyInstall, planInstall, redactReport } from './init-project.js';
 import { parseFleetClients, planClientInstall } from './client-config.js';
 import { pickClaudeAccount, readClaudeAccounts } from './capaware.js';
-import { claudeAccountRows, pickClaudeAccountsBatch, usableClaudeCaps } from './account-pick.js';
+import { claudeAccountRows, pickClaudeAccountToSwitch, pickClaudeAccountsBatch, usableClaudeCaps, type ClaudeAccountRow } from './account-pick.js';
+import { loginsOf, type Logins } from './logins.js';
 import { bindingMeter, claudeFloorsFrom } from './floors.js';
 import { loadLanes } from './lanes.js';
 import { readSeatWeights, seatWeightsFrom, writeSeatWeightsMirror } from './seat-weights.js';
-import { censusClaudeResidents } from './residents.js';
+import { censusClaudeLogins, censusClaudeResidents } from './residents.js';
 import { DEFAULT_USAGE_DIR, readProviderCaps } from './usage.js';
 import { buildOauthUsageSidecar, pollClaudeUsage } from './claude-usage.js';
 import { formatUsageRemaining, readUsageRemaining } from './usage-remaining.js';
@@ -140,6 +141,7 @@ const USAGE = `heddle — cross-provider orchestration for subscription coding C
   heddle usage install-poll-launchd [--start-interval <secs>] [--dry-run] [--json]  install + load the keeper-less launchd usage-poll producer (running this yourself is the activation step — the pack never loads it; refuses if the window-keeper is loaded)
   heddle top [--once] [--json]  one disk-only dashboard snapshot (watch mode is Slice 2)
   heddle account pick [--for <letter[,letter...]>] [--json] [--explain]   healthiest addressable Claude account for a fleet relaunch
+  heddle account pick --leaving <account|config-dir|default> [--json] [--explain]   the account to move one running session to, off the login it names
   heddle account seat-weights sync   atomically refresh ~/.heddle/seat-weights.json from routing/lanes.yaml
   heddle pr own <whoami|claim|check|release|mine> [<pr#>] [--json]       coordinate ownership of a GitHub PR
   heddle pr sweep <pr#> [--json]       sweep all GitHub PR review channels and report mechanical gates
@@ -166,6 +168,30 @@ function commaIds(flag: string): string[] {
 }
 function out(json: boolean, obj: unknown, text: () => string): void {
   console.log(json ? JSON.stringify(obj, null, 2) : text());
+}
+const ACCOUNT_PICK_USAGE = 'usage: heddle account pick [--for <letter[,letter...]>] [--leaving <account|config-dir|default>] [--json] [--explain]';
+/** `account pick --explain`'s per-account lines. A switch pick's rows add `leaving` (on the login being
+ *  left; null where the login can't be told) and `ruledOutBy` (the folder whose state takes the whole
+ *  login out). */
+function explainRows(rows: ReadonlyArray<Omit<ClaudeAccountRow, 'residents' | 'residentWeight'> & {
+  leaving?: boolean | null; ruledOutBy?: { account: string; state: string } | null;
+}>): string {
+  return rows.map((account) => {
+    const by = account.ruledOutBy;
+    const state = [
+      account.leaving ? 'login being left' : account.leaving === null ? 'login unknown' : null,
+      by && by.account !== account.account ? `login ruled out by ${by.account} (${by.state})` : null,
+      account.floored ? 'floored' : null,
+      account.loggedOut ? 'logged-out' : null,
+      account.dispatchExcluded ? 'dispatch-excluded' : null,
+      account.overage ? 'overage' : null,
+      account.envRepointPinOnly ? 'pin-only' : null,
+    ].filter(Boolean).join(', ') || 'eligible';
+    const meter = account.bindingMeter === null ? 'no known meter' : `${account.bindingMeter} binds`;
+    return `${account.account}: 5h ${account.usedPct5h === null ? 'unknown' : `${account.usedPct5h.toFixed(0)}%`}, ` +
+      `7d ${account.usedPct7d === null ? 'unknown' : `${account.usedPct7d.toFixed(0)}%`}, ` +
+      `headroom ${account.headroomPct === null ? 'unknown' : `${account.headroomPct.toFixed(0)}%`} (${meter}), ${state}`;
+  }).join('\n');
 }
 
 async function readStdin(): Promise<string> {
@@ -327,7 +353,7 @@ try {
         break;
       }
       if (process.argv[3] !== 'pick') {
-        console.error('usage: heddle account pick [--for <letter[,letter...]>] [--json] [--explain]\n       heddle account seat-weights sync');
+        console.error(`${ACCOUNT_PICK_USAGE}\n       heddle account seat-weights sync`);
         process.exit(2);
       }
       const accounts = readClaudeAccounts();
@@ -336,7 +362,12 @@ try {
       const floors = claudeFloorsFrom(lanes);
       const forAgent = arg('--for');
       if (has('--for') && (!forAgent || forAgent.startsWith('--'))) {
-        console.error('usage: heddle account pick [--for <letter[,letter...]>] [--json] [--explain]');
+        console.error(ACCOUNT_PICK_USAGE);
+        process.exit(2);
+      }
+      const leaving = arg('--leaving');
+      if (has('--leaving') && (!leaving || leaving.startsWith('--'))) {
+        console.error(ACCOUNT_PICK_USAGE);
         process.exit(2);
       }
       // Exit 2 = cannot decide (missing/stale meters); distinct from exit 1 = decided, none healthy.
@@ -355,10 +386,25 @@ try {
       // `--json` into an assignment key (qodo review, HED-333). The guard above only checks the whole
       // string; validate each comma-separated entry so a flag-like value is rejected, not used as a key.
       if (requestedAgents.some((agent) => agent.startsWith('-'))) {
-        console.error('usage: heddle account pick [--for <letter[,letter...]>] [--json] [--explain]');
+        console.error(ACCOUNT_PICK_USAGE);
         process.exit(2);
       }
       const agents = [...new Set(requestedAgents)];
+      // --leaving: a pick for ONE running session moving off the login it names (pickClaudeAccountToSwitch).
+      let leavingLogin: string | null = null;
+      let logins: Logins | null = null;
+      if (leaving !== undefined) {
+        if (agents.length > 1) {
+          console.error('heddle: --leaving picks for one session; it cannot be combined with a multi-agent --for');
+          process.exit(2);
+        }
+        logins = loginsOf(accounts);
+        leavingLogin = logins.named(leaving);
+        if (leavingLogin === null) {
+          console.error(`heddle: cannot decide a switch pick: ${leaving} names no login (not an account id, "default", or a config folder whose .claude.json holds one)`);
+          process.exit(2);
+        }
+      }
       // Refresh the dumb seat-weight mirror from lanes policy, then read it back as the picker's weight
       // lookup — and only AFTER every usage/caps/arg gate above, so a validation exit never leaves this
       // side effect behind. The refresh is best-effort: `account pick` was read-only before HED-514 and
@@ -371,6 +417,34 @@ try {
         console.error(`heddle: warning: could not refresh the seat-weights mirror (${(error as Error).message}); using the last-written or unit weights`);
       }
       const { weightOf } = readSeatWeights();
+      if (leavingLogin !== null && logins !== null) {
+        const result = pickClaudeAccountToSwitch(claudeCaps, accounts, floors, {
+          leaving: leavingLogin,
+          loginOf: logins.ofAccount,
+          // Per LOGIN, keyed by the same resolver, so sessions in a folder the registry doesn't list (the
+          // default ~/.claude) count too.
+          residents: censusClaudeLogins({ weightOf, logins }),
+          nowS: Math.floor(Date.now() / 1000),
+        });
+        if (result.pick === null) {
+          console.error(`heddle: refusing a switch pick: ${result.reason}`);
+          process.exit(1);
+        }
+        const switchPick = result.pick;
+        const switchRows = result.rows.map(({ residents: _residents, residentWeight: _residentWeight, ...row }) => row);
+        out(json, {
+          ...switchPick,
+          ...(agents[0] ? { for: agents[0] } : {}),
+          ...(has('--explain') ? { accounts: switchRows } : {}),
+        }, () => {
+          const config = switchPick.configDir
+            ? `CLAUDE_CONFIG_DIR=${switchPick.configDir}`
+            : 'default login — leave CLAUDE_CONFIG_DIR unset';
+          const selected = `${switchPick.account}  ${config}  ${switchPick.reason}` + (agents[0] ? `  for: ${agents[0]}` : '');
+          return has('--explain') ? `${selected}\n${explainRows(switchRows)}` : selected;
+        });
+        break;
+      }
       // Single-account picks retain their long-standing cap-aware path; residency is batch placement state.
       // An unavailable census (null) degrades to residency-unaware placement rather than a partial count
       // that would under-fill an account into a stack — the census already warned why on stderr.
@@ -438,18 +512,7 @@ try {
           : 'default login — leave CLAUDE_CONFIG_DIR unset';
         const selected = `${pick.account.id}  ${config}  ${pick.reason}` + (agents[0] ? `  for: ${agents[0]}` : '');
         if (!has('--explain')) return selected;
-        const details = accountRows.map((account) => {
-          const state = [
-            account.floored ? 'floored' : null,
-            account.loggedOut ? 'logged-out' : null,
-            account.dispatchExcluded ? 'dispatch-excluded' : null,
-          ].filter(Boolean).join(', ') || 'eligible';
-          const meter = account.bindingMeter === null ? 'no known meter' : `${account.bindingMeter} binds`;
-          return `${account.account}: 5h ${account.usedPct5h === null ? 'unknown' : `${account.usedPct5h.toFixed(0)}%`}, ` +
-            `7d ${account.usedPct7d === null ? 'unknown' : `${account.usedPct7d.toFixed(0)}%`}, ` +
-            `headroom ${account.headroomPct === null ? 'unknown' : `${account.headroomPct.toFixed(0)}%`} (${meter}), ${state}`;
-        }).join('\n');
-        return `${selected}\n${details}`;
+        return `${selected}\n${explainRows(accountRows)}`;
       });
       break;
     }
