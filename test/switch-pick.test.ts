@@ -182,13 +182,20 @@ describe('pickClaudeAccountToSwitch', () => {
     expect(pick(past, 'uuid:LOGIN-1').pick).toMatchObject({ account: 'acct3', roomPct: 60 });
   });
 
-  it('measures room on the tighter window, and a 5h reset never lifts a full week', () => {
+  it('measures room on the tighter window, and a 5h reset never lifts the 7d window', () => {
     expect(pick({ acct2: { used5h: 10, used7d: 85 }, acct3: { used5h: 50, used7d: 20 }, acct4: { used5h: 10, used7d: 85 } }, 'uuid:LOGIN-1').pick)
       .toMatchObject({ account: 'acct3', roomPct: 50 });
     const soon = NOW + 10 * 60;
     expect(pick({
       acct2: { used5h: 80, used7d: 70, reset5h: soon }, acct3: { used5h: 50, used7d: 20 }, acct4: { used5h: 80, used7d: 70, reset5h: soon },
     }, 'uuid:LOGIN-1').pick).toMatchObject({ account: 'acct3', roomPct: 50 });
+    // Here the reset credit decides it: without it LOGIN-2 has 20% room and loses to acct3's 50%. It
+    // counts only the 5h window as empty, so the room is the 7d window's 55%, not 100%.
+    const credited = pick({
+      acct2: { used5h: 80, used7d: 45, reset5h: soon }, acct3: { used5h: 50, used7d: 20 }, acct4: { used5h: 80, used7d: 45, reset5h: soon },
+    }, 'uuid:LOGIN-1');
+    expect(credited.pick).toMatchObject({ account: 'acct2', roomPct: 55, usedPct5h: 80, usedPct7d: 45 });
+    expect(credited.pick?.reason).toContain('resetting within 30 min');
   });
 
   it('never picks a floored, logged-out or unmetered account, even one resetting soon', () => {
@@ -197,9 +204,12 @@ describe('pickClaudeAccountToSwitch', () => {
       { id: 'acct5', configDir: '/x/.claude-acct5', accountUuid: 'LOGIN-5', loggedIn: false },
       { id: 'acct6', configDir: '/x/.claude-acct6', accountUuid: 'LOGIN-6' },
     ];
-    const result = pick({
-      acct1: { used5h: 98, reset5h: NOW + 60 }, acct3: { used5h: 70 }, acct5: { used5h: 0 }, acct6: { used5h: null },
-    }, 'uuid:LOGIN-2', new Map(), accounts);
+    const readings = { acct1: { used5h: 82, reset5h: NOW + 60 }, acct3: { used5h: 70 }, acct5: { used5h: 0 }, acct6: { used5h: null } };
+    // At the 3% floor a floored 5h window never has the 15% the reset credit needs, so the floor is
+    // raised to 20%: acct1 (18% left) is floored, yet its window resets in a minute with more than 15%
+    // left, which alone would count it empty, 100% room against acct3's 30%.
+    const result = pickClaudeAccountToSwitch(caps(readings), accounts, { ...floors, neverBelowPct: 20 },
+      { leaving: 'uuid:LOGIN-2', loginOf, residents: new Map(), nowS: NOW });
     expect(result.pick).toMatchObject({ account: 'acct3', roomPct: 30 });
   });
 
