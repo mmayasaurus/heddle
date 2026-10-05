@@ -547,6 +547,12 @@ describe('heddle account pick --leaving (a switch pick for one running session)'
       resetsAt: { acct2: { fiveHour: nowS + 60 * 60 }, acct4: { fiveHour: nowS + 60 * 60 } },
     });
     expect(JSON.parse((await run(['--leaving', 'default', '--json'], later, home)).stdout)).toMatchObject({ account: 'acct3', roomPct: 60 });
+
+    // 14% left is too little to carry a session to the reset, however soon it comes.
+    const nearlyFull = fixture(registry, { acct1: 10, acct2: 86, acct3: 40, acct4: 86 }, {
+      resetsAt: { acct2: { fiveHour: nowS + 10 * 60 }, acct4: { fiveHour: nowS + 10 * 60 } },
+    });
+    expect(JSON.parse((await run(['--leaving', 'default', '--json'], nearlyFull, home)).stdout)).toMatchObject({ account: 'acct3', roomPct: 60 });
   }, 60_000);
 
   it('prints the pick and, with --explain, every account', async () => {
