@@ -17,11 +17,12 @@ import { loadProjectRegistry, DEFAULT_PROJECTS_PATH } from './projects.js';
 import { applyInstall, planInstall, redactReport } from './init-project.js';
 import { parseFleetClients, planClientInstall } from './client-config.js';
 import { pickClaudeAccount, readClaudeAccounts } from './capaware.js';
-import { claudeAccountRows, pickClaudeAccountsBatch, usableClaudeCaps } from './account-pick.js';
+import { claudeAccountRows, pickClaudeAccountToSwitch, pickClaudeAccountsBatch, usableClaudeCaps, type ClaudeAccountRow } from './account-pick.js';
+import { loginKeyOf, loginNamed } from './logins.js';
 import { bindingMeter, claudeFloorsFrom } from './floors.js';
 import { loadLanes } from './lanes.js';
 import { readSeatWeights, seatWeightsFrom, writeSeatWeightsMirror } from './seat-weights.js';
-import { censusClaudeResidents } from './residents.js';
+import { censusClaudeLogins, censusClaudeResidents } from './residents.js';
 import { DEFAULT_USAGE_DIR, readProviderCaps } from './usage.js';
 import { buildOauthUsageSidecar, pollClaudeUsage } from './claude-usage.js';
 import { formatUsageRemaining, readUsageRemaining } from './usage-remaining.js';
@@ -166,6 +167,21 @@ function commaIds(flag: string): string[] {
 }
 function out(json: boolean, obj: unknown, text: () => string): void {
   console.log(json ? JSON.stringify(obj, null, 2) : text());
+}
+/** `account pick --explain`'s per-account lines (`leaving`: a switch pick's rows on the login being left). */
+function explainRows(rows: ReadonlyArray<Omit<ClaudeAccountRow, 'residents' | 'residentWeight'> & { leaving?: boolean }>): string {
+  return rows.map((account) => {
+    const state = [
+      account.leaving ? 'login being left' : null,
+      account.floored ? 'floored' : null,
+      account.loggedOut ? 'logged-out' : null,
+      account.dispatchExcluded ? 'dispatch-excluded' : null,
+    ].filter(Boolean).join(', ') || 'eligible';
+    const meter = account.bindingMeter === null ? 'no known meter' : `${account.bindingMeter} binds`;
+    return `${account.account}: 5h ${account.usedPct5h === null ? 'unknown' : `${account.usedPct5h.toFixed(0)}%`}, ` +
+      `7d ${account.usedPct7d === null ? 'unknown' : `${account.usedPct7d.toFixed(0)}%`}, ` +
+      `headroom ${account.headroomPct === null ? 'unknown' : `${account.headroomPct.toFixed(0)}%`} (${meter}), ${state}`;
+  }).join('\n');
 }
 
 async function readStdin(): Promise<string> {
@@ -327,7 +343,7 @@ try {
         break;
       }
       if (process.argv[3] !== 'pick') {
-        console.error('usage: heddle account pick [--for <letter[,letter...]>] [--json] [--explain]\n       heddle account seat-weights sync');
+        console.error('usage: heddle account pick [--for <letter[,letter...]>] [--leaving <account|config-dir|default>] [--json] [--explain]\n       heddle account seat-weights sync');
         process.exit(2);
       }
       const accounts = readClaudeAccounts();
@@ -336,7 +352,12 @@ try {
       const floors = claudeFloorsFrom(lanes);
       const forAgent = arg('--for');
       if (has('--for') && (!forAgent || forAgent.startsWith('--'))) {
-        console.error('usage: heddle account pick [--for <letter[,letter...]>] [--json] [--explain]');
+        console.error('usage: heddle account pick [--for <letter[,letter...]>] [--leaving <account|config-dir|default>] [--json] [--explain]');
+        process.exit(2);
+      }
+      const leaving = arg('--leaving');
+      if (has('--leaving') && (!leaving || leaving.startsWith('--'))) {
+        console.error('usage: heddle account pick [--for <letter[,letter...]>] [--leaving <account|config-dir|default>] [--json] [--explain]');
         process.exit(2);
       }
       // Exit 2 = cannot decide (missing/stale meters); distinct from exit 1 = decided, none healthy.
@@ -355,10 +376,23 @@ try {
       // `--json` into an assignment key (qodo review, HED-333). The guard above only checks the whole
       // string; validate each comma-separated entry so a flag-like value is rejected, not used as a key.
       if (requestedAgents.some((agent) => agent.startsWith('-'))) {
-        console.error('usage: heddle account pick [--for <letter[,letter...]>] [--json] [--explain]');
+        console.error('usage: heddle account pick [--for <letter[,letter...]>] [--leaving <account|config-dir|default>] [--json] [--explain]');
         process.exit(2);
       }
       const agents = [...new Set(requestedAgents)];
+      // --leaving: a pick for ONE running session moving off the login it names (pickClaudeAccountToSwitch).
+      let leavingLogin: string | null = null;
+      if (leaving !== undefined) {
+        if (agents.length > 1) {
+          console.error('heddle: --leaving picks for one session; it cannot be combined with a multi-agent --for');
+          process.exit(2);
+        }
+        leavingLogin = loginNamed(leaving, accounts);
+        if (leavingLogin === null) {
+          console.error(`heddle: cannot decide a switch pick: ${leaving} names no login (not an account id, "default", or a config folder whose .claude.json holds one)`);
+          process.exit(2);
+        }
+      }
       // Refresh the dumb seat-weight mirror from lanes policy, then read it back as the picker's weight
       // lookup — and only AFTER every usage/caps/arg gate above, so a validation exit never leaves this
       // side effect behind. The refresh is best-effort: `account pick` was read-only before HED-514 and
@@ -371,6 +405,33 @@ try {
         console.error(`heddle: warning: could not refresh the seat-weights mirror (${(error as Error).message}); using the last-written or unit weights`);
       }
       const { weightOf } = readSeatWeights();
+      if (leavingLogin !== null) {
+        const result = pickClaudeAccountToSwitch(claudeCaps, accounts, floors, {
+          leaving: leavingLogin,
+          loginOf: (account) => loginKeyOf(account),
+          // Per LOGIN, so sessions in a folder the registry doesn't list (the default ~/.claude) count too.
+          residents: censusClaudeLogins({ weightOf }),
+          nowS: Math.floor(Date.now() / 1000),
+        });
+        if (result.pick === null) {
+          console.error(`heddle: refusing a switch pick: ${result.reason}`);
+          process.exit(1);
+        }
+        const switchPick = result.pick;
+        const switchRows = result.rows.map(({ residents: _residents, residentWeight: _residentWeight, ...row }) => row);
+        out(json, {
+          ...switchPick,
+          ...(agents[0] ? { for: agents[0] } : {}),
+          ...(has('--explain') ? { accounts: switchRows } : {}),
+        }, () => {
+          const config = switchPick.configDir
+            ? `CLAUDE_CONFIG_DIR=${switchPick.configDir}`
+            : 'default login — leave CLAUDE_CONFIG_DIR unset';
+          const selected = `${switchPick.account}  ${config}  ${switchPick.reason}` + (agents[0] ? `  for: ${agents[0]}` : '');
+          return has('--explain') ? `${selected}\n${explainRows(switchRows)}` : selected;
+        });
+        break;
+      }
       // Single-account picks retain their long-standing cap-aware path; residency is batch placement state.
       // An unavailable census (null) degrades to residency-unaware placement rather than a partial count
       // that would under-fill an account into a stack — the census already warned why on stderr.
@@ -438,18 +499,7 @@ try {
           : 'default login — leave CLAUDE_CONFIG_DIR unset';
         const selected = `${pick.account.id}  ${config}  ${pick.reason}` + (agents[0] ? `  for: ${agents[0]}` : '');
         if (!has('--explain')) return selected;
-        const details = accountRows.map((account) => {
-          const state = [
-            account.floored ? 'floored' : null,
-            account.loggedOut ? 'logged-out' : null,
-            account.dispatchExcluded ? 'dispatch-excluded' : null,
-          ].filter(Boolean).join(', ') || 'eligible';
-          const meter = account.bindingMeter === null ? 'no known meter' : `${account.bindingMeter} binds`;
-          return `${account.account}: 5h ${account.usedPct5h === null ? 'unknown' : `${account.usedPct5h.toFixed(0)}%`}, ` +
-            `7d ${account.usedPct7d === null ? 'unknown' : `${account.usedPct7d.toFixed(0)}%`}, ` +
-            `headroom ${account.headroomPct === null ? 'unknown' : `${account.headroomPct.toFixed(0)}%`} (${meter}), ${state}`;
-        }).join('\n');
-        return `${selected}\n${details}`;
+        return `${selected}\n${explainRows(accountRows)}`;
       });
       break;
     }

@@ -119,3 +119,34 @@ harness's tools. Add one with `heddle accounts add --provider <service>`. The to
   (HED-531).
 - **Read-only reviewers** get Read/Grep/Glob only, with no shell or git (see `src/adapters/claude.ts`).
   Pass `diff_base` or embed the diff in the prompt.
+
+## Moving a running session: `account pick --leaving`
+
+`heddle account pick --leaving <account|config-dir|default> [--json] [--explain]` picks the account a
+running Claude session should move to when it leaves the login it is on. Name that login by a registry
+`id`, by `default` (the folder used when `CLAUDE_CONFIG_DIR` is unset), or by a config folder written
+the way `CLAUDE_CONFIG_DIR` would name it. A plain `account pick` takes the account with the most 5h
+headroom; this ranks **logins** instead:
+
+- **One login, one candidate.** Config folders logged into the same login draw on one usage pool, so
+  they are one candidate, at the least room any of them reports. Folders are grouped by the registry's
+  `accountUuid`, then its `email`. A folder the registry doesn't list, such as the default `~/.claude`,
+  is told by the `oauthAccount` in its own `.claude.json` (`~/.claude.json` for the default folder).
+  The login being left is never picked, whichever of its folders the session ran in, and a login is
+  picked through its first folder in registry order.
+- **Room.** A login's room is its headroom on the tighter of its two windows. A 5h window that resets
+  within 30 minutes counts as empty while more than 15% is left on it, enough to carry the session to
+  the reset. A window with 15% or less left gets no such credit, so a caller that moves sessions off
+  an account at 85% of its 5h window is never handed one it would move straight off again.
+- **Sessions already there.** The room is shared with the interactive sessions already running on the
+  login, from the same process census as batch placement (`src/residents.ts`), counted per login: a
+  session in the default folder counts toward that folder's login. The pick has the most room per
+  seat, `room ÷ (weighted sessions + 1)`, then the most room, then the lowest account id. When the
+  census can't be taken, it ranks on room alone and reports `residents: null`.
+- **Exclusions.** An account batch placement never uses (floored, logged out, dispatch-excluded,
+  overage, env-repoint pin-only, or unmetered) is never picked, even when its 5h window resets soon.
+
+The JSON is the single pick's shape plus `roomPct` and `residents` (the sessions counted on the
+login). `--explain` adds every account, marking the ones on the login being left. It exits 2 when it
+can't decide: usage readings missing or stale, a `--leaving` that names no login, or `--leaving` with
+a multi-agent `--for`. It exits 1 when no other login has a usable account.

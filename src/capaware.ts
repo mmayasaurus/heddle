@@ -461,6 +461,8 @@ export interface ClaudeAccount {
   /** null = the default login (~/.claude): do NOT set CLAUDE_CONFIG_DIR for it (auth status breaks). */
   configDir: string | null;
   email?: string;
+  /** The login's account id, as the registry records it: how src/logins.ts groups folders sharing a login. */
+  accountUuid?: string;
   note?: string;
   /**
    * false = the dir's credential is gone (e.g. the default login was switched over it) — the account
@@ -496,6 +498,7 @@ export function readClaudeAccounts(path: string = process.env.HEDDLE_ACCOUNTS ??
         id: a.id as string,
         configDir: typeof a.configDir === 'string' && a.configDir ? a.configDir : null,
         email: typeof a.email === 'string' ? a.email : undefined,
+        ...(typeof a.accountUuid === 'string' && a.accountUuid ? { accountUuid: a.accountUuid } : {}),
         note: typeof a.note === 'string' ? a.note : undefined,
         loggedIn: a.loggedIn === false ? false : undefined,
         ...(typeof a.overageEnabled === 'boolean' ? { overageEnabled: a.overageEnabled } : {}),
