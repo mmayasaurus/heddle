@@ -110,6 +110,22 @@ describe('pickClaudeAccountToSwitch', () => {
       .toMatchObject({ account: 'acct3' });
   });
 
+  it('regression — says what takes the login being left out too, but nothing for a login that can\'t be told', () => {
+    const readings = { acct1: { used5h: 98 }, acct2: { used5h: 10 }, acct3: { used5h: 70 }, acct4: { used5h: 10, failed: 'billing' as const } };
+    const { pick: picked, rows } = pick(readings, 'uuid:LOGIN-2');
+    expect(picked).toMatchObject({ account: 'acct3' });
+    expect(rows.map((row) => [row.account, row.leaving, row.ruledOutBy])).toEqual([
+      ['acct1', false, { account: 'acct1', state: 'floored' }],
+      ['acct2', true, { account: 'acct4', state: 'billing failure' }],
+      ['acct3', false, null],
+      ['acct4', true, { account: 'acct4', state: 'billing failure' }],
+    ]);
+    // A floored folder whose login can't be told has no siblings to read: it is out as unknown alone.
+    const unknown = (account: ClaudeAccount) => (account.id === 'acct1' ? null : `uuid:${account.accountUuid}`);
+    const withUnknown = pickClaudeAccountToSwitch(caps(readings), registry, floors, { leaving: 'uuid:LOGIN-2', loginOf: unknown, residents: new Map(), nowS: NOW });
+    expect(withUnknown.rows[0]).toMatchObject({ account: 'acct1', leaving: null, ruledOutBy: null });
+  });
+
   it('moves past a folder that is logged out, but still counts its reading toward the login\'s room', () => {
     const loggedOut = registry.map((account) => (account.id === 'acct2' ? { ...account, loggedIn: false as const } : account));
     const result = pick({ acct2: { used5h: 40 }, acct3: { used5h: 80 }, acct4: { used5h: 20 } }, 'uuid:LOGIN-1', new Map(), loggedOut);

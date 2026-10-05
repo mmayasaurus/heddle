@@ -129,6 +129,10 @@ describe('heddle account pick --leaving (a switch pick for one running session)'
     expect(text.stdout).toContain('acct4: 5h 30%, 7d unknown, headroom 70% (5h binds), overage');
     const json = JSON.parse((await run(['--leaving', 'default', '--json', '--explain'], usage, homeLoggedInto('LOGIN-1'))).stdout);
     expect(json.accounts.find((row: { account: string }) => row.account === 'acct2').ruledOutBy).toEqual({ account: 'acct4', state: 'overage' });
+    // Leaving that login, its folders say what takes it out too.
+    const leaving = await run(['--leaving', 'acct2', '--explain'], usage, homeLoggedInto('LOGIN-1'));
+    expect(leaving).toMatchObject({ code: 0, stderr: '' });
+    expect(leaving.stdout).toContain('acct2: 5h 30%, 7d unknown, headroom 70% (5h binds), login being left, login ruled out by acct4 (overage)\n');
   }, 30_000);
 
   it('refuses with exit 1 when no other login has a usable account', async () => {

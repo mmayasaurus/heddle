@@ -119,7 +119,8 @@ export interface SwitchAccountRow extends ClaudeAccountRow {
    *  candidate either. */
   leaving: boolean | null;
   /** The folder whose pool-wide state (floored, overage, billing failure) takes this row's whole
-   *  login out — this row's own, or a sibling's; null when nothing does. */
+   *  login out — this row's own, or a sibling's, on the login being left too; null when nothing does,
+   *  or when the row's login can't be told (it has no siblings to read). */
   ruledOutBy: { account: string; state: 'floored' | 'overage' | 'billing failure' } | null;
 }
 
@@ -178,14 +179,19 @@ export function pickClaudeAccountToSwitch(
     const row = rows[index];
     const key = loginKeys[index];
     if (row.leaving) left++;
-    if (key === null) unknown++;
-    if (row.leaving !== false || key === null) continue;
+    if (key === null) {
+      unknown++;
+      continue;
+    }
     const login = logins.get(key) ?? { into: null, room: null, peak5h: null, peak7d: null, barredBy: null };
     logins.set(key, login);
     const capsRow = capsRowOf.get(account.id);
     const poolState = row.floored ? 'floored' as const : row.overage ? 'overage' as const
       : row.dispatchExcluded && capsRow?.dispatch?.reason === 'billing' ? 'billing failure' as const : null;
     if (poolState && !login.barredBy) login.barredBy = { account: account.id, state: poolState };
+    // The login being left is never moved into: it gets its bar, for its rows, but no folder or room,
+    // so it is never a candidate.
+    if (row.leaving) continue;
     if (!row.excluded && !login.into) login.into = account;
     if (row.headroomPct === null) continue;
     const reset5h = capsRow?.fiveHour.resetsAt ?? null;
@@ -202,7 +208,7 @@ export function pickClaudeAccountToSwitch(
   }
   for (const [index, row] of rows.entries()) {
     const key = loginKeys[index];
-    if (row.leaving === false && key !== null) row.ruledOutBy = logins.get(key)?.barredBy ?? null;
+    if (key !== null) row.ruledOutBy = logins.get(key)?.barredBy ?? null;
   }
   const candidates = [...logins.entries()].flatMap(([key, { into, room, peak5h, peak7d, barredBy }]) =>
     (into && room && !barredBy ? [{ key, into, room, peak5h, peak7d }] : []));

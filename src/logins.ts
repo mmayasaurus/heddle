@@ -26,7 +26,8 @@ import type { ClaudeAccount } from './capaware.js';
  * `.claude.json` can't be the same login, however their ids and emails resolve (one of them is stale,
  * and only a live poll could say which); and a native account with no identity anywhere. An
  * env-repoint account (`envRepoint`) has no Claude login, whatever its row or folder says: it is a
- * login of its own, `account:<id>`.
+ * login of its own, `account:<id>`, and neither its row nor its folder, the default one included,
+ * pairs an email with an id.
  */
 
 interface Identity {
@@ -103,7 +104,10 @@ export function loginsOf(accounts: readonly ClaudeAccount[], home: string = home
     pair(registryIdentity(account));
     pair(blobOf(folderOf(account.configDir)));
   }
-  pair(blobOf(null));
+  // Sessions run in the default folder whether the registry lists it or not, so its .claude.json
+  // pairs too. A registry row naming it (configDir null) has settled that above: a native row paired
+  // it, an env-repoint row did not.
+  if (!byFolder.has(null)) pair(blobOf(null));
 
   /** Every login an identity could be: its account id; else the ids its email is paired with; else,
    *  paired with none, its email. */

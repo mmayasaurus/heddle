@@ -116,6 +116,20 @@ describe('loginsOf — the login a folder or account draws on', () => {
     expect(logins.ofAccount(native)).toBe('email:one@x.com');
   });
 
+  it('regression — pairs nothing from the default folder when an env-repoint account is registered there', () => {
+    // The default folder is glm's, so the U1 its .claude.json names is no Claude login of any account's.
+    // Paired anyway, x@example.com would be ambiguous between U1 and acct2's U2, and acct3 unknown.
+    const dir = home({ accountUuid: 'U1', emailAddress: 'x@example.com' });
+    const envRepoint = { baseUrl: 'https://api.example.com/anthropic', authTokenRef: 'EXAMPLE_KEY', service: 'glm' };
+    const glm: ClaudeAccount = { id: 'glm', configDir: null, envRepoint };
+    const acct2: ClaudeAccount = { id: 'acct2', configDir: '/accounts/acct2', accountUuid: 'U2', email: 'x@example.com' };
+    const acct3: ClaudeAccount = { id: 'acct3', configDir: '/accounts/acct3', email: 'x@example.com' };
+    const logins = loginsOf([glm, acct2, acct3], dir);
+    expect(logins.ofAccount(acct3)).toBe('uuid:U2');
+    expect(logins.ofFolder(null)).toBe('account:glm');
+    expect(logins.named('default')).toBe('account:glm');
+  });
+
   it('regression — can\'t tell a registered folder whose row and own .claude.json name different logins', () => {
     // One of the two is stale (a re-login the registry's populate-only reconcile left unchanged, or a
     // cloned folder's cached blob), and only a live poll could say which.
