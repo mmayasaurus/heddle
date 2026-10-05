@@ -157,6 +157,7 @@ export function pickClaudeAccountToSwitch(
   const loginKeys = accounts.map((account) => opts.loginOf(account));
   const rows: SwitchAccountRow[] = claudeAccountRows(caps, accounts, floors)
     .map((row, index) => ({ ...row, leaving: loginKeys[index] === null ? null : loginKeys[index] === opts.leaving }));
+  const capsRowOf = new Map(caps.accounts.map((capsRow) => [capsRow.id, capsRow]));
   interface Login {
     /** The folder a session would move into. */
     into: ClaudeAccount | null;
@@ -176,7 +177,7 @@ export function pickClaudeAccountToSwitch(
     if (row.leaving !== false || key === null) continue;
     const login = logins.get(key) ?? { into: null, room: null, peak5h: null, peak7d: null, barred: false };
     logins.set(key, login);
-    const capsRow = caps.accounts.find((candidate) => candidate.id === account.id);
+    const capsRow = capsRowOf.get(account.id);
     if (row.floored || row.overage || (row.dispatchExcluded && capsRow?.dispatch?.reason === 'billing')) login.barred = true;
     if (!row.excluded && !login.into) login.into = account;
     if (row.headroomPct === null) continue;
@@ -204,7 +205,8 @@ export function pickClaudeAccountToSwitch(
         (unknown > 0 ? `, ${unknown} whose login can't be told` : ''),
     };
   }
-  const weightOn = (key: string) => opts.residents?.get(key)?.weight ?? 0;
+  // A weight below zero (a misconfigured seat-weight table) counts as none, never as a negative seat.
+  const weightOn = (key: string) => Math.max(0, opts.residents?.get(key)?.weight ?? 0);
   candidates.sort((a, b) =>
     b.room.pct / (weightOn(b.key) + 1) - a.room.pct / (weightOn(a.key) + 1) ||
     b.room.pct - a.room.pct ||

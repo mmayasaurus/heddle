@@ -169,6 +169,7 @@ function commaIds(flag: string): string[] {
 function out(json: boolean, obj: unknown, text: () => string): void {
   console.log(json ? JSON.stringify(obj, null, 2) : text());
 }
+const ACCOUNT_PICK_USAGE = 'usage: heddle account pick [--for <letter[,letter...]>] [--leaving <account|config-dir|default>] [--json] [--explain]';
 /** `account pick --explain`'s per-account lines (`leaving`: a switch pick's rows on the login being
  *  left, or null where the login can't be told). */
 function explainRows(rows: ReadonlyArray<Omit<ClaudeAccountRow, 'residents' | 'residentWeight'> & { leaving?: boolean | null }>): string {
@@ -178,6 +179,8 @@ function explainRows(rows: ReadonlyArray<Omit<ClaudeAccountRow, 'residents' | 'r
       account.floored ? 'floored' : null,
       account.loggedOut ? 'logged-out' : null,
       account.dispatchExcluded ? 'dispatch-excluded' : null,
+      account.overage ? 'overage' : null,
+      account.envRepointPinOnly ? 'pin-only' : null,
     ].filter(Boolean).join(', ') || 'eligible';
     const meter = account.bindingMeter === null ? 'no known meter' : `${account.bindingMeter} binds`;
     return `${account.account}: 5h ${account.usedPct5h === null ? 'unknown' : `${account.usedPct5h.toFixed(0)}%`}, ` +
@@ -345,7 +348,7 @@ try {
         break;
       }
       if (process.argv[3] !== 'pick') {
-        console.error('usage: heddle account pick [--for <letter[,letter...]>] [--leaving <account|config-dir|default>] [--json] [--explain]\n       heddle account seat-weights sync');
+        console.error(`${ACCOUNT_PICK_USAGE}\n       heddle account seat-weights sync`);
         process.exit(2);
       }
       const accounts = readClaudeAccounts();
@@ -354,12 +357,12 @@ try {
       const floors = claudeFloorsFrom(lanes);
       const forAgent = arg('--for');
       if (has('--for') && (!forAgent || forAgent.startsWith('--'))) {
-        console.error('usage: heddle account pick [--for <letter[,letter...]>] [--leaving <account|config-dir|default>] [--json] [--explain]');
+        console.error(ACCOUNT_PICK_USAGE);
         process.exit(2);
       }
       const leaving = arg('--leaving');
       if (has('--leaving') && (!leaving || leaving.startsWith('--'))) {
-        console.error('usage: heddle account pick [--for <letter[,letter...]>] [--leaving <account|config-dir|default>] [--json] [--explain]');
+        console.error(ACCOUNT_PICK_USAGE);
         process.exit(2);
       }
       // Exit 2 = cannot decide (missing/stale meters); distinct from exit 1 = decided, none healthy.
@@ -378,7 +381,7 @@ try {
       // `--json` into an assignment key (qodo review, HED-333). The guard above only checks the whole
       // string; validate each comma-separated entry so a flag-like value is rejected, not used as a key.
       if (requestedAgents.some((agent) => agent.startsWith('-'))) {
-        console.error('usage: heddle account pick [--for <letter[,letter...]>] [--leaving <account|config-dir|default>] [--json] [--explain]');
+        console.error(ACCOUNT_PICK_USAGE);
         process.exit(2);
       }
       const agents = [...new Set(requestedAgents)];

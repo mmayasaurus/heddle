@@ -19,8 +19,13 @@ import type { ClaudeAccount } from './capaware.js';
  * A login known only by its email takes the account id that email is paired with elsewhere (a
  * registry row, or the `.claude.json` of a registered folder or of the default one, naming both), so
  * one login reads alike whichever source told it. An email nothing pairs with an id keys as
- * `email:<address>`. An email paired with two or more ids (a stale `.claude.json`, say) leaves its
- * login unknown: null, so a caller never takes it for some other login.
+ * `email:<address>`.
+ *
+ * Where the sources can't settle it, the login is unknown (null), so a caller never takes it for some
+ * other login: an email paired with two or more ids; a registered folder whose row and own
+ * `.claude.json` name different logins (one of them is stale, and only a live poll could say which);
+ * and a native account with no identity anywhere. An env-repoint account (`envRepoint`) has no Claude
+ * login: it is a login of its own, `account:<id>`.
  */
 
 interface Identity {
@@ -70,6 +75,11 @@ export interface Logins {
  *  folder's `.claude.json` once, when built. */
 export function loginsOf(accounts: readonly ClaudeAccount[], home: string = homedir()): Logins {
   const folderOf = (configDir: string | null) => (configDir === null ? null : normalizeConfigDir(configDir, home));
+  const byFolder = new Map<string | null, ClaudeAccount[]>();
+  for (const account of accounts) {
+    const folder = folderOf(account.configDir);
+    byFolder.set(folder, [...(byFolder.get(folder) ?? []), account]);
+  }
   const blobs = new Map<string | null, Identity | null>();
   const blobOf = (folder: string | null): Identity | null => {
     if (!blobs.has(folder)) blobs.set(folder, cachedIdentity(folder, home));
@@ -98,13 +108,17 @@ export function loginsOf(accounts: readonly ClaudeAccount[], home: string = home
     if (!ids) return `email:${identity.email}`;
     return ids.size === 1 ? `uuid:${[...ids][0]}` : null;
   };
+  const differ = (a: string | null, b: string | null) => a !== null && b !== null && a !== b;
   const ofAccount = (account: ClaudeAccount): string | null => {
-    const identity = registryIdentity(account) ?? blobOf(folderOf(account.configDir));
-    return identity ? keyOf(identity) : `account:${account.id}`;
+    const registry = registryIdentity(account);
+    const cached = blobOf(folderOf(account.configDir));
+    if (!registry && !cached) return account.envRepoint ? `account:${account.id}` : null;
+    if (registry && cached && (differ(registry.uuid, cached.uuid) || differ(registry.email, cached.email))) return null;
+    return keyOf((registry ?? cached)!);
   };
   const ofFolder = (configDir: string | null): string | null => {
     const folder = folderOf(configDir);
-    const registered = accounts.filter((account) => folderOf(account.configDir) === folder);
+    const registered = byFolder.get(folder) ?? [];
     if (registered.length === 0) {
       const identity = blobOf(folder);
       return identity ? keyOf(identity) : null;

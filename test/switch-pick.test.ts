@@ -127,6 +127,13 @@ describe('pickClaudeAccountToSwitch', () => {
     expect(pick(readings, 'uuid:LOGIN-1', heavy).pick).toMatchObject({ account: 'acct3', residents: 1 });
   });
 
+  it('counts a weight below zero as no sessions, never as a negative seat', () => {
+    // 80 ÷ (−2 + 1) would rank LOGIN-2 last; clamped, it is 80 ÷ 1 against LOGIN-3's 50.
+    const negative = new Map([['uuid:LOGIN-2', { count: 1, weight: -2 }]]);
+    expect(pick({ acct2: { used5h: 20 }, acct3: { used5h: 50 }, acct4: { used5h: 20 } }, 'uuid:LOGIN-1', negative).pick)
+      .toMatchObject({ account: 'acct2' });
+  });
+
   it('ranks on room alone, and says so, when the session census is unavailable', () => {
     const result = pick({ acct2: { used5h: 20 }, acct3: { used5h: 50 }, acct4: { used5h: 20 } }, 'uuid:LOGIN-1', null);
     expect(result.pick).toMatchObject({ account: 'acct2', residents: null });

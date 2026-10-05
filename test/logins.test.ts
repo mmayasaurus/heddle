@@ -52,23 +52,50 @@ describe('loginsOf — the login a folder or account draws on', () => {
     expect(logins.ofFolder(null)).toBeNull();
   });
 
-  it('takes a registered account\'s login from the registry over its folder\'s cached .claude.json', () => {
+  it('takes a registered account\'s login from its registry row when its .claude.json agrees or names none', () => {
     const dir = home();
-    const configDir = folder(dir, '.claude-acct2', { accountUuid: 'STALE' });
-    const account: ClaudeAccount = { id: 'acct2', configDir, accountUuid: 'LOGIN-2', email: 'two@x.com' };
-    const logins = loginsOf([account], dir);
-    expect(logins.ofAccount(account)).toBe('uuid:LOGIN-2');
-    expect(logins.ofFolder(configDir)).toBe('uuid:LOGIN-2');
+    const agreeing = folder(dir, '.claude-acct2', { accountUuid: 'LOGIN-2', emailAddress: 'two@x.com' });
+    const blank = folder(dir, '.claude-acct4');
+    const acct2: ClaudeAccount = { id: 'acct2', configDir: agreeing, accountUuid: 'LOGIN-2', email: 'two@x.com' };
+    const acct4: ClaudeAccount = { id: 'acct4', configDir: blank, accountUuid: 'LOGIN-2' };
+    const logins = loginsOf([acct2, acct4], dir);
+    expect(logins.ofAccount(acct2)).toBe('uuid:LOGIN-2');
+    expect(logins.ofFolder(agreeing)).toBe('uuid:LOGIN-2');
+    expect(logins.ofAccount(acct4)).toBe('uuid:LOGIN-2');
   });
 
-  it('reads the .claude.json of a registered folder that records no login, written with ~, and keeps a login-less account apart', () => {
+  it('reads the .claude.json of a registered folder that records no login, written with ~', () => {
     const dir = home();
     folder(dir, '.claude-acct2', { accountUuid: 'U2' });
     const unrecorded: ClaudeAccount = { id: 'acct2', configDir: '~/.claude-acct2' };
-    const glm: ClaudeAccount = { id: 'glm', configDir: folder(dir, 'glm') };
-    const logins = loginsOf([unrecorded, glm], dir);
-    expect(logins.ofAccount(unrecorded)).toBe('uuid:U2');
+    expect(loginsOf([unrecorded], dir).ofAccount(unrecorded)).toBe('uuid:U2');
+  });
+
+  it('keeps an env-repoint account apart as a login of its own, but can\'t tell a native account with no identity anywhere', () => {
+    const dir = home();
+    const glm: ClaudeAccount = {
+      id: 'glm', configDir: folder(dir, 'glm'),
+      envRepoint: { baseUrl: 'https://api.example.com/anthropic', authTokenRef: 'EXAMPLE_KEY', service: 'glm' },
+    };
+    const blank: ClaudeAccount = { id: 'blank', configDir: folder(dir, 'blank') };
+    const logins = loginsOf([glm, blank], dir);
     expect(logins.ofAccount(glm)).toBe('account:glm');
+    expect(logins.ofAccount(blank)).toBeNull();
+    expect(logins.named('blank')).toBeNull();
+  });
+
+  it('regression — can\'t tell a registered folder whose row and own .claude.json name different logins', () => {
+    // One of the two is stale (a re-login the registry's populate-only reconcile left unchanged, or a
+    // cloned folder's cached blob), and only a live poll could say which.
+    const dir = home();
+    const byId: ClaudeAccount = { id: 'acct4', configDir: folder(dir, 'by-id', { accountUuid: 'NEW' }), accountUuid: 'OLD' };
+    const byEmail: ClaudeAccount = { id: 'acct5', configDir: folder(dir, 'by-email', { emailAddress: 'new@x.com' }), email: 'old@x.com' };
+    const agreeing: ClaudeAccount = { id: 'acct6', configDir: folder(dir, 'agreeing', { accountUuid: 'U6', emailAddress: 'six@x.com' }), accountUuid: 'U6' };
+    const logins = loginsOf([byId, byEmail, agreeing], dir);
+    expect(logins.ofAccount(byId)).toBeNull();
+    expect(logins.ofFolder(byId.configDir)).toBeNull();
+    expect(logins.ofAccount(byEmail)).toBeNull();
+    expect(logins.ofAccount(agreeing)).toBe('uuid:U6');
   });
 
   it('regression — keys one login alike when one source knows it by email and another by account id', () => {
@@ -123,8 +150,8 @@ describe('loginsOf — the login a folder or account draws on', () => {
     expect(logins.named('default')).toBe('uuid:CURRENT');
   });
 
-  it('matches a registered folder after ~ and a trailing slash, and prefers the default folder\'s row over home\'s .claude.json', () => {
-    const dir = home({ accountUuid: 'CACHED' });
+  it('matches a registered folder after ~ and a trailing slash, and the default folder through its registry row', () => {
+    const dir = home({ accountUuid: 'REGISTRY' });
     const logins = loginsOf([
       { id: 'acct2', configDir: '~/.claude-acct2', accountUuid: 'LOGIN-2' },
       { id: 'default', configDir: null, accountUuid: 'REGISTRY' },
