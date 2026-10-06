@@ -147,6 +147,8 @@ server.tool(
     author_model: z.string().optional(),
     override_reason: z.string().optional().describe('Same rule as dispatch_worker: a bare provider+model with no task_class is reported as WOULD REFUSE unless you say why it bypasses the routing table.'),
     cwd: z.string().optional().describe('Working directory the dispatch would use (default: server cwd) — the quality gate is resolved per repository from it (HED-389), and a standalone clone of a memtrace-indexed repository previews the HED-723 refusal, so pass the cwd you will pass to dispatch_worker.'),
+    mcp: z.array(z.string()).optional().describe('The mcp list you will pass to dispatch_worker; it decides whether the HED-723 clone refusal applies.'),
+    no_fallback: z.boolean().optional().describe('The no_fallback you will pass to dispatch_worker; a fallback it rules out cannot trigger the HED-723 clone refusal.'),
   },
   async (a) => {
     try {
@@ -156,6 +158,7 @@ server.tool(
         taskClass: a.task_class, provider: a.provider, model: a.model, prompt: '(dry run)',
         cwd: a.cwd ?? process.cwd(), optIn: a.opt_in, overrideReason: a.override_reason, env: Object.keys(env).length ? env : undefined, identity: IDENTITY,
         inSession: a.in_session, accountPin: a.account_pin, authorProvider: a.author_provider, authorModel: a.author_model,
+        mcp: a.mcp, noFallback: a.no_fallback,
       });
       return text(summarizePlan(plan));
     } catch (err) {

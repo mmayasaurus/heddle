@@ -9,6 +9,7 @@ import { loadAccountRegistry, type Account } from '../accounts.js';
 import { resolveTierTarget } from '../tier-resolve.js';
 import { mcpAttachable, webCapable } from '../mcp.js';
 import { readMemtraceWorkspaceRoots, standaloneCloneOfIndexedRepo } from '../memtrace-workspace.js';
+import { isInProcessHttpProvider } from '../adapters/openai-compat.js';
 import { pickReviewer, normalizeProvider, type ReviewerPick } from '../review.js';
 import { decideCapabilities, capabilityPolicy } from '../capabilities.js';
 import { readProviderCaps } from '../usage.js';
@@ -467,16 +468,21 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
       + `SIGKILLs at its timeout with zero output (HED-511: 6/6 such dispatches died this way).`
     : undefined;
   // HED-723: a worker that runs memtrace in a standalone clone of an indexed repository makes memtrace
-  // build a second, private store for the whole repository. A worker can run it there when heddle
-  // attaches it (claude and codex then load ONLY heddle's list: --strict-mcp-config / --ignore-user-config),
-  // and on any cursor target, which also starts the servers in the user's own Cursor MCP config
-  // (observed 2026-10-06: argent, summer-engine and browser-devtools under a heddle review worker) —
-  // heddle neither controls nor reads that config. Decided for the primary AND the class fallback (both
-  // run in the same cwd), so a dispatch that could only fall back into the clone is refused up front too
-  // — unless --no-fallback rules the fallback out. The cheap test runs first: other dispatches never read
-  // a manifest or shell out to git here.
-  const mayRunMemtrace = [target, req.noFallback ? undefined : fallback]
-    .some((t) => t && (t.provider === 'cursor' || (req.mcp ?? t.mcp ?? []).includes('memtrace')));
+  // build a second, private store for the whole repository. claude and codex workers load ONLY the
+  // servers heddle hands them (--strict-mcp-config / --ignore-user-config), so they run memtrace there only
+  // when heddle attaches it. Every other spawned CLI — cursor, gemini, gemini-cli, opencode — also loads
+  // MCP servers from the user's and the project's own config files, which heddle neither controls nor
+  // reads (observed 2026-10-06 for cursor: argent, summer-engine and browser-devtools under a heddle review
+  // worker), so it counts whatever heddle attaches. In-process HTTP providers have no MCP, and an
+  // in-session-subagent route spawns nothing. Decided for the primary AND the class fallback (both run in
+  // the same cwd) — unless --no-fallback rules the fallback out. The cheap test runs first: other
+  // dispatches never read a manifest or shell out to git here.
+  const loadsOnlyHeddleMcp = (provider: string) => provider === 'claude' || provider === 'codex';
+  const couldRunMemtrace = (t: RouteTarget | undefined) => !!t
+    && providerExecution(table, t.provider) !== 'in-session-subagent'
+    && !isInProcessHttpProvider(t.provider)
+    && (!loadsOnlyHeddleMcp(t.provider) || (req.mcp ?? t.mcp ?? []).includes('memtrace'));
+  const mayRunMemtrace = couldRunMemtrace(target) || (!req.noFallback && couldRunMemtrace(fallback));
   const indexedClone = reachesRunTarget && !notDispatchable && mayRunMemtrace
     ? standaloneCloneOfIndexedRepo(req.cwd, req.memtraceWorkspaceRoots ?? readMemtraceWorkspaceRoots())
     : null;

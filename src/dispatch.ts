@@ -246,9 +246,10 @@ export async function dispatch(
       code: 'memtrace-standalone-clone',
       reason: plan.memtraceCloneRefusal,
       instruction: 'Dispatch from your own registered worktree of that repository instead (commit first: COMMIT '
-        + 'BEFORE DISPATCH); memtrace serves the shared store there. In a clone, a worker is let through only '
-        + 'when memtrace is not in its MCP list (mcp: []) and it is not cursor; a cursor worker never is, '
-        + 'because it also starts the servers in your own Cursor MCP config.',
+        + 'BEFORE DISPATCH); memtrace serves the shared store there. In a clone, only a claude or codex worker '
+        + 'without memtrace in its MCP list (mcp: []), or an HTTP worker, is let through; a cursor, gemini, '
+        + 'gemini-cli or opencode worker never is, because it also loads the MCP servers in your own and the '
+        + "project's config files.",
     });
   }
 

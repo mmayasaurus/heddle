@@ -78,6 +78,22 @@ task_classes:
     return path;
   }
 
+  /** A routing table with every provider kind the gate tells apart, plus `classes` (YAML, indented two spaces). */
+  function providerTable(classes: string, claudeExecution = 'headless'): string {
+    const path = join(tempDir(), 'routing.yaml');
+    writeFileSync(path, `version: 0
+policy: {structural_caps: {max_children_per_orchestrator: 8, in_flight_stale_after_ms: 10800000}}
+providers:
+  claude: {auth: anthropic-subscription, execution: ${claudeExecution}, models: [sonnet]}
+  codex: {auth: chatgpt-subscription, execution: headless, models: [gpt-5.6-luna]}
+  glm: {auth: zai-coding-plan-subscription, execution: headless, models: [glm-5.3]}
+  gemini-cli: {auth: google-subscription, execution: headless, models: [gemini-3-flash]}
+  opencode: {auth: opencode-free, execution: headless, models: [opencode/big-pickle]}
+task_classes:
+${classes}`);
+    return path;
+  }
+
   /** dispatch() loads its own table; HEDDLE_ROUTING points it at a test one for the length of `run`. */
   async function withRouting<T>(path: string, run: () => Promise<T>): Promise<T> {
     const prev = process.env.HEDDLE_ROUTING;
@@ -284,6 +300,97 @@ task_classes:
     expect(outcome.refusal).toBeUndefined();
     expect(fake.calls).toHaveLength(1);
     expect(fake.calls[0].opts.cwd).toBe(clone);
+  });
+
+  it('refuses a gemini-cli or opencode worker in the clone even with mcp: [], before any worker is spawned', async () => {
+    const { member, clone } = fixture();
+    const table = providerTable(`  on-gemini-cli: {provider: gemini-cli, model: gemini-3-flash, mcp: [], read_only: false, edits_code: false}
+  on-opencode: {provider: opencode, model: opencode/big-pickle, mcp: [], read_only: false, edits_code: false}
+`);
+    const req = { prompt: 'x', cwd: clone, memtraceWorkspaceRoots: [member] };
+    // Like cursor, these CLIs also start the servers in the user's and the project's own MCP config files.
+    expect(planDispatch({ ...req, taskClass: 'on-opencode' }, loadRouting(table)).memtraceCloneRefusal).toContain(clone);
+    const fake = fakeAdapter();
+
+    const outcome = await withRouting(table, () => dispatch({ ...req, taskClass: 'on-gemini-cli', identity: unbound }, tempLedger(), () => fake.adapter));
+
+    expect(outcome.refusal?.code).toBe(REFUSAL);
+    expect(fake.calls).toHaveLength(0);
+  });
+
+  it('plans an HTTP provider in the clone without the refusal: it has no MCP at all', () => {
+    const { member, clone } = fixture();
+    const table = providerTable(`  over-http: {provider: glm, model: glm-5.3, mcp: [], read_only: false, edits_code: false}
+`);
+
+    const plan = planDispatch({ taskClass: 'over-http', prompt: 'x', cwd: clone, memtraceWorkspaceRoots: [member] }, loadRouting(table));
+
+    expect(plan.memtraceCloneRefusal).toBeUndefined();
+  });
+
+  it('ignores a fallback that runs in-session: heddle spawns no worker for it', () => {
+    const { member, clone } = fixture();
+    const classes = `  claude-fallback:
+    provider: codex
+    model: gpt-5.6-luna
+    mcp: []
+    fallback: {provider: claude, model: sonnet, mcp: [memtrace]}
+    read_only: false
+    edits_code: false
+`;
+    const req = { taskClass: 'claude-fallback', prompt: 'x', cwd: clone, memtraceWorkspaceRoots: [member] };
+
+    expect(planDispatch(req, loadRouting(providerTable(classes, 'in-session-subagent'))).memtraceCloneRefusal).toBeUndefined();
+    expect(planDispatch(req, loadRouting(providerTable(classes, 'headless'))).memtraceCloneRefusal).toContain(clone);
+  });
+
+  it('refuses a clone whose only remote is not named origin', async () => {
+    const { member } = fixture();
+    const work = join(realpathSync(tempDir()), 'renamed-remote');
+    hermeticGit(member, 'clone', '-q', '-o', 'upstream', member, work);
+    const fake = fakeAdapter();
+
+    const outcome = await dispatch(
+      { taskClass: 'bulk-mechanical', prompt: 'x', cwd: work, identity: unbound, memtraceWorkspaceRoots: [member] },
+      tempLedger(), () => fake.adapter,
+    );
+
+    expect(outcome.refusal?.code).toBe(REFUSAL);
+    expect(fake.calls).toHaveLength(0);
+  });
+
+  it('refuses a sibling clone of the local mirror the indexed repository was cloned from', async () => {
+    const base = realpathSync(tempDir());
+    const source = repo(join(base, 'source'));
+    const mirror = join(base, 'mirror.git');
+    hermeticGit(base, 'clone', '-q', '--bare', source, mirror);
+    const member = join(base, 'Project-Root');
+    hermeticGit(base, 'clone', '-q', mirror, member);
+    const sibling = join(base, 'sibling');
+    hermeticGit(base, 'clone', '-q', mirror, sibling);
+    const fake = fakeAdapter();
+
+    const outcome = await dispatch(
+      { taskClass: 'bulk-mechanical', prompt: 'x', cwd: sibling, identity: unbound, memtraceWorkspaceRoots: [member] },
+      tempLedger(), () => fake.adapter,
+    );
+
+    expect(outcome.refusal?.code).toBe(REFUSAL);
+    expect(outcome.refusal?.reason).toContain(member);
+    expect(fake.calls).toHaveLength(0);
+  });
+
+  it('tells apart remotes on different ports of one host, and ignores a default port', () => {
+    const base = realpathSync(tempDir());
+    const onPort = repo(join(base, 'on-port'), 'ssh://git@example.com:2222/team/project.git');
+    const onDefault = repo(join(base, 'on-default'), 'ssh://git@example.com:22/team/project.git');
+    const httpsCopy = repo(join(base, 'https-copy'), 'https://example.com/team/project.git');
+    const scpCopy = repo(join(base, 'scp-copy'), 'git@example.com:team/project');
+    const refusal = (cwd: string, member: string) =>
+      planDispatch({ taskClass: 'bulk-mechanical', prompt: 'x', cwd, memtraceWorkspaceRoots: [member] }).memtraceCloneRefusal;
+
+    expect(refusal(httpsCopy, onPort)).toBeUndefined();
+    expect(refusal(scpCopy, onDefault)).toContain(scpCopy);
   });
 
   it('runs in a linked sibling worktree of the indexed repository', async () => {

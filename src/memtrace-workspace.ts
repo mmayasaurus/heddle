@@ -54,28 +54,35 @@ function localOrigin(origin: string): string | null {
   return isAbsolute(origin) ? origin : null;
 }
 
+/** A scheme's default port names the same server as no port at all; any other port may be another server. */
+const DEFAULT_PORTS: Record<string, string> = { ssh: '22', 'git+ssh': '22', 'ssh+git': '22', git: '9418', http: '80', https: '443' };
+
 /**
  * `host/path` identity of a network remote, so `https://host/o/r.git` and `git@host:o/r` compare
  * equal. Only the host is case-folded: a path that differs in case is treated as a different
- * repository (the fail-open side — an unmatched clone is simply not refused).
+ * repository (the fail-open side — an unmatched clone is simply not refused). A non-default port
+ * stays part of the host.
  */
 function remoteKey(url: string): string | null {
   const trimmed = url.trim();
-  const scheme = /^[a-z][a-z0-9+.-]*:\/\//i.exec(trimmed);
+  const scheme = /^([a-z][a-z0-9+.-]*):\/\//i.exec(trimmed);
   let host: string;
   let path: string;
   if (scheme) {
     const rest = trimmed.slice(scheme[0].length);
     const slash = rest.indexOf('/');
     if (slash < 0) return null;
-    host = rest.slice(0, slash);
+    host = rest.slice(0, slash).replace(/^[^@]*@/, '');
     path = rest.slice(slash + 1);
+    const port = /:(\d+)$/.exec(host);
+    if (port && port[1] === DEFAULT_PORTS[scheme[1].toLowerCase()]) host = host.slice(0, port.index);
   } else {
     const scpLike = /^([^/:]+):(.+)$/.exec(trimmed);
     if (!scpLike) return null;
     [, host, path] = scpLike;
+    host = host.replace(/^[^@]*@/, '');
   }
-  host = host.replace(/^[^@]*@/, '').replace(/:\d+$/, '').toLowerCase();
+  host = host.toLowerCase();
   path = path.split(/[?#]/, 1)[0].replace(/^\/+/, '').replace(/\/+$/, '').replace(/\.git$/, '');
   return host && path ? `${host}/${path}` : null;
 }
@@ -100,10 +107,11 @@ export interface IndexedRepoClone {
  * A repository is identified by its MAIN checkout (gitRepositoryFor), never by a path prefix: a
  * consumer fleet's linked worktrees are siblings of the checkout they belong to, and a manifest may
  * list a linked worktree rather than the main checkout. So `cwd` is NOT a clone when its repository's
- * main checkout is an indexed one. Otherwise its `origin` is followed — through local clones of
- * clones, bare mirrors and `.git` directories — until it names an indexed repository (a local path
- * inside one, or the network remote one of them has). No repository, an unknown identity, no origin,
- * an origin `git clone` never writes (a relative path), or an unrelated repository: null.
+ * main checkout is an indexed one. Otherwise its remote (`origin`, else the first one) is followed —
+ * through local clones of clones, bare mirrors and `.git` directories — until it names an indexed
+ * repository (a local path inside one, the local repository one of them was cloned from, or the
+ * network remote one of them has). No repository, an unknown identity, no remote, a remote `git clone`
+ * never writes (a relative path), or an unrelated repository: null.
  */
 export function standaloneCloneOfIndexedRepo(cwd: string, roots: readonly string[]): IndexedRepoClone | null {
   if (roots.length === 0) return null;
@@ -113,46 +121,61 @@ export function standaloneCloneOfIndexedRepo(cwd: string, roots: readonly string
   const main = real(repo.mainRoot);
   if (listed.has(main)) return null;
   const members = indexedMembers(listed);
-  if (members.has(main)) return null;
-  const member = indexedUpstream(repo.originUrl, members, main);
+  if (members.remotes.has(main)) return null;
+  const member = indexedUpstream(gitRepositoryAtPath(repo.topLevel)?.remoteUrl ?? null, members, main);
   return member ? { clone: repo.topLevel, member } : null;
 }
 
-/** Main checkout → its origin (if any) for each listed root; a root git cannot read keys as itself. */
-function indexedMembers(listed: ReadonlySet<string>): Map<string, string | null> {
-  const members = new Map<string, string | null>();
-  for (const root of listed) {
-    const member = gitRepositoryFor(root);
-    members.set(member?.mainRoot ? real(member.mainRoot) : root, member?.originUrl ?? null);
-  }
-  return members;
+/** The indexed repositories, each keyed by its main checkout (a root git cannot read keys as itself). */
+interface IndexedMembers {
+  /** Main checkout → its remote URL, if any. */
+  remotes: Map<string, string | null>;
+  /** A local repository a member was cloned from (a bare mirror, say) → that member. */
+  bySource: Map<string, string>;
 }
 
-/** The member whose network remote is `origin`, else null. */
-function memberWithRemote(origin: string, members: ReadonlyMap<string, string | null>): string | null {
-  const wanted = remoteKey(origin);
+function indexedMembers(listed: ReadonlySet<string>): IndexedMembers {
+  const remotes = new Map<string, string | null>();
+  const bySource = new Map<string, string>();
+  for (const root of listed) {
+    const member = gitRepositoryAtPath(root);
+    const key = member ? real(member.mainRoot) : root;
+    remotes.set(key, member?.remoteUrl ?? null);
+    const source = member?.remoteUrl ? localOrigin(member.remoteUrl) : null;
+    const upstream = source ? gitRepositoryAtPath(source) : null;
+    if (upstream) bySource.set(real(upstream.mainRoot), key);
+  }
+  return { remotes, bySource };
+}
+
+/** The member whose network remote is `remote`, else null. */
+function memberWithRemote(remote: string, remotes: ReadonlyMap<string, string | null>): string | null {
+  const wanted = remoteKey(remote);
   if (!wanted) return null;
-  for (const [member, memberOrigin] of members) {
-    if (memberOrigin && remoteKey(memberOrigin) === wanted) return member;
+  for (const [member, memberRemote] of remotes) {
+    if (memberRemote && remoteKey(memberRemote) === wanted) return member;
   }
   return null;
 }
 
-/** The member `origin` leads back to through local repositories, else null; `start` is the clone's own main checkout. */
-function indexedUpstream(origin: string | null, members: ReadonlyMap<string, string | null>, start: string): string | null {
+/** The member `remote` leads back to through local repositories, else null; `start` is the clone's own main checkout. */
+function indexedUpstream(remote: string | null, members: IndexedMembers, start: string): string | null {
   const visited = new Set<string>([start]);
-  for (let hop = 0; origin && hop < MAX_ORIGIN_HOPS; hop += 1) {
-    const source = localOrigin(origin);
-    if (!source) return memberWithRemote(origin, members);
-    // The origin may name a bare mirror or a `.git` directory rather than a checkout: a bare
-    // repository is never itself a member, so its own origin is followed instead.
+  for (let hop = 0; remote && hop < MAX_ORIGIN_HOPS; hop += 1) {
+    const source = localOrigin(remote);
+    if (!source) return memberWithRemote(remote, members.remotes);
+    // The remote may name a bare mirror or a `.git` directory rather than a checkout: a bare
+    // repository is never itself a member, so its own remote is followed instead.
     const upstream = gitRepositoryAtPath(source);
     if (!upstream) return null;
     const upstreamMain = real(upstream.mainRoot);
-    if (!upstream.bare && members.has(upstreamMain)) return upstreamMain;
-    if (visited.has(upstreamMain)) return null; // a loop of origins never reaches an indexed repository
+    if (!upstream.bare && members.remotes.has(upstreamMain)) return upstreamMain;
+    // Cloned from the local repository a member was cloned from (siblings of one mirror): the same repository.
+    const sibling = members.bySource.get(upstreamMain);
+    if (sibling) return sibling;
+    if (visited.has(upstreamMain)) return null; // a loop of remotes never reaches an indexed repository
     visited.add(upstreamMain);
-    origin = upstream.originUrl;
+    remote = upstream.remoteUrl;
   }
   return null;
 }

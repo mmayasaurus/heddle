@@ -301,13 +301,15 @@ flags churn monthly.
   repository: 5.9 GB of RAM within five minutes, and 1.1–1.6 GB of `.memdb` on disk per clone.
   Heddle refuses a dispatch into such a clone whenever the worker could run memtrace there
   (`memtrace-standalone-clone`), reading the indexed checkouts from `~/.memtrace/workspaces/*.toml`
-  and following the clone's `origin` through clones of clones, bare mirrors and `.git` directories
-  (up to 32 hops; a loop of origins ends the walk).
-  A fallback that `--no-fallback` rules out does not count.
+  and following the clone's remote (`origin`, else the first) through clones of clones, bare mirrors
+  and `.git` directories (up to 32 hops; a loop ends the walk), including a sibling cloned from the
+  local mirror a member was cloned from. A fallback that `--no-fallback` rules out, or one that runs
+  in-session, does not count.
   Dispatch from your own worktree. A claude or codex worker can run in the clone with `mcp: []`: both
-  load only the servers heddle hands them. A cursor worker can't: it also starts the servers in your
-  own Cursor MCP config (observed: argent, summer-engine and browser-devtools under a review worker
-  whose heddle list was only memtrace), so it is refused there whatever its `mcp`.
+  load only the servers heddle hands them, and an HTTP worker has no MCP at all. A cursor, gemini,
+  gemini-cli or opencode worker can't: those CLIs also load the MCP servers in your own and the
+  project's config files (observed for cursor: argent, summer-engine and browser-devtools under a
+  review worker whose heddle list was only memtrace), so they are refused there whatever their `mcp`.
 
 ## Everywhere
 

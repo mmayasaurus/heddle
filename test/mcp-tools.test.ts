@@ -1,7 +1,8 @@
 import { afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { mkdirSync, realpathSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Ledger } from '../src/ledger.js';
-import { useTempResources, initRepoFixture } from './helpers.js';
+import { hermeticGit, useTempResources, initRepoFixture } from './helpers.js';
 import { ensureBuilt, withTempHome } from './helpers/cli.js';
 import { startMcp, type McpHarness } from './helpers/mcp.js';
 
@@ -99,4 +100,49 @@ describe('plan_dispatch — the dry run names the gate the dispatch would resolv
     expect(inUnknown).not.toContain('repo-heddle-core');
     expect(inUnknown).not.toContain('quality-gate');
   });
+});
+
+describe('plan_dispatch — previews the HED-723 clone refusal for the mcp and no_fallback the dispatch will pass', () => {
+  const { tempDir } = useTempResources('heddle-plan-clone-');
+  const REFUSAL = 'memtrace-standalone-clone';
+
+  beforeAll(async () => {
+    await ensureBuilt();
+  }, 120_000);
+
+  it('drops the refusal when the dry run passes mcp: [] or no_fallback, as dispatch_worker would', async () => {
+    const base = realpathSync(tempDir());
+    const member = join(base, 'Project-Root');
+    initRepoFixture(member, 'unused-worktree', { linkedWorktree: true });
+    const clone = join(base, 'review-clone');
+    hermeticGit(base, 'clone', '-q', member, clone);
+    // The server child gets its own temp HOME: the manifest goes there, never into a real ~/.memtrace.
+    const home = withTempHome();
+    mkdirSync(join(home, '.memtrace', 'workspaces'), { recursive: true });
+    writeFileSync(join(home, '.memtrace', 'workspaces', 'fleet.toml'), `[[members]]\npath = ${JSON.stringify(member)}\n`);
+    const routing = join(base, 'routing.yaml');
+    writeFileSync(routing, `version: 0
+policy: {structural_caps: {max_children_per_orchestrator: 8, in_flight_stale_after_ms: 10800000}}
+providers:
+  codex: {auth: chatgpt-subscription, execution: headless, models: [gpt-5.6-luna]}
+  cursor: {auth: cursor-subscription, execution: headless, models: [cursor-grok-4.6-high]}
+task_classes:
+  memtrace-worker: {provider: codex, model: gpt-5.6-luna, mcp: [memtrace], read_only: false, edits_code: false}
+  cursor-on-fallback:
+    provider: codex
+    model: gpt-5.6-luna
+    mcp: []
+    fallback: {provider: cursor, model: cursor-grok-4.6-high, mcp: []}
+    read_only: false
+    edits_code: false
+`);
+    const mcp = await startMcp({ home, env: { HEDDLE_ROUTING: routing } });
+    const preview = async (args: Record<string, unknown>) => JSON.stringify(await mcp.callTool('plan_dispatch', { cwd: clone, ...args }));
+
+    expect(await preview({ task_class: 'memtrace-worker' })).toContain(REFUSAL);
+    expect(await preview({ task_class: 'memtrace-worker', mcp: [] })).not.toContain(REFUSAL);
+    expect(await preview({ task_class: 'cursor-on-fallback' })).toContain(REFUSAL);
+    expect(await preview({ task_class: 'cursor-on-fallback', no_fallback: true })).not.toContain(REFUSAL);
+    await mcp.close();
+  }, 60_000);
 });

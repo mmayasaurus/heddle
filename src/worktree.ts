@@ -151,7 +151,8 @@ export interface GitRepositoryAtPath {
   /** The first `git worktree list --porcelain` entry: the main checkout, or a bare repository itself. */
   mainRoot: string;
   bare: boolean;
-  originUrl: string | null;
+  /** `remote.origin.url`, else the first configured remote's URL (`git clone -o <name>` names it otherwise). */
+  remoteUrl: string | null;
 }
 
 /**
@@ -168,10 +169,14 @@ export function gitRepositoryAtPath(path: string): GitRepositoryAtPath | null {
     if (!mainRoot) return null;
     const end = lines.indexOf('', start);
     const bare = lines.slice(start + 1, end < 0 ? undefined : end).includes('bare');
-    let originUrl: string | null = null;
-    try { originUrl = git(path, ['config', '--local', '--get', 'remote.origin.url']).trim() || null; }
-    catch { /* no origin */ }
-    return { mainRoot, bare, originUrl };
+    let remoteUrl: string | null = null;
+    try {
+      const remotes = git(path, ['config', '--local', '--get-regexp', '^remote\\..*\\.url$']).split('\n')
+        .map((line) => /^remote\.(.+)\.url (.+)$/.exec(line.trim()))
+        .filter((m): m is RegExpExecArray => m !== null);
+      remoteUrl = (remotes.find((m) => m[1] === 'origin') ?? remotes[0])?.[2] ?? null;
+    } catch { /* no remote is normal for a local repository */ }
+    return { mainRoot, bare, remoteUrl };
   } catch {
     return null;
   }
