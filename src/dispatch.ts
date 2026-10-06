@@ -245,10 +245,10 @@ export async function dispatch(
     return refusalOutcome(ctx, req, route.taskClass, target, skillsForRefusal, {
       code: 'memtrace-standalone-clone',
       reason: plan.memtraceCloneRefusal,
-      instruction: 'Dispatch from your own registered worktree of that repository (commit first: COMMIT BEFORE '
-        + 'DISPATCH); memtrace serves the shared store there. A claude or codex worker can run in the clone with '
-        + 'mcp: [], since those load only the MCP servers heddle hands them. A cursor worker cannot: it also '
-        + 'starts the servers in your own Cursor MCP config.',
+      instruction: 'Dispatch from your own registered worktree of that repository instead (commit first: COMMIT '
+        + 'BEFORE DISPATCH); memtrace serves the shared store there. In a clone, only a claude or codex worker '
+        + 'with mcp: [] is let through, because it loads nothing but the MCP servers heddle hands it; a cursor '
+        + 'worker never is, because it also starts the servers in your own Cursor MCP config.',
     });
   }
 
