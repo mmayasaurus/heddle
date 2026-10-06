@@ -80,8 +80,12 @@ function remoteKey(url: string): string | null {
   return host && path ? `${host}/${path}` : null;
 }
 
-/** A clone made from a clone still ends at the indexed repository; this bounds the walk back to it. */
-const MAX_ORIGIN_HOPS = 4;
+/**
+ * A clone made from a clone still ends at the indexed repository. The walk back to it stops at a loop of
+ * origins (each local repository is visited once) and, to bound its cost at two git calls a hop, after
+ * this many hops — a longer chain is not followed and fails open.
+ */
+const MAX_ORIGIN_HOPS = 32;
 
 export interface IndexedRepoClone {
   /** The top level of the checkout `cwd` is in. */
@@ -114,6 +118,7 @@ export function standaloneCloneOfIndexedRepo(cwd: string, roots: readonly string
     members.set(member?.mainRoot ? real(member.mainRoot) : root, member?.originUrl ?? null);
   }
   if (members.has(main)) return null;
+  const visited = new Set<string>([main]);
   let origin = repo.originUrl;
   for (let hop = 0; origin && hop < MAX_ORIGIN_HOPS; hop += 1) {
     const source = localOrigin(origin);
@@ -130,6 +135,8 @@ export function standaloneCloneOfIndexedRepo(cwd: string, roots: readonly string
     if (!upstream) return null;
     const upstreamMain = real(upstream.mainRoot);
     if (!upstream.bare && members.has(upstreamMain)) return { clone: repo.topLevel, member: upstreamMain };
+    if (visited.has(upstreamMain)) return null; // a loop of origins never reaches an indexed repository
+    visited.add(upstreamMain);
     origin = upstream.originUrl;
   }
   return null;

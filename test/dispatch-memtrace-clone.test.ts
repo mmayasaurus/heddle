@@ -148,6 +148,44 @@ task_classes:
     expect(fake.calls).toHaveLength(0);
   });
 
+  it('refuses a clone at the end of a long chain of local clones', async () => {
+    const { member } = fixture();
+    const base = realpathSync(tempDir());
+    let previous = member;
+    for (let link = 1; link <= 6; link += 1) {
+      const next = join(base, `chain-${link}`);
+      hermeticGit(base, 'clone', '-q', previous, next);
+      previous = next;
+    }
+    const fake = fakeAdapter();
+
+    const outcome = await dispatch(
+      { taskClass: 'bulk-mechanical', prompt: 'x', cwd: previous, identity: unbound, memtraceWorkspaceRoots: [member] },
+      tempLedger(), () => fake.adapter,
+    );
+
+    expect(outcome.refusal?.code).toBe(REFUSAL);
+    expect(outcome.refusal?.reason).toContain(member);
+    expect(fake.calls).toHaveLength(0);
+  });
+
+  it('stops at a loop of origins that never reaches an indexed repository', async () => {
+    const { member } = fixture();
+    const base = realpathSync(tempDir());
+    const first = repo(join(base, 'loop-a'));
+    const second = repo(join(base, 'loop-b'), first);
+    hermeticGit(first, 'remote', 'add', 'origin', second);
+    const fake = fakeAdapter();
+
+    const outcome = await dispatch(
+      { taskClass: 'bulk-mechanical', prompt: 'x', cwd: first, identity: unbound, memtraceWorkspaceRoots: [member] },
+      tempLedger(), () => fake.adapter,
+    );
+
+    expect(outcome.refusal).toBeUndefined();
+    expect(fake.calls).toHaveLength(1);
+  });
+
   it('refuses a clone whose origin is a file:// URL of the indexed repository', async () => {
     const { member } = fixture();
     const viaFileUrl = join(realpathSync(tempDir()), 'file-url-clone');
