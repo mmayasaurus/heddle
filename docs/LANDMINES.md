@@ -299,9 +299,12 @@ flags churn monthly.
   indexed checkout had no `.memdb` of their own. A separate `git clone` of the same repository (a
   review copy under `/tmp`) got its own `memcore-server` + `memcortex-daemon` for the whole
   repository: 5.9 GB of RAM within five minutes, and 1.1–1.6 GB of `.memdb` on disk per clone.
-  Heddle refuses a memtrace-carrying dispatch into such a clone (`memtrace-standalone-clone`), reading
-  the indexed checkouts from `~/.memtrace/workspaces/*.toml`. Dispatch from your own worktree, or pass
-  `mcp: []` to run in the clone without memtrace.
+  Heddle refuses a dispatch into such a clone whenever the worker could run memtrace there
+  (`memtrace-standalone-clone`), reading the indexed checkouts from `~/.memtrace/workspaces/*.toml`.
+  Dispatch from your own worktree. A claude or codex worker can run in the clone with `mcp: []`: both
+  load only the servers heddle hands them. A cursor worker can't: it also starts the servers in your
+  own Cursor MCP config (observed: argent, summer-engine and browser-devtools under a review worker
+  whose heddle list was only memtrace), so it is refused there whatever its `mcp`.
 
 ## Everywhere
 

@@ -44,9 +44,9 @@ branch off fresh `origin/main` in the SAME folder. Do not create a new worktree 
    **Never a fresh clone either** (HED-723; Maya asked for this in R's session, 2026-10-06). A
    standalone `git clone` of a memtrace-indexed repository (a review copy under `/tmp`, say) makes
    the worker's memtrace build a second, private store for the whole repository: 5.9 GB of RAM within
-   five minutes, measured 2026-10-06, against none in a worktree. Heddle refuses a memtrace-carrying
-   dispatch into one (refusal `memtrace-standalone-clone`). Reviews included: commit, then dispatch
-   the reviewer into your own worktree.
+   five minutes, measured 2026-10-06, against none in a worktree. Heddle refuses a dispatch into one
+   whenever the worker could run memtrace there (refusal `memtrace-standalone-clone`). Reviews
+   included: commit, then dispatch the reviewer into your own worktree.
 3. PR → full sweep (see `pr-discipline.md`) → merge promptly. **Branches are kept after merge.**
 4. **Removal (standing authorization, Maya 2026-08-15):** a worktree may be removed WITHOUT a
    further per-item ask only when ALL hold — its branches are fully merged to `origin/main`,

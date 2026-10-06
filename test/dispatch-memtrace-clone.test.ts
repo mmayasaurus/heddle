@@ -1,8 +1,8 @@
 import { mkdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { homedir, tmpdir } from 'node:os';
+import { join, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { dispatch } from '../src/dispatch.js';
 import { planDispatch, summarizePlan } from '../src/dispatcher/plan.js';
 import { loadRouting } from '../src/routing.js';
@@ -14,9 +14,15 @@ const REFUSAL = 'memtrace-standalone-clone';
 describe('dispatch into a standalone clone of a memtrace-indexed repository (HED-723)', () => {
   const { tempDir, tempLedger } = useTempResources('heddle-memtrace-clone-test-');
   const { unbound } = IDENTITIES;
-  // test/setup.ts points HOME at an empty temp dir, so this is never the operator's real ~/.memtrace.
+  // A few tests write manifests where the code reads them, ~/.memtrace/workspaces. test/setup.ts points
+  // HOME at an empty temp dir; this suite refuses to run at all if that ever stops being true, so it can
+  // never write into (or clean up) an operator's real memtrace store.
+  const homeIsTemp = resolve(homedir()).startsWith(resolve(tmpdir()) + sep);
   const workspacesDir = join(homedir(), '.memtrace', 'workspaces');
-  afterEach(() => rmSync(join(homedir(), '.memtrace'), { recursive: true, force: true }));
+  beforeAll(() => {
+    if (!homeIsTemp) throw new Error(`HOME (${homedir()}) is not under ${tmpdir()}: refusing to touch its ~/.memtrace`);
+  });
+  afterEach(() => { if (homeIsTemp) rmSync(workspacesDir, { recursive: true, force: true }); });
 
   function repo(dir: string, remote?: string): string {
     mkdirSync(dir, { recursive: true });
@@ -136,7 +142,7 @@ describe('dispatch into a standalone clone of a memtrace-indexed repository (HED
     expect(fake.calls).toHaveLength(1);
   });
 
-  it('refuses when only the class fallback would attach memtrace in the clone', () => {
+  it('refuses when only the class fallback would run memtrace in the clone', () => {
     const { member, clone } = fixture();
     const routingPath = join(tempDir(), 'routing.yaml');
     const table = (fallbackMcp: string): ReturnType<typeof loadRouting> => {
@@ -177,17 +183,41 @@ task_classes:
     expect(fake.calls[0].opts.cwd).toBe(worktree);
   });
 
-  it('runs in the clone when the dispatch attaches no memtrace', async () => {
+  it('runs a codex worker in the clone when the dispatch attaches no memtrace (codex/claude route: no cursor)', async () => {
     const { member, clone } = fixture();
     const fake = fakeAdapter();
 
     const outcome = await dispatch(
-      { taskClass: 'bulk-mechanical', mcp: [], prompt: 'x', cwd: clone, identity: unbound, memtraceWorkspaceRoots: [member] },
+      { taskClass: 'implementation', mcp: [], prompt: 'x', cwd: clone, identity: unbound, memtraceWorkspaceRoots: [member] },
       tempLedger(), () => fake.adapter,
     );
 
     expect(outcome.refusal).toBeUndefined();
     expect(fake.calls).toHaveLength(1);
+    expect(fake.calls[0].opts.cwd).toBe(clone);
+  });
+
+  it('refuses a cursor worker in the clone even with mcp: [], before any worker is spawned', async () => {
+    const { member, clone } = fixture();
+    const fake = fakeAdapter();
+
+    const outcome = await dispatch(
+      { taskClass: 'second-opinion', mcp: [], prompt: 'x', cwd: clone, identity: unbound, memtraceWorkspaceRoots: [member] },
+      tempLedger(), () => fake.adapter,
+    );
+
+    expect(outcome.refusal?.code).toBe(REFUSAL);
+    expect(outcome.refusal?.instruction).toContain('cursor');
+    expect(fake.calls).toHaveLength(0);
+  });
+
+  it('plans a cursor worker in a linked worktree of the indexed repository without the refusal', () => {
+    const { member, worktree } = fixture();
+
+    const plan = planDispatch({ taskClass: 'second-opinion', mcp: [], prompt: 'x', cwd: worktree, memtraceWorkspaceRoots: [member] });
+
+    expect(plan.target.provider).toBe('cursor');
+    expect(plan.memtraceCloneRefusal).toBeUndefined();
   });
 
   it('runs in a repository that is unrelated to every indexed one', async () => {

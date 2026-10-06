@@ -466,20 +466,23 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
       + `claude -p --output-format json is silent until completion, so a substantial review that overruns `
       + `SIGKILLs at its timeout with zero output (HED-511: 6/6 such dispatches died this way).`
     : undefined;
-  // HED-723: a memtrace-carrying worker in a standalone clone of an indexed repository makes memtrace
-  // build a second, private store for the whole repository. Decided for the primary AND the class
-  // fallback (each resolves its own mcp in runTarget, and both run in the same cwd), so a dispatch that
-  // could only fall back into the clone is refused up front too. The cheap mcp test runs first: a
-  // dispatch that attaches no memtrace never reads a manifest or shells out to git here.
-  const attachesMemtrace = [target, fallback].some((t) => t && (req.mcp ?? t.mcp ?? []).includes('memtrace'));
-  const indexedClone = reachesRunTarget && !notDispatchable && attachesMemtrace
+  // HED-723: a worker that runs memtrace in a standalone clone of an indexed repository makes memtrace
+  // build a second, private store for the whole repository. A worker can run it there when heddle
+  // attaches it (claude and codex then load ONLY heddle's list: --strict-mcp-config / --ignore-user-config),
+  // and on any cursor target, which also starts the servers in the user's own Cursor MCP config
+  // (observed 2026-10-06: argent, summer-engine and browser-devtools under a heddle review worker) —
+  // heddle neither controls nor reads that config. Decided for the primary AND the class fallback (both
+  // run in the same cwd), so a dispatch that could only fall back into the clone is refused up front too.
+  // The cheap test runs first: other dispatches never read a manifest or shell out to git here.
+  const mayRunMemtrace = [target, fallback].some((t) => t && (t.provider === 'cursor' || (req.mcp ?? t.mcp ?? []).includes('memtrace')));
+  const indexedClone = reachesRunTarget && !notDispatchable && mayRunMemtrace
     ? standaloneCloneOfIndexedRepo(req.cwd, req.memtraceWorkspaceRoots ?? readMemtraceWorkspaceRoots())
     : null;
   const memtraceCloneRefusal = indexedClone
     ? `dispatch cwd "${indexedClone.clone}" is a standalone clone of "${indexedClone.member}", which the memtrace `
-      + `workspace already indexes. memtrace anchors on its working directory, so attaching it there builds a `
-      + `second, private store for the whole repository (HED-723: 5.9 GB within five minutes and 1.1–1.6 GB on `
-      + `disk per clone, measured 2026-10-06).`
+      + `workspace already indexes. memtrace anchors on its working directory, so a worker that runs it there `
+      + `builds a second, private store for the whole repository (HED-723: 5.9 GB within five minutes and `
+      + `1.1–1.6 GB on disk per clone, measured 2026-10-06).`
     : undefined;
   return { route, target, fallback, origin, execution, decision, symbol, resolutionWalk, skillsForRefusal, account, accountAdvice, accountPick, rotationAccount, claudeAccountCount, claudePinOnlyCount, runsAs, notDispatchable, reviewerPick, sameProviderReview, pinnedExcludedAccount, overrideReasonRequired, billingRefusal, tierRefusal, envRepointRefusal, billingAdvice, capabilityRefusal, requiresWebRefusal, capabilityFitRebinds, headlessClaudeReviewRefusal, memtraceCloneRefusal };
 }

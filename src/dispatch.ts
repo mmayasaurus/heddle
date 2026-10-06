@@ -246,8 +246,9 @@ export async function dispatch(
       code: 'memtrace-standalone-clone',
       reason: plan.memtraceCloneRefusal,
       instruction: 'Dispatch from your own registered worktree of that repository (commit first: COMMIT BEFORE '
-        + 'DISPATCH); memtrace serves the shared store there. To dispatch into the clone anyway, pass mcp: [] so '
-        + 'heddle attaches no memtrace.',
+        + 'DISPATCH); memtrace serves the shared store there. A claude or codex worker can run in the clone with '
+        + 'mcp: [], since those load only the MCP servers heddle hands them. A cursor worker cannot: it also '
+        + 'starts the servers in your own Cursor MCP config.',
     });
   }
 
