@@ -380,6 +380,45 @@ ${classes}`);
     expect(fake.calls).toHaveLength(0);
   });
 
+  it('refuses a clone of the network remote the indexed repository reaches through a local copy', async () => {
+    const base = realpathSync(tempDir());
+    const localCopy = repo(join(base, 'local-copy'), 'https://github.com/example/project.git');
+    const member = join(base, 'Project-Root');
+    hermeticGit(base, 'clone', '-q', localCopy, member);
+    const fromNetwork = repo(join(base, 'from-network'), 'git@github.com:example/project');
+    const fake = fakeAdapter();
+
+    const outcome = await dispatch(
+      { taskClass: 'bulk-mechanical', prompt: 'x', cwd: fromNetwork, identity: unbound, memtraceWorkspaceRoots: [member] },
+      tempLedger(), () => fake.adapter,
+    );
+
+    expect(outcome.refusal?.code).toBe(REFUSAL);
+    expect(outcome.refusal?.reason).toContain(member);
+    expect(fake.calls).toHaveLength(0);
+  });
+
+  it('refuses a clone of any local repository on the indexed repository\'s own origin chain', async () => {
+    const base = realpathSync(tempDir());
+    const source = repo(join(base, 'source'));
+    const middle = join(base, 'middle');
+    hermeticGit(base, 'clone', '-q', source, middle);
+    const member = join(base, 'Project-Root');
+    hermeticGit(base, 'clone', '-q', middle, member);
+    const cousin = join(base, 'cousin');
+    hermeticGit(base, 'clone', '-q', source, cousin);
+    const fake = fakeAdapter();
+
+    const outcome = await dispatch(
+      { taskClass: 'bulk-mechanical', prompt: 'x', cwd: cousin, identity: unbound, memtraceWorkspaceRoots: [member] },
+      tempLedger(), () => fake.adapter,
+    );
+
+    expect(outcome.refusal?.code).toBe(REFUSAL);
+    expect(outcome.refusal?.reason).toContain(member);
+    expect(fake.calls).toHaveLength(0);
+  });
+
   it('tells apart remotes on different ports of one host, and ignores a default port', () => {
     const base = realpathSync(tempDir());
     const onPort = repo(join(base, 'on-port'), 'ssh://git@example.com:2222/team/project.git');

@@ -302,9 +302,10 @@ flags churn monthly.
   Heddle refuses a dispatch into such a clone whenever the worker could run memtrace there
   (`memtrace-standalone-clone`), reading the indexed checkouts from `~/.memtrace/workspaces/*.toml`
   and following the clone's remote (`origin`, else the first) through clones of clones, bare mirrors
-  and `.git` directories (up to 32 hops; a loop ends the walk), including a sibling cloned from the
-  local mirror a member was cloned from. A fallback that `--no-fallback` rules out, or one that runs
-  in-session, does not count.
+  and `.git` directories (up to 32 hops; a loop ends the walk). Each indexed checkout's own remote is
+  followed the same way, so a clone of any local copy on that chain, or of the network remote the
+  chain ends at, is caught even when the indexed checkout was itself cloned from a local copy. A
+  fallback that `--no-fallback` rules out, or one that runs in-session, does not count.
   Dispatch from your own worktree. A claude or codex worker can run in the clone with `mcp: []`: both
   load only the servers heddle hands them, and an HTTP worker has no MCP at all. A cursor, gemini,
   gemini-cli or opencode worker can't: those CLIs also load the MCP servers in your own and the

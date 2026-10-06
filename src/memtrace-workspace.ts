@@ -109,8 +109,8 @@ export interface IndexedRepoClone {
  * list a linked worktree rather than the main checkout. So `cwd` is NOT a clone when its repository's
  * main checkout is an indexed one. Otherwise its remote (`origin`, else the first one) is followed —
  * through local clones of clones, bare mirrors and `.git` directories — until it names an indexed
- * repository (a local path inside one, the local repository one of them was cloned from, or the
- * network remote one of them has). No repository, an unknown identity, no remote, a remote `git clone`
+ * repository (a local path inside one, a local repository on one's own origin chain, or the network
+ * remote that chain ends at). No repository, an unknown identity, no remote, a remote `git clone`
  * never writes (a relative path), or an unrelated repository: null.
  */
 export function standaloneCloneOfIndexedRepo(cwd: string, roots: readonly string[]): IndexedRepoClone | null {
@@ -128,9 +128,9 @@ export function standaloneCloneOfIndexedRepo(cwd: string, roots: readonly string
 
 /** The indexed repositories, each keyed by its main checkout (a root git cannot read keys as itself). */
 interface IndexedMembers {
-  /** Main checkout → its remote URL, if any. */
+  /** Main checkout → the network remote its own origin chain ends at (its remote, or one reached through local copies), if any. */
   remotes: Map<string, string | null>;
-  /** A local repository a member was cloned from (a bare mirror, say) → that member. */
+  /** A local repository on a member's own origin chain (the bare mirror it was cloned from, say, or that mirror's source) → that member. */
   bySource: Map<string, string>;
 }
 
@@ -140,12 +140,31 @@ function indexedMembers(listed: ReadonlySet<string>): IndexedMembers {
   for (const root of listed) {
     const member = gitRepositoryAtPath(root);
     const key = member ? real(member.mainRoot) : root;
-    remotes.set(key, member?.remoteUrl ?? null);
-    const source = member?.remoteUrl ? localOrigin(member.remoteUrl) : null;
-    const upstream = source ? gitRepositoryAtPath(source) : null;
-    if (upstream) bySource.set(real(upstream.mainRoot), key);
+    remotes.set(key, memberNetworkRemote(member?.remoteUrl ?? null, key, bySource));
   }
   return { remotes, bySource };
+}
+
+/**
+ * Walks a member's own origin chain the way indexedUpstream walks a clone's: every local repository on it
+ * is recorded in `bySource` as leading back to `member` (the first member to reach one keeps it), and the
+ * network remote the chain ends at is returned. So a clone of that remote, or of any local copy on the way,
+ * matches the member even when the member itself was cloned from a local copy.
+ */
+function memberNetworkRemote(remote: string | null, member: string, bySource: Map<string, string>): string | null {
+  const visited = new Set<string>([member]);
+  for (let hop = 0; remote && hop < MAX_ORIGIN_HOPS; hop += 1) {
+    const source = localOrigin(remote);
+    if (!source) return remote;
+    const upstream = gitRepositoryAtPath(source);
+    if (!upstream) return null;
+    const upstreamMain = real(upstream.mainRoot);
+    if (visited.has(upstreamMain)) return null; // a loop of remotes never reaches a network remote
+    visited.add(upstreamMain);
+    if (!bySource.has(upstreamMain)) bySource.set(upstreamMain, member);
+    remote = upstream.remoteUrl;
+  }
+  return null;
 }
 
 /** The member whose network remote is `remote`, else null. */
@@ -170,7 +189,7 @@ function indexedUpstream(remote: string | null, members: IndexedMembers, start: 
     if (!upstream) return null;
     const upstreamMain = real(upstream.mainRoot);
     if (!upstream.bare && members.remotes.has(upstreamMain)) return upstreamMain;
-    // Cloned from the local repository a member was cloned from (siblings of one mirror): the same repository.
+    // Cloned from a local repository on a member's own origin chain (siblings of one mirror, say): the same repository.
     const sibling = members.bySource.get(upstreamMain);
     if (sibling) return sibling;
     if (visited.has(upstreamMain)) return null; // a loop of remotes never reaches an indexed repository
