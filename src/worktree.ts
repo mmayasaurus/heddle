@@ -146,6 +146,37 @@ export function gitRepositoryFor(cwd: string): GitRepository | null {
   }
 }
 
+/** Identity of the repository at a path that may have no work tree; see gitRepositoryAtPath. */
+export interface GitRepositoryAtPath {
+  /** The first `git worktree list --porcelain` entry: the main checkout, or a bare repository itself. */
+  mainRoot: string;
+  bare: boolean;
+  originUrl: string | null;
+}
+
+/**
+ * Like gitRepositoryFor, for a path that may be a bare repository or a `.git` directory — the shapes a
+ * local clone's `origin` can name. gitRepositoryFor needs a work tree (`rev-parse --show-toplevel`
+ * fails in both); `git worktree list` and `config --local` read the repository wherever it is. null
+ * when `path` is not a readable repository.
+ */
+export function gitRepositoryAtPath(path: string): GitRepositoryAtPath | null {
+  try {
+    const lines = git(path, ['worktree', 'list', '--porcelain']).split('\n');
+    const start = lines.findIndex((l) => l.startsWith('worktree '));
+    const mainRoot = start < 0 ? '' : lines[start].slice('worktree '.length);
+    if (!mainRoot) return null;
+    const end = lines.indexOf('', start);
+    const bare = lines.slice(start + 1, end < 0 ? undefined : end).includes('bare');
+    let originUrl: string | null = null;
+    try { originUrl = git(path, ['config', '--local', '--get', 'remote.origin.url']).trim() || null; }
+    catch { /* no origin */ }
+    return { mainRoot, bare, originUrl };
+  } catch {
+    return null;
+  }
+}
+
 export interface WorktreeContext {
   /** The canonical (main) checkout this linked worktree belongs to. */
   parentRoot: string;

@@ -146,7 +146,7 @@ server.tool(
     author_provider: z.string().optional(),
     author_model: z.string().optional(),
     override_reason: z.string().optional().describe('Same rule as dispatch_worker: a bare provider+model with no task_class is reported as WOULD REFUSE unless you say why it bypasses the routing table.'),
-    cwd: z.string().optional().describe('Working directory the dispatch would use (default: server cwd) — the quality gate is resolved per repository from it (HED-389), so pass the cwd you will pass to dispatch_worker.'),
+    cwd: z.string().optional().describe('Working directory the dispatch would use (default: server cwd) — the quality gate is resolved per repository from it (HED-389), and a standalone clone of a memtrace-indexed repository previews the HED-723 refusal, so pass the cwd you will pass to dispatch_worker.'),
   },
   async (a) => {
     try {

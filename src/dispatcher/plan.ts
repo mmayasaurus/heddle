@@ -472,9 +472,11 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
   // and on any cursor target, which also starts the servers in the user's own Cursor MCP config
   // (observed 2026-10-06: argent, summer-engine and browser-devtools under a heddle review worker) —
   // heddle neither controls nor reads that config. Decided for the primary AND the class fallback (both
-  // run in the same cwd), so a dispatch that could only fall back into the clone is refused up front too.
-  // The cheap test runs first: other dispatches never read a manifest or shell out to git here.
-  const mayRunMemtrace = [target, fallback].some((t) => t && (t.provider === 'cursor' || (req.mcp ?? t.mcp ?? []).includes('memtrace')));
+  // run in the same cwd), so a dispatch that could only fall back into the clone is refused up front too
+  // — unless --no-fallback rules the fallback out. The cheap test runs first: other dispatches never read
+  // a manifest or shell out to git here.
+  const mayRunMemtrace = [target, req.noFallback ? undefined : fallback]
+    .some((t) => t && (t.provider === 'cursor' || (req.mcp ?? t.mcp ?? []).includes('memtrace')));
   const indexedClone = reachesRunTarget && !notDispatchable && mayRunMemtrace
     ? standaloneCloneOfIndexedRepo(req.cwd, req.memtraceWorkspaceRoots ?? readMemtraceWorkspaceRoots())
     : null;

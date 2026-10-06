@@ -1,4 +1,4 @@
-import { mkdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -36,17 +36,54 @@ describe('dispatch into a standalone clone of a memtrace-indexed repository (HED
    * `member` is a checkout the memtrace workspace indexes, `worktree` a linked SIBLING worktree of it
    * (the consumer-fleet layout, where a path-prefix test would call the worktree a stranger), and
    * `clone` a `git clone` of that worktree — the review-clone shape that built the private stores.
-   * `memberAlias` names `member` through the unresolved temp path (a symlink on macOS).
+   * `memberAlias` is a symlink to `member`, so a manifest that spells the path differently still names it.
    */
   function fixture(): { member: string; memberAlias: string; worktree: string; clone: string } {
-    const alias = tempDir();
-    const base = realpathSync(alias);
+    const base = realpathSync(tempDir());
     const member = repo(join(base, 'Project-Root'));
     const worktree = join(base, 'Project-Root.feature');
     hermeticGit(member, 'worktree', 'add', '-q', worktree, '-b', 'feature');
     const clone = join(base, 'review-clone');
     hermeticGit(base, 'clone', '-q', worktree, clone);
-    return { member, memberAlias: join(alias, 'Project-Root'), worktree, clone };
+    const memberAlias = join(realpathSync(tempDir()), 'linked-Project-Root');
+    symlinkSync(member, memberAlias);
+    return { member, memberAlias, worktree, clone };
+  }
+
+  /** A routing table whose primaries attach no memtrace, so only a fallback could start one in the clone. */
+  function fallbackOnlyTable(fallbackMcp: '[memtrace]' | '[]'): string {
+    const path = join(tempDir(), 'routing.yaml');
+    writeFileSync(path, `version: 0
+policy: {structural_caps: {max_children_per_orchestrator: 8, in_flight_stale_after_ms: 10800000}}
+providers:
+  glm: {auth: zai-coding-plan-subscription, execution: headless, models: [glm-5.3]}
+  codex: {auth: chatgpt-subscription, execution: headless, models: [gpt-5.6-luna]}
+  cursor: {auth: cursor-subscription, execution: headless, models: [cursor-grok-4.6-high]}
+task_classes:
+  discovery-on-fallback:
+    provider: glm
+    model: glm-5.3
+    mcp: []
+    fallback: {provider: codex, model: gpt-5.6-luna, mcp: ${fallbackMcp}}
+    read_only: false
+    edits_code: false
+  cursor-on-fallback:
+    provider: codex
+    model: gpt-5.6-luna
+    mcp: []
+    fallback: {provider: cursor, model: cursor-grok-4.6-high, mcp: []}
+    read_only: false
+    edits_code: false
+`);
+    return path;
+  }
+
+  /** dispatch() loads its own table; HEDDLE_ROUTING points it at a test one for the length of `run`. */
+  async function withRouting<T>(path: string, run: () => Promise<T>): Promise<T> {
+    const prev = process.env.HEDDLE_ROUTING;
+    process.env.HEDDLE_ROUTING = path;
+    try { return await run(); }
+    finally { if (prev === undefined) delete process.env.HEDDLE_ROUTING; else process.env.HEDDLE_ROUTING = prev; }
   }
 
   it('refuses a memtrace-carrying dispatch into a clone of an indexed repository before any worker is spawned', async () => {
@@ -126,6 +163,41 @@ describe('dispatch into a standalone clone of a memtrace-indexed repository (HED
     expect(fake.calls).toHaveLength(0);
   });
 
+  it('refuses a clone of a bare mirror of the indexed repository', async () => {
+    const { member } = fixture();
+    const base = realpathSync(tempDir());
+    const mirror = join(base, 'mirror.git');
+    hermeticGit(base, 'clone', '-q', '--bare', member, mirror);
+    const work = join(base, 'work');
+    hermeticGit(base, 'clone', '-q', mirror, work);
+    const fake = fakeAdapter();
+
+    const outcome = await dispatch(
+      { taskClass: 'bulk-mechanical', prompt: 'x', cwd: work, identity: unbound, memtraceWorkspaceRoots: [member] },
+      tempLedger(), () => fake.adapter,
+    );
+
+    expect(outcome.refusal?.code).toBe(REFUSAL);
+    expect(outcome.refusal?.reason).toContain(member);
+    expect(fake.calls).toHaveLength(0);
+  });
+
+  it('refuses a clone made from the indexed checkout\'s .git directory', async () => {
+    const { member } = fixture();
+    const work = join(realpathSync(tempDir()), 'from-git-dir');
+    hermeticGit(member, 'clone', '-q', join(member, '.git'), work);
+    const fake = fakeAdapter();
+
+    const outcome = await dispatch(
+      { taskClass: 'bulk-mechanical', prompt: 'x', cwd: work, identity: unbound, memtraceWorkspaceRoots: [member] },
+      tempLedger(), () => fake.adapter,
+    );
+
+    expect(outcome.refusal?.code).toBe(REFUSAL);
+    expect(outcome.refusal?.reason).toContain(member);
+    expect(fake.calls).toHaveLength(0);
+  });
+
   it('runs in the main checkout when the workspace lists one of its linked worktrees as the member', async () => {
     const base = realpathSync(tempDir());
     const main = repo(join(base, 'Project-Root'), 'https://github.com/example/project.git');
@@ -142,30 +214,38 @@ describe('dispatch into a standalone clone of a memtrace-indexed repository (HED
     expect(fake.calls).toHaveLength(1);
   });
 
-  it('refuses when only the class fallback would run memtrace in the clone', () => {
+  it('refuses when only the class fallback would run memtrace in the clone, before any worker is spawned', async () => {
     const { member, clone } = fixture();
-    const routingPath = join(tempDir(), 'routing.yaml');
-    const table = (fallbackMcp: string): ReturnType<typeof loadRouting> => {
-      writeFileSync(routingPath, `version: 0
-policy: {structural_caps: {max_children_per_orchestrator: 8, in_flight_stale_after_ms: 10800000}}
-providers:
-  glm: {auth: zai-coding-plan-subscription, execution: headless, models: [glm-5.3]}
-  codex: {auth: chatgpt-subscription, execution: headless, models: [gpt-5.6-luna]}
-task_classes:
-  discovery-on-fallback:
-    provider: glm
-    model: glm-5.3
-    mcp: []
-    fallback: {provider: codex, model: gpt-5.6-luna, mcp: ${fallbackMcp}}
-    read_only: false
-    edits_code: false
-`);
-      return loadRouting(routingPath);
-    };
+    const withMemtrace = fallbackOnlyTable('[memtrace]');
     const req = { taskClass: 'discovery-on-fallback', prompt: 'x', cwd: clone, memtraceWorkspaceRoots: [member] };
+    expect(planDispatch(req, loadRouting(withMemtrace)).memtraceCloneRefusal).toContain(clone);
+    expect(planDispatch(req, loadRouting(fallbackOnlyTable('[]'))).memtraceCloneRefusal).toBeUndefined();
+    const fake = fakeAdapter();
 
-    expect(planDispatch(req, table('[memtrace]')).memtraceCloneRefusal).toContain(clone);
-    expect(planDispatch(req, table('[]')).memtraceCloneRefusal).toBeUndefined();
+    const outcome = await withRouting(withMemtrace, () => dispatch({ ...req, identity: unbound }, tempLedger(), () => fake.adapter));
+
+    expect(outcome.refusal?.code).toBe(REFUSAL);
+    expect(fake.calls).toHaveLength(0);
+  });
+
+  it('ignores a fallback that --no-fallback rules out: only the primary can run, and it attaches no memtrace', async () => {
+    const { member, clone } = fixture();
+    const table = fallbackOnlyTable('[memtrace]');
+    const routing = loadRouting(table);
+    const req = { prompt: 'x', cwd: clone, memtraceWorkspaceRoots: [member] };
+    expect(planDispatch({ ...req, taskClass: 'discovery-on-fallback', noFallback: true }, routing).memtraceCloneRefusal).toBeUndefined();
+    // A cursor fallback counts whatever its own mcp list says, until --no-fallback rules it out.
+    expect(planDispatch({ ...req, taskClass: 'cursor-on-fallback' }, routing).memtraceCloneRefusal).toContain(clone);
+    expect(planDispatch({ ...req, taskClass: 'cursor-on-fallback', noFallback: true }, routing).memtraceCloneRefusal).toBeUndefined();
+    const fake = fakeAdapter();
+
+    const outcome = await withRouting(table, () => dispatch(
+      { ...req, taskClass: 'cursor-on-fallback', noFallback: true, identity: unbound }, tempLedger(), () => fake.adapter,
+    ));
+
+    expect(outcome.refusal).toBeUndefined();
+    expect(fake.calls).toHaveLength(1);
+    expect(fake.calls[0].opts.cwd).toBe(clone);
   });
 
   it('runs in a linked sibling worktree of the indexed repository', async () => {

@@ -3,7 +3,7 @@ import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse as parseToml } from 'smol-toml';
-import { gitRepositoryFor } from './worktree.js';
+import { gitRepositoryAtPath, gitRepositoryFor } from './worktree.js';
 
 /**
  * HED-723: which checkouts the machine's memtrace workspaces already index, and whether a dispatch
@@ -97,8 +97,9 @@ export interface IndexedRepoClone {
  * consumer fleet's linked worktrees are siblings of the checkout they belong to, and a manifest may
  * list a linked worktree rather than the main checkout. So `cwd` is NOT a clone when its repository's
  * main checkout is an indexed one. Otherwise its `origin` is followed — through local clones of
- * clones — until it names an indexed repository (a local path inside one, or the network remote one
- * of them has). No repository, an unknown identity, no origin, or an unrelated repository: null.
+ * clones, bare mirrors and `.git` directories — until it names an indexed repository (a local path
+ * inside one, or the network remote one of them has). No repository, an unknown identity, no origin,
+ * an origin `git clone` never writes (a relative path), or an unrelated repository: null.
  */
 export function standaloneCloneOfIndexedRepo(cwd: string, roots: readonly string[]): IndexedRepoClone | null {
   if (roots.length === 0) return null;
@@ -123,10 +124,12 @@ export function standaloneCloneOfIndexedRepo(cwd: string, roots: readonly string
       }
       return null;
     }
-    const upstream = gitRepositoryFor(source);
-    if (!upstream?.mainRoot) return null;
+    // The origin may name a bare mirror or a `.git` directory rather than a checkout: a bare
+    // repository is never itself a member, so its own origin is followed instead.
+    const upstream = gitRepositoryAtPath(source);
+    if (!upstream) return null;
     const upstreamMain = real(upstream.mainRoot);
-    if (members.has(upstreamMain)) return { clone: repo.topLevel, member: upstreamMain };
+    if (!upstream.bare && members.has(upstreamMain)) return { clone: repo.topLevel, member: upstreamMain };
     origin = upstream.originUrl;
   }
   return null;
