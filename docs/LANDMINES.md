@@ -294,6 +294,23 @@ flags churn monthly.
   reason). Until worktree overlays are wired (`watch_directory` / `worktree=` overlay on the
   canonical repo_id — tracked as a HED ticket), either omit memtrace for branch-new code or dispatch
   into the canonical checkout.
+- **A standalone clone gets a private store** (HED-723, observed 2026-10-06). `memtrace mcp` with no
+  workspace flag anchors on its working directory (its own `--help` says so). Linked worktrees of an
+  indexed checkout had no `.memdb` of their own. A separate `git clone` of the same repository (a
+  review copy under `/tmp`) got its own `memcore-server` + `memcortex-daemon` for the whole
+  repository: 5.9 GB of RAM within five minutes, and 1.1–1.6 GB of `.memdb` on disk per clone.
+  Heddle refuses a dispatch into such a clone whenever the worker could run memtrace there
+  (`memtrace-standalone-clone`), reading the indexed checkouts from `~/.memtrace/workspaces/*.toml`
+  and following the clone's remote (`origin`, else the first) through clones of clones, bare mirrors
+  and `.git` directories (up to 32 hops; a loop ends the walk). Each indexed checkout's own remote is
+  followed the same way, so a clone of any local copy on that chain, or of the network remote the
+  chain ends at, is caught even when the indexed checkout was itself cloned from a local copy. A
+  fallback that `--no-fallback` rules out, or one that runs in-session, does not count.
+  Dispatch from your own worktree. A claude or codex worker can run in the clone with `mcp: []`: both
+  load only the servers heddle hands them, and an HTTP worker has no MCP at all. A cursor, gemini,
+  gemini-cli or opencode worker can't: those CLIs also load the MCP servers in your own and the
+  project's config files (observed for cursor: argent, summer-engine and browser-devtools under a
+  review worker whose heddle list was only memtrace), so they are refused there whatever their `mcp`.
 
 ## Everywhere
 

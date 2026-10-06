@@ -8,6 +8,8 @@ import { loadLanes, type LanesConfig } from '../lanes.js';
 import { loadAccountRegistry, type Account } from '../accounts.js';
 import { resolveTierTarget } from '../tier-resolve.js';
 import { mcpAttachable, webCapable } from '../mcp.js';
+import { readMemtraceWorkspaceRoots, standaloneCloneOfIndexedRepo } from '../memtrace-workspace.js';
+import { isInProcessHttpProvider } from '../adapters/openai-compat.js';
 import { pickReviewer, normalizeProvider, type ReviewerPick } from '../review.js';
 import { decideCapabilities, capabilityPolicy } from '../capabilities.js';
 import { readProviderCaps } from '../usage.js';
@@ -465,7 +467,32 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
       + `claude -p --output-format json is silent until completion, so a substantial review that overruns `
       + `SIGKILLs at its timeout with zero output (HED-511: 6/6 such dispatches died this way).`
     : undefined;
-  return { route, target, fallback, origin, execution, decision, symbol, resolutionWalk, skillsForRefusal, account, accountAdvice, accountPick, rotationAccount, claudeAccountCount, claudePinOnlyCount, runsAs, notDispatchable, reviewerPick, sameProviderReview, pinnedExcludedAccount, overrideReasonRequired, billingRefusal, tierRefusal, envRepointRefusal, billingAdvice, capabilityRefusal, requiresWebRefusal, capabilityFitRebinds, headlessClaudeReviewRefusal };
+  // HED-723: a worker that runs memtrace in a standalone clone of an indexed repository makes memtrace
+  // build a second, private store for the whole repository. claude and codex workers load ONLY the
+  // servers heddle hands them (--strict-mcp-config / --ignore-user-config), so they run memtrace there only
+  // when heddle attaches it. Every other spawned CLI — cursor, gemini, gemini-cli, opencode — also loads
+  // MCP servers from the user's and the project's own config files, which heddle neither controls nor
+  // reads (observed 2026-10-06 for cursor: argent, summer-engine and browser-devtools under a heddle review
+  // worker), so it counts whatever heddle attaches. In-process HTTP providers have no MCP, and an
+  // in-session-subagent route spawns nothing. Decided for the primary AND the class fallback (both run in
+  // the same cwd) — unless --no-fallback rules the fallback out. The cheap test runs first: other
+  // dispatches never read a manifest or shell out to git here.
+  const loadsOnlyHeddleMcp = (provider: string) => provider === 'claude' || provider === 'codex';
+  const couldRunMemtrace = (t: RouteTarget | undefined) => !!t
+    && providerExecution(table, t.provider) !== 'in-session-subagent'
+    && !isInProcessHttpProvider(t.provider)
+    && (!loadsOnlyHeddleMcp(t.provider) || (req.mcp ?? t.mcp ?? []).includes('memtrace'));
+  const mayRunMemtrace = couldRunMemtrace(target) || (!req.noFallback && couldRunMemtrace(fallback));
+  const indexedClone = reachesRunTarget && !notDispatchable && mayRunMemtrace
+    ? standaloneCloneOfIndexedRepo(req.cwd, req.memtraceWorkspaceRoots ?? readMemtraceWorkspaceRoots())
+    : null;
+  const memtraceCloneRefusal = indexedClone
+    ? `dispatch cwd "${indexedClone.clone}" is a standalone clone of "${indexedClone.member}", which the memtrace `
+      + `workspace already indexes. memtrace anchors on its working directory, so a worker that runs it there `
+      + `builds a second, private store for the whole repository (HED-723: 5.9 GB within five minutes and `
+      + `1.1–1.6 GB on disk per clone, measured 2026-10-06).`
+    : undefined;
+  return { route, target, fallback, origin, execution, decision, symbol, resolutionWalk, skillsForRefusal, account, accountAdvice, accountPick, rotationAccount, claudeAccountCount, claudePinOnlyCount, runsAs, notDispatchable, reviewerPick, sameProviderReview, pinnedExcludedAccount, overrideReasonRequired, billingRefusal, tierRefusal, envRepointRefusal, billingAdvice, capabilityRefusal, requiresWebRefusal, capabilityFitRebinds, headlessClaudeReviewRefusal, memtraceCloneRefusal };
 }
 
 /** One shared dry-run summary for `heddle route` and the `plan_dispatch` MCP tool (identical fields). */
@@ -483,7 +510,7 @@ export function summarizePlan(plan: DispatchPlan): Record<string, unknown> {
   // a capability-fit fallback reaches runTarget, which gates the REBOUND account — so don't advertise the
   // primary's tier refusal here). Ordered after billing, mirroring the runTarget gate order.
   const previewTier = plan.capabilityFitRebinds ? undefined : plan.tierRefusal;
-  const refusedPreview = notDispatchable || plan.decision.refusal || previewBilling || previewTier || plan.envRepointRefusal || plan.sameProviderReview || plan.pinnedExcludedAccount || noDispatchableAccount || plan.headlessClaudeReviewRefusal || plan.overrideReasonRequired || plan.capabilityRefusal || plan.requiresWebRefusal;
+  const refusedPreview = notDispatchable || plan.decision.refusal || previewBilling || previewTier || plan.envRepointRefusal || plan.sameProviderReview || plan.pinnedExcludedAccount || noDispatchableAccount || plan.headlessClaudeReviewRefusal || plan.memtraceCloneRefusal || plan.overrideReasonRequired || plan.capabilityRefusal || plan.requiresWebRefusal;
   return {
     task_class: plan.route.taskClass,
     symbol: plan.symbol ?? null,
@@ -517,6 +544,8 @@ export function summarizePlan(plan: DispatchPlan): Record<string, unknown> {
       ? { code: 'no-dispatchable-account', reason: noDispatchableClaudeAccountReason(plan.claudeAccountCount, plan.claudePinOnlyCount) }
       : plan.headlessClaudeReviewRefusal
       ? { code: 'headless-claude-review-unreliable', reason: plan.headlessClaudeReviewRefusal }
+      : plan.memtraceCloneRefusal
+      ? { code: 'memtrace-standalone-clone', reason: plan.memtraceCloneRefusal }
       : plan.capabilityRefusal
       ? { code: 'capability-denied', reason: plan.capabilityRefusal }
       : plan.requiresWebRefusal

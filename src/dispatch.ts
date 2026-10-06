@@ -239,6 +239,20 @@ export async function dispatch(
     });
   }
 
+  // ---- HED-723: memtrace would build a private store in a standalone clone of an indexed repo ----
+  // Computed in planDispatch (so `heddle route` / plan_dispatch preview and this dispatch agree).
+  if (plan.memtraceCloneRefusal) {
+    return refusalOutcome(ctx, req, route.taskClass, target, skillsForRefusal, {
+      code: 'memtrace-standalone-clone',
+      reason: plan.memtraceCloneRefusal,
+      instruction: 'Dispatch from your own registered worktree of that repository instead (commit first: COMMIT '
+        + 'BEFORE DISPATCH); memtrace serves the shared store there. In a clone, only a claude or codex worker '
+        + 'without memtrace in its MCP list (mcp: []), or an HTTP worker, is let through; a cursor, gemini, '
+        + 'gemini-cli or opencode worker never is, because it also loads the MCP servers in your own and the '
+        + "project's config files.",
+    });
+  }
+
   // Auto-effort (opt-in): classify the sub-task's difficulty and pin the effort, unless the caller
   // already set one. Runs only after every plan-level refusal gate has passed — a refused dispatch
   // never spends a classifier (a max-children refusal can still waste one: that count is

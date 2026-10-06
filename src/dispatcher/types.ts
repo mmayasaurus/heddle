@@ -90,6 +90,12 @@ export interface DispatchRequest {
   /** Full registry used by tier-symbol availability; tests may supply a synthetic registry. */
   accountRegistry?: Account[];
   /**
+   * HED-723: checkouts the memtrace workspaces index; read from `~/.memtrace/workspaces/*.toml` when
+   * omitted (tests inject). Used only to refuse a memtrace-carrying dispatch into a standalone clone
+   * of one of them (src/memtrace-workspace.ts).
+   */
+  memtraceWorkspaceRoots?: string[];
+  /**
    * Claude-primary classes: return the structured `claude-in-session` instruction (run it as your
    * own Agent-tool subagent, shared prompt cache + same account) instead of spawning a headless
    * `claude -p` worker on the account with the most headroom (HED-78 default).
@@ -132,7 +138,7 @@ export interface BoundedAdmission {
  * `refusal` column.
  */
 export interface DispatchRefusal {
-  code: 'claude-in-session' | 'no-dispatchable-account' | 'not-dispatchable' | 'depth-1' | 'max-children' | 'capability-denied' | 'tier-read-only' | 'metered-pool-exhausted' | 'same-provider-review' | 'override-reason-required' | 'fleet-paused' | 'fallback-blocked-dirty-tree' | 'billing.pay-per-token' | 'billing.open-billing-at-cap' | 'billing.prepaid-exhausted' | 'headless-claude-review-unreliable' | 'env-repoint.missing-token' | 'env-repoint.insecure-secrets' | 'env-repoint.invalid-config' | 'bounded-input-oversize' | 'bounded-unsupported-bound' | 'bounded-headroom-unknown' | 'bounded-headroom-stale' | 'bounded-account-mismatch' | 'bounded-aggregate-exhausted' | 'bounded-forbidden-fallback' | 'bounded-forbidden-extra-request' | 'bounded-forbidden-tools' | 'bounded-duplicate-request';
+  code: 'claude-in-session' | 'no-dispatchable-account' | 'not-dispatchable' | 'depth-1' | 'max-children' | 'capability-denied' | 'tier-read-only' | 'metered-pool-exhausted' | 'same-provider-review' | 'override-reason-required' | 'fleet-paused' | 'fallback-blocked-dirty-tree' | 'billing.pay-per-token' | 'billing.open-billing-at-cap' | 'billing.prepaid-exhausted' | 'headless-claude-review-unreliable' | 'memtrace-standalone-clone' | 'env-repoint.missing-token' | 'env-repoint.insecure-secrets' | 'env-repoint.invalid-config' | 'bounded-input-oversize' | 'bounded-unsupported-bound' | 'bounded-headroom-unknown' | 'bounded-headroom-stale' | 'bounded-account-mismatch' | 'bounded-aggregate-exhausted' | 'bounded-forbidden-fallback' | 'bounded-forbidden-extra-request' | 'bounded-forbidden-tools' | 'bounded-duplicate-request';
   reason: string;
   /** What to do instead, when there is a clear alternative. */
   instruction?: string;
@@ -345,6 +351,10 @@ export interface DispatchPlan {
    *  unreliable — json-mode is silent till completion, so it SIGKILLs at timeout with zero output).
    *  Computed in planDispatch so summarizePlan (preview) and dispatch() agree. Holds the reason string. */
   headlessClaudeReviewRefusal?: string;
+  /** HED-723: set when a memtrace-carrying dispatch would run in a standalone clone of a repository
+   *  the memtrace workspace already indexes (memtrace would build a second, private store there).
+   *  Computed in planDispatch so summarizePlan (preview) and dispatch() agree. Holds the reason string. */
+  memtraceCloneRefusal?: string;
 }
 
 /** How the in-session route was chosen — the refusal reason must not misstate the YAML policy. */

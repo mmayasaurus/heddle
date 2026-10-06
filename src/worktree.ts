@@ -146,6 +146,42 @@ export function gitRepositoryFor(cwd: string): GitRepository | null {
   }
 }
 
+/** Identity of the repository at a path that may have no work tree; see gitRepositoryAtPath. */
+export interface GitRepositoryAtPath {
+  /** The first `git worktree list --porcelain` entry: the main checkout, or a bare repository itself. */
+  mainRoot: string;
+  bare: boolean;
+  /** `remote.origin.url`, else the first configured remote's URL (`git clone -o <name>` names it otherwise). */
+  remoteUrl: string | null;
+}
+
+/**
+ * Like gitRepositoryFor, for a path that may be a bare repository or a `.git` directory — the shapes a
+ * local clone's `origin` can name. gitRepositoryFor needs a work tree (`rev-parse --show-toplevel`
+ * fails in both); `git worktree list` and `config --local` read the repository wherever it is. null
+ * when `path` is not a readable repository.
+ */
+export function gitRepositoryAtPath(path: string): GitRepositoryAtPath | null {
+  try {
+    const lines = git(path, ['worktree', 'list', '--porcelain']).split('\n');
+    const start = lines.findIndex((l) => l.startsWith('worktree '));
+    const mainRoot = start < 0 ? '' : lines[start].slice('worktree '.length);
+    if (!mainRoot) return null;
+    const end = lines.indexOf('', start);
+    const bare = lines.slice(start + 1, end < 0 ? undefined : end).includes('bare');
+    let remoteUrl: string | null = null;
+    try {
+      const remotes = git(path, ['config', '--local', '--get-regexp', '^remote\\..*\\.url$']).split('\n')
+        .map((line) => /^remote\.(.+)\.url (.+)$/.exec(line.trim()))
+        .filter((m): m is RegExpExecArray => m !== null);
+      remoteUrl = (remotes.find((m) => m[1] === 'origin') ?? remotes[0])?.[2] ?? null;
+    } catch { /* no remote is normal for a local repository */ }
+    return { mainRoot, bare, remoteUrl };
+  } catch {
+    return null;
+  }
+}
+
 export interface WorktreeContext {
   /** The canonical (main) checkout this linked worktree belongs to. */
   parentRoot: string;

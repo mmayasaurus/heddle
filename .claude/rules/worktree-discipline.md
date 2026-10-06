@@ -41,6 +41,14 @@ branch off fresh `origin/main` in the SAME folder. Do not create a new worktree 
    a worker leaves output behind: a stray `replies-r2.json` in the dashboard root on 2026-08-17 was
    first attributed to the wrong agent. A cross-repo need means create or reuse YOUR worktree in that
    repo, not borrow the shared root.
+   **Never a standalone clone either** (HED-723; Maya asked for this in R's session, 2026-10-06): any
+   separate copy of a memtrace-indexed repository, however old — `git clone` (a review copy under
+   `/tmp`, say), a clone of a clone or of a bare mirror, a copied `.git`. A linked worktree is not
+   one, and a clone is a repository, never the repo-less scratch dir above. A worker that runs
+   memtrace in one builds a second, private store for the whole repository: 5.9 GB of RAM within five
+   minutes, measured 2026-10-06, against none in a worktree. Heddle refuses a dispatch into one
+   whenever the worker could run memtrace there (refusal `memtrace-standalone-clone`). Reviews
+   included: commit, then dispatch the reviewer into your own worktree.
 3. PR → full sweep (see `pr-discipline.md`) → merge promptly. **Branches are kept after merge.**
 4. **Removal (standing authorization, Maya 2026-08-15):** a worktree may be removed WITHOUT a
    further per-item ask only when ALL hold — its branches are fully merged to `origin/main`,

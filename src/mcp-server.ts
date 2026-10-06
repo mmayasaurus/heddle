@@ -63,7 +63,7 @@ server.tool(
     provider: z.string().optional().describe('Explicit route: claude | codex | cursor | gemini (the agy CLI) | gemini-cli | opencode. Requires model (both or neither). Without task_class = direct path. "claude" runs a headless claude -p worker on the best registry account (in_session:true instead returns the structured claude-in-session refusal to run it as your own Agent-tool subagent).'),
     model: z.string().optional().describe('Explicit route: model id for provider (e.g. cursor-grok-4.6-high).'),
     override_reason: z.string().optional().describe('REQUIRED when you pass provider+model WITHOUT a task_class: say what about THIS task needs this exact model that its routing class does not give you (a bench, a probe, a specific-capability call). Recorded on the ledger row so routing can be tuned from evidence. Must be a real justification — a bare cliché or the route\'s own name is rejected ("proven", "faster", "gpt-5.6-terra" do not pass); a specific sentence does.'),
-    cwd: z.string().optional().describe('Working directory for the worker (default: server cwd).'),
+    cwd: z.string().optional().describe('Working directory for the worker (default: server cwd): your own worktree. A standalone clone of a memtrace-indexed repository is refused when the worker could run memtrace there (HED-723).'),
     issue: z.string().optional().describe('Linear issue this sub-task serves, e.g. ABC-123.'),
     agent: z.string().optional().describe("Dispatching orchestrator's fleet identity, e.g. K — used only when this heddle process has no bound identity (HEDDLE_AGENT/FLEET_AGENT/.fleet-agent); a bound identity always wins and the result says which."),
     skills: z.array(z.string()).optional().describe(
@@ -146,7 +146,9 @@ server.tool(
     author_provider: z.string().optional(),
     author_model: z.string().optional(),
     override_reason: z.string().optional().describe('Same rule as dispatch_worker: a bare provider+model with no task_class is reported as WOULD REFUSE unless you say why it bypasses the routing table.'),
-    cwd: z.string().optional().describe('Working directory the dispatch would use (default: server cwd) — the quality gate is resolved per repository from it (HED-389), so pass the cwd you will pass to dispatch_worker.'),
+    cwd: z.string().optional().describe('Working directory the dispatch would use (default: server cwd) — the quality gate is resolved per repository from it (HED-389), and a standalone clone of a memtrace-indexed repository previews the HED-723 refusal, so pass the cwd you will pass to dispatch_worker.'),
+    mcp: z.array(z.string()).optional().describe('The mcp list you will pass to dispatch_worker; it decides whether the HED-723 clone refusal applies.'),
+    no_fallback: z.boolean().optional().describe('The no_fallback you will pass to dispatch_worker; a fallback it rules out cannot trigger the HED-723 clone refusal.'),
   },
   async (a) => {
     try {
@@ -156,6 +158,7 @@ server.tool(
         taskClass: a.task_class, provider: a.provider, model: a.model, prompt: '(dry run)',
         cwd: a.cwd ?? process.cwd(), optIn: a.opt_in, overrideReason: a.override_reason, env: Object.keys(env).length ? env : undefined, identity: IDENTITY,
         inSession: a.in_session, accountPin: a.account_pin, authorProvider: a.author_provider, authorModel: a.author_model,
+        mcp: a.mcp, noFallback: a.no_fallback,
       });
       return text(summarizePlan(plan));
     } catch (err) {
