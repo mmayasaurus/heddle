@@ -63,7 +63,7 @@ server.tool(
     provider: z.string().optional().describe('Explicit route: claude | codex | cursor | gemini (the agy CLI) | gemini-cli | opencode. Requires model (both or neither). Without task_class = direct path. "claude" runs a headless claude -p worker on the best registry account (in_session:true instead returns the structured claude-in-session refusal to run it as your own Agent-tool subagent).'),
     model: z.string().optional().describe('Explicit route: model id for provider (e.g. cursor-grok-4.6-high).'),
     override_reason: z.string().optional().describe('REQUIRED when you pass provider+model WITHOUT a task_class: say what about THIS task needs this exact model that its routing class does not give you (a bench, a probe, a specific-capability call). Recorded on the ledger row so routing can be tuned from evidence. Must be a real justification — a bare cliché or the route\'s own name is rejected ("proven", "faster", "gpt-5.6-terra" do not pass); a specific sentence does.'),
-    cwd: z.string().optional().describe('Working directory for the worker (default: server cwd).'),
+    cwd: z.string().optional().describe('Working directory for the worker (default: server cwd): your own worktree. A standalone clone of a memtrace-indexed repository is refused when memtrace is attached (HED-723).'),
     issue: z.string().optional().describe('Linear issue this sub-task serves, e.g. ABC-123.'),
     agent: z.string().optional().describe("Dispatching orchestrator's fleet identity, e.g. K — used only when this heddle process has no bound identity (HEDDLE_AGENT/FLEET_AGENT/.fleet-agent); a bound identity always wins and the result says which."),
     skills: z.array(z.string()).optional().describe(

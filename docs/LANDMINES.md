@@ -294,6 +294,14 @@ flags churn monthly.
   reason). Until worktree overlays are wired (`watch_directory` / `worktree=` overlay on the
   canonical repo_id — tracked as a HED ticket), either omit memtrace for branch-new code or dispatch
   into the canonical checkout.
+- **A standalone clone gets a private store** (HED-723, observed 2026-10-06). `memtrace mcp` with no
+  workspace flag anchors on its working directory (its own `--help` says so). Linked worktrees of an
+  indexed checkout had no `.memdb` of their own. A separate `git clone` of the same repository (a
+  review copy under `/tmp`) got its own `memcore-server` + `memcortex-daemon` for the whole
+  repository: 5.9 GB of RAM within five minutes, and 1.1–1.6 GB of `.memdb` on disk per clone.
+  Heddle refuses a memtrace-carrying dispatch into such a clone (`memtrace-standalone-clone`), reading
+  the indexed checkouts from `~/.memtrace/workspaces/*.toml`. Dispatch from your own worktree, or pass
+  `mcp: []` to run in the clone without memtrace.
 
 ## Everywhere
 

@@ -8,6 +8,7 @@ import { loadLanes, type LanesConfig } from '../lanes.js';
 import { loadAccountRegistry, type Account } from '../accounts.js';
 import { resolveTierTarget } from '../tier-resolve.js';
 import { mcpAttachable, webCapable } from '../mcp.js';
+import { readMemtraceWorkspaceRoots, standaloneCloneOfIndexedRepo } from '../memtrace-workspace.js';
 import { pickReviewer, normalizeProvider, type ReviewerPick } from '../review.js';
 import { decideCapabilities, capabilityPolicy } from '../capabilities.js';
 import { readProviderCaps } from '../usage.js';
@@ -465,7 +466,22 @@ export function planDispatch(req: DispatchRequest, table: RoutingTable = loadRou
       + `claude -p --output-format json is silent until completion, so a substantial review that overruns `
       + `SIGKILLs at its timeout with zero output (HED-511: 6/6 such dispatches died this way).`
     : undefined;
-  return { route, target, fallback, origin, execution, decision, symbol, resolutionWalk, skillsForRefusal, account, accountAdvice, accountPick, rotationAccount, claudeAccountCount, claudePinOnlyCount, runsAs, notDispatchable, reviewerPick, sameProviderReview, pinnedExcludedAccount, overrideReasonRequired, billingRefusal, tierRefusal, envRepointRefusal, billingAdvice, capabilityRefusal, requiresWebRefusal, capabilityFitRebinds, headlessClaudeReviewRefusal };
+  // HED-723: a memtrace-carrying worker in a standalone clone of an indexed repository makes memtrace
+  // build a second, private store for the whole repository. Decided for the primary AND the class
+  // fallback (each resolves its own mcp in runTarget, and both run in the same cwd), so a dispatch that
+  // could only fall back into the clone is refused up front too. The cheap mcp test runs first: a
+  // dispatch that attaches no memtrace never reads a manifest or shells out to git here.
+  const attachesMemtrace = [target, fallback].some((t) => t && (req.mcp ?? t.mcp ?? []).includes('memtrace'));
+  const indexedClone = reachesRunTarget && !notDispatchable && attachesMemtrace
+    ? standaloneCloneOfIndexedRepo(req.cwd, req.memtraceWorkspaceRoots ?? readMemtraceWorkspaceRoots())
+    : null;
+  const memtraceCloneRefusal = indexedClone
+    ? `dispatch cwd "${indexedClone.clone}" is a standalone clone of "${indexedClone.member}", which the memtrace `
+      + `workspace already indexes. memtrace anchors on its working directory, so attaching it there builds a `
+      + `second, private store for the whole repository (HED-723: 5.9 GB within five minutes and 1.1–1.6 GB on `
+      + `disk per clone, measured 2026-10-06).`
+    : undefined;
+  return { route, target, fallback, origin, execution, decision, symbol, resolutionWalk, skillsForRefusal, account, accountAdvice, accountPick, rotationAccount, claudeAccountCount, claudePinOnlyCount, runsAs, notDispatchable, reviewerPick, sameProviderReview, pinnedExcludedAccount, overrideReasonRequired, billingRefusal, tierRefusal, envRepointRefusal, billingAdvice, capabilityRefusal, requiresWebRefusal, capabilityFitRebinds, headlessClaudeReviewRefusal, memtraceCloneRefusal };
 }
 
 /** One shared dry-run summary for `heddle route` and the `plan_dispatch` MCP tool (identical fields). */
@@ -483,7 +499,7 @@ export function summarizePlan(plan: DispatchPlan): Record<string, unknown> {
   // a capability-fit fallback reaches runTarget, which gates the REBOUND account — so don't advertise the
   // primary's tier refusal here). Ordered after billing, mirroring the runTarget gate order.
   const previewTier = plan.capabilityFitRebinds ? undefined : plan.tierRefusal;
-  const refusedPreview = notDispatchable || plan.decision.refusal || previewBilling || previewTier || plan.envRepointRefusal || plan.sameProviderReview || plan.pinnedExcludedAccount || noDispatchableAccount || plan.headlessClaudeReviewRefusal || plan.overrideReasonRequired || plan.capabilityRefusal || plan.requiresWebRefusal;
+  const refusedPreview = notDispatchable || plan.decision.refusal || previewBilling || previewTier || plan.envRepointRefusal || plan.sameProviderReview || plan.pinnedExcludedAccount || noDispatchableAccount || plan.headlessClaudeReviewRefusal || plan.memtraceCloneRefusal || plan.overrideReasonRequired || plan.capabilityRefusal || plan.requiresWebRefusal;
   return {
     task_class: plan.route.taskClass,
     symbol: plan.symbol ?? null,
@@ -517,6 +533,8 @@ export function summarizePlan(plan: DispatchPlan): Record<string, unknown> {
       ? { code: 'no-dispatchable-account', reason: noDispatchableClaudeAccountReason(plan.claudeAccountCount, plan.claudePinOnlyCount) }
       : plan.headlessClaudeReviewRefusal
       ? { code: 'headless-claude-review-unreliable', reason: plan.headlessClaudeReviewRefusal }
+      : plan.memtraceCloneRefusal
+      ? { code: 'memtrace-standalone-clone', reason: plan.memtraceCloneRefusal }
       : plan.capabilityRefusal
       ? { code: 'capability-denied', reason: plan.capabilityRefusal }
       : plan.requiresWebRefusal
