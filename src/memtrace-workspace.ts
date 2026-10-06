@@ -112,29 +112,44 @@ export function standaloneCloneOfIndexedRepo(cwd: string, roots: readonly string
   const listed = new Set(roots.map(real));
   const main = real(repo.mainRoot);
   if (listed.has(main)) return null;
-  const members = new Map<string, string | null>(); // main checkout → its origin, if any
+  const members = indexedMembers(listed);
+  if (members.has(main)) return null;
+  const member = indexedUpstream(repo.originUrl, members, main);
+  return member ? { clone: repo.topLevel, member } : null;
+}
+
+/** Main checkout → its origin (if any) for each listed root; a root git cannot read keys as itself. */
+function indexedMembers(listed: ReadonlySet<string>): Map<string, string | null> {
+  const members = new Map<string, string | null>();
   for (const root of listed) {
     const member = gitRepositoryFor(root);
     members.set(member?.mainRoot ? real(member.mainRoot) : root, member?.originUrl ?? null);
   }
-  if (members.has(main)) return null;
-  const visited = new Set<string>([main]);
-  let origin = repo.originUrl;
+  return members;
+}
+
+/** The member whose network remote is `origin`, else null. */
+function memberWithRemote(origin: string, members: ReadonlyMap<string, string | null>): string | null {
+  const wanted = remoteKey(origin);
+  if (!wanted) return null;
+  for (const [member, memberOrigin] of members) {
+    if (memberOrigin && remoteKey(memberOrigin) === wanted) return member;
+  }
+  return null;
+}
+
+/** The member `origin` leads back to through local repositories, else null; `start` is the clone's own main checkout. */
+function indexedUpstream(origin: string | null, members: ReadonlyMap<string, string | null>, start: string): string | null {
+  const visited = new Set<string>([start]);
   for (let hop = 0; origin && hop < MAX_ORIGIN_HOPS; hop += 1) {
     const source = localOrigin(origin);
-    if (!source) {
-      const wanted = remoteKey(origin);
-      for (const [member, memberOrigin] of members) {
-        if (wanted && memberOrigin && remoteKey(memberOrigin) === wanted) return { clone: repo.topLevel, member };
-      }
-      return null;
-    }
+    if (!source) return memberWithRemote(origin, members);
     // The origin may name a bare mirror or a `.git` directory rather than a checkout: a bare
     // repository is never itself a member, so its own origin is followed instead.
     const upstream = gitRepositoryAtPath(source);
     if (!upstream) return null;
     const upstreamMain = real(upstream.mainRoot);
-    if (!upstream.bare && members.has(upstreamMain)) return { clone: repo.topLevel, member: upstreamMain };
+    if (!upstream.bare && members.has(upstreamMain)) return upstreamMain;
     if (visited.has(upstreamMain)) return null; // a loop of origins never reaches an indexed repository
     visited.add(upstreamMain);
     origin = upstream.originUrl;
