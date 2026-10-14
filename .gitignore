@@ -18,9 +18,8 @@ dist/
 # Claude project settings are tracked; per-machine local state is not
 .claude/settings.local.json
 
-# Verity — machine-local state. Everything in .verity/ is ignored except the
-# shared standard, which is meant to be committed. The knowledge graph under
-# .verity/memory/ is machine-local too: the service rebuilds it, and committing
-# it puts generated notes in every diff and pull request.
+# Verity — machine-local state, all of it ignored. HED-724 (2026-10-14) removed Verity
+# and its shared standard (.verity/standard.yaml) from the repo, so nothing in .verity/
+# is tracked any more. This block goes in a later PR, once the local .verity/ folders
+# are archived, so they never show up as untracked files in the meantime.
 .verity/*
-!.verity/standard.yaml
