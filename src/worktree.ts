@@ -496,9 +496,10 @@ export function autoWipCommit(
       ], { GIT_LITERAL_PATHSPECS: '1' });
     } catch (err) {
       // The reset failed AFTER update-ref moved HEAD — most reachably because another process holds
-      // .git/index.lock (memtrace watchers / Verity hooks touch the index in this fleet). A failed
-      // reset writes nothing (git takes index.lock then renames; a lock-acquire failure leaves the
-      // real index untouched), so roll HEAD back to oldHead via compare-and-swap: the tree is then
+      // .git/index.lock (memtrace watchers touch the index in this fleet, as Verity's hooks did until
+      // NOV-4 removed Verity, 2026-10-14). A failed reset writes nothing (git takes index.lock then
+      // renames; a lock-acquire failure leaves the real index untouched), so roll HEAD back to
+      // oldHead via compare-and-swap: the tree is then
       // EXACTLY as found and committed:false is fully honest — the caller refuses the fallback and the
       // worktree is unchanged. update-ref does not take index.lock, so the rollback succeeds precisely
       // when the reset failed for that reason (codex round-2 finding B). A rollback that itself fails
