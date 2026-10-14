@@ -23,6 +23,7 @@ exclude_paths:
   # (that file binds only inside Verity's runner), so Node scripts under .claude/skills/ produced
   # 51 false no-undef findings (process/console/Buffer) and .codacy/ itself was routed for
   # analysis. Exclude both at the routing level here — the config Codacy actually reads.
-  # Verity's gate still lints the skill scripts with proper Node globals via its own config.
+  # Verity, whose runner used that file, is removed from heddle by HED-724 (2026-10-14); both excludes
+  # stay harmless.
   - ".claude/skills/**"
   - ".codacy/**"
