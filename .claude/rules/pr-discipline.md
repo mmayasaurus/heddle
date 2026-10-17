@@ -27,9 +27,9 @@ lin.sh resolve HED-n "<summary + PR #>"
 
 ## Self-merge (standing authorization)
 
-When all six conditions in `/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/rules/heddle-self-merge.md` hold, you may merge your own PR without waiting for Maya:
+When all eight conditions in `/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/rules/heddle-self-merge.md` hold, you may merge your own PR without waiting for Maya:
 
-1. Two `pr-sweep.sh` exits 0, ≥15 min apart at HEAD (docs-only main drift exception per that file).
+1. Two `pr-sweep.sh` exits 0, ≥15 min apart at HEAD (the non-overlapping main-advance exception is in that file).
 2. Every non-empty review body addressed (fix or reply+resolve with rationale).
 3. All required checks green at HEAD.
 4. Merge commit only, pinned to the swept commit (`gh pr merge <n> --merge --match-head-commit <swept-sha>`) — never squash, never force-push.
@@ -48,26 +48,25 @@ When all six conditions in `/Users/mayatobi/Developer/Spinventory-Rebuild-App/.c
    conflict, but you are always PERMITTED to merge main in — do it when your change feels semantically
    load-bearing against something that just landed.
 6. Stacked PRs merge bottom-up (base first, retarget children, re-sweep).
+7. An inherited code-scanning alert blocks only if it is in or touched by the diff, or it is warning
+   severity or worse in a file your lane owns. Otherwise characterize it (id, severity, file, age, not
+   in the diff, open on `main`), name it in the merge report, and make sure a ticket tracks it. Never
+   dismiss another lane's alert to unblock your own merge.
+8. Review loop: at least one pre-PR adversarial round has completed (a refused or timed-out round
+   doesn't count), and every finding from every round is fixed on HEAD or disputed with evidence. A
+   round with ≥1 high or ≥2 med engages the loop: the latest receipts must then match the authored
+   diff with 0 high and <2 med, unless three rounds have run, after which it merges unconverged
+   (Maya, 2026-10-05). A loop whose rounds all failed keeps retrying until one completes.
 
-Still waits for Maya: security-semantics changes, user-visible feature removal, or touching another agent's files — see the full rule.
+Since Maya's standing merge rule of 2026-10-05, security-semantics changes, user-visible feature
+removal and PRs touching another agent's files merge on these same conditions. Still hers, before
+the work: her own enumeration of a delete-set before a deleter is built
+(`/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/rules/destructive-scope.md`), the
+decision flags in `/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/rules/needs-maya.md`,
+and CI is never bypassed. See the full rule.
 
-## Config-text exception (Maya-ratified 2026-08-16) — SUPERSEDED 2026-08-17
+## Config-text exception — SUPERSEDED 2026-08-17
 
-**Superseded by condition 5 above** (Maya, 2026-08-17), which grants the same relief to EVERY
-non-conflicting PR regardless of file class — this exception was a narrow patch for exactly the
-problem condition 5 now solves generally. Its same-breath overlap measurement is no longer required.
-Kept below for provenance, since merge reports from 2026-08-16 cite it.
-
-When a PR's ENTIRE diff is `.claude/**` + `docs/**` + root config-text (CLAUDE.md, README.md,
-ROADMAP.md, .gitignore, .memtraceignore, ESLint ignore entries (none exist in this repo today)) — nothing under `src/`,
-`src-tauri/`, tests, or `.github/workflows/` — a non-overlapping `main` advance neither forces a
-re-merge nor restarts the sweep clock. Three mechanical conditions: (1) the zero-overlap
-measurement runs in the SAME BREATH as the merge (against then-current main); (2) the merge is
-pinned with `--match-head-commit`; (3) the merge report states the exception and the overlap
-measurement. Scope notes: `.claude/**` in this repo holds only JSON and Markdown — if an
-executable ever lands there, it falls OUT of this exception; a base advance in the seconds between
-the overlap measurement and the merge API call is an accepted residual (gh has no base-pinning
-flag; `--match-head-commit` pins our side). Rationale: the exception is about main-movement
-invalidation, not diff riskiness — config-text has an empty interaction surface with incoming
-code; the double-sweep still covers the PR's own correctness. Authority:
-`/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/rules/heddle-self-merge.md`.
+Superseded by condition 5 (Maya, 2026-08-17), which gives every non-conflicting PR the same relief.
+Merge reports from 2026-08-16 cite it. Its text stays in `heddle-self-merge.md` and in this file's
+history: `git show 7f2d525:.claude/rules/pr-discipline.md`.
