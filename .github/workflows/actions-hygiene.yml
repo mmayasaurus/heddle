@@ -80,6 +80,6 @@ jobs:
       # (report-only) where the token can write — main pushes + same-repo PRs;
       # fork PRs run plain mode: findings print to the console and red the job.
       - name: zizmor
-        uses: zizmorcore/zizmor-action@70fb788f84895a7701f5643d103d587e460b5c99 # v0.6.3
+        uses: zizmorcore/zizmor-action@cc914d7f3750a2d13d75c7f184a1060aa0e9d482 # v0.6.4
         with:
           advanced-security: ${{ github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository }}
