@@ -48,25 +48,28 @@ When all eight conditions in `/Users/mayatobi/Developer/Spinventory-Rebuild-App/
    conflict, but you are always PERMITTED to merge main in — do it when your change feels semantically
    load-bearing against something that just landed.
 6. Stacked PRs merge bottom-up (base first, retarget children, re-sweep).
-7. An inherited code-scanning alert blocks only if it is in or touched by the diff, or it is warning
-   severity or worse in a file your lane owns. Otherwise characterize it (id, severity, file, age, not
-   in the diff, open on `main`), name it in the merge report, and make sure a ticket tracks it. Never
-   dismiss another lane's alert to unblock your own merge.
+7. An open code-scanning alert blocks only if it is in or touched by the diff, or it is warning
+   severity or worse in a file your lane owns. An inherited one that does neither doesn't block,
+   provided you characterize it (id, severity, file, age, not in the diff, open on `main`), name it and
+   its disposition in one sentence of the merge report, and make sure a ticket tracks it (search
+   first; no duplicates). Never dismiss another lane's alert to unblock your own merge.
 8. Review loop: at least one pre-PR adversarial round has completed (a refused or timed-out round
    doesn't count), and every finding from every round is fixed on HEAD or disputed with evidence. A
    round with ≥1 high or ≥2 med engages the loop: the latest receipts must then match the authored
    diff with 0 high and <2 med, unless three rounds have run, after which it merges unconverged
-   (Maya, 2026-10-05). A loop whose rounds all failed keeps retrying until one completes.
+   (Maya, 2026-10-05). A loop whose rounds all failed keeps retrying until one completes, and doesn't
+   go to Maya.
 
 Since Maya's standing merge rule of 2026-10-05, security-semantics changes, user-visible feature
 removal and PRs touching another agent's files merge on these same conditions. Still hers, before
 the work: her own enumeration of a delete-set before a deleter is built
 (`/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/rules/destructive-scope.md`), the
-decision flags in `/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/rules/needs-maya.md`,
-and CI is never bypassed. See the full rule.
+decision flags in `/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/rules/needs-maya.md`
+(each also raised with her in conversation), and CI is never bypassed. See the full rule.
 
 ## Config-text exception — SUPERSEDED 2026-08-17
 
 Superseded by condition 5 (Maya, 2026-08-17), which gives every non-conflicting PR the same relief.
-Merge reports from 2026-08-16 cite it. Its text stays in `heddle-self-merge.md` and in this file's
-history: `git show 7f2d525:.claude/rules/pr-discipline.md`.
+Merge reports from 2026-08-16 cite it. Its text stays in
+`/Users/mayatobi/Developer/Spinventory-Rebuild-App/.claude/rules/heddle-self-merge.md` and in this
+file's history: `git show 7f2d525:.claude/rules/pr-discipline.md`.
