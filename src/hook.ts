@@ -1,8 +1,11 @@
 #!/usr/bin/env -S node --disable-warning=ExperimentalWarning
 import { fileURLToPath } from 'node:url';
+import { homedir } from 'node:os';
 import { evaluateRules, type HookPayload } from './rules/evaluate.js';
 import { loadRules } from './rules/load.js';
+import { applyPolicy, loadRulesPolicy } from './rules/policy.js';
 import { renderMatches } from './rules/render.js';
+import { policyPath } from './wizard/persist.js';
 
 const STDIN_IDLE_MS = 1500;
 function readStdin(): Promise<string> {
@@ -30,7 +33,10 @@ async function main(): Promise<string> {
   }
   const argvEvent = arg('--event'); if (argvEvent && argvEvent !== event) process.stderr.write(`heddle-hook: --event '${argvEvent}' ignored; payload event '${event}' wins\n`);
   const rulesDir = arg('--rules') ?? process.env.HEDDLE_RULES_DIR ?? (process.env.CLAUDE_PROJECT_DIR ? `${process.env.CLAUDE_PROJECT_DIR}/rules` : fileURLToPath(new URL('../rules', import.meta.url)));
-  const rules = loadRules(rulesDir);
+  const catalogRules = loadRules(rulesDir);
+  const policyResult = loadRulesPolicy(policyPath(homedir(), 'rules'));
+  if (policyResult.warning) process.stderr.write(`heddle-hook: ${policyResult.warning}\n`);
+  const rules = policyResult.policy ? applyPolicy(catalogRules, policyResult.policy) : catalogRules;
   const isSubagent = Boolean(payload.agent_id) || event === 'SubagentStop';
   const agentRole = process.env.HEDDLE_WORKER === '1' ? 'worker' : 'orchestrator';
   const agent = process.env.HEDDLE_AGENT ?? process.env.FLEET_AGENT ?? '';
