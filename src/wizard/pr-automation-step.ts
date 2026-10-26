@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { atomicWriteFile } from './persist.js';
+import { createFileWithinRoot } from '../secure-fs.js';
 import { gitRepositoryFor } from '../worktree.js';
 import type { WizardContext, WizardIO, WizardStep, WizardStepResult } from './step.js';
 
@@ -233,10 +233,13 @@ function targetPaths(targetDir: string): { readonly workflow: string; readonly g
 }
 
 /**
- * Write all scaffold files into the target `.github/`, skipping (merge-preserving) any that already
- * exist. Returns which paths were written vs left unchanged so the caller can report and summarize.
+ * Write all scaffold files into the target `.github/`, skipping (merge-preserving) any that already exist.
+ * `root` is the project repo (the trust boundary): each write is refused if a directory component below it
+ * (`.github`, `workflows`, `scripts`) is a symlink or group/other-writable, so a scaffold can never escape the
+ * chosen repo via a planted symlink (HED-650). Returns which paths were written vs left unchanged.
  */
 function scaffoldWorkflows(
+  root: string,
   paths: { readonly workflow: string; readonly gate: string; readonly gitleaks: string },
   options: RenderOptions,
   io: WizardIO,
@@ -245,11 +248,12 @@ function scaffoldWorkflows(
   const written: string[] = [];
   const existing: string[] = [];
   const writeIfAbsent = (path: string, content: string): void => {
-    if (existsSync(path)) {
+    // createFileWithinRoot guards the `.github` chain below `root` and is create-only, so an existing file is
+    // left unchanged (merge-preserving) and a symlinked component fails closed before any write.
+    if (createFileWithinRoot(root, path, content) === 'exists') {
       existing.push(path);
       io.report(`PR automation: already present — left unchanged: ${path}`);
     } else {
-      atomicWriteFile(path, content);
       written.push(path);
       io.report(`PR automation: wrote ${path}`);
     }
@@ -296,6 +300,18 @@ async function resolveTargetByOffer(ctx: WizardContext, io: WizardIO): Promise<{
     if (resolved) return { dir: resolved };
   }
   return { skip: 'PR automation: no git repository entered' };
+}
+
+/**
+ * Report a scaffold-write failure and, when the error names a blocked path (the symlinked, non-directory, or
+ * world/other-writable `.github` component that createFileWithinRoot refused), add an actionable remediation
+ * hint. Factored out of run()'s catch so the step's control flow stays within the complexity budget (HED-650).
+ */
+function reportScaffoldFailure(io: WizardIO, targetDir: string, detail: string): void {
+  io.report(`PR automation failed: ${detail}`);
+  if (/symlink|writable|not a directory/i.test(detail)) {
+    io.report(`If ${targetDir}/.github is a symlink or world-writable, heddle will not write through it — replace it with a plain directory you own and re-run.`);
+  }
 }
 
 export function prAutomationStep(): WizardStep {
@@ -355,7 +371,7 @@ export function prAutomationStep(): WizardStep {
       io.report(`PR automation language preset: ${preset.label}`);
 
       try {
-        const { written, existing } = scaffoldWorkflows(paths, { ...preset.options, defaultBranch }, io);
+        const { written, existing } = scaffoldWorkflows(targetDir, paths, { ...preset.options, defaultBranch }, io);
         if (written.length > 0) io.report(nextSteps);
         const changes = [
           written.length > 0 ? `wrote ${written.join(', ')}` : '',
@@ -368,7 +384,7 @@ export function prAutomationStep(): WizardStep {
         });
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
-        io.report(`PR automation failed: ${detail}`);
+        reportScaffoldFailure(io, targetDir, detail);
         return publish({ id: 'pr-automation', status: 'failed', summary: `PR automation: ${preset.label}; failed to write workflows` });
       }
     },
