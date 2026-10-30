@@ -48,8 +48,8 @@ Execute in order. Do not skip a step because you believe it is empty — verify 
    - `gh pr checks <n>` (gate result), and `gh pr view <n> --json mergeable` (CONFLICTING vs mergeable).
    - unresolved threads: the channel (c) GraphQL query in docs/REVIEW-SWEEP.md, counting
      `isResolved == false`.
-   "In review" is not a state — "sweep #2 due at HH:MM", "waiting on Maya for security semantics",
-   "CONFLICTING, needs main merged in" are.
+   "In review" is not a state — "sweep #2 due at HH:MM", "needs-maya flag on HED-n awaiting her
+   ruling", "CONFLICTING, needs main merged in" are.
 7. Any PR you will not be driving further: release ownership (`pr-own.sh release <n>`) so it is not
    stranded behind an absent agent.
 
