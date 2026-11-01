@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -41,6 +41,22 @@ describe('prAutomationStep', () => {
     expect(workflow).toContain('--metrics=off');
     expect(script.equals(sourceScript)).toBe(true);
     expect(gate).toContain('name: build');
+  });
+
+  it('fails loudly and never escapes when .github is a symlink pointing outside the repo (HED-650)', async () => {
+    const targetDir = targetRepo(tempDir);
+    const outside = tempDir(); // an attacker-chosen destination OUTSIDE the repo
+    symlinkSync(outside, join(targetDir, '.github')); // git carries symlinks as content — a repo can ship this
+    const lines: string[] = [];
+
+    // Explicit target → straight to the preset + guarded scaffold, which refuses the symlinked `.github`.
+    const result = await prAutomationStep().run(context(targetDir), io(['TS/Node'], lines));
+
+    expect(result.status).toBe('failed');
+    // Target the reported DETAIL line, not the whole log: the remediation hint also says "symlink", so
+    // matching the joined output would pass on any failure. This proves the actual reason reached the operator.
+    expect(lines.find((l) => l.startsWith('PR automation failed:')) ?? '').toMatch(/symlink/i);
+    expect(existsSync(join(outside, 'workflows'))).toBe(false); // nothing written outside the repo
   });
 
   it('keeps the vendored gitleaks script byte-identical to heddle’s canonical script (drift guard)', () => {
