@@ -129,10 +129,16 @@ export function secureWriteFile(path: string, content: string, opts: { mode?: nu
  * so callers receive a descriptive error instead. An absent file is NOT a violation: its natural ENOENT
  * bubbles unchanged so a caller can probe for a not-yet-created secret without unwrapping a security error.
  *
- * The final component is opened `O_NOFOLLOW` and every check runs against the OPEN fd (fstat + read from
- * the fd), so nothing re-resolves the path after the checks — closing the check-then-read TOCTOU a
- * path-based `lstat()`+`readFileSync()` leaves. The immediate parent is validated too (symlink / non-dir
- * / group-or-other-writable); deeper ancestors are the caller's responsibility (see the module invariant).
+ * The final component is opened `O_NOFOLLOW | O_NONBLOCK` and every check runs against the OPEN fd (fstat +
+ * read from the fd), so nothing re-resolves the path after the checks — closing the check-then-read TOCTOU a
+ * path-based `lstat()`+`readFileSync()` leaves. `O_NONBLOCK` is load-bearing, not incidental: a FIFO (or a
+ * slow/blocking device) at `path` would otherwise block indefinitely inside `open()` ITSELF — waiting for a
+ * writer — BEFORE the fstat could reject it as a non-regular file, hanging the caller (for the runtime hook,
+ * every tool call). O_NOFOLLOW does not help here — a FIFO is not a symlink. Opening non-blocking lets the
+ * open return at once so the fstat `isFile()` check can refuse it, and it is a no-op for a regular file's
+ * subsequent read (POSIX ignores `O_NONBLOCK` for regular-file I/O). The immediate parent is validated too
+ * (symlink / non-dir / group-or-other-writable); deeper ancestors are the caller's responsibility (see the
+ * module invariant).
  */
 export function secureReadFile(path: string, opts: { euid?: number } = {}): string {
   if (process.platform === 'win32') return windowsSecureFs('read', path).content!;
@@ -147,7 +153,10 @@ export function secureReadFile(path: string, opts: { euid?: number } = {}): stri
   }
   let fd: number;
   try {
-    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    // O_NONBLOCK is a security guard, not a perf tweak: a FIFO (or slow device) at `path` blocks in open()
+    // waiting for a writer BEFORE the fstat reject below could fire — hanging the caller. Non-blocking makes
+    // the open return at once so fstat can refuse the non-regular file; it is a no-op for a regular read.
+    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
     if (code === 'ELOOP') throw new Error(`refusing to read secret file ${path}: target is a symlink`);
